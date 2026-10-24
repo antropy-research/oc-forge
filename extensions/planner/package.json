@@ -1,0 +1,32 @@
+{
+  "name": "@oc-forge/openchamber-planner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sunsama-style daily planning inside OpenChamber. Skeleton: live session overview across projects.",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.4.0"
+    },
+    "contributes": {
+      "panel": {
+        "id": "oc-forge-planner",
+        "name": "Planner",
+        "icon": "calendar-event",
+        "entry": "panel/index.html"
+      },
+      "page": true,
+      "capabilities": [
+        "sessions"
+      ]
+    }
+  },
+  "scripts": {
+    "check": "tsc -p .",
+    "build": "openchamber-guest-bundle panel/main.ts panel/main.js"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "2.4.0",
+    "typescript": "^7.0.2"
+  }
+}
