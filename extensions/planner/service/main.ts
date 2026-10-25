@@ -39,6 +39,33 @@ const json = (res: http.ServerResponse, status: number, body: unknown): void => 
   res.end(JSON.stringify(body));
 };
 
+const PULL_LOOKUPS_PER_REQUEST = 4;
+
+/** A run's pull request to look up, as the panel sends it. */
+const isLookup = (value: unknown): value is { runId: string; branch: string; directories: string[] } => {
+  const lookup = value as { runId?: unknown; branch?: unknown; directories?: unknown } | null;
+  return (
+    typeof lookup?.runId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) &&
+    typeof lookup.branch === 'string' && lookup.branch.length <= 200 &&
+    Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === 'string' && item.length <= 1024)
+  );
+};
+
+/** Map with at most `limit` calls in flight. */
+const mapLimited = async <T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> => {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index]!);
+      }
+    }),
+  );
+  return results;
+};
+
 const readJson = (req: http.IncomingMessage): Promise<unknown> =>
   new Promise((resolve, reject) => {
     let size = 0;
@@ -103,6 +130,21 @@ const server = http.createServer(async (req, res) => {
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
+      return;
+    }
+    if (url.pathname === '/github/pulls' && req.method === 'POST') {
+      // Pull requests that agents opened from their runs' worktree branches. Four
+      // at a time, in parallel, so the request ends well within the host's 20 seconds.
+      const body = (await readJson(req)) as { runs?: unknown };
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
+      const results = await mapLimited(runs, 4, async (run) => {
+        try {
+          return { runId: run.runId, pullRequest: await github.pullRequestFor(run.branch, run.directories) };
+        } catch (error) {
+          return { runId: run.runId, pullRequest: null, error: error instanceof Error ? error.message : String(error) };
+        }
+      });
+      json(res, 200, { results });
       return;
     }
     if (url.pathname.startsWith('/linear/')) {

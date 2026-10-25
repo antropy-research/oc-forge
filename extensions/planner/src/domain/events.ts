@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -20,7 +20,10 @@ export interface NewTask {
   sessionRef?: Task['sessionRef'];
 }
 
-export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title'>;
+export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title' | 'wantsPr'>;
+
+/** A pull request as gh shows it; the log adds when the Planner saw it. */
+export type SeenPullRequest = Omit<RunPullRequest, 'seenAt'>;
 
 export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'subtasks', 'source'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
@@ -70,6 +73,7 @@ export type EventBody =
   | { type: 'run.outcome'; runId: string; outcome: 'completed' | 'failed' }
   | { type: 'run.reviewed'; runId: string; verdict: 'accepted' | 'changes'; note?: string }
   | { type: 'run.removed'; runId: string }
+  | { type: 'run.pullRequest'; runId: string; taskId: string; pullRequest: SeenPullRequest }
   | { type: 'channel.created'; channel: NewChannel }
   | { type: 'channel.updated'; channelId: string; patch: ChannelPatch }
   | { type: 'channel.deleted'; channelId: string }
@@ -201,8 +205,20 @@ const isRunShape = (value: unknown): string | null => {
   if (!(value.projectId === null || isShortText(value.projectId, 1024))) return 'projectId is invalid';
   if (!(value.directory === null || isShortText(value.directory, 1024))) return 'directory is invalid';
   if (!(value.worktree === null || (isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))) return 'worktree is invalid';
+  if (value.wantsPr !== undefined && typeof value.wantsPr !== 'boolean') return 'wantsPr must be true or false';
   return isShortText(value.title, TITLE_MAX) ? null : 'title is invalid';
 };
+
+const PULL_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/\d{1,9}$/;
+
+const isPullRequest = (value: unknown): value is SeenPullRequest =>
+  isRecord(value) &&
+  Number.isInteger(value.number) && (value.number as number) > 0 &&
+  typeof value.url === 'string' && PULL_URL.test(value.url) &&
+  ['open', 'closed', 'merged'].includes(value.state as string) &&
+  typeof value.draft === 'boolean' &&
+  isShortText(value.title, TITLE_MAX) &&
+  typeof value.repo === 'string' && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
 
 const isRule = (value: unknown): value is RecurrenceRule => {
   if (!isRecord(value)) return false;
@@ -431,6 +447,12 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return command.note === undefined || isShortText(command.note, 4000) ? null : 'note is too long';
     case 'run.removed':
       return isId(command.runId) && context.runs[command.runId as string] ? null : 'unknown run';
+    case 'run.pullRequest': {
+      const run = isId(command.runId) ? context.runs[command.runId as string] : undefined;
+      if (!run) return 'unknown run';
+      if (command.taskId !== run.taskId) return "taskId must be the run's task";
+      return isPullRequest(command.pullRequest) ? null : 'pullRequest is invalid';
+    }
     case 'ritual.saved':
       if (!(RITUALS as readonly string[]).includes(command.ritual as string)) return 'unknown ritual';
       if (!isDateKey(command.date)) return 'date must be a date';

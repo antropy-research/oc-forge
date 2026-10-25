@@ -52,10 +52,11 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'folder.created': return `Add folder: ${event.folder.name}`;
     case 'folder.renamed': return `Rename folder: ${event.name}`;
     case 'folder.deleted': return 'Delete folder';
-    case 'run.started': return `Start agent: ${titleOf(event.run.taskId)}`;
+    case 'run.started': return `${event.run.wantsPr ? 'Assign to agent' : 'Start agent'}: ${titleOf(event.run.taskId)}`;
     case 'run.outcome': return `Agent run ${event.outcome}`;
     case 'run.reviewed': return `Review agent run: ${event.verdict}`;
     case 'run.removed': return 'Unlink agent run';
+    case 'run.pullRequest': return `Pull request ${event.pullRequest.repo}#${event.pullRequest.number} ${event.pullRequest.state}: ${titleOf(event.taskId)}`;
     case 'channel.created': return `Add channel: ${event.channel.name}`;
     case 'channel.updated': return `Edit channel: ${event.channelId}`;
     case 'channel.deleted': return `Delete channel: ${event.channelId}`;

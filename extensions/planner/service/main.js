@@ -405,6 +405,12 @@ var applyInto = (state, event) => {
     case "run.removed":
       delete state.runs[event.runId];
       return;
+    case "run.pullRequest": {
+      const run = state.runs[event.runId];
+      if (run)
+        state.runs[event.runId] = { ...run, pullRequest: { ...event.pullRequest, seenAt: event.at } };
+      return;
+    }
     case "calendar.added":
       if (!state.calendars[event.calendar.id])
         state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
@@ -850,8 +856,12 @@ var isRunShape = (value) => {
     return "directory is invalid";
   if (!(value.worktree === null || isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))
     return "worktree is invalid";
+  if (value.wantsPr !== undefined && typeof value.wantsPr !== "boolean")
+    return "wantsPr must be true or false";
   return isShortText(value.title, TITLE_MAX) ? null : "title is invalid";
 };
+var PULL_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/\d{1,9}$/;
+var isPullRequest = (value) => isRecord(value) && Number.isInteger(value.number) && value.number > 0 && typeof value.url === "string" && PULL_URL.test(value.url) && ["open", "closed", "merged"].includes(value.state) && typeof value.draft === "boolean" && isShortText(value.title, TITLE_MAX) && typeof value.repo === "string" && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
 var isRule = (value) => {
   if (!isRecord(value))
     return false;
@@ -1158,6 +1168,14 @@ var validateCommand = (command, context) => {
       return command.note === undefined || isShortText(command.note, 4000) ? null : "note is too long";
     case "run.removed":
       return isId(command.runId) && context.runs[command.runId] ? null : "unknown run";
+    case "run.pullRequest": {
+      const run = isId(command.runId) ? context.runs[command.runId] : undefined;
+      if (!run)
+        return "unknown run";
+      if (command.taskId !== run.taskId)
+        return "taskId must be the run's task";
+      return isPullRequest(command.pullRequest) ? null : "pullRequest is invalid";
+    }
     case "ritual.saved":
       if (!RITUALS.includes(command.ritual))
         return "unknown ritual";
@@ -1380,13 +1398,15 @@ var summarize = (events, titleOf) => {
     case "folder.deleted":
       return "Delete folder";
     case "run.started":
-      return `Start agent: ${titleOf(event.run.taskId)}`;
+      return `${event.run.wantsPr ? "Assign to agent" : "Start agent"}: ${titleOf(event.run.taskId)}`;
     case "run.outcome":
       return `Agent run ${event.outcome}`;
     case "run.reviewed":
       return `Review agent run: ${event.verdict}`;
     case "run.removed":
       return "Unlink agent run";
+    case "run.pullRequest":
+      return `Pull request ${event.pullRequest.repo}#${event.pullRequest.number} ${event.pullRequest.state}: ${titleOf(event.taskId)}`;
     case "channel.created":
       return `Add channel: ${event.channel.name}`;
     case "channel.updated":
@@ -2032,8 +2052,11 @@ class SyncManager {
 
 // service/github.ts
 import { execFile as execFile2 } from "node:child_process";
-var ghRunner = (args) => new Promise((resolve, reject) => {
-  execFile2("gh", args, { timeout: 20000, maxBuffer: 8000000 }, (error, stdout, stderr) => {
+import { existsSync as existsSync3 } from "node:fs";
+import { isAbsolute } from "node:path";
+var GH_TIMEOUT_MS = 15000;
+var ghRunner = (args, options) => new Promise((resolve, reject) => {
+  execFile2("gh", args, { timeout: options?.timeoutMs ?? GH_TIMEOUT_MS, maxBuffer: 8000000, ...options?.cwd ? { cwd: options.cwd } : {} }, (error, stdout, stderr) => {
     if (error)
       reject(Object.assign(new Error(`${error.message}
 ${stderr}`), { code: error.code, stderr: String(stderr) }));
@@ -2068,6 +2091,20 @@ var parseNodes = (nodes) => nodes.flatMap((node) => {
     updatedAt: node.updatedAt ?? ""
   }];
 });
+var PULL_FIELDS = "number,url,state,isDraft,title,updatedAt";
+var PULL_URL2 = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})\/pull\/\d{1,9}$/;
+var BRANCH = /^(?![-/.])(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._/-]{1,200}(?<![/.])$/;
+var pickPull = (pulls) => {
+  const rank = { open: 0, merged: 1, closed: 2 };
+  const parsed = pulls.flatMap((pull) => {
+    const match = PULL_URL2.exec(pull.url ?? "");
+    const state = pull.state?.toLowerCase();
+    if (!match || !pull.number || !pull.title || !(state === "open" || state === "merged" || state === "closed"))
+      return [];
+    return [{ pr: { number: pull.number, url: pull.url, state, draft: Boolean(pull.isDraft), title: pull.title.slice(0, 500), repo: match[1] }, updatedAt: pull.updatedAt ?? "" }];
+  });
+  return parsed.sort((a, b) => rank[a.pr.state] - rank[b.pr.state] || b.updatedAt.localeCompare(a.updatedAt))[0]?.pr ?? null;
+};
 var explain = (error) => {
   const failure = error;
   if (failure.code === "ENOENT")
@@ -2097,6 +2134,24 @@ class GitHubSource {
       throw new Error(explain(error));
     });
     return parseNodes(JSON.parse(out).data?.search?.nodes ?? []);
+  }
+  async pullRequestFor(branch, directories) {
+    if (!BRANCH.test(branch))
+      throw new Error("branch name is invalid");
+    let failure = null;
+    for (const directory of directories) {
+      if (!isAbsolute(directory) || !existsSync3(directory))
+        continue;
+      try {
+        const out = await this.run(["pr", "list", "--head", branch, "--state", "all", "--limit", "10", "--json", PULL_FIELDS], { cwd: directory, timeoutMs: 8000 });
+        return pickPull(JSON.parse(out));
+      } catch (error) {
+        failure = error;
+      }
+    }
+    if (failure)
+      throw new Error(explain(failure));
+    return null;
   }
   async items(ids) {
     if (ids.length === 0)
@@ -2419,6 +2474,22 @@ var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
 };
+var PULL_LOOKUPS_PER_REQUEST = 4;
+var isLookup = (value) => {
+  const lookup = value;
+  return typeof lookup?.runId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) && typeof lookup.branch === "string" && lookup.branch.length <= 200 && Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === "string" && item.length <= 1024);
+};
+var mapLimited = async (items, limit, fn) => {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  }));
+  return results;
+};
 var readJson = (req) => new Promise((resolve, reject) => {
   let size = 0;
   const chunks = [];
@@ -2481,6 +2552,19 @@ var server = http.createServer(async (req, res) => {
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
+      return;
+    }
+    if (url.pathname === "/github/pulls" && req.method === "POST") {
+      const body = await readJson(req);
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
+      const results = await mapLimited(runs, 4, async (run) => {
+        try {
+          return { runId: run.runId, pullRequest: await github.pullRequestFor(run.branch, run.directories) };
+        } catch (error) {
+          return { runId: run.runId, pullRequest: null, error: error instanceof Error ? error.message : String(error) };
+        }
+      });
+      json(res, 200, { results });
       return;
     }
     if (url.pathname.startsWith("/linear/")) {

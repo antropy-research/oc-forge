@@ -79,10 +79,16 @@ const Progress = ({ value }: { value: number }) => {
 };
 
 const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: boolean }) => {
-  const { linear } = usePlanner();
+  const { linear, client } = usePlanner();
   const view = useView();
   const lv = useLinear();
   const { setUi } = useUi();
+  /** Plan the issue today, then open its task's "Assign to an agent". */
+  const assign = async () => {
+    const { bodies, taskId } = linear.importCommands(issue, { kind: 'day', date: view.today });
+    await client.dispatch(bodies, { undo: `Planned ${issue.identifier}` });
+    setUi({ openTaskId: taskId, agentForm: 'assign' });
+  };
   const linked = linkedTask(view.state, issue.id, githubMirrors(issue));
   const workspace = workspaceLabel(lv, issue.workspaceId);
   return (
@@ -133,6 +139,7 @@ const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: 
           <button onClick={() => void linear.plan(issue, { kind: 'day', date: view.today })} aria-label={`Plan ${issue.identifier} today`}>Today</button>
           <button onClick={() => void linear.plan(issue, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${issue.identifier} tomorrow`}>Tmrw</button>
           <button onClick={() => void linear.plan(issue, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${issue.identifier} in the backlog`}>Later</button>
+          <button onClick={() => void assign()} aria-label={`Assign ${issue.identifier} to an agent`} title="Plan it today and assign it to an agent, which opens a pull request">Agent</button>
         </span>
       )}
     </li>

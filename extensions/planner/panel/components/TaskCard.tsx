@@ -59,6 +59,7 @@ export const InlineInput = ({ value, className, onCommit, onCancel }: InlineInpu
 const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
   const { client } = usePlanner();
   const view = useView();
+  const { setUi } = useUi();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -112,6 +113,17 @@ const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
       >
         Duplicate
       </button>
+      {!task.completedAt && (
+        <button
+          role="menuitem"
+          onClick={() => {
+            onClose();
+            setUi({ openTaskId: task.id, agentForm: 'assign' });
+          }}
+        >
+          Assign to an agent
+        </button>
+      )}
       <hr />
       <button role="menuitem" onClick={() => run({ type: 'task.archived', taskId: task.id }, 'Task archived')}>Archive</button>
       <button role="menuitem" class="danger" onClick={() => run({ type: 'task.deleted', taskId: task.id }, 'Task deleted')}>Delete</button>

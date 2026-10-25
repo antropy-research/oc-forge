@@ -20,10 +20,16 @@ const plannedLabel = (task: Task, today: string): string => {
 };
 
 const ItemRow = ({ item }: { item: GitHubItem }) => {
-  const { github } = usePlanner();
+  const { github, client } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
   const linked = taskForGitHub(view.state, item);
+  /** Plan the issue today, then open its task's "Assign to an agent". */
+  const assign = async () => {
+    const { bodies, taskId } = github.importCommands(item, { kind: 'day', date: view.today });
+    await client.dispatch(bodies, { undo: `Planned ${item.key}` });
+    setUi({ openTaskId: taskId, agentForm: 'assign' });
+  };
   return (
     <li
       class="issue-row"
@@ -50,6 +56,7 @@ const ItemRow = ({ item }: { item: GitHubItem }) => {
           <button onClick={() => void github.plan(item, { kind: 'day', date: view.today })} aria-label={`Plan ${item.key} today`}>Today</button>
           <button onClick={() => void github.plan(item, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${item.key} tomorrow`}>Tmrw</button>
           <button onClick={() => void github.plan(item, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${item.key} in the backlog`}>Later</button>
+          {item.kind === 'issue' && <button onClick={() => void assign()} aria-label={`Assign ${item.key} to an agent`} title="Plan it today and assign it to an agent, which opens a pull request">Agent</button>}
         </span>
       )}
     </li>

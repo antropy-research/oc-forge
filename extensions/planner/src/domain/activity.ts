@@ -51,8 +51,15 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
     case 'tasks.rolledOver':
       if ((event.superseded ?? []).includes(taskId)) return 'replaced this with the next repeat';
       return event.archived.includes(taskId) ? 'archived this after repeated rollovers' : `rolled this over to ${monthDay(event.date)}`;
-    case 'run.started':
-      return event.run.worktree ? `started an agent in worktree ${event.run.worktree.branch ?? event.run.worktree.directory}` : 'started an agent';
+    case 'run.started': {
+      const inWorktree = event.run.worktree ? ` in worktree ${event.run.worktree.branch ?? event.run.worktree.directory}` : '';
+      return event.run.wantsPr ? `assigned this to an agent${inWorktree}` : `started an agent${inWorktree}`;
+    }
+    case 'run.pullRequest': {
+      const pr = event.pullRequest;
+      const what = pr.state === 'merged' ? 'was merged' : pr.state === 'closed' ? 'was closed' : pr.draft ? 'is open as a draft' : 'is open';
+      return `pull request ${pr.repo}#${pr.number} ${what}`;
+    }
     default:
       return event.type;
   }

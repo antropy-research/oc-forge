@@ -1,7 +1,7 @@
 // Agent runs on tasks: what a run's status is, which need the user, and which
 // facts about sessions are worth writing down.
-import type { PlannerState, TaskRun } from './types.ts';
-import type { EventBody } from './events.ts';
+import type { PlannerState, RunPullRequest, TaskRun } from './types.ts';
+import type { EventBody, SeenPullRequest } from './events.ts';
 
 export type SessionActivity = 'unknown' | 'idle' | 'running' | 'retrying' | 'waiting-permission' | 'waiting-question';
 
@@ -146,3 +146,69 @@ export const taskChipId = (state: PlannerState, taskId: string): string => state
  * there is one, else a reserved `.invalid` address that can never resolve.
  */
 export const taskUrl = (state: PlannerState, taskId: string): string => state.tasks[taskId]?.source?.url ?? `https://planner.invalid/tasks/${encodeURIComponent(taskId)}`;
+
+/**
+ * The first message when a task is assigned to an agent, as in GitHub or
+ * Linear: the task, then what to hand back, which is a pull request from
+ * `branch` that links the issue, named in the reply.
+ */
+export const assignPrompt = (state: PlannerState, taskId: string, branch: string): string => {
+  const task = state.tasks[taskId];
+  if (!task) return '';
+  const source = task.source;
+  const link =
+    source?.kind === 'linear'
+      ? ` Mention ${source.key} in the description, so Linear links the pull request to the issue.`
+      : source?.kind === 'github' && /\/issues\/\d+$/.test(source.url)
+        ? ` Put "Closes ${source.key}" in the description.`
+        : '';
+  return [
+    taskPrompt(state, taskId),
+    [
+      `You are working on this in your own git worktree, on branch \`${branch}\`.`,
+      '1. Make the change this task asks for, with tests where the project has them.',
+      '2. Commit it with a clear message.',
+      `3. Push \`${branch}\` and open a pull request with \`gh pr create\`: a title from the task, and a description of what changed and how you checked it.${link}`,
+      "4. Reply with the pull request's URL, or say why you could not open one.",
+    ].join('\n'),
+  ].join('\n\n');
+};
+
+/** What the service needs to look a run's pull request up with gh, in the first directory that exists. */
+export interface PullRequestLookup {
+  runId: string;
+  branch: string;
+  directories: string[];
+}
+
+const LOOKUP_DAYS = 30;
+
+/**
+ * Runs whose pull request may still change: they have a worktree branch,
+ * started in the last 30 days, and no pull request was seen yet or it is open.
+ */
+export const pullRequestLookups = (state: PlannerState, now: number = Date.now()): PullRequestLookup[] =>
+  Object.values(state.runs).flatMap((run) => {
+    const branch = run.worktree?.branch;
+    if (!branch || now - Date.parse(run.startedAt) > LOOKUP_DAYS * 86_400_000) return [];
+    if (run.pullRequest && run.pullRequest.state !== 'open') return [];
+    const task = state.tasks[run.taskId];
+    if (!task || task.deletedAt) return [];
+    // The worktree may be gone once its branch merged; the project checkout knows the same repository.
+    const directories = [run.worktree!.directory, ...(run.directory && run.directory !== run.worktree!.directory ? [run.directory] : [])];
+    return [{ runId: run.id, branch, directories }];
+  });
+
+/** Events for the pull requests that appeared or changed since the log last saw them. */
+export const planPullRequests = (state: PlannerState, found: ReadonlyMap<string, SeenPullRequest>): EventBody[] =>
+  [...found].flatMap(([runId, pr]) => {
+    const run = state.runs[runId];
+    if (!run) return [];
+    const seen = run.pullRequest;
+    const same = seen && seen.number === pr.number && seen.url === pr.url && seen.state === pr.state && seen.draft === pr.draft && seen.title === pr.title && seen.repo === pr.repo;
+    return same ? [] : [{ type: 'run.pullRequest' as const, runId, taskId: run.taskId, pullRequest: pr }];
+  });
+
+/** The pull request of a task's latest run that has one. */
+export const taskPullRequest = (state: PlannerState, taskId: string): RunPullRequest | null =>
+  runsFor(state, taskId).flatMap((run) => (run.pullRequest ? [run.pullRequest] : [])).at(-1) ?? null;

@@ -218,6 +218,23 @@ export interface TaskRun {
   outcomeAt: string | null;
   /** A finished turn is not an accepted task: the user reviews it. */
   review: { verdict: 'accepted' | 'changes'; at: string; note: string } | null;
+  /** Assigned to the agent, as in GitHub or Linear: it was asked to open a pull request from its branch. */
+  wantsPr?: boolean;
+  /** The pull request opened from the run's branch, as gh last showed it. */
+  pullRequest?: RunPullRequest | null;
+}
+
+/** A pull request on GitHub, opened from a run's worktree branch. */
+export interface RunPullRequest {
+  number: number;
+  url: string;
+  state: 'open' | 'closed' | 'merged';
+  draft: boolean;
+  title: string;
+  /** owner/repo */
+  repo: string;
+  /** When the Planner last saw it change. */
+  seenAt: string;
 }
 
 /** A read-only calendar the service fetches (an ICS feed or file). */

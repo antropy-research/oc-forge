@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
-import { isActive, needsYou, planAdoptions, planRunOutcomes, runStatus, taskChipId, taskPrompt, taskRunStatus, taskUrl, type LiveSession } from '../src/domain/runs.ts';
+import { assignPrompt, isActive, needsYou, planAdoptions, planPullRequests, planRunOutcomes, pullRequestLookups, runStatus, taskChipId, taskPrompt, taskPullRequest, taskRunStatus, taskUrl, type LiveSession } from '../src/domain/runs.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { branchFor } from '../panel/lib/agents.ts';
 import { titleFromMessage } from '../panel/lib/background.ts';
@@ -104,5 +104,51 @@ describe('validation and helpers', () => {
     expect(titleFromMessage('\n## Next steps\n- [ ] Add retries to the **sync** job\n')).toBe('Next steps');
     expect(titleFromMessage('- Add retries')).toBe('Add retries');
     expect(titleFromMessage('x'.repeat(200)).length).toBe(120);
+  });
+});
+
+describe('assigned to an agent, with a pull request', () => {
+  const pr = { number: 12, url: 'https://github.com/acme/app/pull/12', state: 'open' as const, draft: true, title: 'Write tests', repo: 'acme/app' };
+  const assigned = () =>
+    applyEvents(base(), [ev({ type: 'run.started', run: { id: 'r2', taskId: 't1', sessionId: 'ses_2', projectId: 'p1', directory: '/repo', worktree: { directory: '/repo-wt/write-tests', branch: 'planner/write-tests' }, title: 'Write tests', wantsPr: true } })]);
+  test('the assignment prompt asks for a pull request that links the issue', () => {
+    const plain = assignPrompt(assigned(), 't1', 'planner/write-tests');
+    expect(plain.startsWith(taskPrompt(assigned(), 't1'))).toBe(true);
+    expect(plain).toContain('branch `planner/write-tests`');
+    expect(plain).toContain('gh pr create');
+    expect(plain).not.toContain('Closes');
+    const linear = applyEvents(assigned(), [ev({ type: 'task.updated', taskId: 't1', patch: { source: { kind: 'linear', id: 'iss', key: 'NEX-7', url: 'https://linear.app/a/issue/NEX-7' } } })]);
+    expect(assignPrompt(linear, 't1', 'nex-7')).toContain('Mention NEX-7 in the description');
+    const issue = applyEvents(assigned(), [ev({ type: 'task.updated', taskId: 't1', patch: { source: { kind: 'github', id: 'I_1', key: 'acme/app#3', url: 'https://github.com/acme/app/issues/3' } } })]);
+    expect(assignPrompt(issue, 't1', 'b')).toContain('"Closes acme/app#3"');
+    const review = applyEvents(assigned(), [ev({ type: 'task.updated', taskId: 't1', patch: { source: { kind: 'github', id: 'PR_1', key: 'acme/app#4', url: 'https://github.com/acme/app/pull/4' } } })]);
+    expect(assignPrompt(review, 't1', 'b')).not.toContain('Closes');
+  });
+  test('runs with a worktree branch are looked up until their pull request is merged or closed', () => {
+    let state = assigned();
+    const now = Date.parse(state.runs.r2!.startedAt) + 60_000;
+    expect(pullRequestLookups(state, now)).toEqual([{ runId: 'r2', branch: 'planner/write-tests', directories: ['/repo-wt/write-tests', '/repo'] }]);
+    const found = planPullRequests(state, new Map([['r2', pr]]));
+    expect(found).toEqual([{ type: 'run.pullRequest', runId: 'r2', taskId: 't1', pullRequest: pr }]);
+    state = applyEvents(state, found.map(ev));
+    expect(state.runs.r2!.pullRequest).toMatchObject({ ...pr, seenAt: expect.any(String) });
+    expect(taskPullRequest(state, 't1')?.number).toBe(12);
+    // Seen and unchanged: nothing to record; still open, so still looked up.
+    expect(planPullRequests(state, new Map([['r2', pr]]))).toEqual([]);
+    expect(pullRequestLookups(state, now)).toHaveLength(1);
+    state = applyEvents(state, planPullRequests(state, new Map([['r2', { ...pr, state: 'merged', draft: false }]])).map(ev));
+    expect(state.runs.r2!.pullRequest?.state).toBe('merged');
+    expect(pullRequestLookups(state, now)).toEqual([]);
+    expect(pullRequestLookups(assigned(), now + 31 * 86_400_000)).toEqual([]);
+  });
+  test('the log only takes a well-formed pull request, for that run and its task', () => {
+    const state = assigned();
+    expect(validateCommand({ cmd: 'p1', type: 'run.pullRequest', runId: 'r2', taskId: 't1', pullRequest: pr }, state)).toBeNull();
+    expect(validateCommand({ cmd: 'p2', type: 'run.pullRequest', runId: 'r2', taskId: 't9', pullRequest: pr }, state)).toContain('taskId');
+    expect(validateCommand({ cmd: 'p3', type: 'run.pullRequest', runId: 'r2', taskId: 't1', pullRequest: { ...pr, url: 'https://evil.example/acme/app/pull/12' } }, state)).toBe('pullRequest is invalid');
+    expect(validateCommand({ cmd: 'p4', type: 'run.pullRequest', runId: 'r2', taskId: 't1', pullRequest: { ...pr, state: 'draft' } }, state)).toBe('pullRequest is invalid');
+    expect(validateCommand({ cmd: 'p5', type: 'run.pullRequest', runId: 'nope', taskId: 't1', pullRequest: pr }, state)).toBe('unknown run');
+    expect(validateCommand({ cmd: 'p6', type: 'run.started', run: { id: 'r3', taskId: 't1', sessionId: 's', projectId: null, directory: null, worktree: null, title: 'x', wantsPr: 'yes' } }, state)).toBe('wantsPr must be true or false');
+    expect(state.runs.r2!.wantsPr).toBe(true);
   });
 });

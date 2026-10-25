@@ -553,6 +553,14 @@ button.issue-title { background: none; border: 0; padding: 0; text-align: left; 
 .run-main { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12.5px; }
 .run-title { font-weight: 500; }
 .run-actions { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; }
+/* Assigned runs and the pull requests their agents open. */
+.run-kind { font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--pl-soft); color: var(--oc-muted); }
+.pr-chip { --pr-color: var(--oc-success-text, #2f9e44); display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--pr-color) 45%, transparent); color: var(--pr-color); background: color-mix(in srgb, var(--pr-color) 8%, transparent); border-radius: 10px; padding: 0 8px; font-size: 11.5px; font-weight: 600; }
+.pr-chip.is-draft { --pr-color: var(--oc-muted); }
+.pr-chip.is-merged { --pr-color: #8250df; }
+.pr-chip.is-closed { --pr-color: var(--oc-error-text, #c92a2a); }
+.agent-pr { font-weight: 500; color: var(--oc-muted); }
+.agent-pr.is-merged { color: #8250df; }
 .dispatch-form { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 8px; background: var(--pl-softer); }
 .dispatch-form .field-row { display: grid; grid-template-columns: 80px 1fr; gap: 10px; align-items: center; font-size: 12.5px; }
 .dispatch-form select, .dispatch-form input:not([type='checkbox']), .dispatch-prompt { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 4px 8px; }

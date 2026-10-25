@@ -31,7 +31,7 @@ export const App = ({ surface }: { surface: string }) => {
   const { client, host, linear, agents, github } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
-  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null });
+  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null, agentForm: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | 'ask' | null>(null);
   const [askText, setAskText] = useState('');
