@@ -2120,6 +2120,7 @@ var ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt branchNam
     assignee { id name }
     project { id name }
     cycle { id number }
+    labels(first: 25) { nodes { id name color } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 var OPEN_FILTER = `{ state: { type: { nin: ["completed", "canceled"] } } }`;
 var PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate updatedAt
@@ -2136,13 +2137,26 @@ var ASSIGNED_QUERY = `query PlannerAssigned($after: String) {
     }
   }
 }`;
-var VIEWS_QUERY = `query PlannerViews {
-  customViews(first: 50) { nodes { id name } }
+var VIEW_FIELDS = `id name description icon color shared modelName slugId updatedAt
+    team { id key name }
+    owner { id name }`;
+var VIEWS_QUERY = `query PlannerViews($after: String) {
+  customViews(first: 100, after: $after) {
+    nodes { ${VIEW_FIELDS} }
+    pageInfo { hasNextPage endCursor }
+  }
 }`;
-var VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!) {
+var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
+  favorites(first: 250) { nodes { type sortOrder customView { id } } }
+}`;
+var VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!, $after: String) {
   customView(id: $id) {
     id
-    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
+    viewPreferencesValues { layout issueGrouping viewOrdering }
+    issues(first: 100, after: $after, filter: ${OPEN_FILTER}) {
+      nodes { ${ISSUE_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
   }
 }`;
 var SEARCH_QUERY = `query PlannerSearch($term: String!) {
@@ -2183,7 +2197,6 @@ var PROJECT_QUERY = `query PlannerProject($id: String!) {
 var COMMENT_FIELDS = `id body createdAt editedAt user { id name } botActor { name } parent { id }`;
 var DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
-    labels(first: 50) { nodes { id name color } }
     comments(first: 100) { nodes { ${COMMENT_FIELDS} } }`;
 var ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
   issue(id: $id) { ${DETAIL_FIELDS} }
@@ -2212,6 +2225,7 @@ var CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueCreateInpu
 var ALL_DOCUMENTS = [
   ASSIGNED_QUERY,
   VIEWS_QUERY,
+  FAVORITE_VIEWS_QUERY,
   VIEW_ISSUES_QUERY,
   SEARCH_QUERY,
   LINKED_QUERY,
@@ -2243,6 +2257,7 @@ var readGraphql = (body) => {
     throw new Error("Linear returned no data");
   return parsed.data;
 };
+var NON_ISSUE_MODELS = new Set(["project", "projects", "initiative", "initiatives", "feeditem", "feeditems", "customer", "customers", "document", "documents", "release", "releases"]);
 
 // service/linear.ts
 var LINEAR_API = "https://api.linear.app/graphql";
