@@ -24,7 +24,7 @@ const fromUtc = (date: Date): DateKey => date.toISOString().slice(0, 10);
 export const todayIn = (timeZone: string, now: Date = new Date()): DateKey =>
   new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 
-export const isValidTimeZone = (timeZone: unknown): timeZone is string => {
+export const isValidTimeZone = (timeZone: unknown): boolean => {
   if (typeof timeZone !== 'string' || !timeZone) return false;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone });
@@ -72,6 +72,57 @@ export const monthDay = (key: DateKey): string => {
 export const monthIndex = (name: string): number => {
   const lower = name.toLowerCase();
   return MONTH_NAMES.findIndex((month) => month.toLowerCase().startsWith(lower.slice(0, 3)));
+};
+
+// Wall-clock conversion between instants and a zone's local date and minute of day.
+const zonedFormatters = new Map<string, Intl.DateTimeFormat>();
+const zonedFormatter = (timeZone: string): Intl.DateTimeFormat => {
+  let formatter = zonedFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    zonedFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+};
+
+const zonedFields = (instant: number, timeZone: string) => {
+  const fields: Record<string, number> = {};
+  for (const part of zonedFormatter(timeZone).formatToParts(new Date(instant))) {
+    if (part.type !== 'literal') fields[part.type] = Number(part.value);
+  }
+  return { year: fields.year!, month: fields.month!, day: fields.day!, hour: fields.hour! % 24, minute: fields.minute!, second: fields.second! };
+};
+
+/** The zone's UTC offset at `instant`, in milliseconds. */
+const offsetAt = (instant: number, timeZone: string): number => {
+  const f = zonedFields(instant, timeZone);
+  return Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute, f.second) - Math.floor(instant / 1000) * 1000;
+};
+
+/** Local date and minute of day of an instant in `timeZone`. */
+export const zonedDateMinutes = (iso: string | number, timeZone: string): { date: DateKey; minutes: number } => {
+  const instant = typeof iso === 'number' ? iso : Date.parse(iso);
+  const f = zonedFields(instant, timeZone);
+  return { date: `${f.year}-${String(f.month).padStart(2, '0')}-${String(f.day).padStart(2, '0')}`, minutes: f.hour * 60 + f.minute + f.second / 60 };
+};
+
+/** The instant at `minutes` past local midnight of `date` in `timeZone` (a DST gap shifts forward). */
+export const instantAt = (date: DateKey, minutes: number, timeZone: string): string => {
+  const [y, m, d] = date.split('-').map(Number);
+  const local = Date.UTC(y!, m! - 1, d!, 0, 0, 0) + Math.round(minutes * 60_000);
+  let guess = local - offsetAt(local, timeZone);
+  guess = local - offsetAt(guess, timeZone);
+  return new Date(guess).toISOString();
+};
+
+/** `9:30 AM` style clock label for minutes past midnight. */
+export const clockLabel = (minutes: number): string => {
+  const total = Math.round(minutes) % (24 * 60);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  const suffix = h < 12 ? 'AM' : 'PM';
+  const hour = h % 12 === 0 ? 12 : h % 12;
+  return m === 0 ? `${hour} ${suffix}` : `${hour}:${String(m).padStart(2, '0')} ${suffix}`;
 };
 
 /** Minutes as Sunsama shows them: `0:30`, `1:15`. */

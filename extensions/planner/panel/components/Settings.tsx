@@ -54,6 +54,50 @@ const Channels = () => {
   );
 };
 
+const hhmm = (minutes: number): string => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+const fromHhmm = (value: string): number | null => {
+  const match = /^(\d{2}):(\d{2})$/.exec(value);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+};
+
+const Calendars = () => {
+  const { client } = usePlanner();
+  const view = useView();
+  const [name, setName] = useState('');
+  const [url, setUrl] = useState('');
+  const calendars = Object.values(view.state.calendars);
+  const add = () => {
+    if (!name.trim() || !/^(https?|webcal|file):\/\//i.test(url.trim())) return;
+    void client.dispatch([{ type: 'calendar.added', calendar: { id: newId(), name: name.trim(), url: url.trim(), color: CHANNEL_COLORS[(calendars.length + 3) % CHANNEL_COLORS.length]! } }]);
+    setName('');
+    setUrl('');
+  };
+  return (
+    <fieldset>
+      <legend>Calendars</legend>
+      <p class="hint">Subscribe to read-only ICS feeds (for Google Calendar, use "Secret address in iCal format"). Meetings show on the calendar and auto-scheduling works around them.</p>
+      <ul class="channel-list">
+        {calendars.map((calendar) => (
+          <li key={calendar.id}>
+            <input type="color" value={calendar.color} aria-label={`${calendar.name} color`} onChange={(event) => void client.dispatch([{ type: 'calendar.updated', calendarId: calendar.id, patch: { color: event.currentTarget.value } }])} />
+            <span class="channel-name" title={calendar.url}>{calendar.name}</span>
+            <label class="inline">
+              <input type="checkbox" checked={calendar.visible} onChange={(event) => void client.dispatch([{ type: 'calendar.updated', calendarId: calendar.id, patch: { visible: event.currentTarget.checked } }])} />
+              Show
+            </label>
+            <button class="link danger" onClick={() => void client.dispatch([{ type: 'calendar.removed', calendarId: calendar.id }])}>Remove</button>
+          </li>
+        ))}
+      </ul>
+      <div class="row">
+        <input value={name} placeholder="Name" aria-label="Calendar name" onInput={(event) => setName(event.currentTarget.value)} />
+        <input class="grow" value={url} placeholder="https://…/basic.ics" aria-label="Calendar URL" onInput={(event) => setUrl(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && add()} />
+        <button onClick={add}>Subscribe</button>
+      </div>
+    </fieldset>
+  );
+};
+
 export const Settings = () => {
   const { client } = usePlanner();
   const view = useView();
@@ -104,6 +148,14 @@ export const Settings = () => {
             />
           </label>
           <label>
+            Working hours
+            <span class="row">
+              <input type="time" aria-label="Workday start" value={hhmm(settings.workdayStart)} onChange={(event) => { const value = fromHhmm(event.currentTarget.value); if (value !== null && value < settings.workdayEnd) update({ workdayStart: value }); }} />
+              <span>–</span>
+              <input type="time" aria-label="Workday end" value={hhmm(settings.workdayEnd)} onChange={(event) => { const value = fromHhmm(event.currentTarget.value); if (value !== null && value > settings.workdayStart) update({ workdayEnd: value }); }} />
+            </span>
+          </label>
+          <label>
             Count planned time as actual
             <input type="checkbox" checked={settings.plannedAsActual} onChange={(event) => update({ plannedAsActual: event.currentTarget.checked })} />
           </label>
@@ -116,6 +168,7 @@ export const Settings = () => {
           </label>
         </fieldset>
         <Channels />
+        <Calendars />
         <fieldset>
           <legend>Storage</legend>
           {view.storage ? (

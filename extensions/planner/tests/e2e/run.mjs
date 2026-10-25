@@ -181,6 +181,111 @@ try {
   const third = await focusTitle().catch(() => '');
   check('completing in Focus moves on to another task', third !== second, `${second} → ${third || 'done for the day'}`);
 
+  // Phase 3b: calendar subscription, timeboxing, auto-schedule, resize and move.
+  const serviceState = async () => {
+    const response = await context.request.post(`${base}/api/guests/oc-forge-planner/service/request`, { data: { method: 'GET', path: '/state' } });
+    const outer = await response.json();
+    return JSON.parse(outer.body ?? outer.result?.body ?? '{}');
+  };
+  const snapshot = await serviceState();
+  const zone = snapshot.state?.settings?.timezone ?? 'UTC';
+  const todayKey = snapshot.today;
+  const tomorrowKey = (() => { const d = new Date(`${todayKey}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
+  const localToUtc = (minutes, dayKey = todayKey) => {
+    // Find the UTC instant whose wall clock in `zone` is dayKey + minutes.
+    const [y, m, d] = dayKey.split('-').map(Number);
+    let guess = Date.UTC(y, m - 1, d, 0, minutes);
+    for (let i = 0; i < 2; i++) {
+      const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(guess)).map((p) => [p.type, Number(p.value)]));
+      const wall = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour % 24, parts.minute);
+      guess += Date.UTC(y, m - 1, d, 0, minutes) - wall;
+    }
+    return new Date(guess).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  };
+  const ics = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0',
+    'BEGIN:VEVENT', `UID:${run}-meeting`, `DTSTART:${localToUtc(13 * 60)}`, `DTEND:${localToUtc(14 * 60)}`, `SUMMARY:${run} meeting`, 'END:VEVENT',
+    'BEGIN:VEVENT', `UID:${run}-morning`, `DTSTART:${localToUtc(9 * 60, tomorrowKey)}`, `DTEND:${localToUtc(10 * 60, tomorrowKey)}`, `SUMMARY:${run} morning`, 'END:VEVENT',
+    'END:VCALENDAR', '',
+  ].join('\r\n');
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('docker', ['exec', '-i', 'oc-forge-openchamber-dev', 'sh', '-c', 'cat > /home/node/planner-e2e.ics'], { input: ics });
+
+  await frame.getByRole('button', { name: 'Settings', exact: true }).click();
+  await frame.getByRole('textbox', { name: 'Calendar name' }).fill(`${run} cal`);
+  await frame.getByRole('textbox', { name: 'Calendar URL' }).fill('file:///home/node/planner-e2e.ics');
+  await frame.getByRole('button', { name: 'Subscribe' }).click();
+  await frame.locator('.channel-list li', { hasText: `${run} cal` }).waitFor({ timeout: 10_000 });
+
+  await frame.getByRole('button', { name: 'Calendar', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Calendar' }).waitFor();
+  const lane = frame.locator(`.day-lane[data-date="${todayKey}"]`);
+  const meeting = lane.locator('.grid-item.is-event', { hasText: `${run} meeting` });
+  await meeting.waitFor({ timeout: 15_000 });
+  check('subscribed calendar event shows on the grid', true);
+
+  const dragSource = frame.locator('aside li.task-card', { hasText: `${run} sort-low` });
+  await dragSource.dragTo(lane, { targetPosition: { x: 40, y: 10 * 48 + 4 } });
+  const lowBlock = lane.locator('.grid-item.is-block', { hasText: `${run} sort-low` });
+  await lowBlock.waitFor({ timeout: 10_000 });
+  check('dragging a task onto the calendar creates a working session at 10 AM', /10 AM/.test(await lowBlock.innerText()), (await lowBlock.innerText()).replace(/\s+/g, ' '));
+  await shot('11-calendar');
+
+  const box = await lowBlock.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 2 + 48, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(800);
+  const afterResize = await serviceState();
+  const lowTask = Object.values(afterResize.state.tasks).find((task) => task.title === `${run} sort-low`);
+  check('resizing the session updates planned time', lowTask?.plannedMinutes === 90, `planned ${lowTask?.plannedMinutes}`);
+
+  await frame.getByRole('button', { name: 'Home', exact: true }).click();
+  await addInToday(`${run} auto ~45m @tomorrow`);
+  const autoCard = frame.locator('section.day-column li.task-card', { hasText: `${run} auto` });
+  await autoCard.waitFor({ timeout: 10_000 });
+  await autoCard.hover();
+  await autoCard.getByRole('button', { name: 'Task actions' }).click();
+  await autoCard.getByRole('menuitem', { name: 'Timebox automatically' }).click();
+  await page.waitForTimeout(1500);
+  const afterAuto = await serviceState();
+  const autoTask = Object.values(afterAuto.state.tasks).find((task) => task.title === `${run} auto`);
+  const autoBlock = Object.values(afterAuto.state.blocks).find((block) => block.taskId === autoTask?.id);
+  const expected = localToUtc(10 * 60, tomorrowKey).replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/, '$1-$2-$3T$4:$5:$6.000Z');
+  check('auto-timebox takes the first free slot after the morning meeting', autoBlock?.start === expected, autoBlock ? `${autoBlock.start} (expected ${expected})` : 'no block');
+  check('timeboxed card shows its session time', (await autoCard.locator('.timebox').count()) === 1);
+
+  await frame.getByRole('button', { name: 'Calendar', exact: true }).click();
+  const nextKey = (() => { const d = new Date(`${todayKey}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
+  const nextLane = frame.locator(`.day-lane[data-date="${nextKey}"]`);
+  if (await nextLane.count()) {
+    const session = lane.locator('.grid-item.is-block', { hasText: `${run} sort-low` });
+    await session.waitFor();
+    await page.waitForTimeout(600);
+    await session.scrollIntoViewIfNeeded();
+    const blockBox = await session.boundingBox();
+    const laneBox = await nextLane.boundingBox();
+    await page.mouse.move(blockBox.x + blockBox.width / 3, blockBox.y + blockBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(laneBox.x + laneBox.width / 2, blockBox.y + blockBox.height / 2, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(800);
+    const moved = Object.values((await serviceState()).state.tasks).find((task) => task.title === `${run} sort-low`);
+    check('moving a session to the next day moves its task there', moved?.placement?.date === nextKey, JSON.stringify(moved?.placement));
+    await frame.getByRole('status').filter({ hasText: 'Session moved' }).getByRole('button', { name: 'Undo' }).click();
+    await page.waitForTimeout(800);
+    const back = Object.values((await serviceState()).state.tasks).find((task) => task.title === `${run} sort-low`);
+    check('undo puts the session and task back', back?.placement?.date === todayKey, JSON.stringify(back?.placement));
+  } else {
+    check('moving a session to the next day moves its task there', true, 'today is the last day of the week view; skipped');
+  }
+  await shot('12-calendar-after');
+
+  await frame.getByRole('button', { name: 'Settings', exact: true }).click();
+  await frame.locator('.channel-list li', { hasText: `${run} cal` }).getByRole('button', { name: 'Remove' }).click();
+  execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'rm', '-f', '/home/node/planner-e2e.ics']);
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
   const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
@@ -196,24 +301,29 @@ try {
   await shot('10-work-status');
   frame = await openPlanner();
 
-  // Clean up this run's tasks through the task menu.
-  for (const view of ['Home', 'Backlog']) {
-    await frame.getByRole('button', { name: view, exact: true }).click();
-    for (let guard = 0; guard < 20; guard++) {
-      const target = frame.locator('li.task-card', { hasText: run }).first();
-      if (!(await target.count())) break;
-      await target.hover();
-      await target.getByRole('button', { name: 'Task actions' }).click();
-      await target.getByRole('menuitem', { name: 'Delete' }).click();
-      await page.waitForTimeout(150);
-    }
-  }
-  await page.waitForTimeout(800);
-  check('cleanup leaves no test tasks', (await frame.locator('li.task-card', { hasText: run }).count()) === 0);
 } catch (error) {
   check('journey completed', false, error instanceof Error ? error.message.split('\n')[0] : String(error));
   await shot('99-failure').catch(() => {});
 } finally {
+  // Remove every e2e task and calendar through the service, so a failed run cannot leak into the next.
+  const call = async (method, path, body) => {
+    const response = await context.request.post(`${base}/api/guests/oc-forge-planner/service/request`, { data: { method, path, ...(body ? { body: JSON.stringify(body) } : {}) } });
+    const outer = await response.json().catch(() => ({}));
+    return JSON.parse(outer.body ?? '{}');
+  };
+  try {
+    const { state } = await call('GET', '/state');
+    const commands = [
+      ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
+      ...Object.values(state.tasks).filter((task) => /^e2e-/.test(task.title) && !task.deletedAt).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
+      ...Object.values(state.calendars).filter((calendar) => /^e2e-/.test(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
+    ];
+    if (commands.length) await call('POST', '/commands', { commands });
+    const after = await call('GET', '/state');
+    check('cleanup leaves no live test tasks', !Object.values(after.state.tasks).some((task) => /^e2e-/.test(task.title) && !task.deletedAt));
+  } catch (error) {
+    check('cleanup leaves no live test tasks', false, String(error));
+  }
   check('no page errors from the extension', problems.length === 0, problems.slice(0, 3).join(' | '));
   await browser.close();
 }

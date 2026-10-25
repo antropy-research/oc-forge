@@ -5,7 +5,9 @@ import { addDays, formatMinutes, monthDay, nextWeekday } from '../../src/domain/
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
 import { moveTo } from '../lib/commands.ts';
-import { actualMinutes } from '../../src/domain/selectors.ts';
+import { actualMinutes, blocksFor } from '../../src/domain/selectors.ts';
+import { clockLabel, zonedDateMinutes } from '../../src/domain/dates.ts';
+import { autoTimebox } from '../lib/autoSchedule.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { useUi } from '../lib/ui.ts';
@@ -73,6 +75,17 @@ const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
       </button>
       <button role="menuitem" onClick={() => run(moveTo(state, task.id, { kind: 'day', date: nextWeekday(today, state.settings.weekStartsOn) }), 'Moved to next week')}>Move to next week</button>
       {task.placement.kind !== 'backlog' && <button role="menuitem" onClick={() => run(moveTo(state, task.id, { kind: 'backlog', bucket: 'next-weeks' }, 'top'), 'Moved to backlog')}>Move to backlog</button>}
+      {!task.completedAt && (
+        <button
+          role="menuitem"
+          onClick={() => {
+            onClose();
+            void autoTimebox(client, state, today, task, onDay ?? today).then((problem) => problem && client.notify(problem));
+          }}
+        >
+          Timebox automatically
+        </button>
+      )}
       <hr />
       <button role="menuitem" onClick={() => run({ type: 'task.archived', taskId: task.id }, 'Task archived')}>Archive</button>
       <button role="menuitem" class="danger" onClick={() => run({ type: 'task.deleted', taskId: task.id }, 'Task deleted')}>Delete</button>
@@ -91,10 +104,13 @@ export const TaskCard = ({ task }: { task: Task }) => {
   const subtasksDone = task.subtasks.filter((subtask) => subtask.done).length;
   const due = task.dueDate;
   const dueClass = due && !done ? (due < view.today ? ' is-overdue' : due === view.today ? ' is-due-today' : '') : '';
-  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes;
   const running = view.state.timer?.taskId === task.id;
   const now = useNow(running);
   const actual = actualMinutes(view.state, task, now);
+  const zone = view.state.settings.timezone ?? 'UTC';
+  const dayKey = task.placement.kind === 'day' ? task.placement.date : null;
+  const timebox = dayKey ? blocksFor(view.state, task.id).find((block) => zonedDateMinutes(block.start, zone).date === dayKey) : undefined;
+  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox;
 
   const toggle = () =>
     void client.dispatch([done ? { type: 'task.reopened', taskId: task.id } : { type: 'task.completed', taskId: task.id, on: view.today }]);
@@ -116,6 +132,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
         <span class="task-title">{task.title}</span>
         {hasMeta && (
           <span class="task-meta">
+            {timebox && <span class="timebox" style={{ '--item-color': channel?.color ?? 'var(--oc-primary)' }} title="Working session">{clockLabel(zonedDateMinutes(timebox.start, zone).minutes)}</span>}
             {channel && <span class="channel"><span class="hash" style={{ color: channel.color }}>#</span>{channel.name}</span>}
             {task.priority && <span class={`priority priority-${task.priority}`}>{PRIORITY_LABEL[task.priority]}</span>}
             {due && <span class={`due${dueClass}`}>Due {due === view.today ? 'today' : monthDay(due)}</span>}

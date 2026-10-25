@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, type Channel, type DateKey, type Placement, type Settings, type Subtask, type Task, type TaskSourceRef } from './types.ts';
+import { BACKLOG_BUCKETS, type CalendarSubscription, type Channel, type DateKey, type Placement, type Settings, type Subtask, type Task, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -41,6 +41,12 @@ export type EventBody =
   | { type: 'timer.stopped' }
   | { type: 'time.logged'; entry: { id: string; taskId: string; start: string; end: string } }
   | { type: 'time.deleted'; entryId: string }
+  | { type: 'block.created'; block: WorkBlock }
+  | { type: 'block.updated'; blockId: string; start: string; end: string }
+  | { type: 'block.deleted'; blockId: string }
+  | { type: 'calendar.added'; calendar: Omit<CalendarSubscription, 'visible'> }
+  | { type: 'calendar.updated'; calendarId: string; patch: Partial<Pick<CalendarSubscription, 'name' | 'color' | 'visible'>> }
+  | { type: 'calendar.removed'; calendarId: string }
   | { type: 'channel.created'; channel: NewChannel }
   | { type: 'channel.updated'; channelId: string; patch: ChannelPatch }
   | { type: 'channel.deleted'; channelId: string }
@@ -119,7 +125,8 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'archiveAfterRollovers' && !(value === null || (Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 365))) return 'archiveAfterRollovers must be 1-365 or null';
     else if (key === 'weekStartsOn' && value !== 0 && value !== 1) return 'weekStartsOn must be 0 or 1';
     else if (key === 'plannedAsActual' && typeof value !== 'boolean') return 'plannedAsActual must be true or false';
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual'].includes(key)) return `unknown setting ${key}`;
+    else if ((key === 'workdayStart' || key === 'workdayEnd') && !(Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60)) return `${key} must be minutes after midnight`;
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };
@@ -129,10 +136,20 @@ export interface CommandContext {
   tasks: Record<string, Task>;
   channels: Record<string, Channel>;
   entries: Record<string, { id: string }>;
+  blocks: Record<string, WorkBlock>;
+  calendars: Record<string, CalendarSubscription>;
 }
+
+const isFeedUrl = (value: unknown): boolean => typeof value === 'string' && value.length <= 2000 && /^(https?|webcal|file):\/\/\S+$/i.test(value);
 
 const isInstant = (value: unknown): value is string => typeof value === 'string' && !Number.isNaN(Date.parse(value)) && /^\d{4}-\d{2}-\d{2}T/.test(value);
 const MAX_ENTRY_MS = 24 * 60 * 60 * 1000;
+
+const validateSpan = (start: unknown, end: unknown): string | null => {
+  if (!isInstant(start) || !isInstant(end)) return 'start and end must be ISO instants';
+  const span = Date.parse(end) - Date.parse(start);
+  return span >= 5 * 60_000 && span <= MAX_ENTRY_MS ? null : 'a working session lasts between 5 minutes and 24 hours';
+};
 
 /** Shape check for a client command against current state. Returns an error message or null. */
 export const validateCommand = (command: unknown, context: CommandContext): string | null => {
@@ -187,6 +204,40 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     }
     case 'time.deleted':
       return isId(command.entryId) && context.entries[command.entryId as string] ? null : 'unknown entry';
+    case 'block.created': {
+      const block = command.block;
+      if (!isRecord(block) || !isId(block.id)) return 'block needs an id';
+      if (context.blocks[block.id as string]) return 'block id already exists';
+      if (!(isId(block.taskId) && tasks[block.taskId as string])) return 'unknown task';
+      return validateSpan(block.start, block.end);
+    }
+    case 'block.updated':
+      if (!(isId(command.blockId) && context.blocks[command.blockId as string])) return 'unknown block';
+      return validateSpan(command.start, command.end);
+    case 'block.deleted':
+      return isId(command.blockId) && context.blocks[command.blockId as string] ? null : 'unknown block';
+    case 'calendar.added': {
+      const calendar = command.calendar;
+      if (!isRecord(calendar) || !isId(calendar.id)) return 'calendar needs an id';
+      if (context.calendars[calendar.id as string]) return 'calendar id already exists';
+      if (!(typeof calendar.name === 'string' && calendar.name.trim() && calendar.name.length <= 80)) return 'calendar name must be 1-80 characters';
+      if (!isFeedUrl(calendar.url)) return 'calendar URL must be http(s), webcal or file';
+      return isColor(calendar.color) ? null : 'color must be #rrggbb';
+    }
+    case 'calendar.updated': {
+      if (!(isId(command.calendarId) && context.calendars[command.calendarId as string])) return 'unknown calendar';
+      const patch = command.patch;
+      if (!isRecord(patch)) return 'patch must be an object';
+      for (const [key, value] of Object.entries(patch)) {
+        if (key === 'name' && !(typeof value === 'string' && value.trim() && value.length <= 80)) return 'calendar name must be 1-80 characters';
+        else if (key === 'color' && !isColor(value)) return 'color must be #rrggbb';
+        else if (key === 'visible' && typeof value !== 'boolean') return 'visible must be true or false';
+        else if (!['name', 'color', 'visible'].includes(key)) return `unknown field ${key}`;
+      }
+      return null;
+    }
+    case 'calendar.removed':
+      return isId(command.calendarId) && context.calendars[command.calendarId as string] ? null : 'unknown calendar';
     case 'channel.created': {
       const channel = command.channel;
       if (!isRecord(channel) || !isId(channel.id)) return 'channel needs an id';

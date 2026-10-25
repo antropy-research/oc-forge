@@ -4,6 +4,7 @@ import { UiContext, type UiState } from '../lib/ui.ts';
 import { ArchiveView } from './ArchiveView.tsx';
 import { Backlog } from './Backlog.tsx';
 import { Board } from './Board.tsx';
+import { CalendarView } from './CalendarView.tsx';
 import { FocusView } from './FocusView.tsx';
 import { Settings } from './Settings.tsx';
 import { Nav, ServiceGate, Toasts, type Route } from './Shell.tsx';
@@ -40,6 +41,7 @@ export const App = ({ surface }: { surface: string }) => {
           <main class="main">
             {route === 'home' && <Board />}
             {route === 'today' && <TodayView />}
+            {route === 'calendar' && <CalendarView />}
             {route === 'focus' && <FocusView onExit={() => setRoute('today')} />}
             {route === 'backlog' && <Backlog />}
             {route === 'archive' && <ArchiveView />}

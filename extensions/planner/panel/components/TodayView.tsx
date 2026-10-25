@@ -1,15 +1,25 @@
+import { useState } from 'preact/hooks';
 import { monthDay, weekdayName } from '../../src/domain/dates.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
 import { useView } from '../lib/context.ts';
+import { useCalendarEvents } from '../lib/calendar.ts';
 import { BacklogBuckets } from './Backlog.tsx';
 import { DayColumn } from './DayColumn.tsx';
 import { AddTask } from './AddTask.tsx';
 import { TaskList } from './TaskList.tsx';
 import { ChannelFilter } from './ChannelFilter.tsx';
+import { TimeGrid } from './TimeGrid.tsx';
 
-/** Today: only today's work, with the backlog beside it to pull from. */
+const TodayCalendar = () => {
+  const view = useView();
+  const feed = useCalendarEvents(view.today, view.today);
+  return <TimeGrid dates={[view.today]} events={feed.events} />;
+};
+
+/** Today: only today's work, with the calendar or the backlog beside it. */
 export const TodayView = () => {
   const view = useView();
+  const [side, setSide] = useState<'calendar' | 'backlog'>('calendar');
   return (
     <section class="view">
       <header class="view-header">
@@ -21,9 +31,12 @@ export const TodayView = () => {
       </header>
       <div class="today-layout">
         <DayColumn date={view.today} wide />
-        <aside class="side-panel" aria-label="Backlog">
-          <h2>Backlog</h2>
-          <BacklogBuckets compact />
+        <aside class={`side-panel${side === 'calendar' ? ' is-calendar' : ''}`} aria-label={side === 'calendar' ? 'Calendar' : 'Backlog'}>
+          <div class="tabs side-tabs" role="tablist">
+            <button role="tab" aria-selected={side === 'calendar'} onClick={() => setSide('calendar')}>Calendar</button>
+            <button role="tab" aria-selected={side === 'backlog'} onClick={() => setSide('backlog')}>Backlog</button>
+          </div>
+          {side === 'calendar' ? <TodayCalendar /> : <BacklogBuckets compact />}
         </aside>
       </div>
     </section>

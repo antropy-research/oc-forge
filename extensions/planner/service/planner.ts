@@ -33,6 +33,12 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'timer.stopped': return 'Stop timer';
     case 'time.logged': return `Log time: ${titleOf(event.entry.taskId)}`;
     case 'time.deleted': return 'Delete time entry';
+    case 'block.created': return `Timebox: ${titleOf(event.block.taskId)}`;
+    case 'block.updated': return 'Move working session';
+    case 'block.deleted': return 'Remove working session';
+    case 'calendar.added': return `Subscribe to calendar: ${event.calendar.name}`;
+    case 'calendar.updated': return 'Edit calendar';
+    case 'calendar.removed': return 'Remove calendar';
     case 'channel.created': return `Add channel: ${event.channel.name}`;
     case 'channel.updated': return `Edit channel: ${event.channelId}`;
     case 'channel.deleted': return `Delete channel: ${event.channelId}`;

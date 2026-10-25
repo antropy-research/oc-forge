@@ -1,5 +1,6 @@
 // Read models over PlannerState.
-import type { BacklogBucket, DateKey, Placement, PlannerState, Task, TimeEntry } from './types.ts';
+import type { BacklogBucket, DateKey, Placement, PlannerState, Task, TimeEntry, WorkBlock } from './types.ts';
+import { zonedDateMinutes } from './dates.ts';
 
 const POSITION_STEP = 1024;
 
@@ -70,6 +71,20 @@ export const actualMinutes = (state: PlannerState, task: Task, now?: number): nu
 /** Whether an actual figure is an estimate filled in from the plan. */
 export const actualIsFromPlan = (state: PlannerState, task: Task): boolean =>
   trackedMinutes(state, task.id) === 0 && state.settings.plannedAsActual && Boolean(task.completedAt && task.plannedMinutes);
+
+/** Working sessions of live tasks that start on `date` in the planner's zone, by start time. */
+export const blocksOnDay = (state: PlannerState, date: DateKey): WorkBlock[] => {
+  const zone = state.settings.timezone ?? 'UTC';
+  return Object.values(state.blocks)
+    .filter((block) => {
+      const task = state.tasks[block.taskId];
+      return task && !task.deletedAt && !task.archivedAt && zonedDateMinutes(block.start, zone).date === date;
+    })
+    .sort((a, b) => a.start.localeCompare(b.start));
+};
+
+export const blocksFor = (state: PlannerState, taskId: string): WorkBlock[] =>
+  Object.values(state.blocks).filter((block) => block.taskId === taskId).sort((a, b) => a.start.localeCompare(b.start));
 
 export const liveChannels = (state: PlannerState) =>
   Object.values(state.channels).filter((channel) => !channel.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));

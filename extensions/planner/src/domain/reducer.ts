@@ -1,8 +1,35 @@
 // Fold events into state. Pure apart from mutating the batch-local copy it creates.
 import { emptyState, type PlannerState, type Task } from './types.ts';
 import type { PlannerEvent } from './events.ts';
-import { daysBetween } from './dates.ts';
+import { daysBetween, zonedDateMinutes } from './dates.ts';
 import { samePlacement } from './selectors.ts';
+
+const zoneOf = (state: PlannerState): string => state.settings.timezone ?? 'UTC';
+const blockDate = (state: PlannerState, start: string): string => zonedDateMinutes(start, zoneOf(state)).date;
+
+/**
+ * Keep a task in step with its working sessions, as in Sunsama: its planned time
+ * is the sessions' total length, and the task belongs to the day of the session
+ * that just changed.
+ */
+const syncTaskToBlocks = (state: PlannerState, taskId: string, at: string, changedStart: string | null): void => {
+  const task = state.tasks[taskId];
+  if (!task) return;
+  const blocks = Object.values(state.blocks).filter((block) => block.taskId === taskId);
+  let next = task;
+  if (blocks.length > 0) {
+    const minutes = Math.round(blocks.reduce((sum, block) => sum + (Date.parse(block.end) - Date.parse(block.start)), 0) / 60_000);
+    if (minutes !== task.plannedMinutes) next = { ...next, plannedMinutes: minutes };
+  }
+  if (changedStart) {
+    const date = blockDate(state, changedStart);
+    if (next.placement.kind !== 'day' || next.placement.date !== date) {
+      const last = Object.values(state.tasks).reduce((max, other) => (other.placement.kind === 'day' && other.placement.date === date ? Math.max(max, other.position) : max), 0);
+      next = { ...next, placement: { kind: 'day', date }, position: last + 1024, rolloverCount: 0, archivedAt: null };
+    }
+  }
+  if (next !== task) state.tasks[taskId] = { ...next, updatedAt: at };
+};
 
 const touch = (state: PlannerState, taskId: string, at: string, change: (task: Task) => Task): void => {
   const task = state.tasks[taskId];
@@ -61,7 +88,16 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
         ...(event.patch.title !== undefined ? { title: event.patch.title.trim() } : {}),
       }));
       return;
-    case 'task.moved':
+    case 'task.moved': {
+      // Dragging a card to another day drops its working sessions on the day it left;
+      // sessions on other days stay as history.
+      const before = state.tasks[event.taskId];
+      if (before && before.placement.kind === 'day' && !samePlacement(before.placement, event.placement)) {
+        const source = before.placement.date;
+        for (const block of Object.values(state.blocks)) {
+          if (block.taskId === event.taskId && blockDate(state, block.start) === source) delete state.blocks[block.id];
+        }
+      }
       touch(state, event.taskId, event.at, (task) => ({
         ...task,
         placement: event.placement,
@@ -72,6 +108,7 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
         archivedAt: null,
       }));
       return;
+    }
     case 'task.completed':
       stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, completedAt: event.at, completedOn: event.on }));
@@ -106,6 +143,36 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       return;
     case 'time.deleted':
       delete state.entries[event.entryId];
+      return;
+    case 'block.created':
+      if (!state.tasks[event.block.taskId] || state.blocks[event.block.id]) return;
+      state.blocks[event.block.id] = { ...event.block };
+      syncTaskToBlocks(state, event.block.taskId, event.at, event.block.start);
+      return;
+    case 'block.updated': {
+      const block = state.blocks[event.blockId];
+      if (!block) return;
+      state.blocks[event.blockId] = { ...block, start: event.start, end: event.end };
+      syncTaskToBlocks(state, block.taskId, event.at, event.start);
+      return;
+    }
+    case 'block.deleted': {
+      const block = state.blocks[event.blockId];
+      if (!block) return;
+      delete state.blocks[event.blockId];
+      syncTaskToBlocks(state, block.taskId, event.at, null);
+      return;
+    }
+    case 'calendar.added':
+      if (!state.calendars[event.calendar.id]) state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
+      return;
+    case 'calendar.updated': {
+      const calendar = state.calendars[event.calendarId];
+      if (calendar) state.calendars[event.calendarId] = { ...calendar, ...event.patch };
+      return;
+    }
+    case 'calendar.removed':
+      delete state.calendars[event.calendarId];
       return;
     case 'tasks.rolledOver':
       for (const rolled of event.moved) {
@@ -149,7 +216,15 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
 /** Apply a batch; copies the containers once and replaces only the tasks it touches. */
 export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]): PlannerState => {
   if (events.length === 0) return state;
-  const next: PlannerState = { ...state, tasks: { ...state.tasks }, channels: { ...state.channels }, entries: { ...state.entries }, settings: { ...state.settings } };
+  const next: PlannerState = {
+    ...state,
+    tasks: { ...state.tasks },
+    channels: { ...state.channels },
+    entries: { ...state.entries },
+    blocks: { ...state.blocks },
+    calendars: { ...state.calendars },
+    settings: { ...state.settings },
+  };
   for (const event of events) applyInto(next, event);
   return next;
 };

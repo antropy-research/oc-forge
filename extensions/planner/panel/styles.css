@@ -246,3 +246,42 @@ html[data-surface='status'], html[data-surface='status'] body { height: auto; ba
 .status-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-time { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--oc-muted); }
 .status-sub { font-size: 11.5px; color: var(--oc-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 26px; }
+
+/* Calendar */
+.calendar-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; padding: 0 20px 0; flex: 1; min-height: 0; }
+.feed-errors { margin: 0 20px 8px; font-size: 12px; color: var(--oc-error-text, #c92a2a); }
+.time-grid { user-select: none; display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--pl-line); border-radius: 10px; background: var(--pl-surface); overflow: hidden; }
+.grid-head { display: grid; border-bottom: 1px solid var(--pl-line); }
+.grid-day-head { padding: 6px 8px; border-left: 1px solid var(--pl-line); min-width: 0; overflow: hidden; }
+.grid-day-head .day-name, .grid-day-head .day-date { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grid-day-head.is-today .day-name { color: var(--oc-primary-text, var(--oc-primary)); }
+.grid-day-head .day-name { font-size: 13px; }
+.all-day { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.all-day-event { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--item-color) 18%, transparent); border-left: 3px solid var(--item-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grid-scroll { overflow-y: auto; flex: 1; min-height: 0; }
+.grid-body { display: grid; position: relative; }
+.hours { position: relative; }
+.hour-label { position: absolute; right: 6px; transform: translateY(-50%); font-size: 10.5px; color: var(--oc-muted); white-space: nowrap; }
+.day-lane { position: relative; border-left: 1px solid var(--pl-line); }
+.hour-line { position: absolute; left: 0; right: 0; border-top: 1px solid color-mix(in srgb, var(--oc-fg) 7%, transparent); }
+.now-line { position: absolute; left: 0; right: 0; border-top: 2px solid var(--oc-error, #e03131); z-index: 3; }
+.now-line::before { content: ''; position: absolute; left: -4px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--oc-error, #e03131); }
+.drop-slot { position: absolute; left: 2px; right: 2px; height: 22px; border-radius: 4px; border: 1.5px dashed var(--oc-primary); background: color-mix(in srgb, var(--oc-primary) 10%, transparent); font-size: 11px; padding: 2px 6px; z-index: 4; pointer-events: none; }
+.grid-item { position: absolute; z-index: 2; border-radius: 5px; padding: 2px 6px; overflow: hidden; font-size: 11.5px; line-height: 1.25; display: flex; flex-direction: column; gap: 1px; background: color-mix(in srgb, var(--item-color) 16%, var(--pl-surface)); border-left: 3px solid var(--item-color); }
+.grid-item.is-event { background: color-mix(in srgb, var(--item-color) 10%, var(--pl-surface)); border-left-style: solid; opacity: 0.9; }
+.grid-item.is-block { cursor: grab; box-shadow: 0 1px 2px color-mix(in srgb, var(--oc-fg) 10%, transparent); touch-action: none; user-select: none; }
+.grid-item.is-block.is-dragging { cursor: grabbing; opacity: 0.85; z-index: 5; box-shadow: 0 6px 16px color-mix(in srgb, var(--oc-fg) 18%, transparent); }
+.grid-item.is-done .item-title { text-decoration: line-through; color: var(--oc-muted); }
+.item-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-time { color: var(--oc-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-remove { position: absolute; top: 1px; right: 2px; background: none; border: 0; padding: 0 3px; color: var(--oc-muted); opacity: 0; }
+.grid-item:hover .item-remove { opacity: 1; }
+.resize-handle { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; cursor: ns-resize; }
+.timebox { font-weight: 600; color: var(--item-color); font-variant-numeric: tabular-nums; }
+.side-gap { margin-top: 18px; }
+.side-tabs { margin: 0 0 10px; }
+.side-panel.is-calendar { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.side-panel.is-calendar .time-grid { flex: 1; }
+.settings .row .grow { flex: 1; }
+.settings label.inline { display: inline-flex; grid-template-columns: none; gap: 4px; }
+.date-nav .tabs { margin: 0 6px 0 0; }

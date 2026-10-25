@@ -86,6 +86,23 @@ export interface TimerState {
   startedAt: string;
 }
 
+/** A working session: when, on the calendar, a task gets worked on. A task can have several. */
+export interface WorkBlock {
+  id: string;
+  taskId: string;
+  start: string;
+  end: string;
+}
+
+/** A read-only calendar the service fetches (an ICS feed or file). */
+export interface CalendarSubscription {
+  id: string;
+  name: string;
+  url: string;
+  color: string;
+  visible: boolean;
+}
+
 export interface Settings {
   /** IANA zone that decides what "today" and midnight mean. Null until the panel reports one. */
   timezone: string | null;
@@ -97,6 +114,9 @@ export interface Settings {
   weekStartsOn: 0 | 1;
   /** Count planned time as actual when a task is completed without any tracked time. */
   plannedAsActual: boolean;
+  /** Working hours, in minutes after local midnight; auto-scheduling stays inside them. */
+  workdayStart: number;
+  workdayEnd: number;
 }
 
 export interface PlannerState {
@@ -106,6 +126,8 @@ export interface PlannerState {
   channels: Record<string, Channel>;
   entries: Record<string, TimeEntry>;
   timer: TimerState | null;
+  blocks: Record<string, WorkBlock>;
+  calendars: Record<string, CalendarSubscription>;
   settings: Settings;
 }
 
@@ -115,6 +137,8 @@ export const DEFAULT_SETTINGS: Settings = {
   archiveAfterRollovers: 7,
   weekStartsOn: 1,
   plannedAsActual: true,
+  workdayStart: 9 * 60,
+  workdayEnd: 18 * 60,
 };
 
 export const emptyState = (): PlannerState => ({
@@ -123,5 +147,7 @@ export const emptyState = (): PlannerState => ({
   channels: {},
   entries: {},
   timer: null,
+  blocks: {},
+  calendars: {},
   settings: { ...DEFAULT_SETTINGS },
 });

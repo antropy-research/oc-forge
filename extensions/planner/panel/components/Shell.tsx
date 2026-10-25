@@ -4,12 +4,12 @@ import { usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 
-export type Route = 'home' | 'today' | 'focus' | 'backlog' | 'archive' | 'settings';
+export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'backlog' | 'archive' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
     <span>{children}</span>
-    {badge ? <span class="nav-badge">{badge}</span> : null}
+    {badge ? <span class="nav-badge" aria-hidden="true">{badge}</span> : null}
   </button>
 );
 
@@ -42,6 +42,7 @@ export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) 
       <div class="brand">Planner</div>
       <NavItem route="home" current={route} onRoute={onRoute}>Home</NavItem>
       <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>
+      <NavItem route="calendar" current={route} onRoute={onRoute}>Calendar</NavItem>
       <NavItem route="focus" current={route} onRoute={onRoute}>Focus</NavItem>
       <div class="nav-section">Lists</div>
       <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>

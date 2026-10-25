@@ -2,9 +2,11 @@
 // to 127.0.0.1, and proxies the panel's serviceRequest calls to it.
 import http from 'node:http';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { EventStore } from './store.ts';
 import { Planner } from './planner.ts';
+import { CalendarFeeds } from './calendars.ts';
+import { daysBetween, isDateKey } from '../src/domain/dates.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -18,6 +20,8 @@ const dir = process.env.PLANNER_DATA_DIR || join(homedir(), '.local', 'share', '
 const store = new EventStore({ dir, log: (message) => console.error(`[planner] ${message}`) });
 await store.init();
 const planner = new Planner(store);
+// Feed copies are a cache, kept beside the git-tracked data rather than in it.
+const feeds = new CalendarFeeds(join(dirname(dir), 'cache'));
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -61,6 +65,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/state' && req.method === 'GET') {
       json(res, 200, planner.snapshot());
+      return;
+    }
+    if (url.pathname === '/calendar' && req.method === 'GET') {
+      const from = url.searchParams.get('from') ?? '';
+      const to = url.searchParams.get('to') ?? '';
+      if (!isDateKey(from) || !isDateKey(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 62) {
+        json(res, 400, { error: 'from and to must be dates at most 62 days apart' });
+        return;
+      }
+      const zone = planner.state.settings.timezone ?? 'UTC';
+      json(res, 200, await feeds.eventsFor(Object.values(planner.state.calendars), from, to, zone, url.searchParams.get('refresh') === '1'));
       return;
     }
     if (url.pathname === '/activity' && req.method === 'GET') {
