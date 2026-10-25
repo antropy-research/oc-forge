@@ -141,6 +141,13 @@ describe('assigned to an agent, with a pull request', () => {
     expect(pullRequestLookups(state, now)).toEqual([]);
     expect(pullRequestLookups(assigned(), now + 31 * 86_400_000)).toEqual([]);
   });
+  test('an assignment adopted from the session list before its start was written stays an assignment', () => {
+    const session = live({ id: 'ses_9', worktree: { directory: '/repo-wt/x', branch: 'planner/x' }, items: [{ id: 'PLN-0001', data: { taskId: 't1', runId: 'r9', wantsPr: true } }] });
+    const [adopted] = planAdoptions(base(), [session]);
+    expect(adopted).toMatchObject({ type: 'run.started', run: { id: 'r9', taskId: 't1', wantsPr: true, worktree: { branch: 'planner/x' } } });
+    const plain = planAdoptions(base(), [live({ id: 'ses_8', items: [{ id: 'PLN-0001', data: { taskId: 't1', runId: 'r8' } }] })])[0] as { run: Record<string, unknown> };
+    expect('wantsPr' in plain.run).toBe(false);
+  });
   test('the log only takes a well-formed pull request, for that run and its task', () => {
     const state = assigned();
     expect(validateCommand({ cmd: 'p1', type: 'run.pullRequest', runId: 'r2', taskId: 't1', pullRequest: pr }, state)).toBeNull();

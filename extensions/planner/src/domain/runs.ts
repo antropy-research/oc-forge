@@ -97,7 +97,7 @@ export const planAdoptions = (state: PlannerState, sessions: Iterable<LiveSessio
   for (const session of sessions) {
     if (known.has(session.id)) continue;
     for (const item of session.items) {
-      const data = (item.data ?? {}) as { taskId?: unknown; runId?: unknown };
+      const data = (item.data ?? {}) as { taskId?: unknown; runId?: unknown; wantsPr?: unknown };
       const taskId = typeof data.taskId === 'string' ? data.taskId : item.id;
       const task = state.tasks[taskId];
       if (!task || task.deletedAt) continue;
@@ -113,6 +113,8 @@ export const planAdoptions = (state: PlannerState, sessions: Iterable<LiveSessio
           directory: session.directory,
           worktree: session.worktree ? { directory: session.worktree.directory, branch: session.worktree.branch } : null,
           title: task.title,
+          // An assignment's session can be adopted before its start is written down; it stays an assignment.
+          ...(data.wantsPr === true ? { wantsPr: true } : {}),
         },
       });
       known.add(session.id);

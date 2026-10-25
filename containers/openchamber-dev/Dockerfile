@@ -1,15 +1,18 @@
 # syntax=docker/dockerfile:1
-# OpenChamber and OpenCode from npm for extension development, pinned to the
-# pair the host runs, plus Bun for the SDK's guest bundler
-# (`bunx openchamber-guest-bundle`).
-ARG BUN_IMAGE=oven/bun:1.4.3
+# OpenChamber and OpenCode from npm for extension development: the latest
+# OpenChamber release, which extensions are installed on, with an OpenCode it
+# supports (2.5.1 needs 2.1.0 or newer); VS Code Server for the web; and Bun for
+# the SDK's guest bundler (`bunx openchamber-guest-bundle`).
+ARG BUN_IMAGE=oven/bun:1.4.4
 ARG NODE_IMAGE=node:26.12.0-trixie-slim
 
 FROM ${BUN_IMAGE} AS bun
 
 FROM ${NODE_IMAGE}
-ARG OPENCHAMBER_VERSION=2.4.0
-ARG OPENCODE_VERSION=2.0.32
+ARG OPENCHAMBER_VERSION=2.5.1
+ARG OPENCODE_VERSION=2.1.4
+# VS Code release, as `vendors.json` pins it; its server for the web runs in the `vscode` service.
+ARG VSCODE_VERSION=1.140.0
 
 # git and ssh for projects and worktrees; python3, make and g++ for native
 # modules that ship no prebuilt binary.
@@ -26,6 +29,16 @@ RUN ln -s bun /usr/local/bin/bunx
 RUN npm install -g --allow-scripts=@opencode/cli,node-pty \
     "@openchamber/web@${OPENCHAMBER_VERSION}" "@opencode/cli@${OPENCODE_VERSION}" \
   && npm cache clean --force
+
+# Microsoft's VS Code Server for the web, the same build VS Code ${VSCODE_VERSION} ships,
+# under /opt/vscode-server; `vscode-server` starts it (see the `vscode` service).
+RUN arch="$(dpkg --print-architecture)" \
+  && case "$arch" in amd64) arch=x64 ;; arm64) arch=arm64 ;; *) echo "no VS Code Server for $arch" >&2; exit 1 ;; esac \
+  && curl -fsSL "https://update.code.visualstudio.com/${VSCODE_VERSION}/server-linux-${arch}-web/stable" -o /tmp/vscode-server.tar.gz \
+  && mkdir -p /opt/vscode-server \
+  && tar -xzf /tmp/vscode-server.tar.gz -C /opt/vscode-server --strip-components=1 \
+  && rm /tmp/vscode-server.tar.gz \
+  && ln -s /opt/vscode-server/bin/code-server /usr/local/bin/vscode-server
 
 ENV LANG=C.UTF-8
 # The image's `node` user is UID 1000, so files written into the bind-mounted

@@ -187,7 +187,8 @@ export class AgentStore {
         title: task.title.slice(0, 200),
         url: taskUrl(state, task.id),
         text: (choice.prompt.trim() || task.title).slice(0, ATTACH_TEXT_MAX),
-        data: { taskId: task.id, runId },
+        // The chip carries what an adoption needs to write the same run, should it win the race.
+        data: { taskId: task.id, runId, ...(choice.wantsPr ? { wantsPr: true } : {}) },
         projectId: choice.projectId,
         navigation: choice.open ? 'open' : 'preserve',
         worktree: workspace.kind === 'project' ? false : workspace.kind === 'new' ? { kind: 'new', ...(workspace.branch.trim() ? { name: workspace.branch.trim() } : {}) } : { kind: 'existing', directory: workspace.directory },
@@ -197,21 +198,28 @@ export class AgentStore {
         return false;
       }
       const project = this.view.projects.find((item) => item.id === choice.projectId);
-      await this.client.dispatch([
-        {
-          type: 'run.started',
-          run: {
-            id: runId,
-            taskId: task.id,
-            sessionId: result.sessionId,
-            projectId: choice.projectId,
-            directory: result.directory ?? project?.directory ?? null,
-            worktree: result.worktree ? { directory: result.worktree.directory, branch: result.worktree.branch } : null,
-            title: task.title,
-            ...(choice.wantsPr ? { wantsPr: true } : {}),
-          },
-        },
-      ]);
+      // The session list may have shown the new chat first and adopted it as this very run.
+      if (!this.client.getView().state.runs[runId]) {
+        await this.client
+          .dispatch([
+            {
+              type: 'run.started',
+              run: {
+                id: runId,
+                taskId: task.id,
+                sessionId: result.sessionId,
+                projectId: choice.projectId,
+                directory: result.directory ?? project?.directory ?? null,
+                worktree: result.worktree ? { directory: result.worktree.directory, branch: result.worktree.branch } : null,
+                title: task.title,
+                ...(choice.wantsPr ? { wantsPr: true } : {}),
+              },
+            },
+          ])
+          .catch((error) => {
+            if (!this.client.getView().state.runs[runId]) throw error;
+          });
+      }
       void this.watch(choice.projectId);
       if (result.sent === 'no-model') this.client.notify('The chat was created, but no model is set up to answer it. Open the chat to pick one.');
       else if (result.sent === 'failed') this.client.notify('The chat was created, but the first message did not send. Open the chat to send it again.');

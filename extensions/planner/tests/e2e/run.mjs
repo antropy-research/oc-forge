@@ -103,10 +103,16 @@ page.on('console', (message) => {
 
 const openPlanner = async () => {
   await page.goto(`${base}/`, { waitUntil: 'load' });
-  await page.getByRole('button', { name: 'Planner', exact: true }).first().click({ timeout: 20_000 });
   // The full page sits in the host's inset overlay; the Work Status section is a separate frame.
-  const frame = page.frameLocator('.inset-0 > iframe[src*="oc-forge-planner"]');
-  await frame.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 30_000 });
+  // OpenChamber 2.5 serves extension frames from /api/guest-files/<grant>/; their title is the panel name.
+  const frame = page.frameLocator('.inset-0 > iframe[title="Planner"]');
+  const home = frame.getByRole('heading', { name: 'Home' });
+  // OpenChamber 2.5 reopens the page it showed before a reload, and the sidebar's Planner button
+  // toggles it; the rail's button (a panel surface) and the Work Status heading share the name.
+  if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
+    await page.locator('button[aria-label="Planner"]:not([data-context-surface])').first().click({ timeout: 20_000 });
+    await home.waitFor({ timeout: 30_000 });
+  }
   return frame;
 };
 
@@ -526,6 +532,10 @@ try {
     project: { id: 'p1', name: 'Planner' }, cycle: null, assigned, description: null, labels: { nodes: [] }, comments: { nodes: [] },
   });
   const linearIssues = [makeIssue(1, 'linear first', 'st-todo'), makeIssue(2, 'linear second', 'st-prog'), makeIssue(3, 'linear third', 'st-backlog'), makeIssue(5, 'linear by url', 'st-todo', false)];
+  // Saved views (phase 11): a favorite team view saved as a board grouped by priority, another team
+  // view, a workspace view, one of my own, and a view of projects that the picker leaves out.
+  const savedView = (id, name, extra) => ({ id, name: `${run} ${name}`, description: null, icon: null, color: null, shared: true, modelName: 'Issue', slugId: `slug-${id}`, updatedAt: new Date().toISOString(), team: null, owner: { id: 'u-e2e', name: 'E2E Linear' }, ...extra });
+  const viewOnlyIssue = { ...makeIssue(31, 'view only bug', 'st-todo', false), priority: 1, labels: { nodes: [{ id: 'lbl-bug', name: 'Bug', color: '#eb5757' }] } };
   const sideStates = makeStates('st-side-');
   const sideTeam = { id: 'team-side', key: 'SIDE', name: 'Side Team' };
   const sideIssue = (n, title, stateId) => ({
@@ -544,6 +554,15 @@ try {
       members: [{ id: 'u-e2e', name: 'E2E Linear', displayName: 'e2e', active: true }, { id: 'u-mate', name: 'Teammate', displayName: 'mate', active: true }, { id: 'u-gone', name: 'Former', displayName: 'former', active: false }],
       labels: [{ id: 'lbl-bug', name: 'Bug', color: '#eb5757' }, { id: 'lbl-feat', name: 'Feature', color: '#bb87fc' }],
       workspaceLabels: [{ id: 'lbl-cust', name: 'Customer', color: '#4ea7fc' }],
+      views: [
+        savedView('v-fav', 'Favorite board', { team }),
+        savedView('v-team', 'Team triage', { team }),
+        savedView('v-ws', 'Company view'),
+        savedView('v-mine', 'Mine', { shared: false }),
+        savedView('v-proj', 'Projects view', { modelName: 'Project' }),
+      ],
+      favorites: [{ type: 'customView', sortOrder: 1, customView: { id: 'v-fav' } }, { type: 'project', sortOrder: 0, customView: null }],
+      viewIssues: { 'v-fav': { prefs: { layout: 'board', issueGrouping: 'priority', viewOrdering: 'priority' }, issues: () => [...linearIssues.filter((issue) => issue.identifier !== 'E2E-5'), viewOnlyIssue] } },
     },
     side: {
       org: { id: 'org-side', name: 'Side Org', urlKey: 'side' }, viewer: { id: 'u-side', name: 'Side Me' }, states: sideStates, teams: [sideTeam], issues: [sideIssue(1, 'side first', 'st-side-todo'), sideIssue(2, 'side second', 'st-side-todo')],
@@ -558,7 +577,13 @@ try {
     const find = (id) => o.issues.find((issue) => issue.id === id || issue.identifier === id);
     if (op === 'PlannerWhoAmI') return { viewer: o.viewer, organization: o.org };
     if (op === 'PlannerAssigned') return { viewer: { ...o.viewer, assignedIssues: { nodes: o.issues.filter((issue) => issue.assigned && isOpenIssue(issue)).map(strip), pageInfo: { hasNextPage: false, endCursor: null } } } };
-    if (op === 'PlannerViews') return { customViews: { nodes: [] } };
+    if (op === 'PlannerViews') return { customViews: { nodes: o.views ?? [], pageInfo: { hasNextPage: false, endCursor: null } } };
+    if (op === 'PlannerFavoriteViews') return { favorites: { nodes: o.favorites ?? [] } };
+    if (op === 'PlannerViewIssues') {
+      const saved = o.viewIssues?.[variables.id];
+      const nodes = (saved?.issues() ?? []).filter(isOpenIssue).map(strip);
+      return { customView: (o.views ?? []).some((item) => item.id === variables.id) ? { id: variables.id, viewPreferencesValues: saved?.prefs ?? null, issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } : null };
+    }
     if (op === 'PlannerLinked') return { issues: { nodes: o.issues.filter((issue) => variables.ids.includes(issue.id)).map(strip) } };
     if (op === 'PlannerIssue') return { issue: find(variables.id) ? strip(find(variables.id)) : null };
     if (op === 'PlannerTeamStates') return { team: { id: variables.id, states: { nodes: o.states } } };
@@ -921,6 +946,73 @@ try {
   check('from a task, Escape closes the issue editor and leaves the task open', await thirdTask.isVisible());
   await thirdTask.getByRole('button', { name: 'Close' }).click();
 
+  // Phase 11: the views saved in Linear, opened as saved, and Linear's temporary filters.
+  await nav('Linear').click();
+  await frame.getByRole('tab', { name: 'Issues' }).click();
+  const sourcePicker = frame.locator('.linear-page').getByRole('combobox', { name: 'Linear issues to show' });
+  await sourcePicker.locator('optgroup[label="Favorites"]').waitFor({ state: 'attached', timeout: 15_000 });
+  const pickerGroups = await sourcePicker.locator('optgroup').evaluateAll((items) => items.map((item) => `${item.getAttribute('label')}: ${[...item.querySelectorAll('option')].map((option) => option.textContent).join(', ')}`));
+  check(
+    'the view picker lists favorites, then team, workspace and my views, without views of projects',
+    pickerGroups.join(' | ') === `Favorites: ${run} Favorite board | E2E · E2E Team: ${run} Team triage | Workspace views: ${run} Company view | My views: ${run} Mine`,
+    pickerGroups.join(' | '),
+  );
+  await sourcePicker.selectOption({ label: `${run} Favorite board` });
+  const viewRow = frame.locator('.linear-page li.issue-row', { hasText: 'E2E-31' });
+  await viewRow.waitFor({ timeout: 15_000 });
+  const boardColumns = await frame.locator('.issue-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')));
+  const priorityNames = { 1: 'Urgent', 2: 'High', 3: 'Medium', 4: 'Low', 0: 'No priority' };
+  const viewPriorities = new Set(linearOrgs.host.viewIssues['v-fav'].issues().filter(isOpenIssue).map((issue) => issue.priority));
+  const expectedColumns = [1, 2, 3, 4, 0].filter((priority) => viewPriorities.has(priority)).map((priority) => priorityNames[priority]);
+  check('a saved view opens with its own layout and grouping (a board by priority)', boardColumns.join('|') === expectedColumns.join('|'), `${boardColumns.join('|')} (want ${expectedColumns.join('|')})`);
+  check("opening a view does not change the Planner's own display settings", (await serviceState()).state.settings.linearLayout === 'list');
+  await shot('31-linear-view');
+
+  const filterBar = frame.locator('.linear-page .linear-filters').first();
+  const shownRows = () => frame.locator('.linear-page li.issue-row').count();
+  // What the fake view holds now (earlier phases moved and labelled some of its issues).
+  const inView = () => linearOrgs.host.viewIssues['v-fav'].issues().filter(isOpenIssue);
+  const shownKeys = async () => (await frame.locator('.linear-page li.issue-row').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label') ?? ''))).map((label) => /^E2E-\d+/.exec(label)?.[0]).sort();
+  const keysWhere = (test) => inView().filter(test).map((issue) => issue.identifier).sort();
+  const allInView = await shownRows();
+  await filterBar.getByRole('button', { name: '+ Filter' }).click();
+  await frame.getByRole('menuitem', { name: 'Status' }).click();
+  const statusMenu = frame.getByRole('dialog', { name: 'Filter by Status' });
+  await statusMenu.getByRole('checkbox', { name: /Todo/ }).check();
+  await filterBar.getByRole('button', { name: 'Edit filter: Status is Todo' }).waitFor({ timeout: 5000 });
+  await statusMenu.getByRole('button', { name: 'Done' }).click();
+  const todoOnly = await shownKeys();
+  const expectedTodo = keysWhere((issue) => issue.state.name === 'Todo');
+  check('a status filter keeps only those issues, and says how many it hides', todoOnly.join() === expectedTodo.join() && todoOnly.length < allInView && (await frame.locator('.linear-page .filter-count').innerText()).includes(`of ${allInView} issues`), `${todoOnly.join(', ')} (want ${expectedTodo.join(', ')}) of ${allInView}`);
+  await filterBar.getByRole('button', { name: 'Edit filter: Status is Todo' }).click();
+  await frame.getByRole('dialog', { name: 'Filter by Status' }).getByRole('radio', { name: 'is not' }).click();
+  await filterBar.getByRole('button', { name: 'Edit filter: Status is not Todo' }).waitFor({ timeout: 5000 });
+  await frame.getByRole('dialog', { name: 'Filter by Status' }).getByRole('button', { name: 'Done' }).click();
+  check('"is not" turns the filter around', (await frame.locator('.linear-page li.issue-row', { hasText: /E2E-31(?!\d)/ }).count()) === 0 && (await shownRows()) === allInView - todoOnly.length);
+  await filterBar.getByRole('button', { name: 'Remove filter: Status is not Todo' }).click();
+  await filterBar.getByRole('button', { name: '+ Filter' }).click();
+  await frame.getByRole('menuitem', { name: 'Label' }).click();
+  await frame.getByRole('dialog', { name: 'Filter by Label' }).getByRole('checkbox', { name: /Bug/ }).check();
+  await frame.getByRole('dialog', { name: 'Filter by Label' }).getByRole('button', { name: 'Done' }).click();
+  await page.waitForTimeout(300);
+  const expectedBug = keysWhere((issue) => issue.labels.nodes.some((label) => label.name === 'Bug'));
+  check('a label filter keeps the issues that have it', (await shownKeys()).join() === expectedBug.join() && expectedBug.includes('E2E-31'), `${(await shownKeys()).join(', ')} (want ${expectedBug.join(', ')})`);
+  await shot('32-linear-filters');
+
+  // Assign an issue to an agent from its row: planned today, the task opens on "Assign to an agent".
+  await viewRow.getByRole('button', { name: 'Assign E2E-31 to an agent' }).click();
+  const assignFromRow = frame.getByRole('dialog', { name: 'Task details' }).getByRole('group', { name: 'Assign to an agent' });
+  await assignFromRow.waitFor({ timeout: 10_000 });
+  const rowBranch = await assignFromRow.getByRole('textbox', { name: 'Worktree branch' }).inputValue();
+  const rowTask = Object.values((await serviceState()).state.tasks).find((task) => task.title === `${run} view only bug` && !task.deletedAt);
+  check("an issue row's Agent plans it today and opens the assignment on Linear's branch name", rowBranch === 'e2e/e2e-31' && rowTask?.placement.kind === 'day' && rowTask.source?.key === 'E2E-31', `${rowBranch} · ${JSON.stringify(rowTask?.placement ?? null)}`);
+  await assignFromRow.getByRole('button', { name: 'Cancel' }).click();
+  await frame.getByRole('dialog', { name: 'Task details' }).getByRole('button', { name: 'Close' }).click();
+
+  await sourcePicker.selectOption('assigned');
+  await issueRow(3).waitFor({ timeout: 10_000 });
+  check("another list starts without filters, in the Planner's own display", (await filterBar.locator('.filter-chip').count()) === 0 && (await frame.locator('.issue-board').count()) === 0);
+
   await context.unroute(isRequestRoute);
   await context.unroute(isStatusRoute);
 
@@ -989,6 +1081,62 @@ try {
   const worktreeRun = runsOf(await serviceState(), worktreeTitle)[0];
   check('an agent can work in a new worktree', worktreeRun?.worktree?.branch === branchName, JSON.stringify(worktreeRun?.worktree ?? null));
   await secondAgent.dialog.getByRole('button', { name: 'Close' }).click();
+
+  // Phase 12: assign a task to an agent, as in GitHub or Linear: a new worktree, then a pull request.
+  await nav('Home').click();
+  const assignTitle = `${run} assigned task`;
+  await addInToday(assignTitle);
+  const assignCard = frame.locator('section.day-column.is-today li.task-card', { hasText: assignTitle });
+  await assignCard.hover();
+  await assignCard.getByRole('button', { name: 'Task actions' }).click();
+  await assignCard.getByRole('menuitem', { name: 'Assign to an agent' }).click();
+  const assignDialog = frame.getByRole('dialog', { name: 'Task details' });
+  const assignForm = assignDialog.getByRole('group', { name: 'Assign to an agent' });
+  check('"Assign to an agent" in the card menu opens the task on the assignment', await assignForm.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+  await assignForm.getByRole('combobox', { name: 'Agent project' }).selectOption({ label: 'planner-demo-a' });
+  const assignBranch = `planner/${run}-assign`;
+  await assignForm.getByRole('textbox', { name: 'Worktree branch' }).fill(assignBranch);
+  await assignForm.getByRole('button', { name: 'Edit the instructions' }).click();
+  const instructions = await assignForm.getByRole('textbox', { name: 'Agent prompt' }).inputValue();
+  check('the assignment asks for a pull request from its branch', instructions.includes(`branch \`${assignBranch}\``) && instructions.includes('gh pr create'), instructions.slice(-240).replace(/\s+/g, ' '));
+  // The demo project has nowhere to push to; the dev container's free model only has to answer.
+  await assignForm.getByRole('textbox', { name: 'Agent prompt' }).fill(TRIVIAL);
+  // Pull requests are looked up with gh through the service; answer for this run's branch.
+  let fakePull = null;
+  const pullLookups = [];
+  await context.route(isServiceRoute, async (route) => {
+    const outer = route.request().postDataJSON();
+    if (outer?.path !== '/github/pulls') return route.continue();
+    const { runs: asked } = JSON.parse(outer.body);
+    pullLookups.push(...asked);
+    const results = asked.map((item) => ({ runId: item.runId, pullRequest: item.branch === assignBranch ? fakePull : null }));
+    await route.fulfill({ json: { status: 200, body: JSON.stringify({ results }) } });
+  });
+  await assignForm.getByRole('button', { name: 'Assign', exact: true }).click();
+  await assignDialog.locator('li.run-row').first().waitFor({ timeout: 200_000 });
+  const assignedRun = runsOf(await serviceState(), assignTitle)[0];
+  check('an assigned run works in a new worktree on its branch and expects a pull request', assignedRun?.worktree?.branch === assignBranch && assignedRun.wantsPr === true, JSON.stringify(assignedRun ?? null).slice(0, 200));
+  await assignDialog.getByRole('button', { name: 'Close' }).click();
+  fakePull = { number: 4242, url: 'https://github.com/e2e/demo/pull/4242', state: 'open', draft: false, title: assignTitle, repo: 'e2e/demo' };
+  // A freshly opened Planner looks pull requests up within seconds.
+  frame = await openPlanner();
+  const withPull = await waitForState((latest) => runsOf(latest, assignTitle)[0]?.pullRequest?.number === 4242, 20_000);
+  check(
+    "the pull request from the run's branch is found in its worktree and logged",
+    runsOf(withPull, assignTitle)[0]?.pullRequest?.state === 'open' && pullLookups.some((item) => item.branch === assignBranch && item.directories[0] === assignedRun?.worktree?.directory),
+    JSON.stringify(pullLookups.slice(-2)).slice(0, 200),
+  );
+  await nav('Agents').click();
+  check('the run shows its pull request', await frame.locator('li.agent-task', { hasText: assignTitle }).getByRole('button', { name: 'Open pull request e2e/demo#4242 (Open)' }).waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+  await shot('33-assigned-pr');
+  fakePull = { ...fakePull, state: 'merged' };
+  frame = await openPlanner();
+  await waitForState((latest) => runsOf(latest, assignTitle)[0]?.pullRequest?.state === 'merged', 20_000);
+  await nav('Agents').click();
+  await frame.locator('li.agent-task', { hasText: assignTitle }).getByRole('button', { name: 'Merged: complete the task' }).click();
+  const completedByPr = await waitForState((latest) => Boolean(taskTitled(latest, assignTitle)?.completedAt));
+  check('a merged pull request offers to complete the task', Boolean(taskTitled(completedByPr, assignTitle)?.completedAt));
+  await context.unroute(isServiceRoute);
 
   // From the chat: a message action, /task, and the session action.
   await nav('Agents').click();
@@ -1203,7 +1351,7 @@ try {
 
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
-  const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
+  const statusSelector = '.rounded-md > iframe[title="Planner"]';
   const statusMounted = () => page.locator(statusSelector).first().waitFor({ timeout: 8000 }).then(() => true).catch(() => false);
   let mounted = await statusMounted();
   const toggle = page.getByRole('button', { name: 'Toggle work-status panel' }).first();
