@@ -11,6 +11,9 @@ import type { EventStore } from './store.ts';
 
 export type ExecuteResult = { ok: true; applied: number } | { ok: false; error: string; index: number };
 
+/** Told after events are written here, with the state before and after them. */
+export type PersistListener = (events: readonly PlannerEvent[], before: PlannerState, after: PlannerState) => void;
+
 export interface Snapshot {
   state: PlannerState;
   today: DateKey | null;
@@ -42,6 +45,7 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'block.created': return `Timebox: ${titleOf(event.block.taskId)}`;
     case 'block.updated': return 'Move working session';
     case 'block.deleted': return 'Remove working session';
+    case 'block.linked': return event.google ? 'Write a working session to Google Calendar' : 'Unlink a working session from Google Calendar';
     case 'objective.created': return `Add objective: ${event.objective.title}`;
     case 'objective.updated': return 'Edit objective';
     case 'objective.deleted': return 'Delete objective';
@@ -75,6 +79,9 @@ export class Planner {
   private readonly applied = new Set<string>();
   private readonly log: PlannerEvent[];
   private lastAt = 0;
+  private readonly persistListeners = new Set<PersistListener>();
+  /** When the log was last read again after a merge brought in events from elsewhere. */
+  reloadedAt = 0;
 
   constructor(private readonly store: EventStore, private readonly now: () => Date = () => new Date()) {
     const events = store.load();
@@ -158,6 +165,13 @@ export class Planner {
       this.lastAt = Math.max(this.lastAt, Date.parse(event.at) || 0);
     }
     this.state = foldEvents(events);
+    this.reloadedAt = Date.now();
+  }
+
+  /** Hear about events written here (not ones a merge brings in: their machine acts on them). */
+  onPersist(listener: PersistListener): () => void {
+    this.persistListeners.add(listener);
+    return () => this.persistListeners.delete(listener);
   }
 
   /** The latest events that concern one task, oldest first. */
@@ -171,6 +185,14 @@ export class Planner {
     this.state = next ?? applyEvents(before, events);
     this.log.push(...events);
     for (const event of events) if (event.cmd) this.applied.add(event.cmd);
+    for (const listener of this.persistListeners) {
+      try {
+        listener(events, before, this.state);
+      } catch (error) {
+        // A listener's trouble never undoes a write.
+        console.error(`[planner] after a write: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   /** Stamp an event; times strictly increase so (at, id) order equals write order. */

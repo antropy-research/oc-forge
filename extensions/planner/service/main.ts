@@ -9,7 +9,10 @@ import { CalendarFeeds } from './calendars.ts';
 import { SyncManager } from './sync.ts';
 import { GitHubSource, LISTS, type ListKind } from './github.ts';
 import { LinearWorkspaces, WorkspaceError } from './linear.ts';
-import { daysBetween, isDateKey } from '../src/domain/dates.ts';
+import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from './google.ts';
+import { GoogleData } from './googleData.ts';
+import { GoogleCalendars, GoogleTimeboxes } from './googleTimeboxes.ts';
+import { addDays, daysBetween, instantAt, isDateKey } from '../src/domain/dates.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -33,6 +36,11 @@ const github = new GitHubSource();
 const feeds = new CalendarFeeds(join(dirname(dir), 'cache'));
 // Linear API keys stay on this machine: beside the data, never in its synced repository.
 const linearWorkspaces = new LinearWorkspaces(join(dirname(dir), 'linear-workspaces.json'), undefined, log);
+// Google's client secret and refresh tokens likewise stay beside the data, never in it.
+const google = new GoogleAccounts(join(dirname(dir), 'google-accounts.json'), undefined, undefined, log);
+const googleData = new GoogleData(google);
+const googleCalendars = new GoogleCalendars(googleData);
+const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleCalendars.forget() });
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -64,6 +72,107 @@ const mapLimited = async <T, R>(items: readonly T[], limit: number, fn: (item: T
     }),
   );
   return results;
+};
+
+const isEmail = (value: unknown): value is string => typeof value === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+const isGoogleId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024;
+
+/** Ask every account that has `feature`; one account's trouble stays its own. */
+const perAccount = async <T>(feature: GoogleFeature, ask: (account: string) => Promise<T[]>): Promise<{ items: T[]; errors: { account: string; message: string }[] }> => {
+  const accounts = (await google.status()).accounts.filter((account) => account.features.includes(feature));
+  const items: T[] = [];
+  const errors: { account: string; message: string }[] = [];
+  await Promise.all(
+    accounts.map(async (account) => {
+      try {
+        items.push(...(await ask(account.email)));
+      } catch (error) {
+        errors.push({ account: account.email, message: error instanceof Error ? error.message : String(error) });
+      }
+    }),
+  );
+  return { items, errors };
+};
+
+/** Google's routes; null when the path is not one of them. */
+const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ status: number; body: unknown } | null> => {
+  const path = url.pathname;
+  const ok = (body: unknown) => ({ status: 200, body });
+  if (path === '/google/status' && req.method === 'GET') return ok({ ...(await google.status()), timeboxError: timeboxes.lastError });
+  if (path === '/google/client' && req.method === 'PUT') {
+    const body = (await readJson(req)) as { id?: unknown; secret?: unknown };
+    if (typeof body.id !== 'string' || typeof body.secret !== 'string') return { status: 400, body: { error: 'id and secret must be strings' } };
+    return ok(await google.setClient(body.id, body.secret));
+  }
+  if (path === '/google/client' && req.method === 'DELETE') return ok(await google.clearClient());
+  if (path === '/google/connect' && req.method === 'POST') {
+    const body = (await readJson(req)) as { features?: unknown };
+    const features = Array.isArray(body.features) ? GOOGLE_FEATURES.filter((feature) => (body.features as unknown[]).includes(feature)) : [];
+    return ok(await google.startSignIn(features));
+  }
+  const signIn = /^\/google\/connect\/([A-Za-z0-9_-]{8,40})(\/finish)?$/.exec(path);
+  if (signIn && !signIn[2] && req.method === 'GET') return ok(google.signIn(signIn[1]!));
+  if (signIn && signIn[2] && req.method === 'POST') {
+    const body = (await readJson(req)) as { url?: unknown };
+    if (typeof body.url !== 'string' || body.url.length > 4000) return { status: 400, body: { error: 'url must be the address the browser was sent to' } };
+    return ok(await google.finishSignIn(signIn[1]!, body.url));
+  }
+  const account = /^\/google\/accounts\/([^/]+)$/.exec(path);
+  if (account && req.method === 'DELETE') return ok({ removed: await google.remove(decodeURIComponent(account[1]!)) });
+  if (path === '/google/calendars' && req.method === 'GET') {
+    const { items, errors } = await perAccount('calendar', (email) => googleData.calendars(email));
+    return ok({ calendars: items, errors });
+  }
+  if (path === '/google/tasklists' && req.method === 'GET') {
+    const { items, errors } = await perAccount('tasks', (email) => googleData.taskLists(email));
+    return ok({ lists: items, errors });
+  }
+  if (path === '/google/tasks' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    const list = url.searchParams.get('list');
+    if (!isEmail(email) || !isGoogleId(list)) return { status: 400, body: { error: 'account and list are required' } };
+    return ok({ tasks: await googleData.tasks(email, list) });
+  }
+  if (path === '/google/tasks/linked' && req.method === 'POST') {
+    // The tasks behind linked Planner tasks, to bring those up to date.
+    const body = (await readJson(req)) as { groups?: unknown };
+    const groups = (Array.isArray(body.groups) ? body.groups : [])
+      .filter((group): group is { account: string; listId: string; ids: string[] } => isEmail(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId))
+      .slice(0, 10);
+    const tasks: unknown[] = [];
+    const errors: { account: string; message: string }[] = [];
+    await Promise.all(
+      groups.map(async (group) => {
+        try {
+          tasks.push(...(await googleData.tasksById(group.account, group.listId, group.ids)));
+        } catch (error) {
+          errors.push({ account: group.account, message: error instanceof Error ? error.message : String(error) });
+        }
+      }),
+    );
+    return ok({ tasks, errors });
+  }
+  if (path === '/google/tasks' && (req.method === 'PATCH' || req.method === 'POST')) {
+    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown };
+    if (!isEmail(body.account) || !isGoogleId(body.listId)) return { status: 400, body: { error: 'account and listId are required' } };
+    if (body.due !== undefined && body.due !== null && !isDateKey(body.due)) return { status: 400, body: { error: 'due must be a date or null' } };
+    if (req.method === 'PATCH') {
+      if (!isGoogleId(body.id)) return { status: 400, body: { error: 'id is required' } };
+      if (body.completed !== undefined && typeof body.completed !== 'boolean') return { status: 400, body: { error: 'completed must be true or false' } };
+      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}) };
+      return ok({ task: await googleData.updateTask(body.account, body.listId, body.id, patch) });
+    }
+    if (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 1024) return { status: 400, body: { error: 'title is required' } };
+    if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8000)) return { status: 400, body: { error: 'notes must be text' } };
+    return ok({ task: await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...(body.notes ? { notes: body.notes as string } : {}), ...(body.due ? { due: body.due as string } : {}) }) });
+  }
+  if (path === '/google/mail' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    const query = url.searchParams.get('q') ?? 'in:inbox';
+    if (!isEmail(email) || query.length > 500) return { status: 400, body: { error: 'account is required, and the search must be shorter' } };
+    return ok({ messages: await googleData.mail(email, query) });
+  }
+  return null;
 };
 
 const readJson = (req: http.IncomingMessage): Promise<unknown> =>
@@ -147,6 +256,21 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { results });
       return;
     }
+    if (url.pathname.startsWith('/google/')) {
+      try {
+        const answer = await googleRoute(req, url);
+        if (answer) {
+          json(res, answer.status, answer.body);
+          return;
+        }
+      } catch (error) {
+        if (error instanceof GoogleError) {
+          json(res, error.status, { error: error.message });
+          return;
+        }
+        throw error;
+      }
+    }
     if (url.pathname.startsWith('/linear/')) {
       try {
         if (url.pathname === '/linear/workspaces' && req.method === 'GET') {
@@ -216,7 +340,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const zone = planner.state.settings.timezone ?? 'UTC';
-      json(res, 200, await feeds.eventsFor(Object.values(planner.state.calendars), from, to, zone, url.searchParams.get('refresh') === '1'));
+      const refresh = url.searchParams.get('refresh') === '1';
+      const calendars = Object.values(planner.state.calendars);
+      // Google calendars are read through their accounts; the rest are ICS feeds.
+      const timeMin = instantAt(from, 0, zone);
+      const timeMax = instantAt(addDays(to, 1), 0, zone);
+      const [feed, fromGoogle] = await Promise.all([
+        feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
+        googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
+      ]);
+      json(res, 200, { events: [...feed.events, ...fromGoogle.events].sort((a, b) => a.start.localeCompare(b.start)), errors: [...feed.errors, ...fromGoogle.errors] });
+      // Sessions moved or deleted in Google follow, once the answer is on its way.
+      if (fromGoogle.reads.size) void timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
       return;
     }
     if (url.pathname === '/activity' && req.method === 'GET') {
@@ -248,6 +383,7 @@ const server = http.createServer(async (req, res) => {
 
 const shutdown = async (): Promise<void> => {
   server.close();
+  await Promise.race([timeboxes.settled(), new Promise((resolve) => setTimeout(resolve, 3000))]);
   await store.flush();
   process.exit(0);
 };

@@ -1,6 +1,9 @@
 // Agent runs on tasks: what a run's status is, which need the user, and which
 // facts about sessions are worth writing down.
-import type { PlannerState, RunPullRequest, TaskRun } from './types.ts';
+import type { PlannerState, RunPullRequest, TaskRun, TaskSourceRef } from './types.ts';
+
+/** How the first message names a task's source. */
+const SOURCE_LABELS: Record<TaskSourceRef['kind'], string> = { linear: 'Linear issue', github: 'GitHub', gtask: 'Google task', email: 'Email in Gmail' };
 import type { EventBody, SeenPullRequest } from './events.ts';
 
 export type SessionActivity = 'unknown' | 'idle' | 'running' | 'retrying' | 'waiting-permission' | 'waiting-question';
@@ -132,7 +135,7 @@ export const taskPrompt = (state: PlannerState, taskId: string): string => {
   if (task.notes.trim()) parts.push(task.notes.trim());
   const open = task.subtasks.filter((subtask) => !subtask.done);
   if (open.length) parts.push(`Checklist:\n${open.map((subtask) => `- [ ] ${subtask.title}`).join('\n')}`);
-  if (task.source) parts.push(`${task.source.kind === 'linear' ? 'Linear issue' : 'Issue'} ${task.source.key}: ${task.source.url}`);
+  if (task.source) parts.push(`${SOURCE_LABELS[task.source.kind]}${task.source.kind === 'gtask' || task.source.kind === 'email' ? '' : ` ${task.source.key}`}: ${task.source.url}`);
   return parts.join('\n\n');
 };
 

@@ -1,6 +1,6 @@
 // Human-readable activity lines for one task, like Sunsama's task history.
 import type { PlannerEvent } from './events.ts';
-import { BACKLOG_BUCKETS, type Placement, type PlannerState } from './types.ts';
+import { BACKLOG_BUCKETS, SOURCE_NAMES, type Placement, type PlannerState } from './types.ts';
 import { formatMinutes, monthDay } from './dates.ts';
 
 const where = (placement: Placement): string =>
@@ -47,7 +47,7 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
     case 'task.archived':
       return 'archived this';
     case 'task.sourceSynced':
-      return `${event.source.key} is ${event.source.status?.name ?? 'updated'} in ${event.source.kind === 'linear' ? 'Linear' : 'GitHub'}${event.title ? ', title updated' : ''}`;
+      return `${event.source.key} is ${event.source.status?.name ?? 'updated'} in ${SOURCE_NAMES[event.source.kind]}${event.title ? ', title updated' : ''}`;
     case 'tasks.rolledOver':
       if ((event.superseded ?? []).includes(taskId)) return 'replaced this with the next repeat';
       return event.archived.includes(taskId) ? 'archived this after repeated rollovers' : `rolled this over to ${monthDay(event.date)}`;

@@ -167,6 +167,13 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       syncTaskToBlocks(state, block.taskId, event.at, event.start);
       return;
     }
+    case 'block.linked': {
+      const block = state.blocks[event.blockId];
+      if (!block) return;
+      const { google: _old, ...rest } = block;
+      state.blocks[event.blockId] = event.google ? { ...rest, google: event.google } : rest;
+      return;
+    }
     case 'block.deleted': {
       const block = state.blocks[event.blockId];
       if (!block) return;

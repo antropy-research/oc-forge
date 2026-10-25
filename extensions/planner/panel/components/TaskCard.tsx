@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { EventBody } from '../../src/domain/events.ts';
-import type { Task } from '../../src/domain/types.ts';
+import { SOURCE_NAMES, type Task } from '../../src/domain/types.ts';
 import { addDays, formatMinutes, monthDay, nextWeekday } from '../../src/domain/dates.ts';
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
@@ -179,11 +179,11 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
               <span
                 class={`source-chip${sourceClosed && !done ? ' is-closed' : ''}`}
                 style={{ '--item-color': task.source.status?.color ?? '#5e6ad2' }}
-                title={`${task.source.key}${task.source.status ? ` · ${task.source.status.name}` : ''} in ${task.source.kind === 'linear' ? 'Linear' : 'GitHub'}`}
+                title={`${task.source.key}${task.source.status ? ` · ${task.source.status.name}` : ''} in ${SOURCE_NAMES[task.source.kind]}`}
               >
                 <span class="dot" aria-hidden="true" />
                 {task.source.kind === 'github' ? shortKey(task.source.key) : task.source.key}
-                {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in ${task.source.kind === 'linear' ? 'Linear' : 'GitHub'}` : ''}
+                {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in ${SOURCE_NAMES[task.source.kind]}` : ''}
               </span>
             )}
             {playlist && (

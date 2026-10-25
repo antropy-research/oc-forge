@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -59,6 +59,7 @@ export type EventBody =
   | { type: 'block.created'; block: WorkBlock }
   | { type: 'block.updated'; blockId: string; start: string; end: string }
   | { type: 'block.deleted'; blockId: string }
+  | { type: 'block.linked'; blockId: string; google: GoogleEventLink | null }
   | { type: 'calendar.added'; calendar: Omit<CalendarSubscription, 'visible'> }
   | { type: 'calendar.updated'; calendarId: string; patch: Partial<Pick<CalendarSubscription, 'name' | 'color' | 'visible'>> }
   | { type: 'calendar.removed'; calendarId: string }
@@ -113,7 +114,7 @@ const isSubtasks = (value: unknown): value is Subtask[] =>
 const isShortText = (value: unknown, max: number): boolean => typeof value === 'string' && value.length <= max;
 const isSource = (value: unknown): value is TaskSourceRef =>
   isRecord(value) &&
-  (value.kind === 'linear' || value.kind === 'github') &&
+  typeof value.kind === 'string' && Object.hasOwn(SOURCE_NAMES, value.kind) &&
   isShortText(value.id, 200) && (value.id as string).length > 0 &&
   isShortText(value.key, 100) &&
   isShortText(value.url, 2000) && /^https:\/\//.test(value.url as string) &&
@@ -122,7 +123,9 @@ const isSource = (value: unknown): value is TaskSourceRef =>
   (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40))) &&
   (value.mirrors === undefined || (Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200)))) &&
   (value.workspaceId === undefined || (isShortText(value.workspaceId, 200) && (value.workspaceId as string).length > 0)) &&
-  (value.branch === undefined || isShortText(value.branch, 200));
+  (value.branch === undefined || isShortText(value.branch, 200)) &&
+  (value.account === undefined || (typeof value.account === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account))) &&
+  (value.listId === undefined || (isShortText(value.listId, 200) && (value.listId as string).length > 0));
 
 const PRIORITY_VALUES = new Set(['urgent', 'high', 'medium', 'low']);
 const isPriority = (value: unknown): boolean => value === null || (typeof value === 'string' && PRIORITY_VALUES.has(value));
@@ -158,6 +161,15 @@ const validateChannelPatch = (patch: unknown): string | null => {
   return null;
 };
 
+const isGoogleAccount = (value: unknown): boolean => typeof value === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+
+/** A Google account and one of its calendars. */
+const isGoogleCalendarRef = (value: unknown): boolean =>
+  isRecord(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && (value.calendarId as string).length > 0;
+
+const isGoogleEventLink = (value: unknown): value is GoogleEventLink =>
+  isGoogleCalendarRef(value) && isShortText((value as Record<string, unknown>).eventId, 1024) && ((value as Record<string, unknown>).eventId as string).length > 0;
+
 const validateSettingsPatch = (patch: unknown): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
@@ -175,7 +187,10 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'linearOrderBy' && !(LINEAR_ORDERS as readonly unknown[]).includes(value)) return `linearOrderBy must be one of ${LINEAR_ORDERS.join(', ')}`;
     else if (key === 'suggestFromHistory' && typeof value !== 'boolean') return 'suggestFromHistory must be true or false';
     else if ((key === 'pomodoroMinutes' || key === 'breakMinutes') && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 180)) return `${key} must be 1-180`;
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes'].includes(key)) return `unknown setting ${key}`;
+    else if (key === 'googleTimebox' && !(value === null || isGoogleCalendarRef(value))) return 'googleTimebox must be a Google account and calendar, or null';
+    else if (key === 'googleTasksOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'googleTasksOnComplete must be ask, complete or nothing';
+    else if ((key === 'googleTasksImportCompletion' || key === 'googleTasksDueFromPlan') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };
@@ -355,12 +370,16 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return validateSpan(command.start, command.end);
     case 'block.deleted':
       return isId(command.blockId) && context.blocks[command.blockId as string] ? null : 'unknown block';
+    case 'block.linked':
+      if (!(isId(command.blockId) && context.blocks[command.blockId as string])) return 'unknown block';
+      return command.google === null || isGoogleEventLink(command.google) ? null : 'google must be an account, calendar and event, or null';
     case 'calendar.added': {
       const calendar = command.calendar;
       if (!isRecord(calendar) || !isId(calendar.id)) return 'calendar needs an id';
       if (context.calendars[calendar.id as string]) return 'calendar id already exists';
       if (!(typeof calendar.name === 'string' && calendar.name.trim() && calendar.name.length <= 80)) return 'calendar name must be 1-80 characters';
       if (!isFeedUrl(calendar.url)) return 'calendar URL must be http(s), webcal or file';
+      if (calendar.google !== undefined && !isGoogleCalendarRef(calendar.google)) return 'google must be an account and a calendar';
       return isColor(calendar.color) ? null : 'color must be #rrggbb';
     }
     case 'calendar.updated': {
