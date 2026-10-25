@@ -442,6 +442,124 @@ try {
   check('Stats counts completed tasks', completedCount > 0, `${completedCount} completed`);
   await shot('16-stats');
 
+  // Phase 6: Linear. First the real state of the dev container (not connected)…
+  const nav = (name) => frame.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name, exact: true });
+  await nav('Linear').click();
+  await frame.getByRole('heading', { name: 'Linear' }).waitFor();
+  await frame.getByRole('button', { name: 'Connect Linear' }).waitFor({ timeout: 10_000 });
+  check('without a Linear connection the page offers Connect', true);
+
+  // …then a fake Linear behind the host's own routes, so the real workspace is never touched.
+  const linearStates = [
+    { id: 'st-backlog', name: 'Backlog', type: 'backlog', color: '#bec2c8', position: 0 },
+    { id: 'st-todo', name: 'Todo', type: 'unstarted', color: '#e2e2e2', position: 1 },
+    { id: 'st-prog', name: 'In Progress', type: 'started', color: '#f2c94c', position: 2 },
+    { id: 'st-done', name: 'Done', type: 'completed', color: '#5e6ad2', position: 3 },
+  ];
+  const team = { id: 'team-e2e', key: 'E2E', name: 'E2E Team' };
+  const makeIssue = (n, title, stateId, assigned = true) => ({
+    id: `iss-${run}-${n}`, identifier: `E2E-${n}`, title: `${run} ${title}`, url: `https://linear.app/e2e/issue/E2E-${n}/x`, priority: 2, dueDate: null,
+    updatedAt: new Date().toISOString(), state: linearStates.find((state) => state.id === stateId), team, project: { id: 'p1', name: 'Planner' }, cycle: null, assigned,
+  });
+  const linearIssues = [makeIssue(1, 'linear first', 'st-todo'), makeIssue(2, 'linear second', 'st-prog'), makeIssue(3, 'linear third', 'st-backlog'), makeIssue(5, 'linear by url', 'st-todo', false)];
+  const linearCalls = [];
+  const strip = ({ assigned, ...issue }) => issue;
+  const isRequestRoute = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/request';
+  const isStatusRoute = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/oauth/status';
+  await context.route(isStatusRoute, (route) => route.fulfill({ json: { connected: true, account: 'E2E Linear', hasClient: true, settings: {}, redirectUri: '' } }));
+  await context.route(isRequestRoute, async (route) => {
+    const { query, variables = {} } = JSON.parse(route.request().postDataJSON().body);
+    const op = /(?:query|mutation) (\w+)/.exec(query)?.[1];
+    linearCalls.push({ op, variables });
+    const find = (id) => linearIssues.find((issue) => issue.id === id || issue.identifier === id);
+    let data;
+    if (op === 'PlannerAssigned') data = { viewer: { id: 'u-e2e', name: 'E2E Linear', assignedIssues: { nodes: linearIssues.filter((issue) => issue.assigned && !['completed', 'canceled'].includes(issue.state.type)).map(strip), pageInfo: { hasNextPage: false, endCursor: null } } } };
+    else if (op === 'PlannerViews') data = { customViews: { nodes: [] } };
+    else if (op === 'PlannerLinked') data = { issues: { nodes: linearIssues.filter((issue) => variables.ids.includes(issue.id)).map(strip) } };
+    else if (op === 'PlannerIssue') data = { issue: find(variables.id) ? strip(find(variables.id)) : null };
+    else if (op === 'PlannerTeamStates') data = { team: { id: variables.id, states: { nodes: linearStates } } };
+    else if (op === 'PlannerTeams') data = { viewer: { id: 'u-e2e' }, teams: { nodes: [team] } };
+    else if (op === 'PlannerSetState') {
+      const issue = find(variables.id);
+      issue.state = linearStates.find((state) => state.id === variables.stateId);
+      data = { issueUpdate: { success: true, issue: strip(issue) } };
+    } else if (op === 'PlannerCreateIssue') {
+      const issue = makeIssue(linearIssues.length + 10, 'x', 'st-todo');
+      issue.title = variables.input.title;
+      linearIssues.push(issue);
+      data = { issueCreate: { success: true, issue: strip(issue) } };
+    } else if (op === 'PlannerSearch') data = { searchIssues: { nodes: linearIssues.filter((issue) => issue.title.includes(variables.term)).map(strip) } };
+    const answer = data ? { data } : { errors: [{ message: `unexpected ${op}` }] };
+    await route.fulfill({ json: { status: 200, body: JSON.stringify(answer) } });
+  });
+
+  frame = await openPlanner();
+  await nav('Linear').click();
+  const issueRow = (n) => frame.locator('li.issue-row', { hasText: `E2E-${n}` }).first();
+  await issueRow(1).waitFor({ timeout: 15_000 });
+  const groups = await frame.locator('.linear-page .issue-group h3').allInnerTexts();
+  check('My issues lists assigned open issues grouped by state', groups.join('|').includes('In progress') && groups.join('|').includes('Todo') && groups.join('|').includes('Backlog'), groups.join(' | '));
+  await shot('17-linear');
+
+  await frame.getByRole('button', { name: 'Plan E2E-1 today' }).click();
+  await issueRow(1).getByRole('button', { name: 'Open the task for E2E-1 (Today)' }).waitFor({ timeout: 10_000 });
+  await nav('Today').click();
+  const todayList = frame.locator('section.day-column.is-today');
+  const linearCard = (title) => todayList.locator('li.task-card', { hasText: `${run} ${title}` });
+  await linearCard('linear first').waitFor({ timeout: 10_000 });
+  check('planning an issue makes a linked task with its key', (await linearCard('linear first').locator('.source-chip').innerText()).includes('E2E-1'));
+
+  await frame.getByRole('tab', { name: 'Linear' }).click();
+  await frame.locator('aside li.issue-row', { hasText: 'E2E-3' }).dragTo(todayList.locator('ul.task-list'));
+  await linearCard('linear third').waitFor({ timeout: 10_000 });
+  check('dragging an issue into the day plans it', true);
+
+  await linearCard('linear first').getByRole('button', { name: 'Mark complete' }).click();
+  const prompt = frame.getByRole('alertdialog', { name: 'Update E2E-1 in Linear' });
+  await prompt.waitFor({ timeout: 10_000 });
+  await prompt.getByRole('button', { name: 'Move' }).click();
+  await linearCard('linear first').locator('.source-chip', { hasText: 'E2E-1' }).waitFor();
+  await page.waitForTimeout(1500);
+  const setState = linearCalls.find((call) => call.op === 'PlannerSetState' && call.variables.id === `iss-${run}-1`);
+  check('completing asks, then moves the issue to the team Done state', setState?.variables.stateId === 'st-done', JSON.stringify(setState?.variables ?? null));
+
+  await nav('Settings').click();
+  await frame.getByRole('checkbox', { name: /Complete a task when its issue is closed in Linear/ }).check();
+  await nav('Today').click();
+  await frame.getByRole('tab', { name: 'Linear' }).click();
+  await frame.getByRole('button', { name: 'Plan E2E-2 today' }).click();
+  await linearCard('linear second').waitFor({ timeout: 10_000 });
+  linearIssues.find((issue) => issue.identifier === 'E2E-2').state = linearStates.find((state) => state.id === 'st-done');
+  linearIssues.find((issue) => issue.identifier === 'E2E-3').title = `${run} linear third renamed`;
+  await frame.getByRole('button', { name: 'Refresh Linear' }).click();
+  const synced = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.title === `${run} linear second` && task.completedAt) && Object.values(latest.state.tasks).some((task) => task.title === `${run} linear third renamed`));
+  const closedTask = Object.values(synced.state.tasks).find((task) => task.title === `${run} linear second`);
+  check('an issue closed in Linear completes its task (when turned on)', Boolean(closedTask?.completedAt));
+  check('a rename in Linear follows to an unrenamed task', Object.values(synced.state.tasks).some((task) => task.title === `${run} linear third renamed`));
+  check('a completion that came from Linear is not written back', !linearCalls.some((call) => call.op === 'PlannerSetState' && call.variables.id === `iss-${run}-2`));
+
+  await addInToday(`${run} make an issue`);
+  await linearCard('make an issue').getByRole('button', { name: new RegExp(`Open ${run} make an issue`) }).click();
+  const issueDialog = frame.getByRole('dialog', { name: 'Task details' });
+  await issueDialog.getByRole('button', { name: 'Create Linear issue' }).click();
+  await issueDialog.locator('section[aria-label="Linear"] .source-chip').waitFor({ timeout: 10_000 });
+  const created = linearCalls.find((call) => call.op === 'PlannerCreateIssue');
+  check('a task can become a Linear issue assigned to me', created?.variables.input.title === `${run} make an issue` && created?.variables.input.assigneeId === 'u-e2e', JSON.stringify(created?.variables.input ?? null));
+  await shot('18-linear-detail');
+  await issueDialog.getByRole('button', { name: 'Unlink' }).click();
+  await issueDialog.locator('section[aria-label="Linear"] .source-chip').waitFor({ state: 'detached', timeout: 10_000 });
+  check('unlinking removes the link', true);
+  await issueDialog.getByRole('button', { name: 'Close' }).click();
+
+  await addInToday('https://linear.app/e2e/issue/E2E-5/linear-by-url ~20m');
+  await linearCard('linear by url').waitFor({ timeout: 10_000 });
+  check('pasting an issue URL into Add task links that issue', (await linearCard('linear by url').innerText()).includes('0:20'));
+
+  await nav('Settings').click();
+  await frame.getByRole('checkbox', { name: /Complete a task when its issue is closed in Linear/ }).uncheck();
+  await context.unroute(isRequestRoute);
+  await context.unroute(isStatusRoute);
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
   const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';

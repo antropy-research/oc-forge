@@ -5,7 +5,7 @@ import { parseQuickAdd } from '../../src/domain/quickAdd.ts';
 import { reorderCommands, sortTasks } from '../../src/domain/sort.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
 import { usePlanner, useView } from '../lib/context.ts';
-import { createTaskCommands } from '../lib/commands.ts';
+import { addParsedTask } from '../lib/addTask.ts';
 import { useUi } from '../lib/ui.ts';
 import type { Route } from './Shell.tsx';
 
@@ -46,6 +46,7 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask }: { onClose: () =>
     go('weeklyPlanning', 'Weekly planning', ''),
     go('weeklyReview', 'Weekly review', ''),
     go('backlog', 'Backlog', ''),
+    go('linear', 'Linear', ''),
     go('archive', 'Archive', ''),
     go('stats', 'Stats', ''),
     go('settings', 'Settings', ''),
@@ -108,7 +109,7 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask }: { onClose: () =>
 
 /** Sunsama's Add Task window (A): the same syntax as inline Add task, landing on today by default. */
 export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
-  const { client } = usePlanner();
+  const { client, linear } = usePlanner();
   const view = useView();
   const input = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
@@ -126,7 +127,7 @@ export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
           onKeyDown={(event) => {
             if (event.key === 'Escape') onClose();
             if (event.key !== 'Enter' || !parsed?.title.trim()) return;
-            void client.dispatch(createTaskCommands(view.state, parsed, { kind: 'day', date: view.today }, 'bottom', view.today));
+            void addParsedTask(client, linear, parsed, { kind: 'day', date: view.today }, 'bottom', view.today);
             onClose();
           }}
         />

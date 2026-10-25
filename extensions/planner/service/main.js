@@ -26,7 +26,10 @@ var DEFAULT_SETTINGS = {
   weekStartsOn: 1,
   plannedAsActual: true,
   workdayStart: 9 * 60,
-  workdayEnd: 18 * 60
+  workdayEnd: 18 * 60,
+  linearOnComplete: "ask",
+  linearOnPlan: "nothing",
+  linearImportCompletion: false
 };
 var emptyState = () => ({
   version: 0,
@@ -267,6 +270,9 @@ var applyInto = (state, event) => {
       return;
     case "task.restored":
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: null, archivedAt: null }));
+      return;
+    case "task.sourceSynced":
+      touch(state, event.taskId, event.at, (task) => ({ ...task, source: event.source, ...event.title !== undefined ? { title: event.title.trim() } : {} }));
       return;
     case "task.archived":
       stopTimerFor(state, event.taskId, event);
@@ -608,7 +614,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
 }
 
 // src/domain/events.ts
-var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "objectiveId", "subtasks"];
+var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "objectiveId", "subtasks", "source"];
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver", "tasks.recurred"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
@@ -627,7 +633,8 @@ var isPlacement = (value) => {
   return false;
 };
 var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
-var isSource = (value) => isRecord(value) && (value.kind === "linear" || value.kind === "github") && typeof value.id === "string" && typeof value.key === "string" && typeof value.url === "string";
+var isShortText = (value, max) => typeof value === "string" && value.length <= max;
+var isSource = (value) => isRecord(value) && (value.kind === "linear" || value.kind === "github") && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40));
 var PRIORITY_VALUES = new Set(["urgent", "high", "medium", "low"]);
 var isPriority = (value) => value === null || typeof value === "string" && PRIORITY_VALUES.has(value);
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
@@ -652,6 +659,8 @@ var validatePatch = (patch, channels, objectives) => {
       return "unknown objective";
     else if (key === "subtasks" && !isSubtasks(value))
       return "subtasks are invalid";
+    else if (key === "source" && !(value === null || isSource(value)))
+      return "source is invalid";
     else if (!PATCH_FIELDS.includes(key))
       return `unknown field ${key}`;
   }
@@ -688,7 +697,13 @@ var validateSettingsPatch = (patch) => {
       return "plannedAsActual must be true or false";
     else if ((key === "workdayStart" || key === "workdayEnd") && !(Number.isInteger(value) && value >= 0 && value <= 24 * 60))
       return `${key} must be minutes after midnight`;
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd"].includes(key))
+    else if (key === "linearOnComplete" && !["ask", "complete", "nothing"].includes(value))
+      return "linearOnComplete must be ask, complete or nothing";
+    else if (key === "linearOnPlan" && !["ask", "start", "nothing"].includes(value))
+      return "linearOnPlan must be ask, start or nothing";
+    else if (key === "linearImportCompletion" && typeof value !== "boolean")
+      return "linearImportCompletion must be true or false";
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
@@ -823,6 +838,12 @@ var validateCommand = (command, context) => {
     case "task.deleted":
     case "task.restored":
     case "task.archived":
+      return needTask();
+    case "task.sourceSynced":
+      if (!isSource(command.source))
+        return "source is invalid";
+      if (command.title !== undefined && !isTitle(command.title))
+        return "title must be 1-500 characters";
       return needTask();
     case "timer.started":
       return needTask();
@@ -1126,6 +1147,8 @@ var summarize = (events, titleOf) => {
       return `Restore task: ${titleOf(event.taskId)}`;
     case "task.archived":
       return `Archive task: ${titleOf(event.taskId)}`;
+    case "task.sourceSynced":
+      return `Sync ${event.source.key}: ${event.source.status?.name ?? ""}`.trim();
     case "tasks.rolledOver":
       return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ""}${event.superseded?.length ? `, replace ${event.superseded.length} repeats` : ""}`;
     case "tasks.recurred":
@@ -1741,7 +1764,7 @@ var server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   try {
     if (url.pathname === "/health" && req.method === "GET") {
-      json(res, 200, { ok: true, version: planner.state.version });
+      json(res, 200, { ok: true, version: planner.state.version, today: planner.today() });
       return;
     }
     if (url.pathname === "/state" && req.method === "GET") {

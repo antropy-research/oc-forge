@@ -28,6 +28,7 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
         if (key === 'dueDate') return value ? `set the due date to ${monthDay(value as string)}` : 'cleared the due date';
         if (key === 'channelId') return value ? `moved this to #${state.channels[value as string]?.name ?? 'channel'}` : 'removed the channel';
         if (key === 'subtasks') return 'updated subtasks';
+        if (key === 'source') return value ? `linked this to ${(value as { key: string }).key}` : 'removed the link';
         return `changed ${key}`;
       });
       return parts.join(', ');
@@ -44,6 +45,8 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
       return 'restored this';
     case 'task.archived':
       return 'archived this';
+    case 'task.sourceSynced':
+      return `${event.source.key} is ${event.source.status?.name ?? 'updated'} in ${event.source.kind === 'linear' ? 'Linear' : 'GitHub'}${event.title ? ', title updated' : ''}`;
     case 'tasks.rolledOver':
       return event.archived.includes(taskId) ? 'archived this after repeated rollovers' : `rolled this over to ${monthDay(event.date)}`;
     default:

@@ -127,6 +127,9 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
     case 'task.restored':
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: null, archivedAt: null }));
       return;
+    case 'task.sourceSynced':
+      touch(state, event.taskId, event.at, (task) => ({ ...task, source: event.source, ...(event.title !== undefined ? { title: event.title.trim() } : {}) }));
+      return;
     case 'task.archived':
       stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, archivedAt: event.at }));

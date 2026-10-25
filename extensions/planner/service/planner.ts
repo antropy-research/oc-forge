@@ -29,6 +29,7 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'task.deleted': return `Delete task: ${titleOf(event.taskId)}`;
     case 'task.restored': return `Restore task: ${titleOf(event.taskId)}`;
     case 'task.archived': return `Archive task: ${titleOf(event.taskId)}`;
+    case 'task.sourceSynced': return `Sync ${event.source.key}: ${event.source.status?.name ?? ''}`.trim();
     case 'tasks.rolledOver': return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ''}${event.superseded?.length ? `, replace ${event.superseded.length} repeats` : ''}`;
     case 'tasks.recurred': return `Create ${event.instances.length} recurring instances`;
     case 'series.created': return `Repeat: ${event.series.template.title}`;

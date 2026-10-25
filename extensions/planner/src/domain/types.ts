@@ -24,12 +24,19 @@ export interface Subtask {
   done: boolean;
 }
 
-/** An external object the task plans; the source stays authoritative for its title and state. */
+/** An external object the task plans; the source stays authoritative for its state. */
 export interface TaskSourceRef {
   kind: 'linear' | 'github';
   id: string;
+  /** Short label at the source, such as NEX-110. */
   key: string;
   url: string;
+  /** Title last seen at the source; a task still carrying it follows renames there. */
+  title?: string;
+  /** Linear team, for finding its workflow states. */
+  teamId?: string;
+  /** Workflow state last seen at the source. */
+  status?: { name: string; type: string; color: string };
 }
 
 export type Priority = 'urgent' | 'high' | 'medium' | 'low';
@@ -190,6 +197,12 @@ export interface Settings {
   /** Working hours, in minutes after local midnight; auto-scheduling stays inside them. */
   workdayStart: number;
   workdayEnd: number;
+  /** After completing a task linked to Linear: ask, move the issue to Done, or leave Linear alone. */
+  linearOnComplete: 'ask' | 'complete' | 'nothing';
+  /** After planning a Linear issue for a day: ask, move it to In Progress, or leave it. */
+  linearOnPlan: 'ask' | 'start' | 'nothing';
+  /** Complete the task when its issue is completed or canceled in Linear (Sunsama does not). */
+  linearImportCompletion: boolean;
 }
 
 export interface PlannerState {
@@ -218,6 +231,9 @@ export const DEFAULT_SETTINGS: Settings = {
   plannedAsActual: true,
   workdayStart: 9 * 60,
   workdayEnd: 18 * 60,
+  linearOnComplete: 'ask',
+  linearOnPlan: 'nothing',
+  linearImportCompletion: false,
 };
 
 export const emptyState = (): PlannerState => ({

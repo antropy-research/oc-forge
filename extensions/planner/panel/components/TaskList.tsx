@@ -2,7 +2,8 @@ import { Fragment } from 'preact';
 import { useRef, useState } from 'preact/hooks';
 import type { Placement, Task } from '../../src/domain/types.ts';
 import { positionAt } from '../../src/domain/selectors.ts';
-import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
+import { DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
+import { isLinearIssue } from '../../src/domain/linear.ts';
 import { TaskCard } from './TaskCard.tsx';
 
 interface TaskListProps {
@@ -13,7 +14,7 @@ interface TaskListProps {
 
 /** A droppable list: cards dragged onto it land at the indicated slot. */
 export const TaskList = ({ placement, tasks, empty }: TaskListProps) => {
-  const { client } = usePlanner();
+  const { client, linear } = usePlanner();
   const view = useView();
   const ref = useRef<HTMLUListElement>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
@@ -32,9 +33,11 @@ export const TaskList = ({ placement, tasks, empty }: TaskListProps) => {
       ref={ref}
       class={`task-list${dropIndex !== null ? ' is-drop-target' : ''}`}
       onDragOver={(event) => {
-        if (!event.dataTransfer?.types.includes(DRAG_TYPE)) return;
+        const types = event.dataTransfer?.types ?? [];
+        const issue = types.includes(LINEAR_DRAG_TYPE);
+        if (!types.includes(DRAG_TYPE) && !issue) return;
         event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
+        event.dataTransfer!.dropEffect = issue ? 'copy' : 'move';
         setDropIndex(indexFor(event.clientY));
       }}
       onDragLeave={(event) => {
@@ -42,9 +45,22 @@ export const TaskList = ({ placement, tasks, empty }: TaskListProps) => {
       }}
       onDrop={(event) => {
         event.preventDefault();
-        const taskId = event.dataTransfer?.getData(DRAG_TYPE);
         const index = dropIndex ?? tasks.length;
         setDropIndex(null);
+        const issueData = event.dataTransfer?.getData(LINEAR_DRAG_TYPE);
+        if (issueData) {
+          let issue: unknown = null;
+          try {
+            issue = JSON.parse(issueData);
+          } catch {
+            return;
+          }
+          if (!isLinearIssue(issue)) return;
+          const { bodies } = linear.importCommands(issue, placement, positionAt(view.state, placement, index));
+          void client.dispatch(bodies, { undo: `Planned ${issue.identifier}` });
+          return;
+        }
+        const taskId = event.dataTransfer?.getData(DRAG_TYPE);
         if (!taskId || !view.state.tasks[taskId]) return;
         void client.dispatch([{ type: 'task.moved', taskId, placement, position: positionAt(view.state, placement, index, taskId) }]);
       }}

@@ -18,7 +18,7 @@ export interface NewTask {
   recurrence?: { seriesId: string; date: DateKey } | null;
 }
 
-export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'objectiveId', 'subtasks'] as const;
+export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'objectiveId', 'subtasks', 'source'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
 
 export type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
@@ -39,6 +39,7 @@ export type EventBody =
   | { type: 'task.deleted'; taskId: string }
   | { type: 'task.restored'; taskId: string }
   | { type: 'task.archived'; taskId: string }
+  | { type: 'task.sourceSynced'; taskId: string; source: TaskSourceRef; title?: string }
   | { type: 'tasks.rolledOver'; date: DateKey; moved: RolledTask[]; archived: string[]; superseded?: string[] }
   | { type: 'tasks.recurred'; instances: NewTask[] }
   | { type: 'series.created'; series: Pick<Series, 'id' | 'rule' | 'startDate' | 'template'>; taskId: string }
@@ -94,8 +95,16 @@ export const isPlacement = (value: unknown): value is Placement => {
 const isSubtasks = (value: unknown): value is Subtask[] =>
   Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean');
 
+const isShortText = (value: unknown, max: number): boolean => typeof value === 'string' && value.length <= max;
 const isSource = (value: unknown): value is TaskSourceRef =>
-  isRecord(value) && (value.kind === 'linear' || value.kind === 'github') && typeof value.id === 'string' && typeof value.key === 'string' && typeof value.url === 'string';
+  isRecord(value) &&
+  (value.kind === 'linear' || value.kind === 'github') &&
+  isShortText(value.id, 200) && (value.id as string).length > 0 &&
+  isShortText(value.key, 100) &&
+  isShortText(value.url, 2000) && /^https:\/\//.test(value.url as string) &&
+  (value.title === undefined || isShortText(value.title, TITLE_MAX)) &&
+  (value.teamId === undefined || isShortText(value.teamId, 200)) &&
+  (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)));
 
 const PRIORITY_VALUES = new Set(['urgent', 'high', 'medium', 'low']);
 const isPriority = (value: unknown): boolean => value === null || (typeof value === 'string' && PRIORITY_VALUES.has(value));
@@ -113,6 +122,7 @@ const validatePatch = (patch: unknown, channels: Record<string, Channel>, object
     else if (key === 'channelId' && !(value === null || (isId(value) && channels[value as string]))) return 'unknown channel';
     else if (key === 'objectiveId' && !(value === null || (isId(value) && objectives[value as string]))) return 'unknown objective';
     else if (key === 'subtasks' && !isSubtasks(value)) return 'subtasks are invalid';
+    else if (key === 'source' && !(value === null || isSource(value))) return 'source is invalid';
     else if (!(PATCH_FIELDS as readonly string[]).includes(key)) return `unknown field ${key}`;
   }
   return null;
@@ -138,7 +148,10 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'weekStartsOn' && value !== 0 && value !== 1) return 'weekStartsOn must be 0 or 1';
     else if (key === 'plannedAsActual' && typeof value !== 'boolean') return 'plannedAsActual must be true or false';
     else if ((key === 'workdayStart' || key === 'workdayEnd') && !(Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60)) return `${key} must be minutes after midnight`;
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd'].includes(key)) return `unknown setting ${key}`;
+    else if (key === 'linearOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'linearOnComplete must be ask, complete or nothing';
+    else if (key === 'linearOnPlan' && !['ask', 'start', 'nothing'].includes(value as string)) return 'linearOnPlan must be ask, start or nothing';
+    else if (key === 'linearImportCompletion' && typeof value !== 'boolean') return 'linearImportCompletion must be true or false';
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };
@@ -255,6 +268,10 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     case 'task.deleted':
     case 'task.restored':
     case 'task.archived':
+      return needTask();
+    case 'task.sourceSynced':
+      if (!isSource(command.source)) return 'source is invalid';
+      if (command.title !== undefined && !isTitle(command.title)) return 'title must be 1-500 characters';
       return needTask();
     case 'timer.started':
       return needTask();

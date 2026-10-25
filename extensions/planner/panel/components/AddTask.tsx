@@ -3,7 +3,7 @@ import { BACKLOG_BUCKETS, type Placement } from '../../src/domain/types.ts';
 import { formatMinutes, monthDay } from '../../src/domain/dates.ts';
 import { parseQuickAdd, type QuickAdd } from '../../src/domain/quickAdd.ts';
 import { usePlanner, useView } from '../lib/context.ts';
-import { createTaskCommands } from '../lib/commands.ts';
+import { addParsedTask } from '../lib/addTask.ts';
 
 const placementLabel = (placement: Placement): string =>
   placement.kind === 'day' ? monthDay(placement.date) : BACKLOG_BUCKETS.find((bucket) => bucket.id === placement.bucket)!.label;
@@ -20,7 +20,7 @@ const Chips = ({ parsed }: { parsed: QuickAdd }) => (
 
 /** Sunsama's inline Add task: `~30m` planned time, `@tomorrow` / `@backlog` start, `#channel`, `!high`. */
 export const AddTask = ({ placement, edge = 'bottom' }: { placement: Placement; edge?: 'top' | 'bottom' }) => {
-  const { client } = usePlanner();
+  const { client, linear } = usePlanner();
   const view = useView();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
@@ -34,7 +34,7 @@ export const AddTask = ({ placement, edge = 'bottom' }: { placement: Placement; 
 
   const submit = () => {
     if (!parsed || !parsed.title.trim()) return;
-    void client.dispatch(createTaskCommands(view.state, parsed, placement, edge, view.today));
+    void addParsedTask(client, linear, parsed, placement, edge, view.today);
     setText('');
   };
 

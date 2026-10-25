@@ -60,7 +60,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   try {
     if (url.pathname === '/health' && req.method === 'GET') {
-      json(res, 200, { ok: true, version: planner.state.version });
+      json(res, 200, { ok: true, version: planner.state.version, today: planner.today() });
       return;
     }
     if (url.pathname === '/state' && req.method === 'GET') {

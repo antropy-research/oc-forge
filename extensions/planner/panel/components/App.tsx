@@ -16,13 +16,14 @@ import { StatusSection } from './StatusSection.tsx';
 import { TaskDetail } from './TaskDetail.tsx';
 import { CompactToday, TodayView } from './TodayView.tsx';
 import { StatsView } from './StatsView.tsx';
+import { LinearPage, LinearPromptBar } from './LinearPanel.tsx';
 import { CommandPalette, QuickAddModal } from './CommandPalette.tsx';
 import { hoveredTask } from '../lib/hover.ts';
 import { moveTo } from '../lib/commands.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 
 export const App = ({ surface }: { surface: string }) => {
-  const { client, host } = usePlanner();
+  const { client, host, linear } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
   const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null });
@@ -30,8 +31,12 @@ export const App = ({ surface }: { surface: string }) => {
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | null>(null);
 
   useEffect(() => {
-    void client.load();
-  }, [client]);
+    // Linear starts after the first snapshot, so its first sync sees the real tasks.
+    void client.load().then(() => {
+      client.startPolling();
+      linear.start();
+    });
+  }, [client, linear]);
 
   // Sunsama's keyboard shortcuts, on the full page only and never while typing.
   useEffect(() => {
@@ -101,6 +106,7 @@ export const App = ({ surface }: { surface: string }) => {
             {route === 'weeklyPlanning' && <WeeklyPlanning onDone={() => setRoute('home')} />}
             {route === 'weeklyReview' && <WeeklyReview />}
             {route === 'backlog' && <Backlog />}
+            {route === 'linear' && <LinearPage />}
             {route === 'archive' && <ArchiveView />}
             {route === 'stats' && <StatsView />}
             {route === 'settings' && <Settings />}
@@ -110,6 +116,7 @@ export const App = ({ surface }: { surface: string }) => {
       {ui.openTaskId && <TaskDetail key={ui.openTaskId} taskId={ui.openTaskId} />}
       {overlay === 'palette' && <CommandPalette onClose={() => setOverlay(null)} onRoute={setRoute} onAddTask={() => setOverlay('quickadd')} />}
       {overlay === 'quickadd' && <QuickAddModal onClose={() => setOverlay(null)} />}
+      <LinearPromptBar />
       <Toasts />
     </UiContext.Provider>
   );

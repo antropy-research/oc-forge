@@ -9,6 +9,7 @@ import { BacklogBuckets } from './Backlog.tsx';
 import { ChannelFilter } from './ChannelFilter.tsx';
 import { TaskList } from './TaskList.tsx';
 import { TimeGrid } from './TimeGrid.tsx';
+import { LinearIssues } from './LinearPanel.tsx';
 
 /** Today's tasks that have no working session today yet. */
 export const UnscheduledToday = () => {
@@ -25,6 +26,7 @@ export const UnscheduledToday = () => {
 export const CalendarView = () => {
   const view = useView();
   const [mode, setMode] = useState<'day' | 'week'>('week');
+  const [side, setSide] = useState<'unscheduled' | 'backlog' | 'linear'>('unscheduled');
   const [anchor, setAnchor] = useState(view.today);
   const dates = mode === 'day' ? [anchor] : Array.from({ length: 7 }, (_, index) => addDays(startOfWeek(anchor, view.state.settings.weekStartsOn), index));
   const feed = useCalendarEvents(dates[0]!, dates[dates.length - 1]!);
@@ -53,11 +55,15 @@ export const CalendarView = () => {
       <div class="calendar-layout">
         <TimeGrid dates={dates} events={feed.events} />
         <aside class="side-panel" aria-label="Unscheduled work">
-          <h2>Unscheduled today</h2>
-          <p class="hint">Drag a task onto the calendar to timebox it.</p>
-          <UnscheduledToday />
-          <h2 class="side-gap">Backlog</h2>
-          <BacklogBuckets compact />
+          <div class="tabs side-tabs" role="tablist">
+            <button role="tab" aria-selected={side === 'unscheduled'} onClick={() => setSide('unscheduled')}>Unscheduled</button>
+            <button role="tab" aria-selected={side === 'backlog'} onClick={() => setSide('backlog')}>Backlog</button>
+            <button role="tab" aria-selected={side === 'linear'} onClick={() => setSide('linear')}>Linear</button>
+          </div>
+          <p class="hint">Drag onto the calendar to timebox.</p>
+          {side === 'unscheduled' && <UnscheduledToday />}
+          {side === 'backlog' && <BacklogBuckets compact />}
+          {side === 'linear' && <LinearIssues />}
         </aside>
       </div>
     </section>

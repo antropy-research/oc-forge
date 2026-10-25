@@ -5,7 +5,8 @@ import { clockLabel, instantAt, monthDay, weekdayName, zonedDateMinutes } from '
 import { blocksOnDay } from '../../src/domain/selectors.ts';
 import { layoutLanes } from '../../src/domain/schedule.ts';
 import { newId } from '../../src/domain/ids.ts';
-import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
+import { DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
+import { isLinearIssue } from '../../src/domain/linear.ts';
 import { useUi } from '../lib/ui.ts';
 import { useNow } from '../lib/time.ts';
 import { useCalendarEvents } from '../lib/calendar.ts';
@@ -45,7 +46,7 @@ interface Item {
 
 /** A Sunsama-style calendar: time grid for `dates`, working sessions you can drop, drag and resize. */
 export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: CalendarEvent[] }) => {
-  const { client } = usePlanner();
+  const { client, linear } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -171,7 +172,8 @@ export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: Calendar
                   lanes.current[date] = element;
                 }}
                 onDragOver={(event) => {
-                  if (!event.dataTransfer?.types.includes(DRAG_TYPE)) return;
+                  const types = event.dataTransfer?.types ?? [];
+                  if (!types.includes(DRAG_TYPE) && !types.includes(LINEAR_DRAG_TYPE)) return;
                   event.preventDefault();
                   setDropHint({ date, minutes: minutesAt(date, event.clientY) });
                 }}
@@ -179,10 +181,26 @@ export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: Calendar
                 onDrop={(event) => {
                   event.preventDefault();
                   setDropHint(null);
+                  const start = minutesAt(date, event.clientY);
+                  const issueData = event.dataTransfer?.getData(LINEAR_DRAG_TYPE);
+                  if (issueData) {
+                    let issue: unknown = null;
+                    try {
+                      issue = JSON.parse(issueData);
+                    } catch {
+                      return;
+                    }
+                    if (!isLinearIssue(issue)) return;
+                    // Plan the issue on this day and timebox it in one undoable step.
+                    const { bodies, taskId: planned } = linear.importCommands(issue, { kind: 'day', date });
+                    const length = Math.max(SNAP, view.state.tasks[planned]?.plannedMinutes ?? 30);
+                    bodies.push({ type: 'block.created', block: { id: newId(), taskId: planned, start: instantAt(date, start, zone), end: instantAt(date, Math.min(DAY_MIN, start + length), zone) } });
+                    void client.dispatch(bodies, { undo: 'Timeboxed' });
+                    return;
+                  }
                   const taskId = event.dataTransfer?.getData(DRAG_TYPE);
                   const task = taskId ? view.state.tasks[taskId] : null;
                   if (!task) return;
-                  const start = minutesAt(date, event.clientY);
                   const length = Math.max(SNAP, task.plannedMinutes ?? 30);
                   const end = Math.min(DAY_MIN, start + length);
                   void client.dispatch([{ type: 'block.created', block: { id: newId(), taskId: task.id, start: instantAt(date, start, zone), end: instantAt(date, end, zone) } }], { undo: 'Timeboxed' });

@@ -3,6 +3,7 @@ import { render } from 'preact';
 import { connectHost } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 import { PlannerClient } from './lib/client.ts';
+import { LinearStore } from './lib/linear.ts';
 import { PlannerContext } from './lib/context.ts';
 import { App } from './components/App.tsx';
 
@@ -16,8 +17,9 @@ host.onReady((ready) => {
   document.documentElement.dataset.surface = ready.surface;
   if (mounted) return;
   mounted = true;
+  const linear = new LinearStore(host, client, ready.surface);
   render(
-    <PlannerContext.Provider value={{ client, host }}>
+    <PlannerContext.Provider value={{ client, host, linear }}>
       <App surface={ready.surface} />
     </PlannerContext.Provider>,
     root,

@@ -2,7 +2,7 @@ import { useState } from 'preact/hooks';
 import { CHANNEL_COLORS, type Settings as PlannerSettings } from '../../src/domain/types.ts';
 import { liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
-import { usePlanner, useView } from '../lib/context.ts';
+import { useLinear, usePlanner, useView } from '../lib/context.ts';
 
 const zones = (current: string | null): string[] => {
   const all = (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];
@@ -98,6 +98,43 @@ const Calendars = () => {
   );
 };
 
+const LinearSettings = () => {
+  const { client, linear } = usePlanner();
+  const view = useView();
+  const lv = useLinear();
+  const { settings } = view.state;
+  const update = (patch: Partial<PlannerSettings>) => void client.dispatch([{ type: 'settings.updated', patch }]);
+  return (
+    <fieldset>
+      <legend>Linear</legend>
+      <p class="hint">
+        {lv.connected ? `Connected${lv.account ? ` as ${lv.account}` : ''} through OpenChamber's Linear connection.` : lv.connected === false ? 'Not connected.' : 'Checking the connection…'}{' '}
+        {lv.connected === false && <button class="link" onClick={() => void linear.connect()}>Connect Linear</button>}
+      </p>
+      <label>
+        When I complete a Linear task
+        <select value={settings.linearOnComplete} onChange={(event) => update({ linearOnComplete: event.currentTarget.value as PlannerSettings['linearOnComplete'] })}>
+          <option value="ask">Ask me</option>
+          <option value="complete">Move the issue to Done</option>
+          <option value="nothing">Leave Linear alone</option>
+        </select>
+      </label>
+      <label>
+        When I plan a Linear issue for a day
+        <select value={settings.linearOnPlan} onChange={(event) => update({ linearOnPlan: event.currentTarget.value as PlannerSettings['linearOnPlan'] })}>
+          <option value="nothing">Leave Linear alone</option>
+          <option value="ask">Ask me</option>
+          <option value="start">Move it to In Progress</option>
+        </select>
+      </label>
+      <label>
+        Complete a task when its issue is closed in Linear
+        <input type="checkbox" checked={settings.linearImportCompletion} onChange={(event) => update({ linearImportCompletion: event.currentTarget.checked })} />
+      </label>
+    </fieldset>
+  );
+};
+
 export const Settings = () => {
   const { client } = usePlanner();
   const view = useView();
@@ -169,6 +206,7 @@ export const Settings = () => {
         </fieldset>
         <Channels />
         <Calendars />
+        <LinearSettings />
         <fieldset>
           <legend>Storage</legend>
           {view.storage ? (
