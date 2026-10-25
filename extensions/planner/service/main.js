@@ -42,7 +42,8 @@ var DEFAULT_SETTINGS = {
   googleTimebox: null,
   googleTasksOnComplete: "complete",
   googleTasksImportCompletion: true,
-  googleTasksDueFromPlan: true
+  googleTasksDueFromPlan: true,
+  googleTasksOnCalendar: true
 };
 var emptyState = () => ({
   version: 0,
@@ -858,9 +859,9 @@ var validateSettingsPatch = (patch) => {
       return "googleTimebox must be a Google account and calendar, or null";
     else if (key === "googleTasksOnComplete" && !["ask", "complete", "nothing"].includes(value))
       return "googleTasksOnComplete must be ask, complete or nothing";
-    else if ((key === "googleTasksImportCompletion" || key === "googleTasksDueFromPlan") && typeof value !== "boolean")
+    else if ((key === "googleTasksImportCompletion" || key === "googleTasksDueFromPlan" || key === "googleTasksOnCalendar") && typeof value !== "boolean")
       return `${key} must be true or false`;
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan"].includes(key))
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
@@ -2873,6 +2874,18 @@ var googleEvent = (event, calendarId, zone) => {
   return { ...base, start: new Date(startMs).toISOString(), end: new Date(Number.isNaN(endMs) ? startMs : Math.max(endMs, startMs)).toISOString(), allDay: false, busy: event.transparency !== "transparent" };
 };
 var plannerBlockOf = (event) => event.extendedProperties?.private?.[PLANNER_BLOCK_KEY] ?? null;
+var GOOGLE_TASKS_CALENDAR = "google-tasks";
+var dueTaskEvent = (item, zone) => ({
+  id: `gtask:${item.listId}:${item.id}`,
+  calendarId: GOOGLE_TASKS_CALENDAR,
+  title: item.title,
+  location: "",
+  start: instantAt(item.due, 0, zone),
+  end: instantAt(addDays(item.due, 1), 0, zone),
+  allDay: true,
+  busy: false,
+  googleTask: item
+});
 var gmailUrl = (account, threadId) => `https://mail.google.com/mail/u/${encodeURIComponent(account)}/#all/${encodeURIComponent(threadId)}`;
 
 // service/googleData.ts
@@ -3004,6 +3017,15 @@ class GoogleData {
     const data = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(listId)}/tasks?showCompleted=false&showHidden=false&maxResults=100`);
     return (data?.items ?? []).map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item)).sort((a, b) => a.position.localeCompare(b.position));
   }
+  async dueTasks(account, from, to) {
+    const lists = await this.taskLists(account);
+    const query = new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` });
+    const perList = await mapLimited(lists, 4, async (list) => {
+      const data = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(list.id)}/tasks?${query}`);
+      return (data?.items ?? []).map((raw) => toTaskItem(raw, account, list.id)).filter((item) => Boolean(item && item.due && !item.completed && item.due >= from && item.due <= to));
+    });
+    return perList.flat();
+  }
   async tasksById(account, listId, ids) {
     const found = await mapLimited(ids.slice(0, 50), 5, async (id) => {
       try {
@@ -3111,6 +3133,40 @@ ${zone}`;
         events.push(...hit.events);
     }));
     return { events, errors, reads };
+  }
+  forget() {
+    this.cache.clear();
+  }
+}
+
+class GoogleDueTasks {
+  data;
+  ttlMs;
+  cache = new Map;
+  constructor(data, ttlMs = 90000) {
+    this.data = data;
+    this.ttlMs = ttlMs;
+  }
+  async read(accounts, from, to, refresh) {
+    const items = [];
+    const errors = [];
+    await Promise.all(accounts.map(async (account) => {
+      const key = `${account}
+${from}
+${to}`;
+      let hit = this.cache.get(key);
+      if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
+        try {
+          hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to), READ_DEADLINE_MS, "Google Tasks") };
+          this.cache.set(key, hit);
+        } catch (error) {
+          errors.push(`${account}: ${messageOf(error)}`);
+          return;
+        }
+      }
+      items.push(...hit.items);
+    }));
+    return { items, errors };
   }
   forget() {
     this.cache.clear();
@@ -3303,6 +3359,7 @@ var linearWorkspaces = new LinearWorkspaces(join3(dirname3(dir), "linear-workspa
 var google = new GoogleAccounts(join3(dirname3(dir), "google-accounts.json"), undefined, undefined, log);
 var googleData = new GoogleData(google);
 var googleCalendars = new GoogleCalendars(googleData);
+var googleDueTasks = new GoogleDueTasks(googleData);
 var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -3592,11 +3649,18 @@ var server = http2.createServer(async (req, res) => {
       const calendars = Object.values(planner.state.calendars);
       const timeMin = instantAt(from, 0, zone);
       const timeMax = instantAt(addDays(to, 1), 0, zone);
-      const [feed, fromGoogle] = await Promise.all([
+      const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email) : [];
+      const [feed, fromGoogle, due] = await Promise.all([
         feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
-        googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh)
+        googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
+        googleDueTasks.read(taskAccounts, from, to, refresh)
       ]);
-      json(res, 200, { events: [...feed.events, ...fromGoogle.events].sort((a, b) => a.start.localeCompare(b.start)), errors: [...feed.errors, ...fromGoogle.errors] });
+      const planned = new Set(Object.values(planner.state.tasks).flatMap((task) => task.source?.kind === "gtask" && !task.deletedAt && !task.archivedAt ? [task.source.id] : []));
+      const dueEvents = due.items.flatMap((item) => item.due && !planned.has(item.id) ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
+      json(res, 200, {
+        events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
+        errors: [...feed.errors, ...fromGoogle.errors, ...due.errors.map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]
+      });
       if (fromGoogle.reads.size)
         timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
       return;

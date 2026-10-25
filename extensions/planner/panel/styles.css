@@ -637,3 +637,9 @@ button.issue-title { background: none; border: 0; padding: 0; text-align: left; 
 .google-connect { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
 .google-calendars h4 { margin: 10px 0 4px; font-size: 12.5px; }
 .calendar-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+/* Google tasks due on a day, and adding a calendar event as a task. */
+button.all-day-event.is-task { display: block; width: 100%; text-align: left; border-top: 0; border-right: 0; border-bottom: 0; color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
+button.all-day-event.is-task:hover { background: color-mix(in srgb, var(--item-color) 28%, transparent); }
+.all-day-event { position: relative; }
+.item-add { position: absolute; top: 1px; right: 2px; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 4px; padding: 0 4px; font-size: 11px; line-height: 1.2; color: var(--oc-fg); opacity: 0; }
+.grid-item:hover .item-add, .all-day-event:hover .item-add, .item-add:focus-visible { opacity: 1; }

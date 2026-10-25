@@ -1045,15 +1045,27 @@ try {
   check('starting twice quickly makes one run (no duplicate dispatch)', runsOf(afterStart, agentTitle).length === 1, `${runsOf(afterStart, agentTitle).length} runs`);
   const agentRun = runsOf(afterStart, agentTitle)[0];
   check('the run keeps project, directory and session', Boolean(agentRun?.sessionId && agentRun.projectId && agentRun.directory?.endsWith('planner-demo-a')), JSON.stringify(agentRun ?? null).slice(0, 160));
-  const reviewed = await firstAgent.dialog.locator('li.run-row', { hasText: 'Ready for review' }).waitFor({ timeout: 180_000 }).then(() => true).catch(() => false);
+  // A turn ends ready for review, or failed when the model could not answer.
+  const settledRow = firstAgent.dialog.locator('li.run-row', { hasText: /Ready for review|Agent run failed/ }).first();
+  const settled = await settledRow.waitFor({ timeout: 180_000 }).then(() => settledRow.innerText()).catch(() => '');
+  const reviewed = settled.includes('Ready for review');
   if (reviewed) {
     check('a finished turn shows as Ready for review', true);
   } else {
-    // Tell a slow free model apart from a stale Planner: ask OpenCode whether the turn finished.
+    // Tell a slow or failing model apart from a stale Planner: ask OpenCode how the turn ended.
     const messages = await (await context.request.get(`${base}/api/session/${agentRun.sessionId}/message?directory=${encodeURIComponent(agentRun.directory)}`)).json().catch(() => []);
-    const finished = (Array.isArray(messages) ? messages : messages.data ?? []).some((message) => (message.info ?? message).time?.completed && (message.info ?? message).finish);
-    if (finished) check('a finished turn shows as Ready for review', false, 'OpenCode finished the turn but the Planner still shows it running');
-    else console.log('INFO the dev container\'s free model did not finish within 3 minutes; skipped the review checks');
+    // OpenCode v2 names a message's author `type`; v1 said `role`.
+    const ended = (Array.isArray(messages) ? messages : messages.data ?? []).map((message) => message.info ?? message).filter((info) => (info.role ?? info.type) === 'assistant' && info.time?.completed);
+    const failure = ended.map((info) => info.error).find(Boolean);
+    const shown = await firstAgent.dialog.locator('li.run-row').first().innerText().catch(() => '');
+    if (failure) {
+      // The dev container's free model has a usage limit; its error ends the turn. OpenChamber reports
+      // a failed turn only when OpenCode sends session.error; otherwise the run just goes idle.
+      const said = String(failure.data?.message ?? failure.message ?? failure.name ?? 'an error').slice(0, 160);
+      check('a turn the model could not finish is not shown as running or ready for review', /Agent run failed|Agent idle/.test(shown) && !/Agent working|Ready for review/.test(shown), `${shown.split('\n')[0]} · the model said: ${said}`);
+      console.log(`INFO the dev container's model did not answer (${said}); skipped the review checks`);
+    } else if (ended.some((info) => info.finish)) check('a finished turn shows as Ready for review', false, `OpenCode finished the turn but the Planner shows: ${shown.split('\n')[0]}`);
+    else console.log("INFO the dev container's free model did not finish within 3 minutes; skipped the review checks");
   }
   check('a finished turn does not complete the task', !taskTitled(await serviceState(), agentTitle)?.completedAt);
   await shot('19-agent-run');
@@ -1367,6 +1379,7 @@ try {
     ],
     lists: [{ account: GMAIL, id: 'L1', title: 'My Tasks' }],
     tasks: [gtask('gt1', 'buy stamps', todayKey), gtask('gt2', 'call the bank', tomorrowKey), gtask('gt3', 'renew passport', null)],
+    calendarOn: false,
     mail: [{ account: GMAIL, id: 'm1', threadId: 'th1', subject: `${run} review the deck`, from: 'Ann Lee <ann@example.com>', date: new Date().toISOString(), snippet: 'Could you look at slides 3 to 5?', unread: true, url: 'https://mail.google.com/mail/u/e2e%40example.com/#all/th1' }],
     writes: [],
   };
@@ -1407,8 +1420,24 @@ try {
     if (url.pathname === '/google/mail') return { messages: fake.mail };
     return null;
   };
+  // The calendar the service would read from Google: a meeting and a Google task due that day.
+  const isoAt = (minutes, dayKey) => localToUtc(minutes, dayKey).replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, '$1-$2-$3T$4:$5:$6.000Z');
+  const dayAfter = (key) => { const d = new Date(`${key}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
+  const fakeCalendar = (from) => {
+    const gcalId = Object.values(lastState?.state.calendars ?? {}).find((calendar) => calendar.google?.calendarId === 'primary')?.id ?? 'none';
+    const due = fake.tasks.find((item) => item.id === 'gt9');
+    return [
+      { id: `${gcalId}:review`, calendarId: gcalId, title: `${run} design review`, location: '', start: isoAt(15 * 60, from), end: isoAt(16 * 60, from), allDay: false, busy: true },
+      ...(due ? [{ id: 'gtask:L1:gt9', calendarId: 'google-tasks', title: due.title, location: '', start: isoAt(0, from), end: isoAt(0, dayAfter(from)), allDay: true, busy: false, googleTask: { ...due, due: from } }] : []),
+    ];
+  };
+  let lastState = null;
   await context.route(isServiceRoute, async (route) => {
     const outer = route.request().postDataJSON();
+    if (fake.calendarOn && String(outer?.path ?? '').startsWith('/calendar?')) {
+      const from = new URL(outer.path, 'http://service').searchParams.get('from');
+      return route.fulfill({ json: { status: 200, body: JSON.stringify({ events: fakeCalendar(from), errors: [] }) } });
+    }
     if (!String(outer?.path ?? '').startsWith('/google/')) return route.continue();
     const answer = googleAnswer(outer.method ?? 'GET', outer.path, outer.body ? JSON.parse(outer.body) : {});
     if (!answer) return route.continue();
@@ -1478,6 +1507,28 @@ try {
   check('a task can be added to Google Tasks, and stays linked to it', taskTitled(added, `${run} plain errand`)?.source?.listId === 'L1' && fake.writes.some((write) => write.method === 'POST' && write.title === `${run} plain errand` && write.due === todayKey));
   check('the task detail offers to open it in Google Tasks', await errandDialog.getByRole('button', { name: 'Open in Google Tasks' }).isVisible());
   await errandDialog.getByRole('button', { name: 'Close' }).click();
+
+  // On the calendar: a Google task due today, as Google Calendar shows it, and an event that becomes a task.
+  fake.tasks.push(gtask('gt9', 'renew library card', todayKey));
+  lastState = await serviceState();
+  fake.calendarOn = true;
+  await nav('Home').click();
+  await nav('Today').click();
+  await frame.getByRole('tab', { name: 'Calendar' }).click();
+  const dueChip = frame.getByRole('button', { name: new RegExp(`^Plan the Google task ${run} renew library card on `) });
+  check('a Google task due today shows on the calendar, as in Google Calendar', await dueChip.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
+  await dueChip.click();
+  const fromDue = await waitForState((latest) => taskTitled(latest, `${run} renew library card`)?.source?.kind === 'gtask');
+  check('one click plans it today, linked to the Google task', taskTitled(fromDue, `${run} renew library card`)?.placement.date === todayKey && taskTitled(fromDue, `${run} renew library card`)?.source?.id === 'gt9');
+  check('a planned Google task leaves the all-day row', await dueChip.waitFor({ state: 'detached', timeout: 5000 }).then(() => true).catch(() => false));
+  const reviewEvent = frame.locator('.grid-item.is-event', { hasText: `${run} design review` });
+  await reviewEvent.hover();
+  await reviewEvent.getByRole('button', { name: `Add ${run} design review as a task` }).click();
+  const fromMeeting = await waitForState((latest) => Boolean(taskTitled(latest, `${run} design review`)));
+  const meetingTask = taskTitled(fromMeeting, `${run} design review`);
+  check('a calendar event becomes a task on its day, its length as planned time', meetingTask?.placement.date === todayKey && meetingTask.plannedMinutes === 60, JSON.stringify({ placement: meetingTask?.placement, minutes: meetingTask?.plannedMinutes }));
+  await shot('36-calendar-google-tasks');
+  fake.calendarOn = false;
 
   // Leave no Google calendar or session calendar behind for later runs (the real service has no such account).
   await nav('Settings').click();

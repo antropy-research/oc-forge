@@ -192,6 +192,18 @@ export class GoogleData {
       .sort((a, b) => a.position.localeCompare(b.position));
   }
 
+  /** Open tasks due between two days (inclusive) in all of an account's lists. */
+  async dueTasks(account: string, from: DateKey, to: DateKey): Promise<GoogleTaskItem[]> {
+    const lists = await this.taskLists(account);
+    // Google keeps a due date as midnight UTC of that day.
+    const query = new URLSearchParams({ showCompleted: 'false', showHidden: 'false', maxResults: '100', dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` });
+    const perList = await mapLimited(lists, 4, async (list) => {
+      const data = await this.accounts.request<{ items?: RawTask[] }>(account, 'GET', `${TASKS}/lists/${enc(list.id)}/tasks?${query}`);
+      return (data?.items ?? []).map((raw) => toTaskItem(raw, account, list.id)).filter((item): item is GoogleTaskItem => Boolean(item && item.due && !item.completed && item.due >= from && item.due <= to));
+    });
+    return perList.flat();
+  }
+
   /** The current state of tasks behind linked Planner tasks; ones Google no longer has are left out. */
   async tasksById(account: string, listId: string, ids: readonly string[]): Promise<GoogleTaskItem[]> {
     const found = await mapLimited(ids.slice(0, 50), 5, async (id) => {

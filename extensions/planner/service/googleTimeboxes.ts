@@ -5,7 +5,8 @@
 // is next read, an event moved or deleted in Google moves or deletes its session.
 import type { CalendarEvent } from '../src/domain/ics.ts';
 import type { EventBody } from '../src/domain/events.ts';
-import type { CalendarSubscription, GoogleEventLink, PlannerState } from '../src/domain/types.ts';
+import type { CalendarSubscription, DateKey, GoogleEventLink, PlannerState } from '../src/domain/types.ts';
+import type { GoogleTaskItem } from '../src/domain/google.ts';
 import { newId } from '../src/domain/ids.ts';
 import { GoogleError } from './google.ts';
 import type { GoogleData, TimeboxEvent } from './googleData.ts';
@@ -106,6 +107,39 @@ export class GoogleCalendars {
   }
 
   /** Forget what was read, as after a session was written: the next read asks Google again. */
+  forget(): void {
+    this.cache.clear();
+  }
+}
+
+/** Google tasks due in a range, for the calendar, kept a short while like calendar reads. */
+export class GoogleDueTasks {
+  private readonly cache = new Map<string, { at: number; items: GoogleTaskItem[] }>();
+
+  constructor(private readonly data: Pick<GoogleData, 'dueTasks'>, private readonly ttlMs = 90_000) {}
+
+  async read(accounts: readonly string[], from: DateKey, to: DateKey, refresh: boolean): Promise<{ items: GoogleTaskItem[]; errors: string[] }> {
+    const items: GoogleTaskItem[] = [];
+    const errors: string[] = [];
+    await Promise.all(
+      accounts.map(async (account) => {
+        const key = `${account}\n${from}\n${to}`;
+        let hit = this.cache.get(key);
+        if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
+          try {
+            hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to), READ_DEADLINE_MS, 'Google Tasks') };
+            this.cache.set(key, hit);
+          } catch (error) {
+            errors.push(`${account}: ${messageOf(error)}`);
+            return;
+          }
+        }
+        items.push(...hit.items);
+      }),
+    );
+    return { items, errors };
+  }
+
   forget(): void {
     this.cache.clear();
   }

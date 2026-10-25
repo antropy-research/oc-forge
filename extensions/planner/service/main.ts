@@ -11,7 +11,8 @@ import { GitHubSource, LISTS, type ListKind } from './github.ts';
 import { LinearWorkspaces, WorkspaceError } from './linear.ts';
 import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from './google.ts';
 import { GoogleData } from './googleData.ts';
-import { GoogleCalendars, GoogleTimeboxes } from './googleTimeboxes.ts';
+import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
+import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { addDays, daysBetween, instantAt, isDateKey } from '../src/domain/dates.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
@@ -40,6 +41,7 @@ const linearWorkspaces = new LinearWorkspaces(join(dirname(dir), 'linear-workspa
 const google = new GoogleAccounts(join(dirname(dir), 'google-accounts.json'), undefined, undefined, log);
 const googleData = new GoogleData(google);
 const googleCalendars = new GoogleCalendars(googleData);
+const googleDueTasks = new GoogleDueTasks(googleData);
 const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleCalendars.forget() });
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
@@ -345,11 +347,19 @@ const server = http.createServer(async (req, res) => {
       // Google calendars are read through their accounts; the rest are ICS feeds.
       const timeMin = instantAt(from, 0, zone);
       const timeMax = instantAt(addDays(to, 1), 0, zone);
-      const [feed, fromGoogle] = await Promise.all([
+      // Google tasks due in the range show on their day, as in Google Calendar, until they are planned.
+      const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes('tasks')).map((account) => account.email) : [];
+      const [feed, fromGoogle, due] = await Promise.all([
         feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
         googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
+        googleDueTasks.read(taskAccounts, from, to, refresh),
       ]);
-      json(res, 200, { events: [...feed.events, ...fromGoogle.events].sort((a, b) => a.start.localeCompare(b.start)), errors: [...feed.errors, ...fromGoogle.errors] });
+      const planned = new Set(Object.values(planner.state.tasks).flatMap((task) => (task.source?.kind === 'gtask' && !task.deletedAt && !task.archivedAt ? [task.source.id] : [])));
+      const dueEvents = due.items.flatMap((item) => (item.due && !planned.has(item.id) ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []));
+      json(res, 200, {
+        events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
+        errors: [...feed.errors, ...fromGoogle.errors, ...due.errors.map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))],
+      });
       // Sessions moved or deleted in Google follow, once the answer is on its way.
       if (fromGoogle.reads.size) void timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
       return;

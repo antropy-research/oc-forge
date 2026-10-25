@@ -378,6 +378,10 @@ const GoogleSettings = () => {
             Planning a Google task on a day makes it due that day (Google Calendar shows it there)
             <input type="checkbox" checked={settings.googleTasksDueFromPlan} onChange={(event) => update({ googleTasksDueFromPlan: event.currentTarget.checked })} />
           </label>
+          <label>
+            Show Google tasks on the calendar on their due day, as Google Calendar does, until they are planned
+            <input type="checkbox" checked={settings.googleTasksOnCalendar} onChange={(event) => update({ googleTasksOnCalendar: event.currentTarget.checked })} />
+          </label>
         </>
       )}
     </fieldset>

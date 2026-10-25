@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { GoogleData, toMailItem, toTaskItem } from '../service/googleData.ts';
 import type { GoogleAccounts } from '../service/google.ts';
-import { gmailUrl, googleEvent, gtaskSource, isGoogleTaskItem, isMailItem, linkedGoogleTasks, planGoogleTaskSync, taskForGoogleTask, taskFromGoogleTask, taskFromMail, type GoogleTaskItem } from '../src/domain/google.ts';
+import { GOOGLE_TASKS_CALENDAR, dueTaskEvent, gmailUrl, googleEvent, gtaskSource, isGoogleTaskItem, isMailItem, linkedGoogleTasks, planGoogleTaskSync, taskForGoogleTask, taskFromGoogleTask, taskFromMail, type GoogleTaskItem } from '../src/domain/google.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 
@@ -81,6 +81,20 @@ describe('Google Tasks', () => {
     await data.updateTask('me@x.com', 'L1', 'gt1', { completed: false, due: null });
     expect(calls.at(-1)!.body).toEqual({ status: 'needsAction', completed: null, due: null });
   });
+  test('tasks due in a range come from every list, and show on their day all day long', async () => {
+    const { data, calls } = fakeAccounts((_method, url) => {
+      if (url.endsWith('/users/@me/lists?maxResults=100')) return { items: [{ id: 'L1', title: 'My Tasks' }, { id: 'L2', title: 'Work' }] };
+      if (url.includes('/lists/L1/')) return { items: [{ ...raw, id: 'in', due: '2026-10-28T00:00:00.000Z' }, { ...raw, id: 'late', due: '2026-11-09T00:00:00.000Z' }] };
+      return { items: [{ ...raw, id: 'done', status: 'completed', due: '2026-10-27T00:00:00.000Z' }, { ...raw, id: 'nodate', due: undefined }] };
+    });
+    const due = await data.dueTasks('me@x.com', '2026-10-26', '2026-11-01');
+    expect(due.map((task) => task.id)).toEqual(['in']);
+    const query = new URL(calls.find((call) => call.url.includes('/lists/L1/'))!.url).searchParams;
+    expect([query.get('dueMin'), query.get('dueMax'), query.get('showCompleted')]).toEqual(['2026-10-26T00:00:00.000Z', '2026-11-01T23:59:59.999Z', 'false']);
+    const event = dueTaskEvent({ ...due[0]!, due: '2026-10-28' }, 'America/Los_Angeles');
+    expect(event).toMatchObject({ calendarId: GOOGLE_TASKS_CALENDAR, title: 'Buy milk', start: '2026-10-28T07:00:00.000Z', end: '2026-10-29T07:00:00.000Z', allDay: true, busy: false, googleTask: { id: 'in' } });
+  });
+
   test('a linked task follows a rename and, when asked, a completion; it is planned once', () => {
     const state = foldEvents([ev({ type: 'task.created', task: taskFromGoogleTask(item(), 't1', { kind: 'day', date: '2026-10-25' }, 1) })]);
     expect(state.tasks.t1).toMatchObject({ title: 'Buy milk', notes: 'two', dueDate: '2026-10-30', source: { kind: 'gtask', account: 'me@x.com', listId: 'L1' } });

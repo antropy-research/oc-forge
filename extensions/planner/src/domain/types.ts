@@ -301,6 +301,8 @@ export interface Settings {
   googleTasksImportCompletion: boolean;
   /** Planning a Google task on a day sets its due date there, so Google Calendar shows it that day. */
   googleTasksDueFromPlan: boolean;
+  /** Show Google tasks that are due on the calendar, as Google Calendar does, until they are planned. */
+  googleTasksOnCalendar: boolean;
 }
 
 export interface PlannerState {
@@ -344,6 +346,7 @@ export const DEFAULT_SETTINGS: Settings = {
   googleTasksOnComplete: 'complete',
   googleTasksImportCompletion: true,
   googleTasksDueFromPlan: true,
+  googleTasksOnCalendar: true,
 };
 
 export const emptyState = (): PlannerState => ({

@@ -3,7 +3,7 @@
 import type { CalendarEvent } from './ics.ts';
 import type { DateKey, Placement, PlannerState, Task, TaskSourceRef } from './types.ts';
 import type { EventBody, NewTask } from './events.ts';
-import { instantAt, isDateKey } from './dates.ts';
+import { addDays, instantAt, isDateKey } from './dates.ts';
 
 /** A calendar of a connected account, as Google lists it. */
 export interface GoogleCalendarInfo {
@@ -95,6 +95,22 @@ export const googleEvent = (event: RawGoogleEvent, calendarId: string, zone: str
 
 /** The Planner's working session an event was written for, if it is one of those. */
 export const plannerBlockOf = (event: RawGoogleEvent): string | null => event.extendedProperties?.private?.[PLANNER_BLOCK_KEY] ?? null;
+
+/** The calendar id of Google tasks shown on their due day. */
+export const GOOGLE_TASKS_CALENDAR = 'google-tasks';
+
+/** A Google task on its due day, all day long and blocking no time, as Google Calendar shows it. */
+export const dueTaskEvent = (item: GoogleTaskItem & { due: DateKey }, zone: string): CalendarEvent => ({
+  id: `gtask:${item.listId}:${item.id}`,
+  calendarId: GOOGLE_TASKS_CALENDAR,
+  title: item.title,
+  location: '',
+  start: instantAt(item.due, 0, zone),
+  end: instantAt(addDays(item.due, 1), 0, zone),
+  allDay: true,
+  busy: false,
+  googleTask: item,
+});
 
 // ── Task sources ─────────────────────────────────────────────────────────────
 

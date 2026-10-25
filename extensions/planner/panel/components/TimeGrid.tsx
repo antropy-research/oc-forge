@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import type { DateKey, WorkBlock } from '../../src/domain/types.ts';
 import { clockLabel, instantAt, monthDay, weekdayName, zonedDateMinutes } from '../../src/domain/dates.ts';
-import { blocksOnDay } from '../../src/domain/selectors.ts';
+import { blocksOnDay, edgePosition } from '../../src/domain/selectors.ts';
+import { taskForGoogleTask } from '../../src/domain/google.ts';
 import { layoutLanes } from '../../src/domain/schedule.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
@@ -48,6 +49,15 @@ interface Item {
 /** A Sunsama-style calendar: time grid for `dates`, working sessions you can drop, drag and resize. */
 export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: CalendarEvent[] }) => {
   const { client, linear, github, google } = usePlanner();
+  /** Sunsama's "add an event as a task": on its day, with the event's length as planned time. */
+  const addEventAsTask = (title: string, date: DateKey, minutes: number | null, note: string) => {
+    const placement = { kind: 'day' as const, date };
+    void client.dispatch(
+      [{ type: 'task.created', task: { id: newId(), title, placement, position: edgePosition(view.state, placement, 'bottom'), ...(minutes ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {}), notes: note } }],
+      { undo: 'Task added from the calendar' },
+    );
+  };
+  const inPlan = (title: string, date: DateKey) => Object.values(view.state.tasks).some((task) => task.title === title && !task.deletedAt && task.placement.kind === 'day' && task.placement.date === date);
   const view = useView();
   const { setUi } = useUi();
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -147,9 +157,28 @@ export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: Calendar
             <div class="day-name">{dates.length > 1 && !['Today', 'Tomorrow', 'Yesterday'].includes(dayLabel(date, view.today)) ? weekdayName(date).slice(0, 3) : dayLabel(date, view.today)}</div>
             <div class="day-date">{monthDay(date).replace(/^(\w{3})\w*/, '$1')}</div>
             <div class="all-day">
-              {allDay(date).map((event) => (
-                <div key={event.id} class="all-day-event" style={{ '--item-color': view.state.calendars[event.calendarId]?.color ?? '#868e96' }} title={event.title}>{event.title}</div>
-              ))}
+              {allDay(date).map((event) =>
+                event.googleTask ? (
+                  // A Google task due that day, as Google Calendar shows it; one click plans it here.
+                  taskForGoogleTask(view.state, event.googleTask) ? null : (
+                    <button
+                      key={event.id}
+                      class="all-day-event is-task"
+                      style={{ '--item-color': '#1a73e8' }}
+                      title={`Google task due ${monthDay(date)}: plan it on this day`}
+                      aria-label={`Plan the Google task ${event.title} on ${monthDay(date)}`}
+                      onClick={() => void google.planTask(event.googleTask!, { kind: 'day', date })}
+                    >
+                      ☐ {event.title}
+                    </button>
+                  )
+                ) : (
+                  <div key={event.id} class="all-day-event" style={{ '--item-color': view.state.calendars[event.calendarId]?.color ?? '#868e96' }} title={event.title}>
+                    {event.title}
+                    {!inPlan(event.title, date) && <button class="item-add" aria-label={`Add ${event.title} as a task`} title="Add it to this day as a task" onClick={() => addEventAsTask(event.title, date, null, `All day, from the calendar`)}>+</button>}
+                  </div>
+                ),
+              )}
             </div>
           </div>
         ))}
@@ -256,6 +285,9 @@ export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: Calendar
                       <div key={item.id} class="grid-item is-event" style={style} title={`${item.title}\n${item.detail}`}>
                         <span class="item-title">{item.title}</span>
                         <span class="item-time">{item.detail}</span>
+                        {!inPlan(item.title, date) && (
+                          <button class="item-add" aria-label={`Add ${item.title} as a task`} title="Add it to this day as a task, its length as planned time" onClick={() => addEventAsTask(item.title, date, item.end - item.start, `${item.detail}, from the calendar`)}>+</button>
+                        )}
                       </div>
                     );
                   }
