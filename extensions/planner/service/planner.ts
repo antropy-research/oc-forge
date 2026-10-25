@@ -2,6 +2,7 @@
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { commandBody, validateCommand, type Command, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { planRollover } from '../src/domain/rollover.ts';
+import { touchesTask } from '../src/domain/activity.ts';
 import { todayIn } from '../src/domain/dates.ts';
 import { newId } from '../src/domain/ids.ts';
 import type { DateKey, PlannerState } from '../src/domain/types.ts';
@@ -44,10 +45,12 @@ const DEFAULT_CHANNELS: EventBody[] = [
 export class Planner {
   state: PlannerState;
   private readonly applied = new Set<string>();
+  private readonly log: PlannerEvent[];
   private lastAt = 0;
 
   constructor(private readonly store: EventStore, private readonly now: () => Date = () => new Date()) {
     const events = store.load();
+    this.log = events;
     for (const event of events) {
       if (event.cmd) this.applied.add(event.cmd);
       this.lastAt = Math.max(this.lastAt, Date.parse(event.at) || 0);
@@ -106,10 +109,16 @@ export class Planner {
     return { ok: true, applied: events.length };
   }
 
+  /** The latest events that concern one task, oldest first. */
+  activity(taskId: string, limit = 200): PlannerEvent[] {
+    return this.log.filter((event) => touchesTask(event, taskId)).slice(-limit);
+  }
+
   private persist(events: PlannerEvent[], next?: PlannerState): void {
     const before = this.state;
     this.store.append(events, summarize(events, (id) => (next ?? before).tasks[id]?.title ?? before.tasks[id]?.title ?? id));
     this.state = next ?? applyEvents(before, events);
+    this.log.push(...events);
     for (const event of events) if (event.cmd) this.applied.add(event.cmd);
   }
 

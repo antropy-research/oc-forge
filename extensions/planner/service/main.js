@@ -86,6 +86,7 @@ var applyInto = (state, event) => {
         notes: input.notes ?? "",
         plannedMinutes: input.plannedMinutes ?? null,
         priority: input.priority ?? null,
+        dueDate: input.dueDate ?? null,
         placement: input.placement,
         position: input.position,
         completedAt: null,
@@ -346,6 +347,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
 }
 
 // src/domain/events.ts
+var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "subtasks"];
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
@@ -381,11 +383,13 @@ var validatePatch = (patch, channels) => {
       return "plannedMinutes must be a number of minutes or null";
     else if (key === "priority" && !isPriority(value))
       return "priority is invalid";
+    else if (key === "dueDate" && !(value === null || isDateKey(value)))
+      return "dueDate must be a date or null";
     else if (key === "channelId" && !(value === null || isId(value) && channels[value]))
       return "unknown channel";
     else if (key === "subtasks" && !isSubtasks(value))
       return "subtasks are invalid";
-    else if (!["title", "notes", "plannedMinutes", "priority", "channelId", "subtasks"].includes(key))
+    else if (!PATCH_FIELDS.includes(key))
       return `unknown field ${key}`;
   }
   return null;
@@ -452,6 +456,8 @@ var validateCommand = (command, context) => {
         return "plannedMinutes is invalid";
       if (task.priority !== undefined && !isPriority(task.priority))
         return "priority is invalid";
+      if (task.dueDate !== undefined && !(task.dueDate === null || isDateKey(task.dueDate)))
+        return "dueDate must be a date or null";
       if (task.channelId !== undefined && !(task.channelId === null || isId(task.channelId) && channels[task.channelId]))
         return "unknown channel";
       if (task.source !== undefined && !(task.source === null || isSource(task.source)))
@@ -525,6 +531,15 @@ var planRollover = (state, today) => {
 };
 var dayOf = (task) => task.placement.kind === "day" ? task.placement.date : "";
 
+// src/domain/activity.ts
+var touchesTask = (event, taskId) => {
+  if (event.type === "task.created")
+    return event.task.id === taskId;
+  if (event.type === "tasks.rolledOver")
+    return event.moved.some((item) => item.taskId === taskId) || event.archived.includes(taskId);
+  return "taskId" in event && event.taskId === taskId;
+};
+
 // src/domain/ids.ts
 var ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 var newId = (now = Date.now()) => {
@@ -580,11 +595,13 @@ class Planner {
   now;
   state;
   applied = new Set;
+  log;
   lastAt = 0;
   constructor(store, now = () => new Date) {
     this.store = store;
     this.now = now;
     const events = store.load();
+    this.log = events;
     for (const event of events) {
       if (event.cmd)
         this.applied.add(event.cmd);
@@ -638,10 +655,14 @@ class Planner {
       this.persist(events, working);
     return { ok: true, applied: events.length };
   }
+  activity(taskId, limit = 200) {
+    return this.log.filter((event) => touchesTask(event, taskId)).slice(-limit);
+  }
   persist(events, next) {
     const before = this.state;
     this.store.append(events, summarize(events, (id) => (next ?? before).tasks[id]?.title ?? before.tasks[id]?.title ?? id));
     this.state = next ?? applyEvents(before, events);
+    this.log.push(...events);
     for (const event of events)
       if (event.cmd)
         this.applied.add(event.cmd);
@@ -704,6 +725,11 @@ var server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/state" && req.method === "GET") {
       json(res, 200, planner.snapshot());
+      return;
+    }
+    if (url.pathname === "/activity" && req.method === "GET") {
+      const taskId = url.searchParams.get("task") ?? "";
+      json(res, 200, { events: planner.activity(taskId) });
       return;
     }
     if (url.pathname === "/commands" && req.method === "POST") {

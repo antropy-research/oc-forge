@@ -2,6 +2,7 @@ import { useState } from 'preact/hooks';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
 import { useView } from '../lib/context.ts';
 import { DayColumn } from './DayColumn.tsx';
+import { ChannelFilter } from './ChannelFilter.tsx';
 
 const DAYS = 7;
 
@@ -16,6 +17,7 @@ export const Board = () => {
         <h1>Home</h1>
         <span class="view-sub">{monthDay(days[0]!)} – {monthDay(days[DAYS - 1]!)}</span>
         <div class="date-nav">
+          <ChannelFilter />
           <button aria-label="Earlier" onClick={() => setAnchor(addDays(anchor, -1))}>‹</button>
           <button onClick={() => setAnchor(view.today)} disabled={anchor === view.today}>Today</button>
           <button aria-label="Later" onClick={() => setAnchor(addDays(anchor, 1))}>›</button>

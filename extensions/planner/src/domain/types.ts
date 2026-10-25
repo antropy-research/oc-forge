@@ -55,6 +55,8 @@ export interface Task {
   placement: Placement;
   /** Order within the placement; fractional so a move rewrites one task. */
   position: number;
+  /** Deadline, separate from the day the task is planned for. */
+  dueDate: DateKey | null;
   completedAt: string | null;
   /** Local date the task was completed on. */
   completedOn: DateKey | null;

@@ -5,6 +5,7 @@ import { BacklogBuckets } from './Backlog.tsx';
 import { DayColumn } from './DayColumn.tsx';
 import { AddTask } from './AddTask.tsx';
 import { TaskList } from './TaskList.tsx';
+import { ChannelFilter } from './ChannelFilter.tsx';
 
 /** Today: only today's work, with the backlog beside it to pull from. */
 export const TodayView = () => {
@@ -14,6 +15,9 @@ export const TodayView = () => {
       <header class="view-header">
         <h1>Today</h1>
         <span class="view-sub">{weekdayName(view.today)}, {monthDay(view.today)}</span>
+        <div class="date-nav">
+          <ChannelFilter />
+        </div>
       </header>
       <div class="today-layout">
         <DayColumn date={view.today} wide />

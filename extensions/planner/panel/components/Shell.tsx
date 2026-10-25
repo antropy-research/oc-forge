@@ -1,9 +1,9 @@
 import type { ComponentChildren } from 'preact';
-import { tasksForDay } from '../../src/domain/selectors.ts';
+import { archivedTasks, tasksForDay } from '../../src/domain/selectors.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
 
-export type Route = 'home' | 'today' | 'backlog' | 'settings';
+export type Route = 'home' | 'today' | 'backlog' | 'archive' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -15,12 +15,15 @@ const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; c
 export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) => void }) => {
   const view = useView();
   const open = tasksForDay(view.state, view.today).filter((task) => !task.completedAt).length;
+  const archived = archivedTasks(view.state).length;
   return (
     <nav class="nav" aria-label="Planner">
       <div class="brand">Planner</div>
       <NavItem route="home" current={route} onRoute={onRoute}>Home</NavItem>
       <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>
+      <div class="nav-section">Lists</div>
       <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>
+      <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>
       <div class="nav-spacer" />
       <NavItem route="settings" current={route} onRoute={onRoute}>Settings</NavItem>
       <div class={`save-state${view.saving ? ' is-saving' : ''}`} aria-live="polite">{view.saving ? 'Saving…' : 'Saved'}</div>
@@ -54,14 +57,26 @@ export const ServiceGate = () => {
   );
 };
 
-export const ErrorToast = () => {
+/** Errors and the Undo offer share one toast slot; errors win. */
+export const Toasts = () => {
   const { client } = usePlanner();
   const view = useView();
-  if (!view.error || !view.loaded) return null;
-  return (
-    <div class="toast" role="alert">
-      <span>{view.error}</span>
-      <button class="link" onClick={() => client.dismissError()}>Dismiss</button>
-    </div>
-  );
+  if (!view.loaded) return null;
+  if (view.error) {
+    return (
+      <div class="toast" role="alert">
+        <span>{view.error}</span>
+        <button class="link" onClick={() => client.dismissError()}>Dismiss</button>
+      </div>
+    );
+  }
+  if (view.undoLabel) {
+    return (
+      <div class="toast" role="status">
+        <span>{view.undoLabel}</span>
+        <button class="link" onClick={() => void client.undo()}>Undo</button>
+      </div>
+    );
+  }
+  return null;
 };

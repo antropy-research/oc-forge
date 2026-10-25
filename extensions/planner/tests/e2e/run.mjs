@@ -26,6 +26,12 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 900 
 const login = await context.request.post(`${base}/auth/session`, { data: { password } });
 check('login', login.status() === 200, `status ${login.status()}`);
 
+// Restart the local service so it runs the code that was just built.
+for (const enabled of [false, true]) {
+  const toggle = await context.request.put(`${base}/api/guests/oc-forge-planner/enabled`, { data: { enabled } });
+  if (toggle.status() !== 200) check(`service restart (${enabled ? 'enable' : 'pause'})`, false, `status ${toggle.status()}`);
+}
+
 const page = await context.newPage();
 const problems = [];
 page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
@@ -84,16 +90,74 @@ try {
   await frame.getByRole('heading', { name: 'Today' }).waitFor();
   await shot('04-today-view');
 
+  // Phase 2: task detail, badges, undo, archive, sort.
+  await frame.getByRole('button', { name: 'Home', exact: true }).click();
+  const todayCol = frame.locator('section.day-column.is-today');
+  const addInToday = async (line) => {
+    await todayCol.getByRole('button', { name: /Add task/ }).click();
+    const box = todayCol.getByRole('textbox', { name: 'New task' });
+    await box.fill(line);
+    await box.press('Enter');
+    await box.press('Escape');
+  };
+  await addInToday(`${run} detail ~20m`);
+  const detailCard = todayCol.locator('li.task-card', { hasText: `${run} detail` });
+  await detailCard.getByRole('button', { name: new RegExp(`Open ${run} detail`) }).click();
+  const dialog = frame.getByRole('dialog', { name: 'Task details' });
+  await dialog.waitFor({ timeout: 10_000 });
+  await dialog.locator('label.field', { hasText: 'Priority' }).locator('select').selectOption('high');
+  await dialog.locator('label.field', { hasText: 'Due' }).locator('input').fill('2030-01-15');
+  await dialog.getByRole('textbox', { name: 'Add subtask' }).fill('first step');
+  await dialog.getByRole('textbox', { name: 'Add subtask' }).press('Enter');
+  await dialog.getByRole('checkbox', { name: 'Complete first step' }).check();
+  await dialog.getByRole('textbox', { name: 'Notes' }).fill('some notes');
+  await dialog.getByRole('textbox', { name: 'Add subtask' }).click();
+  await page.waitForTimeout(1500);
+  const activityText = (await dialog.locator('.activity').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  check('activity log records detail edits', /set priority to High/.test(activityText) && /updated subtasks/.test(activityText), activityText.slice(0, 160));
+  await shot('05-detail');
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  const badges = (await detailCard.innerText()).replace(/\s+/g, ' ');
+  check('card shows priority, due date, subtask and notes badges', /High/.test(badges) && /Due January 15/.test(badges) && /1\/1/.test(badges) && /≡/.test(badges), badges);
+
+  await detailCard.hover();
+  await detailCard.getByRole('button', { name: 'Task actions' }).click();
+  await detailCard.getByRole('menuitem', { name: 'Delete' }).click();
+  await frame.getByRole('status').filter({ hasText: 'Task deleted' }).getByRole('button', { name: 'Undo' }).click();
+  await todayCol.locator('li.task-card', { hasText: `${run} detail` }).waitFor({ timeout: 10_000 });
+  check('undo brings a deleted task back', true);
+
+  const again = todayCol.locator('li.task-card', { hasText: `${run} detail` });
+  await again.hover();
+  await again.getByRole('button', { name: 'Task actions' }).click();
+  await again.getByRole('menuitem', { name: 'Archive' }).click();
+  await frame.getByRole('button', { name: /^Archive/ }).first().click();
+  const archivedRow = frame.locator('li.archive-row', { hasText: `${run} detail` });
+  await archivedRow.waitFor({ timeout: 10_000 });
+  await shot('06-archive');
+  await archivedRow.getByRole('button', { name: 'Move to today' }).click();
+  await frame.getByRole('button', { name: 'Home', exact: true }).click();
+  check('archived task returns to today', (await todayCol.locator('li.task-card', { hasText: `${run} detail` }).count()) === 1);
+
+  await addInToday(`${run} sort-low !low`);
+  await addInToday(`${run} sort-urgent !urgent`);
+  await todayCol.getByRole('button', { name: 'Today actions' }).click();
+  await todayCol.getByRole('menuitem', { name: 'Sort by priority' }).click();
+  await page.waitForTimeout(800);
+  const order = (await todayCol.locator('li.task-card .task-title').allTextContents()).filter((title) => title.includes(run));
+  check('sort by priority puts urgent first', order.findIndex((title) => title.includes('sort-urgent')) < order.findIndex((title) => title.includes('sort-low')), order.join(' | '));
+  await shot('07-sorted');
+
   // Clean up this run's tasks through the task menu.
-  for (const title of [`${run} write plan`, `${run} later idea`]) {
-    for (const view of ['Home', 'Backlog']) {
-      await frame.getByRole('button', { name: view, exact: true }).click();
-      const target = frame.locator('li.task-card', { hasText: title }).first();
-      if (await target.count()) {
-        await target.hover();
-        await target.getByRole('button', { name: 'Task actions' }).click();
-        await target.getByRole('menuitem', { name: 'Delete' }).click();
-      }
+  for (const view of ['Home', 'Backlog']) {
+    await frame.getByRole('button', { name: view, exact: true }).click();
+    for (let guard = 0; guard < 20; guard++) {
+      const target = frame.locator('li.task-card', { hasText: run }).first();
+      if (!(await target.count())) break;
+      await target.hover();
+      await target.getByRole('button', { name: 'Task actions' }).click();
+      await target.getByRole('menuitem', { name: 'Delete' }).click();
+      await page.waitForTimeout(150);
     }
   }
   await page.waitForTimeout(800);

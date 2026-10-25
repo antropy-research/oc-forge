@@ -63,6 +63,11 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, planner.snapshot());
       return;
     }
+    if (url.pathname === '/activity' && req.method === 'GET') {
+      const taskId = url.searchParams.get('task') ?? '';
+      json(res, 200, { events: planner.activity(taskId) });
+      return;
+    }
     if (url.pathname === '/commands' && req.method === 'POST') {
       const body = (await readJson(req)) as { commands?: unknown };
       if (!Array.isArray(body.commands)) {

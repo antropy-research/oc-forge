@@ -23,6 +23,7 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
         notes: input.notes ?? '',
         plannedMinutes: input.plannedMinutes ?? null,
         priority: input.priority ?? null,
+        dueDate: input.dueDate ?? null,
         placement: input.placement,
         position: input.position,
         completedAt: null,

@@ -8,13 +8,15 @@ export interface NewTask {
   notes?: string;
   plannedMinutes?: number | null;
   priority?: Task['priority'];
+  dueDate?: DateKey | null;
   placement: Placement;
   position: number;
   channelId?: string | null;
   source?: TaskSourceRef | null;
 }
 
-export type TaskPatch = Partial<Pick<Task, 'title' | 'notes' | 'plannedMinutes' | 'priority' | 'channelId' | 'subtasks'>>;
+export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'subtasks'] as const;
+export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
 
 export type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
 export type ChannelPatch = Partial<Pick<Channel, 'name' | 'color' | 'context'>>;
@@ -86,9 +88,10 @@ const validatePatch = (patch: unknown, channels: Record<string, Channel>): strin
     else if (key === 'notes' && !(typeof value === 'string' && value.length <= NOTES_MAX)) return 'notes are too long';
     else if (key === 'plannedMinutes' && !isMinutes(value)) return 'plannedMinutes must be a number of minutes or null';
     else if (key === 'priority' && !isPriority(value)) return 'priority is invalid';
+    else if (key === 'dueDate' && !(value === null || isDateKey(value))) return 'dueDate must be a date or null';
     else if (key === 'channelId' && !(value === null || (isId(value) && channels[value as string]))) return 'unknown channel';
     else if (key === 'subtasks' && !isSubtasks(value)) return 'subtasks are invalid';
-    else if (!['title', 'notes', 'plannedMinutes', 'priority', 'channelId', 'subtasks'].includes(key)) return `unknown field ${key}`;
+    else if (!(PATCH_FIELDS as readonly string[]).includes(key)) return `unknown field ${key}`;
   }
   return null;
 };
@@ -142,6 +145,7 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       if (task.notes !== undefined && !(typeof task.notes === 'string' && task.notes.length <= NOTES_MAX)) return 'notes are too long';
       if (task.plannedMinutes !== undefined && !isMinutes(task.plannedMinutes)) return 'plannedMinutes is invalid';
       if (task.priority !== undefined && !isPriority(task.priority)) return 'priority is invalid';
+      if (task.dueDate !== undefined && !(task.dueDate === null || isDateKey(task.dueDate))) return 'dueDate must be a date or null';
       if (task.channelId !== undefined && !(task.channelId === null || (isId(task.channelId) && channels[task.channelId as string]))) return 'unknown channel';
       if (task.source !== undefined && !(task.source === null || isSource(task.source))) return 'source is invalid';
       return null;
