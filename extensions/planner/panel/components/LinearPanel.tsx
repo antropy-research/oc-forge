@@ -1,19 +1,35 @@
 import { useEffect, useState } from 'preact/hooks';
-import type { Task } from '../../src/domain/types.ts';
+import { LINEAR_GROUPS, LINEAR_ORDERS, type LinearGroupBy, type LinearOrderBy, type Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
-import { githubMirrors, isClosedType, linkedTask, type LinearIssue } from '../../src/domain/linear.ts';
+import {
+  HEALTH_LABELS,
+  githubMirrors,
+  groupIssues,
+  groupProjects,
+  isClosedType,
+  linkedTask,
+  plannedLinearTasks,
+  sortIssues,
+  type LinearIssue,
+  type LinearProject,
+  type LinearProjectDetail,
+} from '../../src/domain/linear.ts';
 import { LINEAR_DRAG_TYPE, usePlanner, useLinear, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
-import type { LinearTeam } from '../lib/linear.ts';
-
-const GROUPS: { type: string; label: string }[] = [
-  { type: 'started', label: 'In progress' },
-  { type: 'unstarted', label: 'Todo' },
-  { type: 'backlog', label: 'Backlog' },
-  { type: 'triage', label: 'Triage' },
-];
+import type { LinearMode, LinearTeam, LinearView, OpenProject } from '../lib/linear.ts';
 
 const PRIORITY_MARK: Record<number, string> = { 1: '!!!', 2: '!!', 3: '!', 4: '·' };
+const GROUP_LABELS: Record<LinearGroupBy, string> = { status: 'Status', priority: 'Priority', project: 'Project', team: 'Team', assignee: 'Assignee', workspace: 'Workspace', none: 'Nothing' };
+const ORDER_LABELS: Record<LinearOrderBy, string> = { priority: 'Priority', updated: 'Last updated', due: 'Due date', identifier: 'Issue number' };
+const MODES: { id: LinearMode; label: string }[] = [
+  { id: 'issues', label: 'Issues' },
+  { id: 'projects', label: 'Projects' },
+  { id: 'planned', label: 'Planned' },
+];
+/** Drag payload for moving a card between board columns: the issue id. */
+const BOARD_DRAG_TYPE = 'application/x-planner-linear-board';
+
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const plannedLabel = (task: Task, today: string): string => {
   if (task.completedAt) return 'Done';
@@ -23,27 +39,49 @@ const plannedLabel = (task: Task, today: string): string => {
   return monthDay(task.placement.date);
 };
 
+/** Nothing to read: OpenChamber is not connected and no workspace was added with a key. */
+const needsConnect = (lv: LinearView): boolean => lv.connected === false && lv.workspaces.length === 0;
+
+/** A workspace's name, shown only while more than one is connected. */
+const workspaceLabel = (lv: LinearView, id: string | null | undefined): string | null =>
+  lv.workspaces.length > 1 ? lv.workspaces.find((workspace) => workspace.id === id)?.name ?? null : null;
+
+const excerpt = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max).trimEnd()}…` : text);
+
 export const ConnectLinear = () => {
   const { linear, client } = usePlanner();
   return (
     <div class="connect-linear">
-      <p>Connect Linear to plan your issues here. Planner uses OpenChamber's own Linear connection; nothing is stored in the extension.</p>
-      <button class="primary" onClick={() => void linear.connect().catch((error) => client.notify(`Could not start the Linear connection: ${error instanceof Error ? error.message : String(error)}`))}>Connect Linear</button>
+      <p>Connect Linear to plan your issues here. Planner uses OpenChamber's own Linear connection; more workspaces can be added with an API key in Settings.</p>
+      <button class="primary" onClick={() => void linear.connect().catch((error) => client.notify(`Could not start the Linear connection: ${messageOf(error)}`))}>Connect Linear</button>
     </div>
   );
 };
 
-const IssueRow = ({ issue }: { issue: LinearIssue }) => {
+const Progress = ({ value }: { value: number }) => {
+  const percent = Math.round(Math.min(1, Math.max(0, value)) * 100);
+  return (
+    <span class="progress" title={`${percent}% complete`}>
+      <span class="progress-bar" aria-hidden="true"><span style={{ width: `${percent}%` }} /></span>
+      <span class="progress-label">{percent}%</span>
+    </span>
+  );
+};
+
+const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: boolean }) => {
   const { linear } = usePlanner();
   const view = useView();
+  const lv = useLinear();
   const { setUi } = useUi();
   const linked = linkedTask(view.state, issue.id, githubMirrors(issue));
+  const workspace = workspaceLabel(lv, issue.workspaceId);
   return (
     <li
-      class="issue-row"
+      class={`issue-row${lv.moving.has(issue.id) ? ' is-moving' : ''}`}
       draggable
       onDragStart={(event) => {
         event.dataTransfer?.setData(LINEAR_DRAG_TYPE, JSON.stringify(issue));
+        event.dataTransfer?.setData(BOARD_DRAG_TYPE, issue.id);
         if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copyMove';
       }}
       aria-label={`${issue.identifier} ${issue.title}`}
@@ -53,7 +91,9 @@ const IssueRow = ({ issue }: { issue: LinearIssue }) => {
         <span class="issue-title">{issue.title}</span>
         <span class="issue-meta">
           <span class="issue-key">{issue.identifier}</span>
+          {workspace && <span class="ws-badge">{workspace}</span>}
           {PRIORITY_MARK[issue.priority] && <span class={`issue-priority p${issue.priority}`} title="Priority">{PRIORITY_MARK[issue.priority]}</span>}
+          {showAssignee && <span>{issue.assignee?.name ?? 'Unassigned'}</span>}
           {issue.project && <span>{issue.project.name}</span>}
           {issue.cycle && <span>Cycle {issue.cycle.number}</span>}
           {issue.dueDate && <span class={issue.dueDate < view.today ? 'due is-overdue' : 'due'}>Due {monthDay(issue.dueDate)}</span>}
@@ -74,29 +114,157 @@ const IssueRow = ({ issue }: { issue: LinearIssue }) => {
   );
 };
 
-/** Sunsama's Linear panel: My issues or a custom view, grouped by state, ready to drag or plan. */
-export const LinearIssues = () => {
+const workspaceNames = (lv: LinearView): Map<string, string> => new Map(lv.workspaces.map((workspace) => [workspace.id, workspace.name]));
+
+/** Issues as a list, grouped and ordered the way the Linear page is set up. */
+const IssueGroups = ({ issues, showAssignee }: { issues: LinearIssue[]; showAssignee?: boolean }) => {
+  const view = useView();
+  const lv = useLinear();
+  const { linearGroupBy, linearOrderBy } = view.state.settings;
+  const groups = groupIssues(sortIssues(issues, linearOrderBy), linearGroupBy, { workspaceNames: workspaceNames(lv) });
+  return (
+    <>
+      {groups.map((group) => (
+        <section key={group.key} class="issue-group" aria-label={group.label}>
+          {linearGroupBy !== 'none' && <h3>{group.label} <span class="count">{group.issues.length}</span></h3>}
+          <ul class="issue-list">{group.issues.map((issue) => <IssueRow key={issue.id} issue={issue} showAssignee={showAssignee} />)}</ul>
+        </section>
+      ))}
+    </>
+  );
+};
+
+/**
+ * Issues as a board. Grouped by status, the columns follow the workflow and a
+ * card dropped on one moves to its team's first state there, as in Linear.
+ */
+const IssueBoard = ({ issues, showAssignee }: { issues: LinearIssue[]; showAssignee?: boolean }) => {
+  const { linear } = usePlanner();
+  const view = useView();
+  const lv = useLinear();
+  const [over, setOver] = useState<string | null>(null);
+  const { linearGroupBy, linearOrderBy } = view.state.settings;
+  const byStatus = linearGroupBy === 'status' || linearGroupBy === 'none';
+  const groups = groupIssues(sortIssues(issues, linearOrderBy), byStatus ? 'status' : linearGroupBy, { board: true, workspaceNames: workspaceNames(lv) });
+  return (
+    <div class="issue-board">
+      {groups.map((group) => {
+        const droppable = byStatus && Boolean(group.stateType);
+        return (
+          <section
+            key={group.key}
+            class={`board-column${over === group.key ? ' is-over' : ''}`}
+            aria-label={group.label}
+            onDragOver={(event) => {
+              if (!droppable || !event.dataTransfer?.types.includes(BOARD_DRAG_TYPE)) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'move';
+              setOver(group.key);
+            }}
+            onDragLeave={(event) => {
+              if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) setOver(null);
+            }}
+            onDrop={(event) => {
+              if (!droppable) return;
+              event.preventDefault();
+              setOver(null);
+              const issue = issues.find((item) => item.id === event.dataTransfer?.getData(BOARD_DRAG_TYPE));
+              if (issue) void linear.moveIssueToType(issue, group.stateType!);
+            }}
+          >
+            <h3>{group.label} <span class="count">{group.issues.length}</span></h3>
+            <ul class="issue-list">{group.issues.map((issue) => <IssueRow key={issue.id} issue={issue} showAssignee={showAssignee} />)}</ul>
+            {droppable && group.issues.length === 0 && <p class="hint board-drop">{group.stateType === 'completed' ? 'Drop an issue here to complete it in Linear' : 'Drop an issue here'}</p>}
+          </section>
+        );
+      })}
+    </div>
+  );
+};
+
+/** List or board, as the page is set up; side panels always list. */
+const IssueLayout = ({ issues, page, showAssignee }: { issues: LinearIssue[]; page?: boolean; showAssignee?: boolean }) => {
+  const view = useView();
+  return page && view.state.settings.linearLayout === 'board' ? <IssueBoard issues={issues} showAssignee={showAssignee} /> : <IssueGroups issues={issues} showAssignee={showAssignee} />;
+};
+
+const DisplayControls = () => {
+  const { linear } = usePlanner();
+  const view = useView();
+  const lv = useLinear();
+  const settings = view.state.settings;
+  const groups = LINEAR_GROUPS.filter((group) => group !== 'workspace' || lv.workspaces.length > 1 || settings.linearGroupBy === 'workspace');
+  return (
+    <div class="linear-display" role="group" aria-label="Display">
+      <div class="segmented" role="radiogroup" aria-label="Layout">
+        <button role="radio" aria-checked={settings.linearLayout === 'list'} onClick={() => void linear.setDisplay({ linearLayout: 'list' })}>List</button>
+        <button role="radio" aria-checked={settings.linearLayout === 'board'} onClick={() => void linear.setDisplay({ linearLayout: 'board' })}>Board</button>
+      </div>
+      <label class="inline">
+        Group by
+        <select aria-label="Group issues by" value={settings.linearGroupBy} onChange={(event) => void linear.setDisplay({ linearGroupBy: event.currentTarget.value as LinearGroupBy })}>
+          {groups.map((group) => <option key={group} value={group}>{GROUP_LABELS[group]}</option>)}
+        </select>
+      </label>
+      <label class="inline">
+        Order by
+        <select aria-label="Order issues by" value={settings.linearOrderBy} onChange={(event) => void linear.setDisplay({ linearOrderBy: event.currentTarget.value as LinearOrderBy })}>
+          {LINEAR_ORDERS.map((order) => <option key={order} value={order}>{ORDER_LABELS[order]}</option>)}
+        </select>
+      </label>
+    </div>
+  );
+};
+
+/** All connected workspaces merged, or one of them. */
+const WorkspaceSelect = () => {
+  const { linear } = usePlanner();
+  const lv = useLinear();
+  if (lv.workspaces.length < 2) return null;
+  return (
+    <select class="workspace-select" aria-label="Linear workspace" value={lv.scope} onChange={(event) => linear.setScope(event.currentTarget.value)}>
+      <option value="all">All workspaces</option>
+      {lv.workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+    </select>
+  );
+};
+
+/** What failed: per workspace while several are connected, else the one error. */
+const LinearErrors = () => {
+  const lv = useLinear();
+  if (lv.workspaces.length < 2) return lv.error ? <p class="feed-errors" role="alert">{lv.error}</p> : null;
+  const failed = lv.workspaces.filter((workspace) => workspace.error && (lv.scope === 'all' || lv.scope === workspace.id));
+  return failed.length ? <p class="feed-errors" role="alert">{failed.map((workspace) => `${workspace.name}: ${workspace.error}`).join(' · ')}</p> : null;
+};
+
+/** Sunsama's Linear panel: My issues, a custom view or a search, grouped, ready to drag or plan. */
+export const LinearIssues = ({ page = false }: { page?: boolean }) => {
   const { linear } = usePlanner();
   const lv = useLinear();
   const [term, setTerm] = useState('');
-  if (lv.connected === false) return <ConnectLinear />;
-  const sourceValue = lv.source.kind === 'view' ? `view:${lv.source.id}` : lv.source.kind;
+  if (needsConnect(lv)) return <ConnectLinear />;
+  const sourceValue = lv.source.kind === 'view' ? `view:${lv.source.workspaceId}:${lv.source.id}` : lv.source.kind;
+  const views = lv.views.filter((item) => lv.scope === 'all' || item.workspaceId === lv.scope);
   const visible = lv.issues.filter((issue) => !isClosedType(issue.state.type));
-  const grouped = GROUPS.map((group) => ({ ...group, issues: visible.filter((issue) => issue.state.type === group.type) })).filter((group) => group.issues.length > 0);
   return (
     <div class="linear-issues">
       <div class="linear-toolbar">
+        {!page && <WorkspaceSelect />}
         <select
           aria-label="Linear issues to show"
           value={sourceValue}
           onChange={(event) => {
             const value = event.currentTarget.value;
-            linear.setSource(value.startsWith('view:') ? { kind: 'view', id: value.slice(5) } : { kind: 'assigned' });
+            const match = /^view:([^:]+):(.+)$/.exec(value);
+            linear.setSource(match ? { kind: 'view', workspaceId: match[1]!, id: match[2]! } : { kind: 'assigned' });
           }}
         >
           <option value="assigned">My issues</option>
           {lv.source.kind === 'search' && <option value="search">Search results</option>}
-          {lv.views.map((item) => <option key={item.id} value={`view:${item.id}`}>{item.name}</option>)}
+          {views.map((item) => {
+            const workspace = workspaceLabel(lv, item.workspaceId);
+            return <option key={`${item.workspaceId}:${item.id}`} value={`view:${item.workspaceId}:${item.id}`}>{workspace && lv.scope === 'all' ? `${item.name} · ${workspace}` : item.name}</option>;
+          })}
         </select>
         <button class="icon-button" aria-label="Refresh Linear" title={lv.syncedAt ? `Synced ${new Date(lv.syncedAt).toLocaleTimeString()}` : 'Refresh'} onClick={() => void linear.refresh()}>↻</button>
       </div>
@@ -112,31 +280,231 @@ export const LinearIssues = () => {
           linear.setSource(query ? { kind: 'search', term: query } : { kind: 'assigned' });
         }}
       />
-      {lv.error && <p class="feed-errors" role="alert">{lv.error}</p>}
+      {page && <DisplayControls />}
+      <LinearErrors />
       {lv.loading && lv.issues.length === 0 && <p class="hint">Loading issues…</p>}
       {!lv.loading && visible.length === 0 && !lv.error && <p class="hint">No open issues here.</p>}
-      {grouped.map((group) => (
-        <section key={group.type} class="issue-group" aria-label={group.label}>
-          <h3>{group.label} <span class="count">{group.issues.length}</span></h3>
-          <ul class="issue-list">{group.issues.map((issue) => <IssueRow key={issue.id} issue={issue} />)}</ul>
+      {visible.length > 0 && <IssueLayout issues={visible} page={page} showAssignee={lv.source.kind !== 'assigned'} />}
+    </div>
+  );
+};
+
+const ProjectRow = ({ project }: { project: LinearProject }) => {
+  const { linear } = usePlanner();
+  const lv = useLinear();
+  const workspace = workspaceLabel(lv, project.workspaceId);
+  return (
+    <li>
+      <button class="project-row" onClick={() => void linear.openProject(project)} aria-label={`Open project ${project.name}`}>
+        <span class="project-dot" style={{ '--item-color': project.color }} aria-hidden="true" />
+        <span class="project-main">
+          <span class="project-name">{project.name}</span>
+          <span class="issue-meta">
+            {workspace && <span class="ws-badge">{workspace}</span>}
+            <span>{project.status.name}</span>
+            {project.health && <span class={`health is-${project.health}`}>{HEALTH_LABELS[project.health]}</span>}
+            {project.lead && <span>Lead {project.lead.name}</span>}
+            {project.targetDate && <span>Target {monthDay(project.targetDate)}</span>}
+            {project.teams.nodes.length > 0 && <span>{project.teams.nodes.map((team) => team.key).join(', ')}</span>}
+          </span>
+        </span>
+        <Progress value={project.progress} />
+      </button>
+    </li>
+  );
+};
+
+const ProjectOverview = ({ detail }: { detail: LinearProjectDetail }) => {
+  const { host } = usePlanner();
+  const milestones = [...detail.projectMilestones.nodes].sort((a, b) => a.sortOrder - b.sortOrder);
+  const update = detail.lastUpdate;
+  if (!update && milestones.length === 0 && !detail.content?.trim()) return <p class="hint">This project has no updates, milestones or description yet.</p>;
+  return (
+    <div class="project-overview">
+      {update && (
+        <section aria-label="Latest update">
+          <h3>
+            Latest update
+            <span class={`health is-${update.health}`}>{HEALTH_LABELS[update.health] ?? update.health}</span>
+            <span class="count">{update.user.name} · {new Date(update.createdAt).toLocaleDateString()}</span>
+            <button class="link" onClick={() => void host.openUrl(update.url)}>Open</button>
+          </h3>
+          <p class="pre">{excerpt(update.body, 1500)}</p>
+        </section>
+      )}
+      {milestones.length > 0 && (
+        <section aria-label="Milestones">
+          <h3>Milestones</h3>
+          <ul class="milestones">
+            {milestones.map((milestone) => (
+              <li key={milestone.id}>
+                <span class="milestone-name">{milestone.name}</span>
+                {milestone.targetDate && <span class="muted">{monthDay(milestone.targetDate)}</span>}
+                <Progress value={milestone.progress} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {detail.content?.trim() && (
+        <section aria-label="Description">
+          <h3>Description</h3>
+          <p class="pre">{excerpt(detail.content, 5000)}</p>
+        </section>
+      )}
+    </div>
+  );
+};
+
+/** One project: its facts, then its open issues (to plan) or its overview. */
+const ProjectDetail = ({ open }: { open: OpenProject }) => {
+  const { linear, host } = usePlanner();
+  const lv = useLinear();
+  const [tab, setTab] = useState<'issues' | 'overview'>('issues');
+  const project = open.detail ?? open.project;
+  const workspace = workspaceLabel(lv, project.workspaceId);
+  const issues = (open.detail?.issues.nodes ?? []).filter((issue) => !isClosedType(issue.state.type));
+  return (
+    <div class="project-detail" aria-label={`Project ${project.name}`}>
+      <div class="linear-toolbar">
+        <button class="link" onClick={() => linear.closeProject()}>← All projects</button>
+        <span class="grow" />
+        <button class="link" onClick={() => void host.openUrl(project.url)}>Open in Linear</button>
+      </div>
+      <header class="project-head">
+        <span class="project-dot" style={{ '--item-color': project.color }} aria-hidden="true" />
+        <h2>{project.name}</h2>
+        {workspace && <span class="ws-badge">{workspace}</span>}
+      </header>
+      {project.description && <p class="project-summary">{project.description}</p>}
+      <dl class="facts project-facts">
+        <dt>Status</dt>
+        <dd><span class="project-status" style={{ '--item-color': project.status.color }}>{project.status.name}</span></dd>
+        <dt>Progress</dt>
+        <dd><Progress value={project.progress} /></dd>
+        {project.health && (<><dt>Health</dt><dd class={`health is-${project.health}`}>{HEALTH_LABELS[project.health]}</dd></>)}
+        <dt>Lead</dt>
+        <dd>{project.lead?.name ?? 'No lead'}</dd>
+        {(project.startDate || project.targetDate) && (<><dt>Dates</dt><dd>{project.startDate ? monthDay(project.startDate) : 'No start'} → {project.targetDate ? monthDay(project.targetDate) : 'no target'}</dd></>)}
+        {project.teams.nodes.length > 0 && (<><dt>Teams</dt><dd>{project.teams.nodes.map((team) => `${team.key} · ${team.name}`).join(', ')}</dd></>)}
+      </dl>
+      <div class="tabs project-tabs" role="tablist" aria-label="Project">
+        <button role="tab" aria-selected={tab === 'issues'} onClick={() => setTab('issues')}>Issues{open.detail ? ` ${issues.length}` : ''}</button>
+        <button role="tab" aria-selected={tab === 'overview'} onClick={() => setTab('overview')}>Overview</button>
+      </div>
+      {open.loading && <p class="hint">Loading the project…</p>}
+      {open.error && <p class="feed-errors" role="alert">{open.error}</p>}
+      {open.detail && tab === 'issues' && (issues.length ? <IssueLayout issues={issues} page showAssignee /> : <p class="hint">No open issues in this project.</p>)}
+      {open.detail && tab === 'overview' && <ProjectOverview detail={open.detail} />}
+    </div>
+  );
+};
+
+/** Linear projects of the shown workspaces, the active ones first. */
+const ProjectsView = () => {
+  const { linear } = usePlanner();
+  const lv = useLinear();
+  if (needsConnect(lv)) return <ConnectLinear />;
+  if (lv.project) return <ProjectDetail key={lv.project.project.id} open={lv.project} />;
+  const groups = groupProjects(lv.projects);
+  return (
+    <div class="linear-projects">
+      <div class="linear-toolbar">
+        <span class="grow muted">{lv.projectsLoaded ? `${lv.projects.length} open project${lv.projects.length === 1 ? '' : 's'}` : ''}</span>
+        <button class="icon-button" aria-label="Refresh projects" onClick={() => void linear.loadProjects()}>↻</button>
+      </div>
+      <LinearErrors />
+      {lv.projectsLoading && lv.projects.length === 0 && <p class="hint">Loading projects…</p>}
+      {!lv.projectsLoading && lv.projectsLoaded && lv.projects.length === 0 && <p class="hint">No open projects here.</p>}
+      {groups.map((group) => (
+        <section key={group.type} class="issue-group" aria-label={`${group.label} projects`}>
+          <h3>{group.label} <span class="count">{group.projects.length}</span></h3>
+          <ul class="project-list">{group.projects.map((project) => <ProjectRow key={`${project.workspaceId}:${project.id}`} project={project} />)}</ul>
         </section>
       ))}
     </div>
   );
 };
 
-/** Linear as a full page. */
-export const LinearPage = () => {
+const PlannedRow = ({ task }: { task: Task }) => {
+  const { linear } = usePlanner();
+  const view = useView();
   const lv = useLinear();
+  const { setUi } = useUi();
+  const source = task.source!;
+  const live = lv.linked[source.id];
+  const status = live ? live.state : source.status;
+  const workspace = workspaceLabel(lv, linear.workspaceOf(source));
+  return (
+    <li class="issue-row is-planned" aria-label={`${source.key} ${task.title}`}>
+      <span class="issue-state" style={{ '--item-color': status?.color ?? '#5e6ad2' }} title={status?.name} aria-hidden="true" />
+      <span class="issue-main">
+        <span class="issue-title">{task.title}</span>
+        <span class="issue-meta">
+          <span class="issue-key">{source.key}</span>
+          {workspace && <span class="ws-badge">{workspace}</span>}
+          {status && <span>{status.name}</span>}
+        </span>
+      </span>
+      <button class="link issue-planned" onClick={() => setUi({ openTaskId: task.id })} aria-label={`Open the task for ${source.key} (${plannedLabel(task, view.today)})`}>
+        {plannedLabel(task, view.today)}
+      </button>
+    </li>
+  );
+};
+
+/** Linear issues already in the plan, by when they are planned. */
+const PlannedView = () => {
+  const view = useView();
+  const groups = plannedLinearTasks(view.state, view.today);
+  if (groups.length === 0) return <p class="hint">No Linear issues in your plan yet. Plan one from Issues or Projects.</p>;
+  return (
+    <div class="linear-issues">
+      {groups.map((group) => (
+        <section key={group.key} class="issue-group" aria-label={`Planned ${group.label}`}>
+          <h3>{group.label} <span class="count">{group.tasks.length}</span></h3>
+          <ul class="issue-list">{group.tasks.map((task) => <PlannedRow key={task.id} task={task} />)}</ul>
+        </section>
+      ))}
+    </div>
+  );
+};
+
+/** Linear as a full page: issues, projects and the planned issues, across workspaces. */
+export const LinearPage = () => {
+  const { linear } = usePlanner();
+  const lv = useLinear();
+  const view = useView();
+  const wide = view.state.settings.linearLayout === 'board' && (lv.mode === 'issues' || (lv.mode === 'projects' && Boolean(lv.project)));
+  const sub =
+    lv.workspaces.length > 1
+      ? `${lv.workspaces.length} workspaces: ${lv.workspaces.map((workspace) => workspace.name).join(', ')}`
+      : lv.workspaces[0]
+        ? `${lv.workspaces[0].name} · ${lv.workspaces[0].account}`
+        : lv.connected === false
+          ? 'Not connected'
+          : 'Checking the connection…';
   return (
     <section class="view">
       <header class="view-header">
         <h1>Linear</h1>
-        <span class="view-sub">{lv.connected ? (lv.account ? `Connected as ${lv.account}` : 'Connected') : lv.connected === false ? 'Not connected' : 'Checking the connection…'}</span>
+        <span class="view-sub">{sub}</span>
       </header>
-      <div class="view-scroll linear-page">
-        <p class="hint">Plan an issue for today, tomorrow or later, or drag it onto a day or the calendar. Planned issues become tasks linked to Linear.</p>
-        <LinearIssues />
+      <div class="linear-modes">
+        <div class="tabs" role="tablist" aria-label="Linear">
+          {MODES.map((mode) => <button key={mode.id} role="tab" aria-selected={lv.mode === mode.id} onClick={() => linear.setMode(mode.id)}>{mode.label}</button>)}
+        </div>
+        <WorkspaceSelect />
+      </div>
+      <div class={`view-scroll linear-page${wide ? ' is-wide' : ''}`}>
+        {lv.mode === 'issues' && (
+          <>
+            <p class="hint">Plan an issue for today, tomorrow or later, or drag it onto a day or the calendar. Planned issues become tasks linked to Linear.</p>
+            <LinearIssues page />
+          </>
+        )}
+        {lv.mode === 'projects' && <ProjectsView />}
+        {lv.mode === 'planned' && <PlannedView />}
       </div>
     </section>
   );
@@ -167,9 +535,11 @@ export const LinearPromptBar = () => {
 
 const CreateIssue = ({ task }: { task: Task }) => {
   const { linear, client } = usePlanner();
+  const lv = useLinear();
   const [teams, setTeams] = useState<LinearTeam[] | null>(null);
   const [teamId, setTeamId] = useState('');
   const [busy, setBusy] = useState(false);
+  const workspaceCount = lv.workspaces.length;
   useEffect(() => {
     let live = true;
     linear
@@ -177,28 +547,33 @@ const CreateIssue = ({ task }: { task: Task }) => {
       .then((list) => {
         if (!live) return;
         setTeams(list);
-        setTeamId(list[0]?.id ?? '');
+        setTeamId((current) => (list.some((team) => team.id === current) ? current : list[0]?.id ?? ''));
       })
       .catch(() => live && setTeams([]));
     return () => {
       live = false;
     };
-  }, [linear]);
+  }, [linear, workspaceCount]);
   if (!teams) return <p class="hint">Loading teams…</p>;
   if (teams.length === 0) return <p class="hint">No Linear teams available.</p>;
+  const team = teams.find((item) => item.id === teamId);
   return (
     <div class="row">
       <select aria-label="Linear team" value={teamId} onChange={(event) => setTeamId(event.currentTarget.value)}>
-        {teams.map((team) => <option key={team.id} value={team.id}>{team.key} · {team.name}</option>)}
+        {teams.map((item) => {
+          const workspace = workspaceLabel(lv, item.workspaceId);
+          return <option key={item.id} value={item.id}>{workspace ? `${workspace} · ` : ''}{item.key} · {item.name}</option>;
+        })}
       </select>
       <button
         class="link"
-        disabled={busy || !teamId}
+        disabled={busy || !team}
         onClick={() => {
+          if (!team) return;
           setBusy(true);
           linear
-            .createIssue(task, teamId)
-            .catch((error) => client.notify(`Could not create the issue: ${error instanceof Error ? error.message : String(error)}`))
+            .createIssue(task, team)
+            .catch((error) => client.notify(`Could not create the issue: ${messageOf(error)}`))
             .finally(() => setBusy(false));
         }}
       >
@@ -217,19 +592,24 @@ export const LinearTaskSection = ({ task }: { task: Task }) => {
     const live = lv.linked[source.id];
     const status = live ? { name: live.state.name, type: live.state.type, color: live.state.color } : source.status;
     const closed = isClosedType(status?.type);
+    const reachable = Boolean(linear.workspace(linear.workspaceOf(source)));
+    const workspace = workspaceLabel(lv, linear.workspaceOf(source));
     return (
       <section class="detail-section" aria-label="Linear">
         <h3>
           Linear
           <span class="source-chip" style={{ '--item-color': status?.color ?? '#5e6ad2' }}><span class="dot" aria-hidden="true" />{source.key}</span>
           {status && <span class="count">{status.name}</span>}
+          {workspace && <span class="ws-badge">{workspace}</span>}
         </h3>
         <div class="row">
           <button class="link" onClick={() => void host.openUrl(source.url)}>Open in Linear</button>
-          {!closed && lv.connected !== false && <button class="link" onClick={() => void linear.moveIssue(task, 'completed')}>Mark done in Linear</button>}
-          {['backlog', 'unstarted', 'triage'].includes(status?.type ?? '') && lv.connected !== false && <button class="link" onClick={() => void linear.moveIssue(task, 'started')}>Start in Linear</button>}
+          {!closed && reachable && <button class="link" onClick={() => void linear.moveIssue(task, 'completed')}>Mark done in Linear</button>}
+          {['backlog', 'unstarted', 'triage'].includes(status?.type ?? '') && reachable && <button class="link" onClick={() => void linear.moveIssue(task, 'started')}>Start in Linear</button>}
           <button class="link danger" onClick={() => void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { source: null } }], { undo: 'Link removed' })}>Unlink</button>
         </div>
+        {!reachable && lv.connected !== null && <p class="hint">{source.workspaceId ? "This issue's workspace is not connected; add it in Settings → Linear to update it from here." : 'Connect Linear to update this issue from here.'}</p>}
+        {source.branch && <p class="hint">Branch <code>{source.branch}</code>: an agent's worktree uses it, so its pull request links back to {source.key}.</p>}
       </section>
     );
   }
@@ -237,7 +617,7 @@ export const LinearTaskSection = ({ task }: { task: Task }) => {
   return (
     <section class="detail-section" aria-label="Linear">
       <h3>Linear</h3>
-      {lv.connected === false ? <button class="link" onClick={() => void linear.connect()}>Connect Linear to create an issue from this task</button> : <CreateIssue task={task} />}
+      {needsConnect(lv) ? <button class="link" onClick={() => void linear.connect()}>Connect Linear to create an issue from this task</button> : <CreateIssue task={task} />}
     </section>
   );
 };

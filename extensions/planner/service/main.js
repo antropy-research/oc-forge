@@ -1,7 +1,7 @@
 // service/main.ts
 import http from "node:http";
 import { homedir } from "node:os";
-import { dirname, join as join3 } from "node:path";
+import { dirname as dirname2, join as join3 } from "node:path";
 
 // service/store.ts
 import { execFile } from "node:child_process";
@@ -17,6 +17,8 @@ var BACKLOG_BUCKETS = [
   { id: "someday", label: "Someday" },
   { id: "never", label: "Never" }
 ];
+var LINEAR_GROUPS = ["status", "priority", "project", "team", "assignee", "workspace", "none"];
+var LINEAR_ORDERS = ["priority", "updated", "due", "identifier"];
 var RITUALS = ["planning", "shutdown", "highlights", "weeklyPlanning", "weeklyReview"];
 var ritualKey = (ritual, date) => `${ritual}:${date}`;
 var DEFAULT_SETTINGS = {
@@ -30,6 +32,9 @@ var DEFAULT_SETTINGS = {
   linearOnComplete: "ask",
   linearOnPlan: "nothing",
   linearImportCompletion: false,
+  linearLayout: "list",
+  linearGroupBy: "status",
+  linearOrderBy: "priority",
   suggestFromHistory: true,
   pomodoroMinutes: 25,
   breakMinutes: 5
@@ -746,7 +751,7 @@ var isPlacement = (value) => {
 };
 var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
-var isSource = (value) => isRecord(value) && (value.kind === "linear" || value.kind === "github") && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200)));
+var isSource = (value) => isRecord(value) && (value.kind === "linear" || value.kind === "github") && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200));
 var PRIORITY_VALUES = new Set(["urgent", "high", "medium", "low"]);
 var isPriority = (value) => value === null || typeof value === "string" && PRIORITY_VALUES.has(value);
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
@@ -817,11 +822,17 @@ var validateSettingsPatch = (patch) => {
       return "linearOnPlan must be ask, start or nothing";
     else if (key === "linearImportCompletion" && typeof value !== "boolean")
       return "linearImportCompletion must be true or false";
+    else if (key === "linearLayout" && value !== "list" && value !== "board")
+      return "linearLayout must be list or board";
+    else if (key === "linearGroupBy" && !LINEAR_GROUPS.includes(value))
+      return `linearGroupBy must be one of ${LINEAR_GROUPS.join(", ")}`;
+    else if (key === "linearOrderBy" && !LINEAR_ORDERS.includes(value))
+      return `linearOrderBy must be one of ${LINEAR_ORDERS.join(", ")}`;
     else if (key === "suggestFromHistory" && typeof value !== "boolean")
       return "suggestFromHistory must be true or false";
     else if ((key === "pomodoroMinutes" || key === "breakMinutes") && !(Number.isInteger(value) && value >= 1 && value <= 180))
       return `${key} must be 1-180`;
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "suggestFromHistory", "pomodoroMinutes", "breakMinutes"].includes(key))
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
@@ -2097,6 +2108,238 @@ class GitHubSource {
   }
 }
 
+// service/linear.ts
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+
+// src/domain/linear.ts
+var ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt branchName
+    state { id name type color }
+    team { id key name }
+    assignee { id name }
+    project { id name }
+    cycle { id number }
+    syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
+var OPEN_FILTER = `{ state: { type: { nin: ["completed", "canceled"] } } }`;
+var PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate updatedAt
+    status { id name type color }
+    lead { id name }
+    teams(first: 10) { nodes { id key name } }`;
+var ASSIGNED_QUERY = `query PlannerAssigned($after: String) {
+  viewer {
+    id
+    name
+    assignedIssues(first: 100, after: $after, orderBy: updatedAt, filter: ${OPEN_FILTER}) {
+      nodes { ${ISSUE_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}`;
+var VIEWS_QUERY = `query PlannerViews {
+  customViews(first: 50) { nodes { id name } }
+}`;
+var VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!) {
+  customView(id: $id) {
+    id
+    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
+  }
+}`;
+var SEARCH_QUERY = `query PlannerSearch($term: String!) {
+  searchIssues(term: $term, first: 25) { nodes { ${ISSUE_FIELDS} } }
+}`;
+var LINKED_QUERY = `query PlannerLinked($ids: [ID!]!) {
+  issues(first: 100, filter: { id: { in: $ids } }) { nodes { ${ISSUE_FIELDS} } }
+}`;
+var ISSUE_QUERY = `query PlannerIssue($id: String!) {
+  issue(id: $id) { ${ISSUE_FIELDS} }
+}`;
+var TEAM_STATES_QUERY = `query PlannerTeamStates($id: String!) {
+  team(id: $id) { id states(first: 100) { nodes { id name type color position } } }
+}`;
+var TEAMS_QUERY = `query PlannerTeams {
+  viewer { id }
+  teams(first: 100) { nodes { id key name } }
+}`;
+var WHOAMI_QUERY = `query PlannerWhoAmI {
+  viewer { id name }
+  organization { id name urlKey }
+}`;
+var PROJECTS_QUERY = `query PlannerProjects($after: String) {
+  projects(first: 50, after: $after, orderBy: updatedAt, filter: { status: { type: { nin: ["completed", "canceled"] } } }) {
+    nodes { ${PROJECT_FIELDS} }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+var PROJECT_QUERY = `query PlannerProject($id: String!) {
+  project(id: $id) {
+    ${PROJECT_FIELDS}
+    content
+    projectMilestones(first: 25) { nodes { id name targetDate progress sortOrder } }
+    lastUpdate { id body health createdAt url user { id name } }
+    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
+  }
+}`;
+var SET_STATE_MUTATION = `mutation PlannerSetState($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) { success issue { ${ISSUE_FIELDS} } }
+}`;
+var CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { ${ISSUE_FIELDS} } }
+}`;
+var ALL_DOCUMENTS = [
+  ASSIGNED_QUERY,
+  VIEWS_QUERY,
+  VIEW_ISSUES_QUERY,
+  SEARCH_QUERY,
+  LINKED_QUERY,
+  ISSUE_QUERY,
+  TEAM_STATES_QUERY,
+  TEAMS_QUERY,
+  WHOAMI_QUERY,
+  PROJECTS_QUERY,
+  PROJECT_QUERY,
+  SET_STATE_MUTATION,
+  CREATE_ISSUE_MUTATION
+];
+var readGraphql = (body) => {
+  const parsed = JSON.parse(body);
+  if (parsed.errors?.length) {
+    const error = parsed.errors[0];
+    throw new Error(error.extensions?.userPresentableMessage ?? error.message ?? "Linear returned an error");
+  }
+  if (!parsed.data)
+    throw new Error("Linear returned no data");
+  return parsed.data;
+};
+
+// service/linear.ts
+var LINEAR_API = "https://api.linear.app/graphql";
+var TIMEOUT_MS2 = 20000;
+var MAX_WORKSPACES = 20;
+var ALLOWED = new Set(ALL_DOCUMENTS);
+
+class WorkspaceError extends Error {
+  status;
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+var isStored = (value) => {
+  const item = value;
+  return Boolean(item) && ["id", "name", "urlKey", "account", "key", "addedAt"].every((field) => typeof item[field] === "string");
+};
+var publicInfo = ({ key: _key, ...info }) => info;
+var authorization = (key) => key.startsWith("lin_oauth_") ? `Bearer ${key}` : key;
+
+class LinearWorkspaces {
+  file;
+  fetcher;
+  log;
+  items = [];
+  loaded = null;
+  writes = Promise.resolve();
+  constructor(file, fetcher = fetch, log = () => {}) {
+    this.file = file;
+    this.fetcher = fetcher;
+    this.log = log;
+  }
+  async list() {
+    await this.load();
+    return this.items.map(publicInfo);
+  }
+  add(rawKey) {
+    return this.serial(async () => {
+      const key = rawKey.trim();
+      if (!/^[A-Za-z0-9_-]{20,200}$/.test(key))
+        throw new WorkspaceError(400, "That does not look like a Linear API key (Linear → Settings → Security & access → Personal API keys)");
+      await this.load();
+      const answer = await this.send(key, WHOAMI_QUERY, {});
+      if (answer.status === 401 || answer.status === 403)
+        throw new WorkspaceError(400, "Linear rejected the key");
+      let data;
+      try {
+        data = readGraphql(answer.body);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new WorkspaceError(400, /authenticat/i.test(message) ? "Linear rejected the key" : `Linear answered: ${message}`);
+      }
+      const entry = { id: data.organization.id, name: data.organization.name, urlKey: data.organization.urlKey, account: data.viewer.name, key, addedAt: new Date().toISOString() };
+      const index = this.items.findIndex((item) => item.id === entry.id);
+      if (index < 0 && this.items.length >= MAX_WORKSPACES)
+        throw new WorkspaceError(400, `At most ${MAX_WORKSPACES} workspaces`);
+      this.items = index < 0 ? [...this.items, entry] : this.items.map((item, at) => at === index ? entry : item);
+      await this.save();
+      return publicInfo(entry);
+    });
+  }
+  remove(id) {
+    return this.serial(async () => {
+      await this.load();
+      const before = this.items.length;
+      this.items = this.items.filter((item) => item.id !== id);
+      if (this.items.length === before)
+        return false;
+      await this.save();
+      return true;
+    });
+  }
+  async graphql(id, query, variables) {
+    if (!ALLOWED.has(query))
+      throw new WorkspaceError(400, "only the Planner's own Linear queries can run");
+    await this.load();
+    const entry = this.items.find((item) => item.id === id);
+    if (!entry)
+      throw new WorkspaceError(404, "that Linear workspace is not connected");
+    return this.send(entry.key, query, variables);
+  }
+  async send(key, query, variables) {
+    let response;
+    try {
+      response = await this.fetcher(LINEAR_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authorization(key) },
+        body: JSON.stringify({ query, variables }),
+        signal: AbortSignal.timeout(TIMEOUT_MS2)
+      });
+    } catch (error) {
+      throw new WorkspaceError(502, `Could not reach Linear: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return { status: response.status, body: await response.text() };
+  }
+  load() {
+    this.loaded ??= (async () => {
+      let text;
+      try {
+        text = await readFile(this.file, "utf8");
+      } catch (error) {
+        if (error.code === "ENOENT")
+          return;
+        throw error;
+      }
+      try {
+        const parsed = JSON.parse(text);
+        this.items = Array.isArray(parsed.workspaces) ? parsed.workspaces.filter(isStored) : [];
+      } catch {
+        this.log(`${this.file} is not readable JSON; Linear workspaces need to be added again`);
+      }
+    })();
+    return this.loaded;
+  }
+  async save() {
+    await mkdir(dirname(this.file), { recursive: true, mode: 448 });
+    const temp = `${this.file}.${process.pid}.tmp`;
+    await writeFile(temp, `${JSON.stringify({ version: 1, workspaces: this.items }, null, 2)}
+`, { mode: 384 });
+    await chmod(temp, 384);
+    await rename(temp, this.file);
+  }
+  serial(work) {
+    const next = this.writes.then(work, work);
+    this.writes = next.catch(() => {});
+    return next;
+  }
+}
+
 // service/main.ts
 var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -2115,7 +2358,8 @@ sync = new SyncManager(store, planner, log);
 await sync.init();
 var snapshot = () => ({ ...planner.snapshot(), sync: sync.status() });
 var github = new GitHubSource;
-var feeds = new CalendarFeeds(join3(dirname(dir), "cache"));
+var feeds = new CalendarFeeds(join3(dirname2(dir), "cache"));
+var linearWorkspaces = new LinearWorkspaces(join3(dirname2(dir), "linear-workspaces.json"), undefined, log);
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -2183,6 +2427,43 @@ var server = http.createServer(async (req, res) => {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
       return;
+    }
+    if (url.pathname.startsWith("/linear/")) {
+      try {
+        if (url.pathname === "/linear/workspaces" && req.method === "GET") {
+          json(res, 200, { workspaces: await linearWorkspaces.list() });
+          return;
+        }
+        if (url.pathname === "/linear/workspaces" && req.method === "POST") {
+          const body = await readJson(req);
+          if (typeof body.key !== "string") {
+            json(res, 400, { error: "key must be a string" });
+            return;
+          }
+          json(res, 200, { workspace: await linearWorkspaces.add(body.key) });
+          return;
+        }
+        const one = /^\/linear\/workspaces\/([A-Za-z0-9_-]{1,100})$/.exec(url.pathname);
+        if (one && req.method === "DELETE") {
+          json(res, 200, { removed: await linearWorkspaces.remove(one[1]) });
+          return;
+        }
+        if (url.pathname === "/linear/graphql" && req.method === "POST") {
+          const body = await readJson(req);
+          if (typeof body.workspaceId !== "string" || typeof body.query !== "string") {
+            json(res, 400, { error: "workspaceId and query must be strings" });
+            return;
+          }
+          json(res, 200, await linearWorkspaces.graphql(body.workspaceId, body.query, body.variables ?? {}));
+          return;
+        }
+      } catch (error) {
+        if (error instanceof WorkspaceError) {
+          json(res, error.status, { error: error.message });
+          return;
+        }
+        throw error;
+      }
     }
     if (url.pathname === "/sync") {
       if (req.method === "GET") {

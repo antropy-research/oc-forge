@@ -57,7 +57,11 @@ const cleanUp = async (final) => {
     } catch (error) {
       console.log(`INFO worktree cleanup: ${String(error).split('\n')[0]}`);
     }
+    const display = { linearLayout: 'list', linearGroupBy: 'status', linearOrderBy: 'priority', linearImportCompletion: false };
+    const displayChanged = Object.entries(display).some(([key, value]) => state.settings[key] !== undefined && state.settings[key] !== value);
     const commands = [
+      // The Linear page's layout is a setting; put it back so the next run starts from the list.
+      ...(displayChanged ? [{ cmd: `cleanup-display-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: display }] : []),
       ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
       ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
       ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
@@ -507,20 +511,83 @@ try {
   check('without a Linear connection the page offers Connect', true);
 
   // …then a fake Linear behind the host's own routes, so the real workspace is never touched.
-  const linearStates = [
-    { id: 'st-backlog', name: 'Backlog', type: 'backlog', color: '#bec2c8', position: 0 },
-    { id: 'st-todo', name: 'Todo', type: 'unstarted', color: '#e2e2e2', position: 1 },
-    { id: 'st-prog', name: 'In Progress', type: 'started', color: '#f2c94c', position: 2 },
-    { id: 'st-done', name: 'Done', type: 'completed', color: '#5e6ad2', position: 3 },
+  // Two fake workspaces: OpenChamber's connection (E2E Org) and one added with an API key (Side Org).
+  const makeStates = (prefix) => [
+    { id: `${prefix}backlog`, name: 'Backlog', type: 'backlog', color: '#bec2c8', position: 0 },
+    { id: `${prefix}todo`, name: 'Todo', type: 'unstarted', color: '#e2e2e2', position: 1 },
+    { id: `${prefix}prog`, name: 'In Progress', type: 'started', color: '#f2c94c', position: 2 },
+    { id: `${prefix}done`, name: 'Done', type: 'completed', color: '#5e6ad2', position: 3 },
   ];
+  const linearStates = makeStates('st-');
   const team = { id: 'team-e2e', key: 'E2E', name: 'E2E Team' };
   const makeIssue = (n, title, stateId, assigned = true) => ({
-    id: `iss-${run}-${n}`, identifier: `E2E-${n}`, title: `${run} ${title}`, url: `https://linear.app/e2e/issue/E2E-${n}/x`, priority: 2, dueDate: null,
-    updatedAt: new Date().toISOString(), state: linearStates.find((state) => state.id === stateId), team, project: { id: 'p1', name: 'Planner' }, cycle: null, assigned,
+    id: `iss-${run}-${n}`, identifier: `E2E-${n}`, title: `${run} ${title}`, url: `https://linear.app/e2e/issue/E2E-${n}/x`, priority: 2, dueDate: null, branchName: `e2e/e2e-${n}`,
+    updatedAt: new Date().toISOString(), state: linearStates.find((state) => state.id === stateId), team, assignee: assigned ? { id: 'u-e2e', name: 'E2E Linear' } : null,
+    project: { id: 'p1', name: 'Planner' }, cycle: null, assigned,
   });
   const linearIssues = [makeIssue(1, 'linear first', 'st-todo'), makeIssue(2, 'linear second', 'st-prog'), makeIssue(3, 'linear third', 'st-backlog'), makeIssue(5, 'linear by url', 'st-todo', false)];
+  const sideStates = makeStates('st-side-');
+  const sideTeam = { id: 'team-side', key: 'SIDE', name: 'Side Team' };
+  const sideIssue = (n, title, stateId) => ({
+    id: `side-${run}-${n}`, identifier: `SIDE-${n}`, title: `${run} ${title}`, url: `https://linear.app/side/issue/SIDE-${n}/x`, priority: 1, dueDate: null, branchName: `side-me/side-${n}-${title.replace(/\s+/g, '-')}`,
+    updatedAt: new Date().toISOString(), state: sideStates.find((state) => state.id === stateId), team: sideTeam, assignee: { id: 'u-side', name: 'Side Me' },
+    project: { id: 'sp1', name: 'Side Project' }, cycle: null, assigned: true,
+  });
+  const project = (id, name, statusType, extra) => ({
+    id, name, url: `https://linear.app/x/project/${id}`, color: '#26b5ce', icon: null, description: `${name} in one line`, progress: 0.25, health: null, priority: 2, startDate: '2026-10-01', targetDate: '2026-11-30',
+    updatedAt: new Date().toISOString(), status: { id: `ps-${statusType}`, name: statusType === 'started' ? 'In Progress' : 'Planned', type: statusType, color: '#f2c94c' }, lead: null, teams: { nodes: [] }, ...extra,
+  });
+  const linearOrgs = {
+    host: {
+      org: { id: 'org-e2e', name: 'E2E Org', urlKey: 'e2e' }, viewer: { id: 'u-e2e', name: 'E2E Linear' }, states: linearStates, teams: [team], issues: linearIssues,
+      projects: [project('p1', 'Planner', 'started', { progress: 0.4, lead: { id: 'u-e2e', name: 'E2E Linear' }, teams: { nodes: [team] } })],
+    },
+    side: {
+      org: { id: 'org-side', name: 'Side Org', urlKey: 'side' }, viewer: { id: 'u-side', name: 'Side Me' }, states: sideStates, teams: [sideTeam], issues: [sideIssue(1, 'side first', 'st-side-todo'), sideIssue(2, 'side second', 'st-side-todo')],
+      projects: [project('sp1', 'Side Project', 'planned', { health: 'atRisk', teams: { nodes: [sideTeam] } })],
+    },
+  };
   const linearCalls = [];
   const strip = ({ assigned, ...issue }) => issue;
+  const isOpenIssue = (issue) => !['completed', 'canceled'].includes(issue.state.type);
+  const answerFor = (o, op, variables) => {
+    const find = (id) => o.issues.find((issue) => issue.id === id || issue.identifier === id);
+    if (op === 'PlannerWhoAmI') return { viewer: o.viewer, organization: o.org };
+    if (op === 'PlannerAssigned') return { viewer: { ...o.viewer, assignedIssues: { nodes: o.issues.filter((issue) => issue.assigned && isOpenIssue(issue)).map(strip), pageInfo: { hasNextPage: false, endCursor: null } } } };
+    if (op === 'PlannerViews') return { customViews: { nodes: [] } };
+    if (op === 'PlannerLinked') return { issues: { nodes: o.issues.filter((issue) => variables.ids.includes(issue.id)).map(strip) } };
+    if (op === 'PlannerIssue') return { issue: find(variables.id) ? strip(find(variables.id)) : null };
+    if (op === 'PlannerTeamStates') return { team: { id: variables.id, states: { nodes: o.states } } };
+    if (op === 'PlannerTeams') return { viewer: { id: o.viewer.id }, teams: { nodes: o.teams } };
+    if (op === 'PlannerSearch') return { searchIssues: { nodes: o.issues.filter((issue) => issue.title.includes(variables.term)).map(strip) } };
+    if (op === 'PlannerProjects') return { projects: { nodes: o.projects, pageInfo: { hasNextPage: false, endCursor: null } } };
+    if (op === 'PlannerProject') {
+      const found = o.projects.find((item) => item.id === variables.id);
+      return {
+        project: found ? {
+          ...found, content: `${found.name} long description`,
+          projectMilestones: { nodes: [{ id: 'm1', name: `${found.name} beta`, targetDate: '2026-11-15', progress: 0.5, sortOrder: 1 }] },
+          lastUpdate: { id: 'u1', body: `${found.name} is slipping a little`, health: found.health ?? 'onTrack', createdAt: new Date().toISOString(), url: `${found.url}/updates`, user: o.viewer },
+          issues: { nodes: o.issues.filter((issue) => issue.project?.id === found.id && isOpenIssue(issue)).map(strip) },
+        } : null,
+      };
+    }
+    if (op === 'PlannerSetState') {
+      const issue = find(variables.id);
+      const state = o.states.find((item) => item.id === variables.stateId);
+      // A state from the other workspace would mean the move went to the wrong place.
+      if (!issue || !state) return null;
+      issue.state = state;
+      return { issueUpdate: { success: true, issue: strip(issue) } };
+    }
+    if (op === 'PlannerCreateIssue') {
+      const issue = makeIssue(o.issues.length + 10, 'x', 'st-todo');
+      issue.title = variables.input.title;
+      o.issues.push(issue);
+      return { issueCreate: { success: true, issue: strip(issue) } };
+    }
+    return null;
+  };
   const isRequestRoute = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/request';
   const isStatusRoute = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/oauth/status';
   await context.route(isStatusRoute, (route) => route.fulfill({ json: { connected: true, account: 'E2E Linear', hasClient: true, settings: {}, redirectUri: '' } }));
@@ -528,24 +595,7 @@ try {
     const { query, variables = {} } = JSON.parse(route.request().postDataJSON().body);
     const op = /(?:query|mutation) (\w+)/.exec(query)?.[1];
     linearCalls.push({ op, variables });
-    const find = (id) => linearIssues.find((issue) => issue.id === id || issue.identifier === id);
-    let data;
-    if (op === 'PlannerAssigned') data = { viewer: { id: 'u-e2e', name: 'E2E Linear', assignedIssues: { nodes: linearIssues.filter((issue) => issue.assigned && !['completed', 'canceled'].includes(issue.state.type)).map(strip), pageInfo: { hasNextPage: false, endCursor: null } } } };
-    else if (op === 'PlannerViews') data = { customViews: { nodes: [] } };
-    else if (op === 'PlannerLinked') data = { issues: { nodes: linearIssues.filter((issue) => variables.ids.includes(issue.id)).map(strip) } };
-    else if (op === 'PlannerIssue') data = { issue: find(variables.id) ? strip(find(variables.id)) : null };
-    else if (op === 'PlannerTeamStates') data = { team: { id: variables.id, states: { nodes: linearStates } } };
-    else if (op === 'PlannerTeams') data = { viewer: { id: 'u-e2e' }, teams: { nodes: [team] } };
-    else if (op === 'PlannerSetState') {
-      const issue = find(variables.id);
-      issue.state = linearStates.find((state) => state.id === variables.stateId);
-      data = { issueUpdate: { success: true, issue: strip(issue) } };
-    } else if (op === 'PlannerCreateIssue') {
-      const issue = makeIssue(linearIssues.length + 10, 'x', 'st-todo');
-      issue.title = variables.input.title;
-      linearIssues.push(issue);
-      data = { issueCreate: { success: true, issue: strip(issue) } };
-    } else if (op === 'PlannerSearch') data = { searchIssues: { nodes: linearIssues.filter((issue) => issue.title.includes(variables.term)).map(strip) } };
+    const data = answerFor(linearOrgs.host, op, variables);
     const answer = data ? { data } : { errors: [{ message: `unexpected ${op}` }] };
     await route.fulfill({ json: { status: 200, body: JSON.stringify(answer) } });
   });
@@ -614,6 +664,123 @@ try {
 
   await nav('Settings').click();
   await frame.getByRole('checkbox', { name: /Complete a task when its issue is closed in Linear/ }).uncheck();
+
+  // Phase 9: more Linear workspaces, projects, grouping, the board and Linear's branch names (after Orca).
+  // A key Linear does not accept goes through the real service, which asks Linear and refuses it.
+  await frame.getByRole('textbox', { name: 'Linear API key' }).fill(`lin_api_e2e-made-up-key-${run}`);
+  await frame.getByRole('button', { name: 'Add workspace' }).click();
+  const refusal = frame.getByRole('alert').filter({ hasText: /rejected the key|reach Linear|Linear answered/ });
+  check('a key Linear does not accept is refused', await refusal.waitFor({ timeout: 30_000 }).then(() => true).catch(() => false), (await refusal.innerText().catch(() => '')).slice(0, 100));
+  // From here the service's workspace endpoints answer for a fake second workspace.
+  const sideWorkspace = { id: 'org-side', name: 'Side Org', urlKey: 'side', account: 'Side Me', addedAt: new Date().toISOString() };
+  let sideConnected = false;
+  const sideCalls = [];
+  const isServiceRoute = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/service/request';
+  await context.route(isServiceRoute, async (route) => {
+    const outer = route.request().postDataJSON();
+    if (!outer?.path?.startsWith('/linear/')) return route.continue();
+    let payload;
+    if (outer.path === '/linear/workspaces' && outer.method === 'GET') payload = { workspaces: sideConnected ? [sideWorkspace] : [] };
+    else if (outer.path === '/linear/workspaces' && outer.method === 'POST') {
+      sideConnected = true;
+      payload = { workspace: sideWorkspace };
+    } else if (outer.path === `/linear/workspaces/${sideWorkspace.id}` && outer.method === 'DELETE') {
+      sideConnected = false;
+      payload = { removed: true };
+    } else if (outer.path === '/linear/graphql') {
+      const { workspaceId, query, variables = {} } = JSON.parse(outer.body);
+      const op = /(?:query|mutation) (\w+)/.exec(query)?.[1];
+      sideCalls.push({ workspaceId, op, variables });
+      const data = workspaceId === sideWorkspace.id ? answerFor(linearOrgs.side, op, variables) : null;
+      payload = { status: 200, body: JSON.stringify(data ? { data } : { errors: [{ message: `unexpected ${op} in ${workspaceId}` }] }) };
+    }
+    await route.fulfill({ json: payload ? { status: 200, body: JSON.stringify(payload) } : { status: 404, body: JSON.stringify({ error: 'not found' }) } });
+  });
+  await frame.getByRole('textbox', { name: 'Linear API key' }).fill(`lin_api_e2e-side-key-${run}`);
+  await frame.getByRole('button', { name: 'Add workspace' }).click();
+  const workspaceList = frame.getByRole('list', { name: 'Linear workspaces' });
+  await workspaceList.locator('li', { hasText: 'Side Org' }).waitFor({ timeout: 10_000 });
+  check('a second workspace can be added with an API key', (await workspaceList.innerText()).includes('E2E Org'), (await workspaceList.innerText()).replace(/\s+/g, ' '));
+
+  await nav('Linear').click();
+  const sideRow = (n) => frame.locator('.linear-page li.issue-row', { hasText: new RegExp(`SIDE-${n}(?!\\d)`) }).first();
+  await sideRow(1).waitFor({ timeout: 15_000 });
+  check('All workspaces merges the issues of both, each marked with its workspace', (await issueRow(3).count()) === 1 && (await sideRow(1).locator('.ws-badge').innerText()) === 'Side Org');
+  await frame.getByRole('combobox', { name: 'Group issues by' }).selectOption('workspace');
+  await frame.locator('.linear-page .issue-group h3', { hasText: 'Side Org' }).waitFor({ timeout: 10_000 });
+  const workspaceGroups = (await frame.locator('.linear-page .issue-group h3').allInnerTexts()).map((text) => text.replace(/\s+\d+$/, ''));
+  check('issues group by workspace', workspaceGroups.join('|') === 'E2E Org|Side Org', workspaceGroups.join(' | '));
+  await frame.getByRole('combobox', { name: 'Linear workspace' }).selectOption({ label: 'Side Org' });
+  await frame.locator('.linear-page li.issue-row', { hasText: /E2E-\d/ }).first().waitFor({ state: 'detached', timeout: 10_000 });
+  check('one workspace can be shown on its own', (await sideRow(2).count()) === 1);
+  await frame.getByRole('combobox', { name: 'Linear workspace' }).selectOption('all');
+  await frame.getByRole('combobox', { name: 'Group issues by' }).selectOption('status');
+  await frame.getByRole('radio', { name: 'Board' }).click();
+  const column = (label) => frame.locator(`.issue-board section.board-column[aria-label="${label}"]`);
+  await column('Todo').locator('li.issue-row', { hasText: /SIDE-1(?!\d)/ }).waitFor({ timeout: 10_000 });
+  check('the board shows status columns in workflow order', (await frame.locator('.issue-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')))).join('|') === 'Backlog|Todo|In progress|Done');
+  await shot('26-linear-board');
+  await column('Todo').locator('li.issue-row', { hasText: /SIDE-1(?!\d)/ }).dragTo(column('In progress'));
+  await column('In progress').locator('li.issue-row', { hasText: /SIDE-1(?!\d)/ }).waitFor({ timeout: 10_000 });
+  const boardMove = sideCalls.find((call) => call.op === 'PlannerSetState' && call.variables.id === `side-${run}-1`);
+  check('dropping a card on a column moves the issue in its own workspace', boardMove?.workspaceId === 'org-side' && boardMove.variables.stateId === 'st-side-prog', JSON.stringify(boardMove ?? null));
+
+  await frame.getByRole('tab', { name: 'Projects' }).click();
+  await frame.getByRole('button', { name: 'Open project Side Project' }).waitFor({ timeout: 10_000 });
+  check('Projects lists the open projects of every workspace', (await frame.getByRole('button', { name: 'Open project Planner' }).count()) === 1);
+  await frame.getByRole('button', { name: 'Open project Side Project' }).click();
+  const projectView = frame.locator('.project-detail');
+  await projectView.getByRole('heading', { name: 'Side Project' }).waitFor({ timeout: 10_000 });
+  await projectView.getByRole('button', { name: 'Plan SIDE-2 today' }).waitFor({ timeout: 10_000 });
+  const facts = (await projectView.locator('.project-facts').innerText()).replace(/\s+/g, ' ');
+  check('a project shows status, progress and health', facts.includes('Planned') && facts.includes('25%') && facts.includes('At risk'), facts);
+  await projectView.getByRole('button', { name: 'Plan SIDE-2 today' }).click();
+  const plannedSide = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.source?.key === 'SIDE-2' && !task.deletedAt));
+  const sideTask = Object.values(plannedSide.state.tasks).find((task) => task.source?.key === 'SIDE-2' && !task.deletedAt);
+  check('planning a project issue links it with its workspace and branch', sideTask?.source?.workspaceId === 'org-side' && sideTask.source.branch === 'side-me/side-2-side-second', JSON.stringify(sideTask?.source ?? null).slice(0, 200));
+  await projectView.getByRole('tab', { name: 'Overview' }).click();
+  await projectView.getByText('Side Project beta').waitFor({ timeout: 5000 });
+  check('the project overview shows milestones and the latest update', (await projectView.innerText()).includes('Side Project is slipping a little'));
+  await shot('27-linear-project');
+  await projectView.getByRole('button', { name: '← All projects' }).click();
+
+  await frame.getByRole('tab', { name: 'Planned' }).click();
+  const plannedToday = frame.locator('section.issue-group[aria-label="Planned Today"]');
+  await plannedToday.locator('li', { hasText: /SIDE-2(?!\d)/ }).waitFor({ timeout: 10_000 });
+  check('Planned lists the Linear issues already in the plan', (await plannedToday.locator('li', { hasText: /SIDE-2(?!\d)/ }).locator('.ws-badge').innerText()) === 'Side Org');
+
+  await nav('Today').click();
+  await linearCard('side second').getByRole('button', { name: 'Mark complete' }).click();
+  const sidePrompt = frame.getByRole('alertdialog', { name: 'Update SIDE-2 in Linear' });
+  await sidePrompt.waitFor({ timeout: 10_000 });
+  await sidePrompt.getByRole('button', { name: 'Move' }).click();
+  await page.waitForTimeout(1500);
+  const sideDone = sideCalls.find((call) => call.op === 'PlannerSetState' && call.variables.id === `side-${run}-2`);
+  check('completing it moves the issue to Done in its own workspace, not through OpenChamber', sideDone?.variables.stateId === 'st-side-done' && !linearCalls.some((call) => call.variables?.id === `side-${run}-2`), JSON.stringify(sideDone ?? null));
+
+  await nav('Linear').click();
+  await frame.getByRole('tab', { name: 'Issues' }).click();
+  await frame.getByRole('button', { name: 'Plan SIDE-1 today' }).click();
+  await nav('Today').click();
+  await linearCard('side first').getByRole('button', { name: new RegExp(`Open ${run} side first`) }).click();
+  const sideDialog = frame.getByRole('dialog', { name: 'Task details' });
+  await sideDialog.getByRole('button', { name: 'Send to an agent' }).click();
+  await sideDialog.getByRole('combobox', { name: 'Agent workspace' }).selectOption('new');
+  const suggestedBranch = await sideDialog.getByRole('textbox', { name: 'Worktree branch' }).inputValue();
+  check("an agent's new worktree defaults to Linear's branch name", suggestedBranch === 'side-me/side-1-side-first', suggestedBranch);
+  check('the task shows which workspace its issue is in', (await sideDialog.locator('section[aria-label="Linear"] .ws-badge').innerText()) === 'Side Org');
+  await sideDialog.getByRole('button', { name: 'Cancel' }).click();
+  await sideDialog.getByRole('button', { name: 'Close' }).click();
+
+  await nav('Settings').click();
+  await frame.getByRole('button', { name: 'Remove the Linear workspace Side Org' }).click();
+  await workspaceList.locator('li', { hasText: 'Side Org' }).waitFor({ state: 'detached', timeout: 10_000 });
+  await nav('Linear').click();
+  await issueRow(3).waitFor({ timeout: 10_000 });
+  check('removing a workspace takes its issues away', (await frame.locator('.linear-page li.issue-row', { hasText: /SIDE-\d/ }).count()) === 0);
+  await frame.getByRole('radio', { name: 'List' }).click();
+  await context.unroute(isServiceRoute);
+
   await context.unroute(isRequestRoute);
   await context.unroute(isStatusRoute);
 

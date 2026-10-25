@@ -39,7 +39,17 @@ export interface TaskSourceRef {
   status?: { name: string; type: string; color: string };
   /** The same item elsewhere, as `owner/repo#number` (a Linear issue Linear syncs with GitHub), so it is planned once. */
   mirrors?: string[];
+  /** Linear workspace (organization id) the issue lives in; absent on links made before workspaces, which mean OpenChamber's own connection. */
+  workspaceId?: string;
+  /** Git branch Linear suggests for the issue; an agent's worktree uses it so its pull request links back. */
+  branch?: string;
 }
+
+/** How the Linear page groups and orders issues. */
+export const LINEAR_GROUPS = ['status', 'priority', 'project', 'team', 'assignee', 'workspace', 'none'] as const;
+export type LinearGroupBy = (typeof LINEAR_GROUPS)[number];
+export const LINEAR_ORDERS = ['priority', 'updated', 'due', 'identifier'] as const;
+export type LinearOrderBy = (typeof LINEAR_ORDERS)[number];
 
 export type Priority = 'urgent' | 'high' | 'medium' | 'low';
 
@@ -239,6 +249,10 @@ export interface Settings {
   linearOnPlan: 'ask' | 'start' | 'nothing';
   /** Complete the task when its issue is completed or canceled in Linear (Sunsama does not). */
   linearImportCompletion: boolean;
+  /** The Linear page: issues as a list or a board, grouped and ordered by. */
+  linearLayout: 'list' | 'board';
+  linearGroupBy: LinearGroupBy;
+  linearOrderBy: LinearOrderBy;
   /** Suggest planned time and channel for new tasks from similar past tasks. */
   suggestFromHistory: boolean;
   /** Focus mode's Pomodoro lengths, in minutes. */
@@ -277,6 +291,9 @@ export const DEFAULT_SETTINGS: Settings = {
   linearOnComplete: 'ask',
   linearOnPlan: 'nothing',
   linearImportCompletion: false,
+  linearLayout: 'list',
+  linearGroupBy: 'status',
+  linearOrderBy: 'priority',
   suggestFromHistory: true,
   pomodoroMinutes: 25,
   breakMinutes: 5,

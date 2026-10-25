@@ -78,7 +78,9 @@ const DispatchForm = ({ task, onDone }: { task: Task; onDone: () => void }) => {
   const av = useAgents();
   const [projectId, setProjectId] = useState(() => agents.defaultProject(view.state, task.id)?.id ?? '');
   const [workspaceKind, setWorkspaceKind] = useState<'project' | 'new' | string>('project');
-  const [branch, setBranch] = useState(() => branchFor(task.title, task.id));
+  // Linear's own branch name links the pull request back to the issue.
+  const linearBranch = task.source?.kind === 'linear' ? task.source.branch ?? null : null;
+  const [branch, setBranch] = useState(() => linearBranch ?? branchFor(task.title, task.id));
   const [worktrees, setWorktrees] = useState<GuestWorktree[]>([]);
   const [prompt, setPrompt] = useState(() => taskPrompt(view.state, task.id));
   const [open, setOpen] = useState(false);
@@ -123,6 +125,7 @@ const DispatchForm = ({ task, onDone }: { task: Task; onDone: () => void }) => {
           <input aria-label="Worktree branch" value={branch} onInput={(event) => setBranch(event.currentTarget.value)} />
         </label>
       )}
+      {workspaceKind === 'new' && linearBranch && branch === linearBranch && <p class="hint">Linear's branch name for {task.source!.key}, so a pull request from it links back to the issue.</p>}
       <textarea class="dispatch-prompt" rows={6} aria-label="Agent prompt" value={prompt} onInput={(event) => setPrompt(event.currentTarget.value)} />
       <div class="row">
         <label class="inline">

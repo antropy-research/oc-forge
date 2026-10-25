@@ -1,6 +1,6 @@
 {
   "name": "@oc-forge/openchamber-planner",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Sunsama-style daily planning inside OpenChamber.",
@@ -54,7 +54,7 @@
       ],
       "integration": {
         "name": "Linear",
-        "description": "Plan your Linear issues in the Planner; completing a task can move its issue to Done.",
+        "description": "Plan your Linear issues and projects in the Planner, across workspaces; completing a task can move its issue to Done.",
         "host": {
           "provider": "linear"
         }

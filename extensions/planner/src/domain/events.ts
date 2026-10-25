@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -116,7 +116,9 @@ const isSource = (value: unknown): value is TaskSourceRef =>
   (value.title === undefined || isShortText(value.title, TITLE_MAX)) &&
   (value.teamId === undefined || isShortText(value.teamId, 200)) &&
   (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40))) &&
-  (value.mirrors === undefined || (Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))));
+  (value.mirrors === undefined || (Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200)))) &&
+  (value.workspaceId === undefined || (isShortText(value.workspaceId, 200) && (value.workspaceId as string).length > 0)) &&
+  (value.branch === undefined || isShortText(value.branch, 200));
 
 const PRIORITY_VALUES = new Set(['urgent', 'high', 'medium', 'low']);
 const isPriority = (value: unknown): boolean => value === null || (typeof value === 'string' && PRIORITY_VALUES.has(value));
@@ -164,9 +166,12 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'linearOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'linearOnComplete must be ask, complete or nothing';
     else if (key === 'linearOnPlan' && !['ask', 'start', 'nothing'].includes(value as string)) return 'linearOnPlan must be ask, start or nothing';
     else if (key === 'linearImportCompletion' && typeof value !== 'boolean') return 'linearImportCompletion must be true or false';
+    else if (key === 'linearLayout' && value !== 'list' && value !== 'board') return 'linearLayout must be list or board';
+    else if (key === 'linearGroupBy' && !(LINEAR_GROUPS as readonly unknown[]).includes(value)) return `linearGroupBy must be one of ${LINEAR_GROUPS.join(', ')}`;
+    else if (key === 'linearOrderBy' && !(LINEAR_ORDERS as readonly unknown[]).includes(value)) return `linearOrderBy must be one of ${LINEAR_ORDERS.join(', ')}`;
     else if (key === 'suggestFromHistory' && typeof value !== 'boolean') return 'suggestFromHistory must be true or false';
     else if ((key === 'pomodoroMinutes' || key === 'breakMinutes') && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 180)) return `${key} must be 1-180`;
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes'].includes(key)) return `unknown setting ${key}`;
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };

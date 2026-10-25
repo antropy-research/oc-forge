@@ -8,6 +8,7 @@ import { Planner } from './planner.ts';
 import { CalendarFeeds } from './calendars.ts';
 import { SyncManager } from './sync.ts';
 import { GitHubSource, LISTS, type ListKind } from './github.ts';
+import { LinearWorkspaces, WorkspaceError } from './linear.ts';
 import { daysBetween, isDateKey } from '../src/domain/dates.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
@@ -30,6 +31,8 @@ const snapshot = () => ({ ...planner.snapshot(), sync: sync!.status() });
 const github = new GitHubSource();
 // Feed copies are a cache, kept beside the git-tracked data rather than in it.
 const feeds = new CalendarFeeds(join(dirname(dir), 'cache'));
+// Linear API keys stay on this machine: beside the data, never in its synced repository.
+const linearWorkspaces = new LinearWorkspaces(join(dirname(dir), 'linear-workspaces.json'), undefined, log);
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -101,6 +104,43 @@ const server = http.createServer(async (req, res) => {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
       return;
+    }
+    if (url.pathname.startsWith('/linear/')) {
+      try {
+        if (url.pathname === '/linear/workspaces' && req.method === 'GET') {
+          json(res, 200, { workspaces: await linearWorkspaces.list() });
+          return;
+        }
+        if (url.pathname === '/linear/workspaces' && req.method === 'POST') {
+          const body = (await readJson(req)) as { key?: unknown };
+          if (typeof body.key !== 'string') {
+            json(res, 400, { error: 'key must be a string' });
+            return;
+          }
+          json(res, 200, { workspace: await linearWorkspaces.add(body.key) });
+          return;
+        }
+        const one = /^\/linear\/workspaces\/([A-Za-z0-9_-]{1,100})$/.exec(url.pathname);
+        if (one && req.method === 'DELETE') {
+          json(res, 200, { removed: await linearWorkspaces.remove(one[1]!) });
+          return;
+        }
+        if (url.pathname === '/linear/graphql' && req.method === 'POST') {
+          const body = (await readJson(req)) as { workspaceId?: unknown; query?: unknown; variables?: unknown };
+          if (typeof body.workspaceId !== 'string' || typeof body.query !== 'string') {
+            json(res, 400, { error: 'workspaceId and query must be strings' });
+            return;
+          }
+          json(res, 200, await linearWorkspaces.graphql(body.workspaceId, body.query, body.variables ?? {}));
+          return;
+        }
+      } catch (error) {
+        if (error instanceof WorkspaceError) {
+          json(res, error.status, { error: error.message });
+          return;
+        }
+        throw error;
+      }
     }
     if (url.pathname === '/sync') {
       if (req.method === 'GET') {

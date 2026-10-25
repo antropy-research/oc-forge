@@ -8,19 +8,20 @@ import { createTaskCommands } from './commands.ts';
 
 /** Add a parsed line; a pasted Linear issue URL becomes a task linked to that issue, as in Sunsama. */
 export const addParsedTask = async (client: PlannerClient, linear: LinearStore, parsed: QuickAdd, fallback: Placement, edge: 'top' | 'bottom', today: DateKey, folderId: string | null = null): Promise<void> => {
-  const key = parseLinearUrl(parsed.title);
-  if (key && linear.getView().connected !== false) {
+  const url = parseLinearUrl(parsed.title);
+  if (url && linear.available()) {
     try {
-      const issue = await linear.issue(key);
+      // The URL names its workspace, so the issue is looked up there and nowhere else.
+      const issue = await linear.issue(url.key, url.urlKey);
       if (issue) {
         const { bodies, taskId } = linear.importCommands(issue, parsed.placement ?? fallback);
         if (parsed.plannedMinutes) bodies.push({ type: 'task.updated', taskId, patch: { plannedMinutes: parsed.plannedMinutes } });
         await client.dispatch(bodies, { undo: `Planned ${issue.identifier}` });
         return;
       }
-      client.notify(`${key} was not found in Linear; added the link as a task`);
+      client.notify(`${url.key} was not found in your connected Linear workspaces; added the link as a task`);
     } catch {
-      client.notify(`Couldn't look up ${key} in Linear; added the link as a task`);
+      client.notify(`Couldn't look up ${url.key} in Linear; added the link as a task`);
     }
   }
   await client.dispatch(createTaskCommands(client.getView().state, parsed, fallback, edge, today, folderId));

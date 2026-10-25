@@ -98,19 +98,68 @@ const Calendars = () => {
   );
 };
 
-const LinearSettings = () => {
+/** OpenChamber's own Linear connection, plus workspaces added with a personal API key. */
+const LinearWorkspaceList = () => {
   const { client, linear } = usePlanner();
-  const view = useView();
   const lv = useLinear();
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const hostWorkspace = lv.workspaces.find((workspace) => workspace.via === 'host');
+  const keyed = lv.workspaces.filter((workspace) => workspace.via === 'key');
+  const add = () => {
+    if (!key.trim() || busy) return;
+    setBusy(true);
+    setProblem(null);
+    linear
+      .addWorkspace(key)
+      .then((workspace) => {
+        setKey('');
+        client.notify(`Added the Linear workspace ${workspace.name}`);
+      })
+      .catch((error) => setProblem(error instanceof Error ? error.message : String(error)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <ul class="channel-list workspace-list" aria-label="Linear workspaces">
+        <li>
+          <span class="channel-name">{hostWorkspace ? hostWorkspace.name : 'OpenChamber connection'}</span>
+          <span class="muted grow">
+            {hostWorkspace ? `through OpenChamber, as ${hostWorkspace.account}` : lv.connected === false ? 'not connected' : lv.connected ? `connected${lv.account ? ` as ${lv.account}` : ''}` : 'checking…'}
+          </span>
+          {lv.connected === false && <button class="link" onClick={() => void linear.connect()}>Connect Linear</button>}
+        </li>
+        {keyed.map((workspace) => (
+          <li key={workspace.id}>
+            <span class="channel-name">{workspace.name}</span>
+            <span class={`grow ${workspace.error ? 'danger' : 'muted'}`}>API key, as {workspace.account}{workspace.error ? ` · ${workspace.error}` : ''}</span>
+            <button class="link danger" aria-label={`Remove the Linear workspace ${workspace.name}`} onClick={() => void linear.removeWorkspace(workspace.id).catch((error) => setProblem(error instanceof Error ? error.message : String(error)))}>Remove</button>
+          </li>
+        ))}
+      </ul>
+      <p class="hint">
+        OpenChamber connects one Linear workspace. Add more with a personal API key from Linear → Settings → Security &amp; access. Keys stay on this machine, outside the synced
+        plan, in a file only you can read, and run nothing but the Planner's own Linear requests.
+      </p>
+      <div class="row">
+        <input class="grow" type="password" autocomplete="off" aria-label="Linear API key" placeholder="lin_api_…" value={key} onInput={(event) => setKey(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && add()} />
+        <button onClick={add} disabled={busy || !key.trim()}>{busy ? 'Checking…' : 'Add workspace'}</button>
+      </div>
+      {problem && <p class="danger" role="alert">{problem}</p>}
+    </>
+  );
+};
+
+const LinearSettings = () => {
+  const { client } = usePlanner();
+  const view = useView();
   const { settings } = view.state;
   const update = (patch: Partial<PlannerSettings>) => void client.dispatch([{ type: 'settings.updated', patch }]);
   return (
     <fieldset>
       <legend>Linear</legend>
-      <p class="hint">
-        {lv.connected ? `Connected${lv.account ? ` as ${lv.account}` : ''} through OpenChamber's Linear connection.` : lv.connected === false ? 'Not connected.' : 'Checking the connection…'}{' '}
-        {lv.connected === false && <button class="link" onClick={() => void linear.connect()}>Connect Linear</button>}
-      </p>
+      <LinearWorkspaceList />
       <label>
         When I complete a Linear task
         <select value={settings.linearOnComplete} onChange={(event) => update({ linearOnComplete: event.currentTarget.value as PlannerSettings['linearOnComplete'] })}>
