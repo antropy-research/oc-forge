@@ -1,0 +1,67 @@
+import type { ComponentChildren } from 'preact';
+import { tasksForDay } from '../../src/domain/selectors.ts';
+import { usePlanner, useView } from '../lib/context.ts';
+import type { ServiceProblem } from '../lib/client.ts';
+
+export type Route = 'home' | 'today' | 'backlog' | 'settings';
+
+const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
+  <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
+    <span>{children}</span>
+    {badge ? <span class="nav-badge">{badge}</span> : null}
+  </button>
+);
+
+export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) => void }) => {
+  const view = useView();
+  const open = tasksForDay(view.state, view.today).filter((task) => !task.completedAt).length;
+  return (
+    <nav class="nav" aria-label="Planner">
+      <div class="brand">Planner</div>
+      <NavItem route="home" current={route} onRoute={onRoute}>Home</NavItem>
+      <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>
+      <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>
+      <div class="nav-spacer" />
+      <NavItem route="settings" current={route} onRoute={onRoute}>Settings</NavItem>
+      <div class={`save-state${view.saving ? ' is-saving' : ''}`} aria-live="polite">{view.saving ? 'Saving…' : 'Saved'}</div>
+    </nav>
+  );
+};
+
+const PROBLEM_TEXT: Record<ServiceProblem, { title: string; body: string }> = {
+  'not-approved': {
+    title: 'Allow the Planner service',
+    body: 'Planner keeps your plan in a small local service. Open Settings → Extensions, find Planner, and approve its requested access, then try again.',
+  },
+  disabled: { title: 'Planner is paused', body: 'Turn Planner back on in Settings → Extensions.' },
+  failed: { title: 'The Planner service stopped', body: 'It crashed or did not start. Try again; if it keeps failing, check the OpenChamber server log.' },
+  unavailable: { title: 'Planner is not reachable', body: 'The local service did not answer.' },
+};
+
+/** Shown until the first snapshot arrives, or when the service cannot answer. */
+export const ServiceGate = () => {
+  const { client } = usePlanner();
+  const view = useView();
+  if (!view.problem) return <div class="gate"><div class="spinner" aria-label="Loading planner" /></div>;
+  const text = PROBLEM_TEXT[view.problem];
+  return (
+    <div class="gate" role="alert">
+      <h2>{text.title}</h2>
+      <p>{text.body}</p>
+      {view.error && <p class="hint">{view.error}</p>}
+      <button class="primary" onClick={() => void client.load()}>Try again</button>
+    </div>
+  );
+};
+
+export const ErrorToast = () => {
+  const { client } = usePlanner();
+  const view = useView();
+  if (!view.error || !view.loaded) return null;
+  return (
+    <div class="toast" role="alert">
+      <span>{view.error}</span>
+      <button class="link" onClick={() => client.dismissError()}>Dismiss</button>
+    </div>
+  );
+};
