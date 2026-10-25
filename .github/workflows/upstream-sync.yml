@@ -1,6 +1,6 @@
 name: Upstream sync
 
-# Follows the latest formal release tag of OpenCode, OpenChamber, and Orca.
+# Follows the latest official stable release tags listed in vendors.json.
 on:
   schedule:
     - cron: "17 * * * *"

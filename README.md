@@ -1,15 +1,15 @@
 # oc-forge
 
-Patched, jointly pinned releases of OpenCode, OpenChamber, and Orca.
+Patched, jointly pinned releases of OpenCode, OpenChamber, Orca, and VS Code.
 
 The `vendors/` submodules are pinned to official stable release git tags in
 `vendors.json` and are **never modified**. Fixes live in `adapters/` and are
 applied in memory while the OpenCode build runs.
 
 OpenCode V2 uses npm `@opencode/cli`'s `latest` version and its matching git tag;
-GitHub's latest release still tracks V1. OpenChamber and Orca use GitHub's latest
+GitHub's latest release still tracks V1. OpenChamber, Orca, and VS Code use GitHub's latest
 non-draft, non-prerelease desktop release. Current binary builds cover OpenCode;
-OpenChamber and Orca are source-pinned for future joint packaging.
+OpenChamber, Orca, and VS Code are source-pinned for future joint packaging.
 
 ## Adapters
 
@@ -21,8 +21,8 @@ OpenChamber and Orca are source-pinned for future joint packaging.
 
 | Folder | Contains |
 |---|---|
-| `vendors/` | Pristine OpenCode, OpenChamber, and Orca release submodules. |
-| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/`, and `orca/`. Empty vendor folders are kept with `.gitkeep` until patches are added. |
+| `vendors/` | Pristine OpenCode, OpenChamber, Orca, and VS Code release submodules. |
+| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/`, `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added. |
 | `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `upstream.py`, `verify.py`. |
 | `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`. |
 

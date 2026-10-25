@@ -7,3 +7,6 @@
 [submodule "vendors/orca"]
 	path = vendors/orca
 	url = https://github.com/stablyai/orca.git
+[submodule "vendors/vscode"]
+	path = vendors/vscode
+	url = https://github.com/microsoft/vscode.git
