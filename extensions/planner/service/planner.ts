@@ -49,6 +49,10 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'calendar.added': return `Subscribe to calendar: ${event.calendar.name}`;
     case 'calendar.updated': return 'Edit calendar';
     case 'calendar.removed': return 'Remove calendar';
+    case 'run.started': return `Start agent: ${titleOf(event.run.taskId)}`;
+    case 'run.outcome': return `Agent run ${event.outcome}`;
+    case 'run.reviewed': return `Review agent run: ${event.verdict}`;
+    case 'run.removed': return 'Unlink agent run';
     case 'channel.created': return `Add channel: ${event.channel.name}`;
     case 'channel.updated': return `Edit channel: ${event.channelId}`;
     case 'channel.deleted': return `Delete channel: ${event.channelId}`;

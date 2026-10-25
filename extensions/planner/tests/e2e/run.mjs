@@ -2,6 +2,7 @@
 // Run on the host: node extensions/planner/tests/e2e/run.mjs [baseUrl] [outDir]
 // Uses this package's playwright-core with the Chromium in ~/.cache/ms-playwright.
 // The UI password is read from the dev container's secrets file and never printed.
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -222,7 +223,6 @@ try {
     'BEGIN:VEVENT', `UID:${run}-morning`, `DTSTART:${localToUtc(9 * 60, tomorrowKey)}`, `DTEND:${localToUtc(10 * 60, tomorrowKey)}`, `SUMMARY:${run} morning`, 'END:VEVENT',
     'END:VCALENDAR', '',
   ].join('\r\n');
-  const { execFileSync } = await import('node:child_process');
   execFileSync('docker', ['exec', '-i', 'oc-forge-openchamber-dev', 'sh', '-c', 'cat > /home/node/planner-e2e.ics'], { input: ics });
 
   await frame.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -560,6 +560,90 @@ try {
   await context.unroute(isRequestRoute);
   await context.unroute(isStatusRoute);
 
+  // Phase 7: agents. Real OpenCode chats in the dev container's demo project, with a trivial prompt.
+  const TRIVIAL = 'Reply with exactly the word OK. Do not use any tools and do not edit files.';
+  const sendToAgent = async (title, setup) => {
+    await nav('Home').click();
+    await addInToday(title);
+    const card = frame.locator('section.day-column.is-today li.task-card', { hasText: title });
+    await card.getByRole('button', { name: new RegExp(`Open ${title}`) }).click();
+    const dialog = frame.getByRole('dialog', { name: 'Task details' });
+    await dialog.getByRole('button', { name: 'Send to an agent' }).click();
+    await dialog.getByRole('combobox', { name: 'Agent project' }).selectOption({ label: 'planner-demo-a' });
+    await dialog.getByRole('textbox', { name: 'Agent prompt' }).fill(TRIVIAL);
+    if (setup) await setup(dialog);
+    return { card, dialog };
+  };
+  const taskTitled = (latest, title) => Object.values(latest.state.tasks).find((task) => task.title === title && !task.deletedAt);
+  const runsOf = (latest, title) => Object.values(latest.state.runs).filter((item) => item.taskId === taskTitled(latest, title)?.id);
+
+  const agentTitle = `${run} agent task`;
+  const firstAgent = await sendToAgent(agentTitle);
+  await firstAgent.dialog.getByRole('button', { name: 'Start agent' }).dblclick();
+  await firstAgent.dialog.locator('li.run-row').first().waitFor({ timeout: 120_000 });
+  await page.waitForTimeout(1500);
+  const afterStart = await serviceState();
+  check('starting twice quickly makes one run (no duplicate dispatch)', runsOf(afterStart, agentTitle).length === 1, `${runsOf(afterStart, agentTitle).length} runs`);
+  const agentRun = runsOf(afterStart, agentTitle)[0];
+  check('the run keeps project, directory and session', Boolean(agentRun?.sessionId && agentRun.projectId && agentRun.directory?.endsWith('planner-demo-a')), JSON.stringify(agentRun ?? null).slice(0, 160));
+  const reviewed = await firstAgent.dialog.locator('li.run-row', { hasText: 'Ready for review' }).waitFor({ timeout: 180_000 }).then(() => true).catch(() => false);
+  check('a finished turn shows as Ready for review', reviewed, (await firstAgent.dialog.locator('li.run-row').first().innerText()).replace(/\s+/g, ' ').slice(0, 120));
+  check('a finished turn does not complete the task', !taskTitled(await serviceState(), agentTitle)?.completedAt);
+  await shot('19-agent-run');
+  await firstAgent.dialog.getByRole('button', { name: 'Close' }).click();
+  check('the card shows the agent state', (await firstAgent.card.locator('.agent-chip').innerText().catch(() => '')).includes('Review'));
+  const sessionsResponse = await context.request.get(`${base}/api/session?directory=${encodeURIComponent(agentRun.directory)}`);
+  const chat = (await sessionsResponse.json()).data.find((item) => item.id === agentRun.sessionId);
+  check('the chat is named with the task chip', /^PLN-\w{4} /.test(chat?.title ?? '') && chat.title.includes(agentTitle), chat?.title);
+
+  await nav('Agents').click();
+  const reviewGroup = frame.locator('section.agent-group[aria-label="Ready for review"]');
+  await reviewGroup.locator('li.agent-task', { hasText: agentTitle }).waitFor({ timeout: 10_000 });
+  check('Agents lists the run under Ready for review', true);
+  await shot('20-agents');
+  await reviewGroup.locator('li.agent-task', { hasText: agentTitle }).getByRole('button', { name: 'Accept and complete' }).click();
+  const accepted = await waitForState((latest) => Boolean(taskTitled(latest, agentTitle)?.completedAt) && runsOf(latest, agentTitle)[0]?.review?.verdict === 'accepted');
+  check('Accept and complete records the review and completes the task', Boolean(taskTitled(accepted, agentTitle)?.completedAt) && runsOf(accepted, agentTitle)[0]?.review?.verdict === 'accepted');
+
+  const worktreeTitle = `${run} worktree task`;
+  const branchName = `planner/${run}`;
+  const secondAgent = await sendToAgent(worktreeTitle, async (dialog) => {
+    await dialog.getByRole('combobox', { name: 'Agent workspace' }).selectOption('new');
+    await dialog.getByRole('textbox', { name: 'Worktree branch' }).fill(branchName);
+  });
+  await secondAgent.dialog.getByRole('button', { name: 'Start agent' }).click();
+  await secondAgent.dialog.locator('li.run-row').first().waitFor({ timeout: 200_000 });
+  const worktreeRun = runsOf(await serviceState(), worktreeTitle)[0];
+  check('an agent can work in a new worktree', worktreeRun?.worktree?.branch === branchName, JSON.stringify(worktreeRun?.worktree ?? null));
+  await secondAgent.dialog.getByRole('button', { name: 'Close' }).click();
+
+  // From the chat: a message action, /task, and the session action.
+  await nav('Agents').click();
+  await frame.locator('li.agent-task', { hasText: agentTitle }).getByRole('button', { name: 'Open chat' }).click();
+  await page.waitForURL((url) => url.searchParams.get('session') === agentRun.sessionId, { timeout: 15_000 });
+  const reply = page.getByText(/^OK\.?$/).last();
+  if (await reply.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false)) {
+    await reply.hover();
+    await page.getByRole('button', { name: 'More actions' }).last().click();
+    await page.getByRole('menuitem', { name: 'Add to Planner' }).click();
+    const fromMessage = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.sessionRef?.sessionId === agentRun.sessionId && task.notes.startsWith('From "') && !task.deletedAt), 15_000);
+    check('"Add to Planner" on a message makes a task linked to the chat', Object.values(fromMessage.state.tasks).some((task) => task.sessionRef?.sessionId === agentRun.sessionId && task.notes.startsWith('From "')));
+  } else {
+    console.log('INFO the agent did not answer exactly OK; skipped the message action check');
+  }
+  const composer = page.getByRole('textbox').last();
+  await composer.click();
+  await composer.fill(`/task ${run} from slash ~15m`);
+  await composer.press('Enter');
+  const slashed = await waitForState((latest) => Boolean(taskTitled(latest, `${run} from slash`)), 15_000);
+  const slashTask = taskTitled(slashed, `${run} from slash`);
+  check('/task in a chat adds a task linked to that chat', slashTask?.plannedMinutes === 15 && slashTask?.sessionRef?.sessionId === agentRun.sessionId, JSON.stringify(slashTask ? [slashTask.plannedMinutes, slashTask.sessionRef?.sessionId] : null));
+  await page.getByRole('button', { name: 'Open session actions' }).click();
+  await page.getByRole('menuitem', { name: 'Track chat in Planner' }).click();
+  const tracked = await waitForState((latest) => Object.values(latest.state.runs).filter((item) => item.sessionId === agentRun.sessionId).length >= 2, 15_000);
+  check('"Track chat in Planner" links the chat to a new task as its run', Object.values(tracked.state.runs).filter((item) => item.sessionId === agentRun.sessionId).length >= 2);
+  await shot('21-chat-actions');
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
   const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
@@ -585,18 +669,31 @@ try {
     const outer = await response.json().catch(() => ({}));
     return JSON.parse(outer.body ?? '{}');
   };
+  const isTestTask = (task) => !task.deletedAt && (/^e2e-/.test(task.title) || Boolean(task.sessionRef?.title?.includes('e2e-')));
   try {
     const { state } = await call('GET', '/state');
+    const testTaskIds = new Set(Object.values(state.tasks).filter(isTestTask).map((task) => task.id));
+    const testRuns = Object.values(state.runs ?? {}).filter((item) => testTaskIds.has(item.taskId));
+    // Real chats the journey started in the dev container, then the worktrees and branches it made.
+    for (const session of new Map(testRuns.map((item) => [item.sessionId, item])).values()) {
+      await context.request.delete(`${base}/api/session/${session.sessionId}?directory=${encodeURIComponent(session.directory ?? '')}`).catch(() => {});
+    }
+    try {
+      execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', "cd /home/node/projects/planner-demo-a && git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch refs\\/heads\\/planner\\/e2e-/{print w}' | while read w; do git worktree remove --force \"$w\"; done; git worktree prune; git branch --list 'planner/e2e-*' | xargs -r git branch -D >/dev/null"]);
+    } catch (error) {
+      console.log(`INFO worktree cleanup: ${String(error).split('\n')[0]}`);
+    }
     const commands = [
+      ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
       ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
-      ...Object.values(state.tasks).filter((task) => /^e2e-/.test(task.title) && !task.deletedAt).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
+      ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
       ...Object.values(state.calendars).filter((calendar) => /^e2e-/.test(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
       ...Object.values(state.objectives ?? {}).filter((objective) => /^e2e-/.test(objective.title) && !objective.deletedAt).map((objective) => ({ cmd: `cleanup-${objective.id}`, type: 'objective.deleted', objectiveId: objective.id })),
       ...Object.values(state.series ?? {}).filter((series) => /^e2e-/.test(series.template.title) && !series.stoppedFrom).map((series) => ({ cmd: `cleanup-${series.id}`, type: 'series.stopped', seriesId: series.id, from: '2000-01-01' })),
     ];
     if (commands.length) await call('POST', '/commands', { commands });
     const after = await call('GET', '/state');
-    check('cleanup leaves no live test tasks', !Object.values(after.state.tasks).some((task) => /^e2e-/.test(task.title) && !task.deletedAt));
+    check('cleanup leaves no live test tasks', !Object.values(after.state.tasks).some(isTestTask));
   } catch (error) {
     check('cleanup leaves no live test tasks', false, String(error));
   }

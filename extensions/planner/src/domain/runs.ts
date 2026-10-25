@@ -1,0 +1,148 @@
+// Agent runs on tasks: what a run's status is, which need the user, and which
+// facts about sessions are worth writing down.
+import type { PlannerState, TaskRun } from './types.ts';
+import type { EventBody } from './events.ts';
+
+export type SessionActivity = 'unknown' | 'idle' | 'running' | 'retrying' | 'waiting-permission' | 'waiting-question';
+
+/** What OpenChamber currently says about a session. */
+export interface LiveSession {
+  id: string;
+  title: string;
+  projectId: string;
+  directory: string;
+  activity: SessionActivity;
+  /** The last observed turn; never a task status. */
+  outcome: 'completed' | 'failed' | null;
+  updatedAt: number;
+  archivedAt: number | null;
+  worktree: { directory: string; branch: string } | null;
+  items: { id: string; data?: unknown }[];
+}
+
+export type RunStatus = 'running' | 'question' | 'permission' | 'review' | 'failed' | 'changes' | 'accepted' | 'idle' | 'archived';
+
+export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
+  running: 'Agent working',
+  question: 'Agent has a question',
+  permission: 'Agent needs permission',
+  review: 'Ready for review',
+  failed: 'Agent run failed',
+  changes: 'Changes requested',
+  accepted: 'Result accepted',
+  idle: 'Agent idle',
+  archived: 'Chat archived',
+};
+
+export const runsFor = (state: PlannerState, taskId: string): TaskRun[] =>
+  Object.values(state.runs).filter((run) => run.taskId === taskId).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+
+/**
+ * A run's status: what the agent is doing now if it is doing anything, else
+ * what is left for the user. A finished turn is "ready for review", never done.
+ */
+export const runStatus = (run: TaskRun, live?: LiveSession): RunStatus => {
+  const activity = live?.activity;
+  if (activity === 'waiting-question') return 'question';
+  if (activity === 'waiting-permission') return 'permission';
+  if (activity === 'running' || activity === 'retrying') return 'running';
+  if (run.review?.verdict === 'accepted') return 'accepted';
+  if (live?.archivedAt) return 'archived';
+  const outcome = live?.outcome ?? run.outcome;
+  if (outcome === 'failed') return 'failed';
+  if (outcome === 'completed') return run.review?.verdict === 'changes' ? 'changes' : 'review';
+  return 'idle';
+};
+
+/** Statuses that wait on the user. */
+export const needsYou = (status: RunStatus): boolean => status === 'question' || status === 'permission' || status === 'review' || status === 'failed';
+
+/** Statuses where an agent is still at work; starting another would duplicate it. */
+export const isActive = (status: RunStatus): boolean => status === 'running' || status === 'question' || status === 'permission';
+
+/** The status to show for a task: the run that most needs attention, else the latest. */
+export const taskRunStatus = (state: PlannerState, taskId: string, sessions: ReadonlyMap<string, LiveSession>): RunStatus | null => {
+  const runs = runsFor(state, taskId);
+  if (runs.length === 0) return null;
+  const statuses = runs.map((run) => runStatus(run, sessions.get(run.sessionId)));
+  const order: RunStatus[] = ['question', 'permission', 'failed', 'review', 'running', 'changes', 'idle', 'accepted', 'archived'];
+  return order.find((status) => statuses.includes(status)) ?? statuses[statuses.length - 1]!;
+};
+
+/**
+ * Outcomes worth recording: a settled turn the log does not have yet, or a new
+ * finished turn after the user asked for changes.
+ */
+export const planRunOutcomes = (state: PlannerState, sessions: ReadonlyMap<string, LiveSession>): EventBody[] => {
+  const bodies: EventBody[] = [];
+  for (const run of Object.values(state.runs)) {
+    const live = sessions.get(run.sessionId);
+    if (!live?.outcome || live.activity !== 'idle') continue;
+    const newAfterChanges = run.review?.verdict === 'changes' && live.outcome === 'completed' && live.updatedAt > Date.parse(run.review.at);
+    if (live.outcome !== run.outcome || newAfterChanges) bodies.push({ type: 'run.outcome', runId: run.id, outcome: live.outcome });
+  }
+  return bodies;
+};
+
+const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Sessions that carry one of our tasks as an attached item but are not a known
+ * run (the run could not be saved after the session started, or it started on
+ * another replica). Adopting them keeps "one task, many runs" complete.
+ */
+export const planAdoptions = (state: PlannerState, sessions: Iterable<LiveSession>): EventBody[] => {
+  const known = new Set(Object.values(state.runs).map((run) => run.sessionId));
+  const bodies: EventBody[] = [];
+  for (const session of sessions) {
+    if (known.has(session.id)) continue;
+    for (const item of session.items) {
+      const data = (item.data ?? {}) as { taskId?: unknown; runId?: unknown };
+      const taskId = typeof data.taskId === 'string' ? data.taskId : item.id;
+      const task = state.tasks[taskId];
+      if (!task || task.deletedAt) continue;
+      const runId = typeof data.runId === 'string' && RUN_ID.test(data.runId) ? data.runId : `adopt-${session.id}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+      if (state.runs[runId]) continue;
+      bodies.push({
+        type: 'run.started',
+        run: {
+          id: runId,
+          taskId,
+          sessionId: session.id,
+          projectId: session.projectId,
+          directory: session.directory,
+          worktree: session.worktree ? { directory: session.worktree.directory, branch: session.worktree.branch } : null,
+          title: task.title,
+        },
+      });
+      known.add(session.id);
+      break;
+    }
+  }
+  return bodies;
+};
+
+/** The first message for a task's agent: its title, notes, checklist and source. */
+export const taskPrompt = (state: PlannerState, taskId: string): string => {
+  const task = state.tasks[taskId];
+  if (!task) return '';
+  const parts = [task.title];
+  if (task.notes.trim()) parts.push(task.notes.trim());
+  const open = task.subtasks.filter((subtask) => !subtask.done);
+  if (open.length) parts.push(`Checklist:\n${open.map((subtask) => `- [ ] ${subtask.title}`).join('\n')}`);
+  if (task.source) parts.push(`${task.source.kind === 'linear' ? 'Linear issue' : 'Issue'} ${task.source.key}: ${task.source.url}`);
+  return parts.join('\n\n');
+};
+
+/**
+ * The chip id OpenChamber shows before the title (and names the chat with):
+ * the Linear key for a linked task, else a short Planner tag. The task itself
+ * travels in the chip's data.
+ */
+export const taskChipId = (state: PlannerState, taskId: string): string => state.tasks[taskId]?.source?.key ?? `PLN-${taskId.slice(-4)}`;
+
+/**
+ * The attach url OpenChamber requires (http or https): the source issue when
+ * there is one, else a reserved `.invalid` address that can never resolve.
+ */
+export const taskUrl = (state: PlannerState, taskId: string): string => state.tasks[taskId]?.source?.url ?? `https://planner.invalid/tasks/${encodeURIComponent(taskId)}`;

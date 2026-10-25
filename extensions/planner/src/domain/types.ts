@@ -79,6 +79,8 @@ export interface Task {
   source: TaskSourceRef | null;
   /** Set on an instance of a recurring task. */
   recurrence: { seriesId: string; date: DateKey } | null;
+  /** The chat this task came from (a message action or /task). */
+  sessionRef: { sessionId: string; title: string; directory: string | null } | null;
 }
 
 /** Actual time spent on a task; a timer run or a manual entry. */
@@ -174,6 +176,28 @@ export interface Series {
   createdAt: string;
 }
 
+/**
+ * An agent session working on a task: one the Planner started, or an existing
+ * one linked to the task. A task can have several. The session's live state
+ * comes from OpenChamber; the outcome is kept so a result waiting for review
+ * survives reloads.
+ */
+export interface TaskRun {
+  id: string;
+  taskId: string;
+  sessionId: string;
+  projectId: string | null;
+  directory: string | null;
+  worktree: { directory: string; branch: string | null } | null;
+  /** Task title when the run started, shown while the session list loads. */
+  title: string;
+  startedAt: string;
+  outcome: 'completed' | 'failed' | null;
+  outcomeAt: string | null;
+  /** A finished turn is not an accepted task: the user reviews it. */
+  review: { verdict: 'accepted' | 'changes'; at: string; note: string } | null;
+}
+
 /** A read-only calendar the service fetches (an ICS feed or file). */
 export interface CalendarSubscription {
   id: string;
@@ -218,6 +242,7 @@ export interface PlannerState {
   /** Keyed `${ritual}:${date}`. */
   rituals: Record<string, RitualRecord>;
   series: Record<string, Series>;
+  runs: Record<string, TaskRun>;
   settings: Settings;
 }
 
@@ -247,5 +272,6 @@ export const emptyState = (): PlannerState => ({
   objectives: {},
   rituals: {},
   series: {},
+  runs: {},
   settings: { ...DEFAULT_SETTINGS },
 });

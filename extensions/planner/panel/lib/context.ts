@@ -3,11 +3,13 @@ import { useContext, useEffect, useState } from 'preact/hooks';
 import type { HostClient } from '@openchamber/sdk';
 import type { ClientView, PlannerClient } from './client.ts';
 import type { LinearStore, LinearView } from './linear.ts';
+import type { AgentStore, AgentView } from './agents.ts';
 
 export interface PlannerContextValue {
   client: PlannerClient;
   host: HostClient;
   linear: LinearStore;
+  agents: AgentStore;
 }
 
 export const PlannerContext = createContext<PlannerContextValue | null>(null);
@@ -31,6 +33,14 @@ export const useLinear = (): LinearView => {
   const { linear } = usePlanner();
   const [view, setView] = useState(linear.getView());
   useEffect(() => linear.subscribe(() => setView(linear.getView())), [linear]);
+  return view;
+};
+
+/** Re-render on every agent change. */
+export const useAgents = (): AgentView => {
+  const { agents } = usePlanner();
+  const [view, setView] = useState(agents.getView());
+  useEffect(() => agents.subscribe(() => setView(agents.getView())), [agents]);
   return view;
 };
 

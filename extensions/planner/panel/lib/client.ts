@@ -8,7 +8,7 @@ import { inverseOfBatch } from '../../src/domain/undo.ts';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import { todayIn } from '../../src/domain/dates.ts';
 import { newId } from '../../src/domain/ids.ts';
-import { emptyState, type DateKey, type PlannerState } from '../../src/domain/types.ts';
+import { DEFAULT_SETTINGS, emptyState, type DateKey, type PlannerState } from '../../src/domain/types.ts';
 
 export interface StorageInfo {
   dir: string;
@@ -42,12 +42,19 @@ export interface ClientView {
 export interface DispatchOptions {
   /** Offer Undo for this batch with this label (e.g. "Task deleted"). */
   undo?: string;
-  /** Who caused the batch; `linear` marks changes that came from Linear, so they are not sent back. */
-  origin?: 'user' | 'linear';
+  /**
+   * Who caused the batch. `linear` marks changes that came from Linear, so they
+   * are not sent back; `agent` marks facts observed about agent sessions. Only
+   * a user's batch reports a failure; automation that loses a race with another
+   * surface just reloads.
+   */
+  origin?: Origin;
 }
 
+export type Origin = 'user' | 'linear' | 'agent';
+
 /** Called after the service accepted a batch, with the confirmed state before and after it. */
-export type CommitListener = (commands: readonly Command[], before: PlannerState, after: PlannerState, origin: 'user' | 'linear') => void;
+export type CommitListener = (commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin) => void;
 
 const POLL_MS = 5000;
 
@@ -190,7 +197,7 @@ export class PlannerClient {
     this.set({ undoLabel: label });
   }
 
-  private async send(commands: Command[], origin: 'user' | 'linear'): Promise<void> {
+  private async send(commands: Command[], origin: Origin): Promise<void> {
     this.set({ saving: true });
     try {
       const snapshot = await this.request<Snapshot>('POST', '/commands', { commands });
@@ -208,7 +215,8 @@ export class PlannerClient {
       // Drop the optimistic change and show what the service actually has.
       this.pending = this.pending.filter((command) => !commands.includes(command));
       this.recompute();
-      this.set({ error: messageOf(error), ...(error instanceof HostRequestError ? { problem: problemOf(error) } : {}) });
+      if (origin === 'user') this.set({ error: messageOf(error), ...(error instanceof HostRequestError ? { problem: problemOf(error) } : {}) });
+      else console.warn(`[planner] ${origin} update skipped: ${messageOf(error)}`);
       await this.load();
     } finally {
       this.set({ saving: this.pending.length > 0 });
@@ -216,7 +224,9 @@ export class PlannerClient {
   }
 
   private accept(snapshot: Snapshot): void {
-    this.confirmed = snapshot.state;
+    // An older service (mid-update) may not know newer collections or settings yet.
+    const fresh = emptyState();
+    this.confirmed = { ...fresh, ...snapshot.state, settings: { ...DEFAULT_SETTINGS, ...snapshot.state.settings } };
     this.recompute({
       loaded: true,
       problem: null,

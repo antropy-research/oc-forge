@@ -13,6 +13,7 @@ import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { RepeatSection } from './RepeatSection.tsx';
 import { LinearTaskSection } from './LinearPanel.tsx';
+import { AgentSection } from './Agents.tsx';
 
 const PRIORITIES: { id: Priority; label: string }[] = [
   { id: 'urgent', label: 'Urgent' },
@@ -183,7 +184,7 @@ const Activity = ({ task }: { task: Task }) => {
 };
 
 export const TaskDetail = ({ taskId }: { taskId: string }) => {
-  const { client } = usePlanner();
+  const { client, agents } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
   const dialog = useRef<HTMLDivElement>(null);
@@ -309,6 +310,13 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
           }}
         />
         <Subtasks task={task} />
+        {task.sessionRef && (
+          <section class="detail-section" aria-label="From chat">
+            <h3>From chat <span class="count">{task.sessionRef.title}</span></h3>
+            <button class="link" onClick={() => void agents.openSession(task.sessionRef!.sessionId).catch((error) => client.notify(`Could not open the chat: ${error instanceof Error ? error.message : String(error)}`))}>Open the chat</button>
+          </section>
+        )}
+        <AgentSection task={task} />
         <LinearTaskSection task={task} />
         <RepeatSection task={task} />
         <ActualTime task={task} />

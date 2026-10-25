@@ -11,7 +11,8 @@ const PRIORITY = { urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' 
 /** Does this event concern `taskId`? */
 export const touchesTask = (event: PlannerEvent, taskId: string): boolean => {
   if (event.type === 'task.created') return event.task.id === taskId;
-  if (event.type === 'tasks.rolledOver') return event.moved.some((item) => item.taskId === taskId) || event.archived.includes(taskId);
+  if (event.type === 'tasks.rolledOver') return event.moved.some((item) => item.taskId === taskId) || event.archived.includes(taskId) || (event.superseded ?? []).includes(taskId);
+  if (event.type === 'run.started') return event.run.taskId === taskId;
   return 'taskId' in event && event.taskId === taskId;
 };
 
@@ -48,7 +49,10 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
     case 'task.sourceSynced':
       return `${event.source.key} is ${event.source.status?.name ?? 'updated'} in ${event.source.kind === 'linear' ? 'Linear' : 'GitHub'}${event.title ? ', title updated' : ''}`;
     case 'tasks.rolledOver':
+      if ((event.superseded ?? []).includes(taskId)) return 'replaced this with the next repeat';
       return event.archived.includes(taskId) ? 'archived this after repeated rollovers' : `rolled this over to ${monthDay(event.date)}`;
+    case 'run.started':
+      return event.run.worktree ? `started an agent in worktree ${event.run.worktree.branch ?? event.run.worktree.directory}` : 'started an agent';
     default:
       return event.type;
   }

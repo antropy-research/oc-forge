@@ -47,6 +47,7 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask }: { onClose: () =>
     go('weeklyReview', 'Weekly review', ''),
     go('backlog', 'Backlog', ''),
     go('linear', 'Linear', ''),
+    go('agents', 'Agents', ''),
     go('archive', 'Archive', ''),
     go('stats', 'Stats', ''),
     go('settings', 'Settings', ''),

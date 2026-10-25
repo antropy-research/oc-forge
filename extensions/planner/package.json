@@ -1,6 +1,6 @@
 {
   "name": "@oc-forge/openchamber-planner",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Sunsama-style daily planning inside OpenChamber.",
@@ -17,12 +17,41 @@
         "entry": "panel/index.html"
       },
       "page": true,
+      "background": {
+        "entry": "panel/index.html"
+      },
       "statusSection": {
         "entry": "panel/index.html",
         "title": "Planner",
         "height": 76,
         "requiresProject": false
       },
+      "actions": [
+        {
+          "id": "add-to-planner",
+          "label": "Add to Planner",
+          "icon": "calendar-event",
+          "where": "message",
+          "mode": "background"
+        },
+        {
+          "id": "track-in-planner",
+          "label": "Track chat in Planner",
+          "icon": "calendar-event",
+          "where": "session",
+          "mode": "background"
+        }
+      ],
+      "commands": [
+        {
+          "name": "task",
+          "description": "Add a task to the Planner: /task title ~30m @tomorrow"
+        },
+        {
+          "name": "today",
+          "description": "Attach today's plan from the Planner"
+        }
+      ],
       "integration": {
         "name": "Linear",
         "description": "Plan your Linear issues in the Planner; completing a task can move its issue to Done.",
@@ -32,6 +61,7 @@
       },
       "capabilities": [
         "sessions",
+        "prompt",
         "model"
       ],
       "service": {

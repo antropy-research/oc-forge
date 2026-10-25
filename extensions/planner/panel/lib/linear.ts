@@ -28,7 +28,7 @@ import {
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import type { Placement, PlannerState, Task } from '../../src/domain/types.ts';
-import type { PlannerClient } from './client.ts';
+import type { Origin, PlannerClient } from './client.ts';
 
 export type LinearSource = { kind: 'assigned' } | { kind: 'view'; id: string } | { kind: 'search'; term: string };
 
@@ -224,8 +224,9 @@ export class LinearStore {
     void this.moveIssue(task, prompt.kind === 'complete' ? 'completed' : 'started');
   }
 
-  private afterCommit(commands: readonly Command[], before: PlannerState, after: PlannerState, origin: 'user' | 'linear'): void {
-    if (origin === 'linear' || this.view.connected === false) return;
+  private afterCommit(commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin): void {
+    // Only the user's own changes reach Linear.
+    if (origin !== 'user' || this.view.connected === false) return;
     const settings = after.settings;
     const ask = (prompt: LinearPrompt) => {
       // Only surfaces with room for the question ask it.

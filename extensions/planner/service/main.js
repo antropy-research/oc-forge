@@ -42,6 +42,7 @@ var emptyState = () => ({
   objectives: {},
   rituals: {},
   series: {},
+  runs: {},
   settings: { ...DEFAULT_SETTINGS }
 });
 
@@ -223,7 +224,8 @@ var createTask = (state, input, at) => {
     objectiveId: input.objectiveId ?? null,
     subtasks: input.subtasks ?? [],
     source: input.source ?? null,
-    recurrence: input.recurrence ?? null
+    recurrence: input.recurrence ?? null,
+    sessionRef: input.sessionRef ?? null
   };
 };
 var applyInto = (state, event) => {
@@ -350,6 +352,27 @@ var applyInto = (state, event) => {
       state.rituals[key] = { ...state.rituals[key], ...event.fields };
       return;
     }
+    case "run.started":
+      if (state.runs[event.run.id] || !state.tasks[event.run.taskId])
+        return;
+      state.runs[event.run.id] = { ...event.run, startedAt: event.at, outcome: null, outcomeAt: null, review: null };
+      return;
+    case "run.outcome": {
+      const run = state.runs[event.runId];
+      if (!run)
+        return;
+      state.runs[event.runId] = { ...run, outcome: event.outcome, outcomeAt: event.at, review: run.review?.verdict === "changes" ? null : run.review };
+      return;
+    }
+    case "run.reviewed": {
+      const run = state.runs[event.runId];
+      if (run)
+        state.runs[event.runId] = { ...run, review: { verdict: event.verdict, at: event.at, note: event.note ?? "" } };
+      return;
+    }
+    case "run.removed":
+      delete state.runs[event.runId];
+      return;
     case "calendar.added":
       if (!state.calendars[event.calendar.id])
         state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
@@ -443,6 +466,7 @@ var applyEvents = (state, events) => {
     objectives: { ...state.objectives },
     rituals: { ...state.rituals },
     series: { ...state.series },
+    runs: { ...state.runs },
     settings: { ...state.settings }
   };
   for (const event of events)
@@ -708,6 +732,20 @@ var validateSettingsPatch = (patch) => {
   }
   return null;
 };
+var isSessionRef = (value) => value === null || isRecord(value) && isShortText(value.sessionId, 200) && value.sessionId.length > 0 && isShortText(value.title, 500) && (value.directory === null || isShortText(value.directory, 1024));
+var isRunShape = (value) => {
+  if (!isRecord(value) || !isId(value.id))
+    return "run needs an id";
+  if (!(isShortText(value.sessionId, 200) && value.sessionId.length > 0))
+    return "run needs a session";
+  if (!(value.projectId === null || isShortText(value.projectId, 1024)))
+    return "projectId is invalid";
+  if (!(value.directory === null || isShortText(value.directory, 1024)))
+    return "directory is invalid";
+  if (!(value.worktree === null || isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))
+    return "worktree is invalid";
+  return isShortText(value.title, TITLE_MAX) ? null : "title is invalid";
+};
 var isRule = (value) => {
   if (!isRecord(value))
     return false;
@@ -822,6 +860,8 @@ var validateCommand = (command, context) => {
         return "subtasks are invalid";
       if (task.recurrence !== undefined && task.recurrence !== null)
         return "recurrence is set through a series";
+      if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef))
+        return "sessionRef is invalid";
       return null;
     }
     case "task.updated":
@@ -974,6 +1014,28 @@ var validateCommand = (command, context) => {
       if (!(isId(command.seriesId) && context.series[command.seriesId]))
         return "unknown series";
       return isDateKey(command.from) ? null : "from must be a date";
+    case "run.started": {
+      const run = command.run;
+      const error = isRunShape(run);
+      if (error)
+        return error;
+      if (context.runs[run.id])
+        return "run id already exists";
+      const taskId = run.taskId;
+      return isId(taskId) && tasks[taskId] ? null : "unknown task";
+    }
+    case "run.outcome":
+      if (!(isId(command.runId) && context.runs[command.runId]))
+        return "unknown run";
+      return command.outcome === "completed" || command.outcome === "failed" ? null : "outcome must be completed or failed";
+    case "run.reviewed":
+      if (!(isId(command.runId) && context.runs[command.runId]))
+        return "unknown run";
+      if (command.verdict !== "accepted" && command.verdict !== "changes")
+        return "verdict must be accepted or changes";
+      return command.note === undefined || isShortText(command.note, 4000) ? null : "note is too long";
+    case "run.removed":
+      return isId(command.runId) && context.runs[command.runId] ? null : "unknown run";
     case "ritual.saved":
       if (!RITUALS.includes(command.ritual))
         return "unknown ritual";
@@ -1110,7 +1172,9 @@ var touchesTask = (event, taskId) => {
   if (event.type === "task.created")
     return event.task.id === taskId;
   if (event.type === "tasks.rolledOver")
-    return event.moved.some((item) => item.taskId === taskId) || event.archived.includes(taskId);
+    return event.moved.some((item) => item.taskId === taskId) || event.archived.includes(taskId) || (event.superseded ?? []).includes(taskId);
+  if (event.type === "run.started")
+    return event.run.taskId === taskId;
   return "taskId" in event && event.taskId === taskId;
 };
 
@@ -1187,6 +1251,14 @@ var summarize = (events, titleOf) => {
       return "Edit calendar";
     case "calendar.removed":
       return "Remove calendar";
+    case "run.started":
+      return `Start agent: ${titleOf(event.run.taskId)}`;
+    case "run.outcome":
+      return `Agent run ${event.outcome}`;
+    case "run.reviewed":
+      return `Review agent run: ${event.verdict}`;
+    case "run.removed":
+      return "Unlink agent run";
     case "channel.created":
       return `Add channel: ${event.channel.name}`;
     case "channel.updated":

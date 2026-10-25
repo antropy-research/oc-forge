@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -16,7 +16,10 @@ export interface NewTask {
   source?: TaskSourceRef | null;
   subtasks?: Subtask[];
   recurrence?: { seriesId: string; date: DateKey } | null;
+  sessionRef?: Task['sessionRef'];
 }
+
+export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title'>;
 
 export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'objectiveId', 'subtasks', 'source'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
@@ -59,6 +62,10 @@ export type EventBody =
   | { type: 'objective.updated'; objectiveId: string; patch: { title?: string; completed?: boolean } }
   | { type: 'objective.deleted'; objectiveId: string }
   | { type: 'ritual.saved'; ritual: Ritual; date: DateKey; fields: RitualRecord }
+  | { type: 'run.started'; run: NewRun }
+  | { type: 'run.outcome'; runId: string; outcome: 'completed' | 'failed' }
+  | { type: 'run.reviewed'; runId: string; verdict: 'accepted' | 'changes'; note?: string }
+  | { type: 'run.removed'; runId: string }
   | { type: 'channel.created'; channel: NewChannel }
   | { type: 'channel.updated'; channelId: string; patch: ChannelPatch }
   | { type: 'channel.deleted'; channelId: string }
@@ -165,7 +172,21 @@ export interface CommandContext {
   calendars: Record<string, CalendarSubscription>;
   objectives: Record<string, Objective>;
   series: Record<string, Series>;
+  runs: Record<string, TaskRun>;
 }
+
+const isSessionRef = (value: unknown): boolean =>
+  value === null ||
+  (isRecord(value) && isShortText(value.sessionId, 200) && (value.sessionId as string).length > 0 && isShortText(value.title, 500) && (value.directory === null || isShortText(value.directory, 1024)));
+
+const isRunShape = (value: unknown): string | null => {
+  if (!isRecord(value) || !isId(value.id)) return 'run needs an id';
+  if (!(isShortText(value.sessionId, 200) && (value.sessionId as string).length > 0)) return 'run needs a session';
+  if (!(value.projectId === null || isShortText(value.projectId, 1024))) return 'projectId is invalid';
+  if (!(value.directory === null || isShortText(value.directory, 1024))) return 'directory is invalid';
+  if (!(value.worktree === null || (isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))) return 'worktree is invalid';
+  return isShortText(value.title, TITLE_MAX) ? null : 'title is invalid';
+};
 
 const isRule = (value: unknown): value is RecurrenceRule => {
   if (!isRecord(value)) return false;
@@ -254,6 +275,7 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       if (task.subtasks !== undefined && !isSubtasks(task.subtasks)) return 'subtasks are invalid';
       // Recurrence comes from series.created and the service's instances, never from a client's task.
       if (task.recurrence !== undefined && task.recurrence !== null) return 'recurrence is set through a series';
+      if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef)) return 'sessionRef is invalid';
       return null;
     }
     case 'task.updated':
@@ -364,6 +386,23 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     case 'series.stopped':
       if (!(isId(command.seriesId) && context.series[command.seriesId as string])) return 'unknown series';
       return isDateKey(command.from) ? null : 'from must be a date';
+    case 'run.started': {
+      const run = command.run;
+      const error = isRunShape(run);
+      if (error) return error;
+      if (context.runs[(run as { id: string }).id]) return 'run id already exists';
+      const taskId = (run as { taskId: unknown }).taskId;
+      return isId(taskId) && tasks[taskId as string] ? null : 'unknown task';
+    }
+    case 'run.outcome':
+      if (!(isId(command.runId) && context.runs[command.runId as string])) return 'unknown run';
+      return command.outcome === 'completed' || command.outcome === 'failed' ? null : 'outcome must be completed or failed';
+    case 'run.reviewed':
+      if (!(isId(command.runId) && context.runs[command.runId as string])) return 'unknown run';
+      if (command.verdict !== 'accepted' && command.verdict !== 'changes') return 'verdict must be accepted or changes';
+      return command.note === undefined || isShortText(command.note, 4000) ? null : 'note is too long';
+    case 'run.removed':
+      return isId(command.runId) && context.runs[command.runId as string] ? null : 'unknown run';
     case 'ritual.saved':
       if (!(RITUALS as readonly string[]).includes(command.ritual as string)) return 'unknown ritual';
       if (!isDateKey(command.date)) return 'date must be a date';

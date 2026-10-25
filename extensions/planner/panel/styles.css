@@ -404,3 +404,30 @@ kbd { font: 11px var(--oc-mono, ui-monospace, monospace); padding: 0 5px; border
 .linear-page { max-width: 820px; }
 .side-panel .linear-issues { margin-top: 2px; }
 .detail-section .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
+
+/* Agents */
+.agent-chip { display: inline-flex; align-items: center; gap: 4px; --agent-color: var(--oc-muted); color: var(--agent-color); font-weight: 600; }
+.agent-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--agent-color); flex: none; }
+.agent-chip.status-running { --agent-color: var(--oc-info-text, #1c7ed6); }
+.agent-chip.status-running .agent-dot { animation: pulse 1.6s ease-in-out infinite; }
+.agent-chip.status-question, .agent-chip.status-permission { --agent-color: var(--oc-warning-text, #e67700); }
+.agent-chip.status-review { --agent-color: var(--oc-primary-text, var(--oc-primary)); }
+.agent-chip.status-failed { --agent-color: var(--oc-error-text, #c92a2a); }
+.agent-chip.status-accepted { --agent-color: var(--oc-success-text, #2f9e44); }
+.runs { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.run-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 8px; background: var(--pl-softer); }
+.run-main { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12.5px; }
+.run-title { font-weight: 500; }
+.run-actions { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; }
+.dispatch-form { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 8px; background: var(--pl-softer); }
+.dispatch-form .field-row { display: grid; grid-template-columns: 80px 1fr; gap: 10px; align-items: center; font-size: 12.5px; }
+.dispatch-form select, .dispatch-form input:not([type='checkbox']), .dispatch-prompt { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 4px 8px; }
+.dispatch-prompt { width: 100%; resize: vertical; font: 12.5px/1.45 var(--oc-mono, ui-monospace, monospace); }
+.dispatch-form .warning { margin: 0; color: var(--oc-warning-text, #e67700); }
+.dispatch-form label.inline { display: inline-flex; gap: 6px; align-items: center; }
+.dispatch-form button.primary:disabled { opacity: 0.6; cursor: default; }
+.agents-view { max-width: 860px; display: flex; flex-direction: column; gap: 16px; }
+.agent-group h2 { font-size: 14px; font-weight: 600; margin-bottom: 6px; display: flex; gap: 8px; }
+.agent-task { display: flex; flex-direction: column; gap: 4px; }
+.agent-task-title { font-weight: 600; text-align: left; color: var(--oc-fg); }
+.status-agents { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; font-size: 12px; padding-left: 26px; }

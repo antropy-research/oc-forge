@@ -10,6 +10,7 @@ import { clockLabel, zonedDateMinutes } from '../../src/domain/dates.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 import { setHoveredTask } from '../lib/hover.ts';
 import { isClosedType } from '../../src/domain/linear.ts';
+import { AgentChip } from './Agents.tsx';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { useUi } from '../lib/ui.ts';
@@ -113,7 +114,8 @@ export const TaskCard = ({ task }: { task: Task }) => {
   const dayKey = task.placement.kind === 'day' ? task.placement.date : null;
   const timebox = dayKey ? blocksFor(view.state, task.id).find((block) => zonedDateMinutes(block.start, zone).date === dayKey) : undefined;
   const objective = task.objectiveId ? view.state.objectives[task.objectiveId] : null;
-  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox || objective || task.recurrence || task.source;
+  const hasRuns = Object.values(view.state.runs).some((run) => run.taskId === task.id);
+  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox || objective || task.recurrence || task.source || hasRuns;
   const sourceClosed = isClosedType(task.source?.status?.type);
 
   const toggle = () =>
@@ -136,7 +138,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
       </button>
       <button class="task-body" onClick={() => setUi({ openTaskId: task.id })} aria-label={`Open ${task.title}`}>
         <span class="task-title">{task.title}</span>
-        {hasMeta && (
+        {(hasMeta || hasRuns) && (
           <span class="task-meta">
             {task.source && (
               <span
@@ -149,6 +151,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
                 {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in Linear` : ''}
               </span>
             )}
+            {hasRuns && <AgentChip taskId={task.id} />}
             {timebox && <span class="timebox" style={{ '--item-color': channel?.color ?? 'var(--oc-primary)' }} title="Working session">{clockLabel(zonedDateMinutes(timebox.start, zone).minutes)}</span>}
             {channel && <span class="channel"><span class="hash" style={{ color: channel.color }}>#</span>{channel.name}</span>}
             {task.priority && <span class={`priority priority-${task.priority}`}>{PRIORITY_LABEL[task.priority]}</span>}

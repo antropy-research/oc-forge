@@ -1,10 +1,10 @@
 import type { ComponentChildren } from 'preact';
 import { actualMinutes, archivedTasks, tasksForDay } from '../../src/domain/selectors.ts';
-import { usePlanner, useView } from '../lib/context.ts';
+import { useAgents, usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 
-export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'archive' | 'stats' | 'settings';
+export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'agents' | 'archive' | 'stats' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -37,6 +37,7 @@ export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (rout
   const view = useView();
   const open = tasksForDay(view.state, view.today).filter((task) => !task.completedAt).length;
   const archived = archivedTasks(view.state).length;
+  const agents = useAgents();
   return (
     <nav class="nav" aria-label="Planner">
       <div class="brand">Planner</div>
@@ -58,6 +59,7 @@ export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (rout
       <div class="nav-section">Lists</div>
       <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>
       <NavItem route="linear" current={route} onRoute={onRoute}>Linear</NavItem>
+      <NavItem route="agents" current={route} onRoute={onRoute} badge={agents.attention}>Agents</NavItem>
       <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>
       <NavItem route="stats" current={route} onRoute={onRoute}>Stats</NavItem>
       <div class="nav-spacer" />

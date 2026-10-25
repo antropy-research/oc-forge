@@ -76,6 +76,7 @@ const createTask = (state: PlannerState, input: NewTask, at: string): void => {
     subtasks: input.subtasks ?? [],
     source: input.source ?? null,
     recurrence: input.recurrence ?? null,
+    sessionRef: input.sessionRef ?? null,
   };
 };
 
@@ -200,6 +201,25 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       state.rituals[key] = { ...state.rituals[key], ...event.fields };
       return;
     }
+    case 'run.started':
+      if (state.runs[event.run.id] || !state.tasks[event.run.taskId]) return;
+      state.runs[event.run.id] = { ...event.run, startedAt: event.at, outcome: null, outcomeAt: null, review: null };
+      return;
+    case 'run.outcome': {
+      const run = state.runs[event.runId];
+      if (!run) return;
+      // A new result after "needs changes" is a new thing to review.
+      state.runs[event.runId] = { ...run, outcome: event.outcome, outcomeAt: event.at, review: run.review?.verdict === 'changes' ? null : run.review };
+      return;
+    }
+    case 'run.reviewed': {
+      const run = state.runs[event.runId];
+      if (run) state.runs[event.runId] = { ...run, review: { verdict: event.verdict, at: event.at, note: event.note ?? '' } };
+      return;
+    }
+    case 'run.removed':
+      delete state.runs[event.runId];
+      return;
     case 'calendar.added':
       if (!state.calendars[event.calendar.id]) state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
       return;
@@ -286,6 +306,7 @@ export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]
     objectives: { ...state.objectives },
     rituals: { ...state.rituals },
     series: { ...state.series },
+    runs: { ...state.runs },
     settings: { ...state.settings },
   };
   for (const event of events) applyInto(next, event);

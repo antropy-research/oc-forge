@@ -2,16 +2,23 @@ import { useEffect, useRef } from 'preact/hooks';
 import type { HostClient } from '@openchamber/sdk';
 import { formatMinutes } from '../../src/domain/dates.ts';
 import { actualMinutes, tasksForDay } from '../../src/domain/selectors.ts';
-import { usePlanner, useView } from '../lib/context.ts';
+import { useAgents, usePlanner, useView } from '../lib/context.ts';
+import { RUN_STATUS_LABEL, needsYou, runStatus } from '../../src/domain/runs.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { focusTask } from './FocusView.tsx';
 import { TimerButton } from './TimerButton.tsx';
 
+const STATUS_SHORT: Record<string, string> = { question: 'Question', permission: 'Permission', review: 'Review', failed: 'Failed' };
+
 /** The Planner section in the chat's Work Status panel: what to work on now, with its timer. */
 export const StatusSection = ({ host }: { host: HostClient }) => {
-  const { client } = usePlanner();
+  const { client, agents } = usePlanner();
   const view = useView();
+  const av = useAgents();
   const root = useRef<HTMLDivElement>(null);
+  const waiting = Object.values(view.state.runs)
+    .map((run) => ({ run, status: runStatus(run, av.sessions.get(run.sessionId)), task: view.state.tasks[run.taskId] }))
+    .filter((row) => row.task && !row.task.deletedAt && needsYou(row.status));
   const today = tasksForDay(view.state, view.today);
   const open = today.filter((task) => !task.completedAt);
   const task = focusTask(open, null, view.state.timer?.taskId ?? null);
@@ -42,6 +49,14 @@ export const StatusSection = ({ host }: { host: HostClient }) => {
         </div>
       ) : (
         <div class="status-row muted">{today.length ? 'Done for the day' : 'Nothing planned today'}</div>
+      )}
+      {waiting.length > 0 && (
+        <div class="status-agents">
+          <span class={`agent-chip status-${waiting[0]!.status}`} title={RUN_STATUS_LABEL[waiting[0]!.status]}><span class="agent-dot" aria-hidden="true" />{STATUS_SHORT[waiting[0]!.status]}</span>
+          <span class="status-title" title={waiting[0]!.task!.title}>{waiting[0]!.task!.title}</span>
+          <button class="link" onClick={() => void agents.openSession(waiting[0]!.run.sessionId).catch(() => {})}>Open chat</button>
+          {waiting.length > 1 && <span class="muted">+{waiting.length - 1}</span>}
+        </div>
       )}
       <div class="status-sub">
         {today.length - open.length}/{today.length} done today{next ? ` · next: ${next.title}` : ''}
