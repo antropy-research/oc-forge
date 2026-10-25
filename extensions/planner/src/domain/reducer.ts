@@ -1,5 +1,5 @@
 // Fold events into state. Pure apart from mutating the batch-local copy it creates.
-import { emptyState, type PlannerState, type Task } from './types.ts';
+import { emptyState, ritualKey, type PlannerState, type Task } from './types.ts';
 import type { PlannerEvent } from './events.ts';
 import { daysBetween, zonedDateMinutes } from './dates.ts';
 import { samePlacement } from './selectors.ts';
@@ -76,6 +76,7 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
         createdAt: event.at,
         updatedAt: event.at,
         channelId: input.channelId ?? null,
+        objectiveId: input.objectiveId ?? null,
         subtasks: [],
         source: input.source ?? null,
       };
@@ -163,6 +164,36 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       syncTaskToBlocks(state, block.taskId, event.at, null);
       return;
     }
+    case 'objective.created':
+      if (!state.objectives[event.objective.id]) {
+        state.objectives[event.objective.id] = { ...event.objective, carriedFrom: event.objective.carriedFrom ?? null, title: event.objective.title.trim(), completedAt: null, createdAt: event.at, deletedAt: null };
+      }
+      return;
+    case 'objective.updated': {
+      const objective = state.objectives[event.objectiveId];
+      if (!objective) return;
+      state.objectives[event.objectiveId] = {
+        ...objective,
+        ...(event.patch.title !== undefined ? { title: event.patch.title.trim() } : {}),
+        ...(event.patch.completed !== undefined ? { completedAt: event.patch.completed ? event.at : null } : {}),
+      };
+      return;
+    }
+    case 'objective.deleted': {
+      const objective = state.objectives[event.objectiveId];
+      if (!objective) return;
+      state.objectives[event.objectiveId] = { ...objective, deletedAt: event.at };
+      // Aligned tasks keep their work; they just lose the alignment.
+      for (const task of Object.values(state.tasks)) {
+        if (task.objectiveId === event.objectiveId) state.tasks[task.id] = { ...task, objectiveId: null, updatedAt: event.at };
+      }
+      return;
+    }
+    case 'ritual.saved': {
+      const key = ritualKey(event.ritual, event.date);
+      state.rituals[key] = { ...state.rituals[key], ...event.fields };
+      return;
+    }
     case 'calendar.added':
       if (!state.calendars[event.calendar.id]) state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
       return;
@@ -223,6 +254,8 @@ export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]
     entries: { ...state.entries },
     blocks: { ...state.blocks },
     calendars: { ...state.calendars },
+    objectives: { ...state.objectives },
+    rituals: { ...state.rituals },
     settings: { ...state.settings },
   };
   for (const event of events) applyInto(next, event);

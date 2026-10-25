@@ -17,6 +17,8 @@ var BACKLOG_BUCKETS = [
   { id: "someday", label: "Someday" },
   { id: "never", label: "Never" }
 ];
+var RITUALS = ["planning", "shutdown", "highlights", "weeklyPlanning", "weeklyReview"];
+var ritualKey = (ritual, date) => `${ritual}:${date}`;
 var DEFAULT_SETTINGS = {
   timezone: null,
   workloadMinutes: 6 * 60,
@@ -34,6 +36,8 @@ var emptyState = () => ({
   timer: null,
   blocks: {},
   calendars: {},
+  objectives: {},
+  rituals: {},
   settings: { ...DEFAULT_SETTINGS }
 });
 
@@ -185,6 +189,7 @@ var applyInto = (state, event) => {
         createdAt: event.at,
         updatedAt: event.at,
         channelId: input.channelId ?? null,
+        objectiveId: input.objectiveId ?? null,
         subtasks: [],
         source: input.source ?? null
       };
@@ -273,6 +278,38 @@ var applyInto = (state, event) => {
       syncTaskToBlocks(state, block.taskId, event.at, null);
       return;
     }
+    case "objective.created":
+      if (!state.objectives[event.objective.id]) {
+        state.objectives[event.objective.id] = { ...event.objective, carriedFrom: event.objective.carriedFrom ?? null, title: event.objective.title.trim(), completedAt: null, createdAt: event.at, deletedAt: null };
+      }
+      return;
+    case "objective.updated": {
+      const objective = state.objectives[event.objectiveId];
+      if (!objective)
+        return;
+      state.objectives[event.objectiveId] = {
+        ...objective,
+        ...event.patch.title !== undefined ? { title: event.patch.title.trim() } : {},
+        ...event.patch.completed !== undefined ? { completedAt: event.patch.completed ? event.at : null } : {}
+      };
+      return;
+    }
+    case "objective.deleted": {
+      const objective = state.objectives[event.objectiveId];
+      if (!objective)
+        return;
+      state.objectives[event.objectiveId] = { ...objective, deletedAt: event.at };
+      for (const task of Object.values(state.tasks)) {
+        if (task.objectiveId === event.objectiveId)
+          state.tasks[task.id] = { ...task, objectiveId: null, updatedAt: event.at };
+      }
+      return;
+    }
+    case "ritual.saved": {
+      const key = ritualKey(event.ritual, event.date);
+      state.rituals[key] = { ...state.rituals[key], ...event.fields };
+      return;
+    }
     case "calendar.added":
       if (!state.calendars[event.calendar.id])
         state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
@@ -337,6 +374,8 @@ var applyEvents = (state, events) => {
     entries: { ...state.entries },
     blocks: { ...state.blocks },
     calendars: { ...state.calendars },
+    objectives: { ...state.objectives },
+    rituals: { ...state.rituals },
     settings: { ...state.settings }
   };
   for (const event of events)
@@ -508,7 +547,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
 }
 
 // src/domain/events.ts
-var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "subtasks"];
+var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "objectiveId", "subtasks"];
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
@@ -532,7 +571,7 @@ var PRIORITY_VALUES = new Set(["urgent", "high", "medium", "low"]);
 var isPriority = (value) => value === null || typeof value === "string" && PRIORITY_VALUES.has(value);
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
 var isChannelName = (value) => typeof value === "string" && /^[\p{L}\p{N}_-]{1,40}$/u.test(value);
-var validatePatch = (patch, channels) => {
+var validatePatch = (patch, channels, objectives) => {
   if (!isRecord(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
@@ -548,6 +587,8 @@ var validatePatch = (patch, channels) => {
       return "dueDate must be a date or null";
     else if (key === "channelId" && !(value === null || isId(value) && channels[value]))
       return "unknown channel";
+    else if (key === "objectiveId" && !(value === null || isId(value) && objectives[value]))
+      return "unknown objective";
     else if (key === "subtasks" && !isSubtasks(value))
       return "subtasks are invalid";
     else if (!PATCH_FIELDS.includes(key))
@@ -591,6 +632,38 @@ var validateSettingsPatch = (patch) => {
   }
   return null;
 };
+var TEXT_MAX = 20000;
+var RITUAL_FIELDS = {
+  planning: ["completedAt", "obstacles", "shutdownTime"],
+  shutdown: ["completedAt", "reflection"],
+  highlights: ["completedAt", "items", "summary", "reflection", "publishedAt"],
+  weeklyPlanning: ["completedAt", "journal"],
+  weeklyReview: ["completedAt", "journal"]
+};
+var validateRitualFields = (ritual, fields) => {
+  if (!isRecord(fields))
+    return "fields must be an object";
+  for (const [key, value] of Object.entries(fields)) {
+    if (!RITUAL_FIELDS[ritual].includes(key))
+      return `${ritual} has no field ${key}`;
+    if ((key === "completedAt" || key === "publishedAt") && !(value === null || isInstantString(value)))
+      return `${key} must be an ISO instant or null`;
+    if ((key === "obstacles" || key === "reflection" || key === "summary" || key === "journal") && !(typeof value === "string" && value.length <= TEXT_MAX))
+      return `${key} is too long`;
+    if (key === "shutdownTime" && !(value === null || Number.isInteger(value) && value >= 0 && value <= 24 * 60))
+      return "shutdownTime must be minutes after midnight";
+    if (key === "items") {
+      if (!Array.isArray(value) || value.length > 100)
+        return "items must be a list of at most 100";
+      for (const item of value) {
+        if (!isRecord(item) || !isId(item.id) || !(typeof item.text === "string" && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== "boolean" || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === "boolean"))
+          return "a highlight is invalid";
+      }
+    }
+  }
+  return null;
+};
+var isInstantString = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
 var isFeedUrl = (value) => typeof value === "string" && value.length <= 2000 && /^(https?|webcal|file):\/\/\S+$/i.test(value);
 var isInstant = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value)) && /^\d{4}-\d{2}-\d{2}T/.test(value);
 var MAX_ENTRY_MS = 24 * 60 * 60 * 1000;
@@ -636,10 +709,12 @@ var validateCommand = (command, context) => {
         return "unknown channel";
       if (task.source !== undefined && !(task.source === null || isSource(task.source)))
         return "source is invalid";
+      if (task.objectiveId !== undefined && !(task.objectiveId === null || isId(task.objectiveId) && context.objectives[task.objectiveId]))
+        return "unknown objective";
       return null;
     }
     case "task.updated":
-      return needTask() ?? validatePatch(command.patch, channels);
+      return needTask() ?? validatePatch(command.patch, channels, context.objectives);
     case "task.moved":
       if (!isPlacement(command.placement))
         return "placement is invalid";
@@ -720,6 +795,42 @@ var validateCommand = (command, context) => {
     }
     case "calendar.removed":
       return isId(command.calendarId) && context.calendars[command.calendarId] ? null : "unknown calendar";
+    case "objective.created": {
+      const objective = command.objective;
+      if (!isRecord(objective) || !isId(objective.id))
+        return "objective needs an id";
+      if (context.objectives[objective.id])
+        return "objective id already exists";
+      if (!isDateKey(objective.weekStart))
+        return "weekStart must be a date";
+      if (!(typeof objective.title === "string" && objective.title.trim() && objective.title.length <= 200))
+        return "objective title must be 1-200 characters";
+      return objective.carriedFrom === null || objective.carriedFrom === undefined || isId(objective.carriedFrom) && context.objectives[objective.carriedFrom] ? null : "unknown objective to continue";
+    }
+    case "objective.updated": {
+      if (!(isId(command.objectiveId) && context.objectives[command.objectiveId]))
+        return "unknown objective";
+      const patch = command.patch;
+      if (!isRecord(patch))
+        return "patch must be an object";
+      for (const [key, value] of Object.entries(patch)) {
+        if (key === "title" && !(typeof value === "string" && value.trim() && value.length <= 200))
+          return "objective title must be 1-200 characters";
+        else if (key === "completed" && typeof value !== "boolean")
+          return "completed must be true or false";
+        else if (key !== "title" && key !== "completed")
+          return `unknown field ${key}`;
+      }
+      return null;
+    }
+    case "objective.deleted":
+      return isId(command.objectiveId) && context.objectives[command.objectiveId] ? null : "unknown objective";
+    case "ritual.saved":
+      if (!RITUALS.includes(command.ritual))
+        return "unknown ritual";
+      if (!isDateKey(command.date))
+        return "date must be a date";
+      return validateRitualFields(command.ritual, command.fields);
     case "channel.created": {
       const channel = command.channel;
       if (!isRecord(channel) || !isId(channel.id))
@@ -830,6 +941,14 @@ var summarize = (events, titleOf) => {
       return "Move working session";
     case "block.deleted":
       return "Remove working session";
+    case "objective.created":
+      return `Add objective: ${event.objective.title}`;
+    case "objective.updated":
+      return "Edit objective";
+    case "objective.deleted":
+      return "Delete objective";
+    case "ritual.saved":
+      return `Save ${event.ritual} for ${event.date}`;
     case "calendar.added":
       return `Subscribe to calendar: ${event.calendar.name}`;
     case "calendar.updated":

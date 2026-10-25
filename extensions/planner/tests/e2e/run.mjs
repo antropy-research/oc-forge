@@ -15,6 +15,9 @@ const password = /^OPENCHAMBER_UI_PASSWORD=(.+)$/m.exec(secrets)?.[1]?.trim();
 if (!password) throw new Error('no UI password in secrets.env');
 
 const run = `e2e-${Date.now().toString(36)}`;
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const monthDayLabel = (key) => `${MONTHS[Number(key.slice(5, 7)) - 1]} ${Number(key.slice(8, 10))}`;
+const weekStartKey = (key) => { const d = new Date(`${key}T00:00:00Z`); const offset = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - offset); return d.toISOString().slice(0, 10); };
 const results = [];
 const check = (name, ok, detail = '') => {
   results.push({ name, ok, detail });
@@ -36,7 +39,9 @@ const page = await context.newPage();
 const problems = [];
 page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
 page.on('console', (message) => {
-  if (message.type() === 'error' && /oc-forge-planner|planner/i.test(message.location().url ?? '')) problems.push(`console: ${message.text()}`);
+  const url = message.location().url ?? '';
+  // A failed generate is the dev container having no model, not a Planner error.
+  if (message.type() === 'error' && /oc-forge-planner|planner/i.test(url) && !url.includes('/generate')) problems.push(`console: ${message.text()}`);
 });
 
 const openPlanner = async () => {
@@ -187,6 +192,15 @@ try {
     const outer = await response.json();
     return JSON.parse(outer.body ?? outer.result?.body ?? '{}');
   };
+  const waitForState = async (predicate, timeout = 8000) => {
+    const end = Date.now() + timeout;
+    let latest = await serviceState();
+    while (!predicate(latest) && Date.now() < end) {
+      await page.waitForTimeout(300);
+      latest = await serviceState();
+    }
+    return latest;
+  };
   const snapshot = await serviceState();
   const zone = snapshot.state?.settings?.timezone ?? 'UTC';
   const todayKey = snapshot.today;
@@ -286,6 +300,92 @@ try {
   await frame.locator('.channel-list li', { hasText: `${run} cal` }).getByRole('button', { name: 'Remove' }).click();
   execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'rm', '-f', '/home/node/planner-e2e.ics']);
 
+  // Phase 4: weekly planning → daily planning → shutdown → highlights → weekly review.
+  await frame.getByRole('button', { name: 'Weekly planning', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Weekly planning' }).waitFor();
+  const subtitle = async () => (await frame.locator('.view-header .view-sub').first().innerText()).trim();
+  // Planning on a late weekday looks at next week; go back to this week for today's tasks.
+  if (!(await subtitle()).includes(monthDayLabel(weekStartKey(todayKey)))) await frame.getByRole('button', { name: 'Previous week' }).click();
+  await frame.getByRole('button', { name: /Objectives/ }).click();
+  await frame.getByRole('textbox', { name: 'Add objective' }).fill(`${run} launch planner`);
+  await frame.getByRole('textbox', { name: 'Add objective' }).press('Enter');
+  await frame.locator('li.objective input.objective-title').first().waitFor({ timeout: 10_000 });
+  await frame.getByRole('button', { name: /Intention/ }).click();
+  await frame.getByRole('textbox', { name: 'Weekly intention' }).fill('Get the Sunsama features in.');
+  await frame.getByRole('button', { name: 'Finish planning' }).click();
+  await frame.getByRole('heading', { name: 'Home' }).waitFor();
+  check('weekly planning saves an objective and finishes', true);
+
+  await frame.getByRole('button', { name: 'Daily planning', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Daily planning' }).waitFor();
+  await frame.getByRole('tab', { name: 'Today' }).click();
+  await frame.getByRole('button', { name: /Add tasks/ }).click();
+  const planDay = frame.locator('.ritual-body section.day-column');
+  await planDay.getByRole('button', { name: /Add task/ }).click();
+  await planDay.getByRole('textbox', { name: 'New task' }).fill(`${run} ritual task ~25m $launch`);
+  await planDay.getByRole('textbox', { name: 'New task' }).press('Enter');
+  const ritualCard = planDay.locator('li.task-card', { hasText: `${run} ritual task` });
+  await ritualCard.waitFor({ timeout: 10_000 });
+  check('a $objective in Add Task aligns the task to the week objective', (await ritualCard.locator('.objective-badge').innerText().catch(() => '')).includes('launch planner'));
+  await frame.getByRole('button', { name: /Estimate/ }).click();
+  check('estimate step shows the workload against the threshold', /of work planned/.test(await frame.locator('.workload').innerText()));
+  await frame.getByRole('button', { name: /Finalize/ }).click();
+  check('finalize step lists the plan', (await frame.locator('.plan-text').innerText()).includes(`${run} ritual task (0:25)`));
+  await frame.getByRole('textbox', { name: 'Obstacles' }).fill('Too many meetings');
+  await frame.locator('.plan-text').click();
+  await shot('13-daily-planning');
+  await frame.getByRole('button', { name: 'Start my day' }).click();
+  await frame.getByRole('heading', { name: 'Today' }).waitFor();
+  const planned = await waitForState((latest) => Boolean(latest.state.rituals[`planning:${todayKey}`]?.completedAt) && latest.state.rituals[`planning:${todayKey}`]?.obstacles === 'Too many meetings');
+  check('daily planning records completion and obstacles', Boolean(planned.state.rituals[`planning:${todayKey}`]?.completedAt) && planned.state.rituals[`planning:${todayKey}`]?.obstacles === 'Too many meetings', JSON.stringify(planned.state.rituals[`planning:${todayKey}`] ?? Object.keys(planned.state.rituals)));
+
+  await frame.getByRole('button', { name: 'Daily shutdown', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Daily shutdown' }).waitFor();
+  check('shutdown review lists today\'s completed work', (await frame.locator('.review-list').innerText()).includes(run));
+  await frame.getByRole('button', { name: /Reflect/ }).click();
+  await frame.getByRole('textbox', { name: 'Reflection' }).fill('Calendar work went well.');
+  await frame.locator('.ritual-section label.stacked').click({ position: { x: 2, y: 2 } });
+  await frame.getByRole('button', { name: 'Done for the day' }).click();
+  await frame.getByRole('heading', { name: 'Daily highlights' }).waitFor();
+  const shutdownState = await waitForState((latest) => latest.state.rituals[`shutdown:${todayKey}`]?.reflection === 'Calendar work went well.' && Boolean(latest.state.rituals[`shutdown:${todayKey}`]?.completedAt));
+  check('shutdown records reflection and completion', shutdownState.state.rituals[`shutdown:${todayKey}`]?.reflection === 'Calendar work went well.' && Boolean(shutdownState.state.rituals[`shutdown:${todayKey}`]?.completedAt), JSON.stringify(shutdownState.state.rituals[`shutdown:${todayKey}`] ?? {}));
+
+  await frame.getByRole('button', { name: new RegExp(`^Star ${run}`) }).first().click();
+  await frame.getByRole('textbox', { name: 'Add highlight' }).fill(`${run} helped a teammate`);
+  await frame.getByRole('textbox', { name: 'Add highlight' }).press('Enter');
+  await frame.getByRole('button', { name: `Remove ${run} helped a teammate` }).waitFor({ timeout: 10_000 });
+  const summarize = frame.getByRole('button', { name: /Summarize with AI/ });
+  if (await summarize.isEnabled()) {
+    await summarize.click();
+    const summary = frame.getByRole('textbox', { name: 'Summary' });
+    const filled = await summary.evaluate(async (element) => {
+      for (let i = 0; i < 90; i++) {
+        if (element.value.trim()) return element.value.trim();
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      return '';
+    }).catch(() => '');
+    console.log(`INFO AI summary (small model, soft check): ${filled ? `"${filled.slice(0, 140)}"` : 'no summary — see the toast for the model error'}`);
+  }
+  await frame.getByRole('button', { name: /^Publish/ }).click();
+  await page.waitForTimeout(800);
+  check('highlights publish with a starred and an added item', (await subtitle()).includes('published'));
+  const highlightState = await waitForState((latest) => Boolean(latest.state.rituals[`highlights:${todayKey}`]?.publishedAt));
+  const items = highlightState.state.rituals[`highlights:${todayKey}`]?.items ?? [];
+  check('published highlights keep the star and the extra item', items.some((item) => item.starred) && items.some((item) => item.text === `${run} helped a teammate`), `${items.length} items`);
+  await shot('14-highlights');
+
+  await frame.getByRole('button', { name: 'Weekly review', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Weekly review' }).waitFor();
+  const reviewText = await frame.locator('.ritual-body').innerText();
+  check('weekly review shows the objective and the body of work', reviewText.includes(`${run} launch planner`) && reviewText.includes(`${run} write plan`));
+  await frame.getByRole('textbox', { name: 'Weekly journal' }).fill('Solid week.');
+  // Ritual records are per week and persist across runs; either label is fine.
+  await frame.getByRole('button', { name: /^(Wrap up the week|Wrapped up)$/ }).click();
+  await frame.getByRole('button', { name: 'Wrapped up' }).waitFor({ timeout: 10_000 });
+  check('weekly review wraps up', true);
+  await shot('15-weekly-review');
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
   const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
@@ -317,6 +417,7 @@ try {
       ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
       ...Object.values(state.tasks).filter((task) => /^e2e-/.test(task.title) && !task.deletedAt).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
       ...Object.values(state.calendars).filter((calendar) => /^e2e-/.test(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
+      ...Object.values(state.objectives ?? {}).filter((objective) => /^e2e-/.test(objective.title) && !objective.deletedAt).map((objective) => ({ cmd: `cleanup-${objective.id}`, type: 'objective.deleted', objectiveId: objective.id })),
     ];
     if (commands.length) await call('POST', '/commands', { commands });
     const after = await call('GET', '/state');

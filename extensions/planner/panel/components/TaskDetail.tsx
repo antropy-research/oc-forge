@@ -7,6 +7,7 @@ import { describe, timeAgo } from '../../src/domain/activity.ts';
 import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { usePlanner, useView } from '../lib/context.ts';
+import { objectivesForWeek, weekStartOf } from '../../src/domain/rituals.ts';
 import { useUi } from '../lib/ui.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
@@ -225,6 +226,19 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
           <label class="field">
             <span>Start</span>
             <StartPicker task={task} />
+          </label>
+          <label class="field">
+            <span>Objective</span>
+            <select value={task.objectiveId ?? ''} onChange={(event) => update({ objectiveId: event.currentTarget.value || null })}>
+              <option value="">None</option>
+              {(() => {
+                const week = weekStartOf(view.state, task.placement.kind === 'day' ? task.placement.date : view.today);
+                const list = objectivesForWeek(view.state, week);
+                const current = task.objectiveId ? view.state.objectives[task.objectiveId] : null;
+                if (current && !list.includes(current)) list.unshift(current);
+                return list.map((objective) => <option key={objective.id} value={objective.id}>◎ {objective.title}</option>);
+              })()}
+            </select>
           </label>
           <label class="field">
             <span>Due</span>

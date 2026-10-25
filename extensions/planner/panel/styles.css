@@ -285,3 +285,61 @@ html[data-surface='status'], html[data-surface='status'] body { height: auto; ba
 .settings .row .grow { flex: 1; }
 .settings label.inline { display: inline-flex; grid-template-columns: none; gap: 4px; }
 .date-nav .tabs { margin: 0 6px 0 0; }
+
+/* Rituals */
+.nav { overflow-y: auto; }
+.ritual-steps { list-style: none; display: flex; gap: 6px; margin: 0; padding: 0 20px 10px; flex-wrap: wrap; }
+.ritual-steps button { display: flex; align-items: center; gap: 6px; background: none; border: 1px solid var(--pl-line); border-radius: 16px; padding: 3px 12px 3px 4px; color: var(--oc-muted); }
+.ritual-steps .step-index { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; background: var(--pl-soft); }
+.ritual-steps .is-current button { border-color: var(--oc-primary); color: var(--oc-fg); font-weight: 600; }
+.ritual-steps .is-current .step-index { background: var(--oc-primary); color: var(--oc-primary-fg); }
+.ritual-steps .is-done .step-index { background: color-mix(in srgb, var(--oc-success, #2f9e44) 25%, transparent); }
+.ritual-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 0 20px; overflow: hidden; }
+.ritual-layout.has-aside { grid-template-columns: minmax(0, 1fr) 300px; }
+.ritual-body { overflow-y: auto; padding-bottom: 20px; display: flex; flex-direction: column; gap: 18px; max-width: 760px; }
+.ritual-aside { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.ritual-aside .time-grid { flex: 1; }
+.ritual-section { display: flex; flex-direction: column; gap: 8px; }
+.ritual-section h2 { font-size: 14px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+.ritual-section .day-column { max-height: none; }
+.ritual-footer { display: flex; gap: 8px; padding: 10px 20px; border-top: 1px solid var(--pl-line); }
+.ritual-footer button, .ritual .row button, .triage-actions button, .source-list button, .objectives button:not(.link), .highlight-actions button { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 3px 10px; }
+.ritual-footer button.primary, .ritual .row button.primary { background: var(--oc-primary); color: var(--oc-primary-fg); border-color: transparent; }
+.ritual .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ritual label.inline { display: inline-flex; gap: 6px; align-items: center; }
+.ritual label.stacked { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.ritual textarea { width: 100%; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 8px 10px; resize: vertical; font-weight: 400; }
+.ritual input[type='time'] { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 2px 6px; }
+.triage, .review-list, .source-list, .objectives, .highlights { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.triage-row, .source-list li, .review-list li { display: flex; gap: 10px; align-items: center; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 6px 10px; }
+.triage-row .task-title, .source-list li > span:first-child, .review-list li > :first-child { flex: 1; min-width: 0; }
+.triage-actions { display: flex; gap: 6px; }
+.reflection { margin: 0; padding: 8px 12px; border-left: 3px solid var(--pl-line); color: var(--oc-muted); white-space: pre-wrap; }
+.workload { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 8px; background: var(--pl-softer); }
+.workload .warning { margin: 0; color: var(--oc-warning-text, #e67700); }
+.plan-text { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--pl-softer); white-space: pre-wrap; font: inherit; }
+.ritual-target { gap: 10px; }
+.objective { display: flex; gap: 10px; align-items: center; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 6px 10px; }
+.objective .objective-title { flex: 1; min-width: 0; border: 1px solid transparent; background: transparent; border-radius: 4px; padding: 2px 4px; }
+.objective input.objective-title:focus, .objective input.objective-title:hover { border-color: var(--pl-line); outline: 0; }
+.objective.is-done .objective-title { text-decoration: line-through; color: var(--oc-muted); }
+.objective-badge { color: #7048e8; }
+.highlights li { display: flex; gap: 8px; align-items: center; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 4px 8px; }
+.highlights li.is-starred { border-color: color-mix(in srgb, #f59f00 60%, transparent); }
+.highlights .star { background: none; border: 0; font-size: 16px; color: #f59f00; padding: 0 2px; }
+.highlight-text { flex: 1; border: 1px solid transparent; background: transparent; border-radius: 4px; padding: 2px 4px; }
+.highlight-text:focus { border-color: var(--pl-line); outline: 0; }
+.highlight-actions { display: flex; gap: 4px; }
+.highlight-actions button { padding: 0 6px; }
+.time-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.time-summary > div { display: flex; flex-direction: column; padding: 8px; border-radius: 8px; background: var(--pl-softer); }
+.time-summary .label { font-size: 11px; color: var(--oc-muted); }
+.breakdown { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.breakdown li { display: grid; grid-template-columns: 90px 1fr 40px; gap: 8px; align-items: center; }
+.breakdown-bar { height: 8px; border-radius: 4px; background: var(--pl-soft); overflow: hidden; display: block; }
+.breakdown-bar > span { display: block; height: 100%; border-radius: 4px; }
+.breakdown-time { text-align: right; font-variant-numeric: tabular-nums; }
+.week-days { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.week-day { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 8px 10px; }
+.week-day ul { margin: 6px 0 0; padding-left: 16px; font-size: 12px; }
+.ritual-section > button { align-self: flex-start; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 3px 10px; }

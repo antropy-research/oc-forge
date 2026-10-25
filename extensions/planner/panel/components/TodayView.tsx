@@ -2,19 +2,13 @@ import { useState } from 'preact/hooks';
 import { monthDay, weekdayName } from '../../src/domain/dates.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
 import { useView } from '../lib/context.ts';
-import { useCalendarEvents } from '../lib/calendar.ts';
 import { BacklogBuckets } from './Backlog.tsx';
 import { DayColumn } from './DayColumn.tsx';
 import { AddTask } from './AddTask.tsx';
 import { TaskList } from './TaskList.tsx';
 import { ChannelFilter } from './ChannelFilter.tsx';
-import { TimeGrid } from './TimeGrid.tsx';
+import { DayCalendar } from './TimeGrid.tsx';
 
-const TodayCalendar = () => {
-  const view = useView();
-  const feed = useCalendarEvents(view.today, view.today);
-  return <TimeGrid dates={[view.today]} events={feed.events} />;
-};
 
 /** Today: only today's work, with the calendar or the backlog beside it. */
 export const TodayView = () => {
@@ -36,7 +30,7 @@ export const TodayView = () => {
             <button role="tab" aria-selected={side === 'calendar'} onClick={() => setSide('calendar')}>Calendar</button>
             <button role="tab" aria-selected={side === 'backlog'} onClick={() => setSide('backlog')}>Backlog</button>
           </div>
-          {side === 'calendar' ? <TodayCalendar /> : <BacklogBuckets compact />}
+          {side === 'calendar' ? <DayCalendar date={view.today} /> : <BacklogBuckets compact />}
         </aside>
       </div>
     </section>

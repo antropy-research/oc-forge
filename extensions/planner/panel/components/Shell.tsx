@@ -4,7 +4,7 @@ import { usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 
-export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'backlog' | 'archive' | 'settings';
+export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'archive' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -44,6 +44,13 @@ export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) 
       <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>
       <NavItem route="calendar" current={route} onRoute={onRoute}>Calendar</NavItem>
       <NavItem route="focus" current={route} onRoute={onRoute}>Focus</NavItem>
+      <div class="nav-section">Daily rituals</div>
+      <NavItem route="planning" current={route} onRoute={onRoute}>Daily planning</NavItem>
+      <NavItem route="shutdown" current={route} onRoute={onRoute}>Daily shutdown</NavItem>
+      <NavItem route="highlights" current={route} onRoute={onRoute}>Daily highlights</NavItem>
+      <div class="nav-section">Weekly rituals</div>
+      <NavItem route="weeklyPlanning" current={route} onRoute={onRoute}>Weekly planning</NavItem>
+      <NavItem route="weeklyReview" current={route} onRoute={onRoute}>Weekly review</NavItem>
       <div class="nav-section">Lists</div>
       <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>
       <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>

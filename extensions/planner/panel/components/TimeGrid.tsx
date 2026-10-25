@@ -8,6 +8,7 @@ import { newId } from '../../src/domain/ids.ts';
 import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import { useNow } from '../lib/time.ts';
+import { useCalendarEvents } from '../lib/calendar.ts';
 import { dayLabel } from './DayColumn.tsx';
 
 const HOUR_PX = 48;
@@ -261,4 +262,10 @@ export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: Calendar
       </div>
     </div>
   );
+};
+
+/** One day's time grid with its calendar events. */
+export const DayCalendar = ({ date }: { date: DateKey }) => {
+  const feed = useCalendarEvents(date, date);
+  return <TimeGrid dates={[date]} events={feed.events} />;
 };

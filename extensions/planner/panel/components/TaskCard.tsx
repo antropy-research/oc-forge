@@ -110,7 +110,8 @@ export const TaskCard = ({ task }: { task: Task }) => {
   const zone = view.state.settings.timezone ?? 'UTC';
   const dayKey = task.placement.kind === 'day' ? task.placement.date : null;
   const timebox = dayKey ? blocksFor(view.state, task.id).find((block) => zonedDateMinutes(block.start, zone).date === dayKey) : undefined;
-  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox;
+  const objective = task.objectiveId ? view.state.objectives[task.objectiveId] : null;
+  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox || objective;
 
   const toggle = () =>
     void client.dispatch([done ? { type: 'task.reopened', taskId: task.id } : { type: 'task.completed', taskId: task.id, on: view.today }]);
@@ -135,6 +136,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
             {timebox && <span class="timebox" style={{ '--item-color': channel?.color ?? 'var(--oc-primary)' }} title="Working session">{clockLabel(zonedDateMinutes(timebox.start, zone).minutes)}</span>}
             {channel && <span class="channel"><span class="hash" style={{ color: channel.color }}>#</span>{channel.name}</span>}
             {task.priority && <span class={`priority priority-${task.priority}`}>{PRIORITY_LABEL[task.priority]}</span>}
+            {objective && !objective.deletedAt && <span class="objective-badge" title={`Objective: ${objective.title}`}>◎ {objective.title}</span>}
             {due && <span class={`due${dueClass}`}>Due {due === view.today ? 'today' : monthDay(due)}</span>}
             {task.subtasks.length > 0 && <span class="subtask-count" title="Subtasks">☑ {subtasksDone}/{task.subtasks.length}</span>}
             {task.notes && <span class="has-notes" title="Has notes">≡</span>}

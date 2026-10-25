@@ -36,6 +36,10 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'block.created': return `Timebox: ${titleOf(event.block.taskId)}`;
     case 'block.updated': return 'Move working session';
     case 'block.deleted': return 'Remove working session';
+    case 'objective.created': return `Add objective: ${event.objective.title}`;
+    case 'objective.updated': return 'Edit objective';
+    case 'objective.deleted': return 'Delete objective';
+    case 'ritual.saved': return `Save ${event.ritual} for ${event.date}`;
     case 'calendar.added': return `Subscribe to calendar: ${event.calendar.name}`;
     case 'calendar.updated': return 'Edit calendar';
     case 'calendar.removed': return 'Remove calendar';

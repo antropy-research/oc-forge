@@ -67,6 +67,7 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   channelId: string | null;
+  objectiveId: string | null;
   subtasks: Subtask[];
   source: TaskSourceRef | null;
 }
@@ -92,6 +93,48 @@ export interface WorkBlock {
   taskId: string;
   start: string;
   end: string;
+}
+
+/** A weekly objective: a goal for one week that tasks can align to. */
+export interface Objective {
+  id: string;
+  /** First day of the objective's week. */
+  weekStart: DateKey;
+  title: string;
+  completedAt: string | null;
+  /** The objective this one continues from last week. */
+  carriedFrom: string | null;
+  createdAt: string;
+  deletedAt: string | null;
+}
+
+export const RITUALS = ['planning', 'shutdown', 'highlights', 'weeklyPlanning', 'weeklyReview'] as const;
+export type Ritual = (typeof RITUALS)[number];
+
+export interface Highlight {
+  id: string;
+  text: string;
+  taskId: string | null;
+  starred: boolean;
+  /** A task-derived item the user removed; kept so it is not merged back in. */
+  hidden?: boolean;
+}
+
+/** What a ritual left behind for one day (or one week, keyed by its first day). */
+export interface RitualRecord {
+  completedAt?: string | null;
+  /** Daily planning: what might get in the way. */
+  obstacles?: string;
+  /** Daily planning: when the workday should end, minutes after midnight. */
+  shutdownTime?: number | null;
+  /** Shutdown and highlights. */
+  reflection?: string;
+  /** Highlights. */
+  items?: Highlight[];
+  summary?: string;
+  publishedAt?: string | null;
+  /** Weekly planning and review. */
+  journal?: string;
 }
 
 /** A read-only calendar the service fetches (an ICS feed or file). */
@@ -128,8 +171,13 @@ export interface PlannerState {
   timer: TimerState | null;
   blocks: Record<string, WorkBlock>;
   calendars: Record<string, CalendarSubscription>;
+  objectives: Record<string, Objective>;
+  /** Keyed `${ritual}:${date}`. */
+  rituals: Record<string, RitualRecord>;
   settings: Settings;
 }
+
+export const ritualKey = (ritual: Ritual, date: DateKey): string => `${ritual}:${date}`;
 
 export const DEFAULT_SETTINGS: Settings = {
   timezone: null,
@@ -149,5 +197,7 @@ export const emptyState = (): PlannerState => ({
   timer: null,
   blocks: {},
   calendars: {},
+  objectives: {},
+  rituals: {},
   settings: { ...DEFAULT_SETTINGS },
 });

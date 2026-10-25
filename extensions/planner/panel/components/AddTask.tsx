@@ -14,6 +14,7 @@ const Chips = ({ parsed }: { parsed: QuickAdd }) => (
     {parsed.placement && <span class="chip">@{placementLabel(parsed.placement)}</span>}
     {parsed.channel && <span class="chip">#{parsed.channel}</span>}
     {parsed.priority && <span class="chip">!{parsed.priority}</span>}
+    {parsed.objective && <span class="chip">◎ {parsed.objective}</span>}
   </div>
 );
 
@@ -33,7 +34,7 @@ export const AddTask = ({ placement, edge = 'bottom' }: { placement: Placement; 
 
   const submit = () => {
     if (!parsed || !parsed.title.trim()) return;
-    void client.dispatch(createTaskCommands(view.state, parsed, placement, edge));
+    void client.dispatch(createTaskCommands(view.state, parsed, placement, edge, view.today));
     setText('');
   };
 

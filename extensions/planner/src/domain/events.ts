@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, type CalendarSubscription, type Channel, type DateKey, type Placement, type Settings, type Subtask, type Task, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Objective, type Placement, type Ritual, type RitualRecord, type Settings, type Subtask, type Task, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -12,10 +12,11 @@ export interface NewTask {
   placement: Placement;
   position: number;
   channelId?: string | null;
+  objectiveId?: string | null;
   source?: TaskSourceRef | null;
 }
 
-export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'subtasks'] as const;
+export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'objectiveId', 'subtasks'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
 
 export type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
@@ -47,6 +48,10 @@ export type EventBody =
   | { type: 'calendar.added'; calendar: Omit<CalendarSubscription, 'visible'> }
   | { type: 'calendar.updated'; calendarId: string; patch: Partial<Pick<CalendarSubscription, 'name' | 'color' | 'visible'>> }
   | { type: 'calendar.removed'; calendarId: string }
+  | { type: 'objective.created'; objective: Pick<Objective, 'id' | 'weekStart' | 'title' | 'carriedFrom'> }
+  | { type: 'objective.updated'; objectiveId: string; patch: { title?: string; completed?: boolean } }
+  | { type: 'objective.deleted'; objectiveId: string }
+  | { type: 'ritual.saved'; ritual: Ritual; date: DateKey; fields: RitualRecord }
   | { type: 'channel.created'; channel: NewChannel }
   | { type: 'channel.updated'; channelId: string; patch: ChannelPatch }
   | { type: 'channel.deleted'; channelId: string }
@@ -91,7 +96,7 @@ const isPriority = (value: unknown): boolean => value === null || (typeof value 
 const isColor = (value: unknown): boolean => typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
 const isChannelName = (value: unknown): boolean => typeof value === 'string' && /^[\p{L}\p{N}_-]{1,40}$/u.test(value);
 
-const validatePatch = (patch: unknown, channels: Record<string, Channel>): string | null => {
+const validatePatch = (patch: unknown, channels: Record<string, Channel>, objectives: Record<string, Objective>): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'title' && !isTitle(value)) return 'title must be 1-500 characters';
@@ -100,6 +105,7 @@ const validatePatch = (patch: unknown, channels: Record<string, Channel>): strin
     else if (key === 'priority' && !isPriority(value)) return 'priority is invalid';
     else if (key === 'dueDate' && !(value === null || isDateKey(value))) return 'dueDate must be a date or null';
     else if (key === 'channelId' && !(value === null || (isId(value) && channels[value as string]))) return 'unknown channel';
+    else if (key === 'objectiveId' && !(value === null || (isId(value) && objectives[value as string]))) return 'unknown objective';
     else if (key === 'subtasks' && !isSubtasks(value)) return 'subtasks are invalid';
     else if (!(PATCH_FIELDS as readonly string[]).includes(key)) return `unknown field ${key}`;
   }
@@ -138,7 +144,36 @@ export interface CommandContext {
   entries: Record<string, { id: string }>;
   blocks: Record<string, WorkBlock>;
   calendars: Record<string, CalendarSubscription>;
+  objectives: Record<string, Objective>;
 }
+
+const TEXT_MAX = 20_000;
+const RITUAL_FIELDS: Record<Ritual, readonly string[]> = {
+  planning: ['completedAt', 'obstacles', 'shutdownTime'],
+  shutdown: ['completedAt', 'reflection'],
+  highlights: ['completedAt', 'items', 'summary', 'reflection', 'publishedAt'],
+  weeklyPlanning: ['completedAt', 'journal'],
+  weeklyReview: ['completedAt', 'journal'],
+};
+
+const validateRitualFields = (ritual: Ritual, fields: unknown): string | null => {
+  if (!isRecord(fields)) return 'fields must be an object';
+  for (const [key, value] of Object.entries(fields)) {
+    if (!RITUAL_FIELDS[ritual].includes(key)) return `${ritual} has no field ${key}`;
+    if ((key === 'completedAt' || key === 'publishedAt') && !(value === null || isInstantString(value))) return `${key} must be an ISO instant or null`;
+    if ((key === 'obstacles' || key === 'reflection' || key === 'summary' || key === 'journal') && !(typeof value === 'string' && value.length <= TEXT_MAX)) return `${key} is too long`;
+    if (key === 'shutdownTime' && !(value === null || (Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 24 * 60))) return 'shutdownTime must be minutes after midnight';
+    if (key === 'items') {
+      if (!Array.isArray(value) || value.length > 100) return 'items must be a list of at most 100';
+      for (const item of value) {
+        if (!isRecord(item) || !isId(item.id) || !(typeof item.text === 'string' && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== 'boolean' || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === 'boolean')) return 'a highlight is invalid';
+      }
+    }
+  }
+  return null;
+};
+
+const isInstantString = (value: unknown): boolean => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
 
 const isFeedUrl = (value: unknown): boolean => typeof value === 'string' && value.length <= 2000 && /^(https?|webcal|file):\/\/\S+$/i.test(value);
 
@@ -174,10 +209,11 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       if (task.dueDate !== undefined && !(task.dueDate === null || isDateKey(task.dueDate))) return 'dueDate must be a date or null';
       if (task.channelId !== undefined && !(task.channelId === null || (isId(task.channelId) && channels[task.channelId as string]))) return 'unknown channel';
       if (task.source !== undefined && !(task.source === null || isSource(task.source))) return 'source is invalid';
+      if (task.objectiveId !== undefined && !(task.objectiveId === null || (isId(task.objectiveId) && context.objectives[task.objectiveId as string]))) return 'unknown objective';
       return null;
     }
     case 'task.updated':
-      return needTask() ?? validatePatch(command.patch, channels);
+      return needTask() ?? validatePatch(command.patch, channels, context.objectives);
     case 'task.moved':
       if (!isPlacement(command.placement)) return 'placement is invalid';
       if (typeof command.position !== 'number' || !Number.isFinite(command.position)) return 'position must be a number';
@@ -238,6 +274,31 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     }
     case 'calendar.removed':
       return isId(command.calendarId) && context.calendars[command.calendarId as string] ? null : 'unknown calendar';
+    case 'objective.created': {
+      const objective = command.objective;
+      if (!isRecord(objective) || !isId(objective.id)) return 'objective needs an id';
+      if (context.objectives[objective.id as string]) return 'objective id already exists';
+      if (!isDateKey(objective.weekStart)) return 'weekStart must be a date';
+      if (!(typeof objective.title === 'string' && objective.title.trim() && objective.title.length <= 200)) return 'objective title must be 1-200 characters';
+      return objective.carriedFrom === null || objective.carriedFrom === undefined || (isId(objective.carriedFrom) && context.objectives[objective.carriedFrom as string]) ? null : 'unknown objective to continue';
+    }
+    case 'objective.updated': {
+      if (!(isId(command.objectiveId) && context.objectives[command.objectiveId as string])) return 'unknown objective';
+      const patch = command.patch;
+      if (!isRecord(patch)) return 'patch must be an object';
+      for (const [key, value] of Object.entries(patch)) {
+        if (key === 'title' && !(typeof value === 'string' && value.trim() && value.length <= 200)) return 'objective title must be 1-200 characters';
+        else if (key === 'completed' && typeof value !== 'boolean') return 'completed must be true or false';
+        else if (key !== 'title' && key !== 'completed') return `unknown field ${key}`;
+      }
+      return null;
+    }
+    case 'objective.deleted':
+      return isId(command.objectiveId) && context.objectives[command.objectiveId as string] ? null : 'unknown objective';
+    case 'ritual.saved':
+      if (!(RITUALS as readonly string[]).includes(command.ritual as string)) return 'unknown ritual';
+      if (!isDateKey(command.date)) return 'date must be a date';
+      return validateRitualFields(command.ritual as Ritual, command.fields);
     case 'channel.created': {
       const channel = command.channel;
       if (!isRecord(channel) || !isId(channel.id)) return 'channel needs an id';

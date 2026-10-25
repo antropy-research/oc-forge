@@ -5,6 +5,10 @@ import { ArchiveView } from './ArchiveView.tsx';
 import { Backlog } from './Backlog.tsx';
 import { Board } from './Board.tsx';
 import { CalendarView } from './CalendarView.tsx';
+import { DailyPlanning } from './rituals/DailyPlanning.tsx';
+import { DailyShutdown } from './rituals/DailyShutdown.tsx';
+import { Highlights } from './rituals/Highlights.tsx';
+import { WeeklyPlanning, WeeklyReview } from './rituals/Weekly.tsx';
 import { FocusView } from './FocusView.tsx';
 import { Settings } from './Settings.tsx';
 import { Nav, ServiceGate, Toasts, type Route } from './Shell.tsx';
@@ -43,6 +47,11 @@ export const App = ({ surface }: { surface: string }) => {
             {route === 'today' && <TodayView />}
             {route === 'calendar' && <CalendarView />}
             {route === 'focus' && <FocusView onExit={() => setRoute('today')} />}
+            {route === 'planning' && <DailyPlanning onDone={() => setRoute('today')} />}
+            {route === 'shutdown' && <DailyShutdown onDone={() => setRoute('highlights')} />}
+            {route === 'highlights' && <Highlights />}
+            {route === 'weeklyPlanning' && <WeeklyPlanning onDone={() => setRoute('home')} />}
+            {route === 'weeklyReview' && <WeeklyReview />}
             {route === 'backlog' && <Backlog />}
             {route === 'archive' && <ArchiveView />}
             {route === 'settings' && <Settings />}
