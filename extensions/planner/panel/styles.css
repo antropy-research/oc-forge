@@ -461,3 +461,21 @@ kbd { font: 11px var(--oc-mono, ui-monospace, monospace); padding: 0 5px; border
 .pomodoro-phase { font-weight: 600; font-variant-numeric: tabular-nums; }
 .pomodoro-phase.is-focus { color: var(--oc-success-text, #2f9e44); }
 .pomodoro-phase.is-break { color: var(--oc-info-text, #1c7ed6); }
+
+/* GitHub */
+.gh-kind { width: 14px; text-align: center; font-weight: 700; margin-top: 1px; }
+.gh-kind.is-issue { color: #2da44e; }
+.gh-kind.is-pull { color: #8250df; }
+.sync-row { align-items: center; }
+
+/* Ask Planner */
+.nav-ask { color: var(--oc-primary-text, var(--oc-primary)); font-weight: 600; margin-bottom: 6px; }
+.assistant { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.assistant textarea { width: 100%; resize: vertical; border: 1px solid var(--pl-line); border-radius: 8px; padding: 8px 10px; background: transparent; font-size: 14px; }
+.assistant-row { display: flex; gap: 10px; align-items: center; }
+.assistant-row .hint { margin: 0; flex: 1; }
+.assistant-row button.primary:disabled { opacity: 0.5; cursor: default; }
+.assistant-reply { margin: 0; font-weight: 500; }
+.assistant-ops { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.assistant-ops label.inline { display: flex; gap: 8px; align-items: center; }
+.assistant-note { margin: 0; }

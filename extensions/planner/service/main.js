@@ -623,6 +623,7 @@ ${summaries.map((line) => `- ${line}`).join(`
       await this.git(["commit", "-q", "-m", message]);
       this.lastCommitAt = new Date().toISOString();
       this.lastError = null;
+      this.options.onCommit?.();
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (!/nothing to commit/.test(text)) {
@@ -631,9 +632,65 @@ ${summaries.map((line) => `- ${line}`).join(`
       }
     }
   }
-  git(args) {
+  async remoteUrl() {
+    if (!this.gitEnabled)
+      return null;
+    try {
+      return (await this.git(["remote", "get-url", "origin"])).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+  async setRemote(url) {
+    if (!this.gitEnabled)
+      throw new Error("git is not available on this machine");
+    const current = await this.remoteUrl();
+    if (!url) {
+      if (current)
+        await this.git(["remote", "remove", "origin"]);
+      return;
+    }
+    await this.git(current ? ["remote", "set-url", "origin", url] : ["remote", "add", "origin", url]);
+  }
+  async commitNow() {
+    if (this.commitTimer) {
+      clearTimeout(this.commitTimer);
+      this.commitTimer = null;
+    }
+    await this.commit();
+    await this.gitChain;
+  }
+  fetchRemote() {
+    return this.git(["fetch", "--quiet", "origin"], 120000);
+  }
+  async mergeRemote() {
+    const remote = (await this.git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]).catch(() => "")).trim();
+    if (!remote)
+      return false;
+    const before = (await this.git(["rev-parse", "HEAD"])).trim();
+    try {
+      await this.git(["merge", "--quiet", "--no-edit", "--allow-unrelated-histories", "-m", "Merge planner data from origin", "refs/remotes/origin/main"]);
+    } catch (error) {
+      const conflicted = (await this.git(["diff", "--name-only", "--diff-filter=U"])).split(`
+`).filter(Boolean);
+      if (conflicted.length === 0 || conflicted.some((file) => file.startsWith("events/"))) {
+        await this.git(["merge", "--abort"]).catch(() => {
+          return;
+        });
+        throw error;
+      }
+      await this.git(["checkout", "--ours", "--", ...conflicted]);
+      await this.git(["add", "--", ...conflicted]);
+      await this.git(["commit", "--quiet", "--no-edit"]);
+    }
+    return (await this.git(["rev-parse", "HEAD"])).trim() !== before;
+  }
+  pushRemote() {
+    return this.git(["push", "--quiet", "origin", "HEAD:refs/heads/main"], 120000);
+  }
+  git(args, timeout = 30000) {
     const run = () => new Promise((resolve, reject) => {
-      execFile("git", ["-c", "user.name=OpenChamber Planner", "-c", "user.email=planner@localhost", "-c", "commit.gpgsign=false", ...args], { cwd: this.dir, timeout: 30000 }, (error, stdout, stderr) => error ? reject(new Error(`${error.message}
+      execFile("git", ["-c", "user.name=OpenChamber Planner", "-c", "user.email=planner@localhost", "-c", "commit.gpgsign=false", ...args], { cwd: this.dir, timeout }, (error, stdout, stderr) => error ? reject(new Error(`${error.message}
 ${stderr}${stdout}`)) : resolve(stdout));
     });
     const next = this.gitChain.then(run, run);
@@ -1407,6 +1464,18 @@ class Planner {
       this.persist(events, working);
     return { ok: true, applied: events.length };
   }
+  reload() {
+    const events = this.store.load();
+    this.log.length = 0;
+    this.log.push(...events);
+    this.applied.clear();
+    for (const event of events) {
+      if (event.cmd)
+        this.applied.add(event.cmd);
+      this.lastAt = Math.max(this.lastAt, Date.parse(event.at) || 0);
+    }
+    this.state = foldEvents(events);
+  }
   activity(taskId, limit = 200) {
     return this.log.filter((event) => touchesTask(event, taskId)).slice(-limit);
   }
@@ -1848,6 +1917,185 @@ class CalendarFeeds {
   }
 }
 
+// service/sync.ts
+var isRemoteUrl = (url) => {
+  if (!url || url.length > 500 || /\s/.test(url) || url.startsWith("-"))
+    return false;
+  return /^(https|ssh|git|file):\/\/\S+$/i.test(url) || /^[\w.-]+@[\w.-]+:[\w.~/-]+$/.test(url) || /^\/[^\0]+$/.test(url);
+};
+var AUTO_DELAY_MS = 15000;
+var PERIOD_MS = 5 * 60000;
+
+class SyncManager {
+  store;
+  planner;
+  log;
+  remote = null;
+  lastSyncAt = null;
+  lastError = null;
+  running = null;
+  lock = null;
+  timer = null;
+  constructor(store, planner, log = () => {}) {
+    this.store = store;
+    this.planner = planner;
+    this.log = log;
+  }
+  async init() {
+    this.remote = await this.store.remoteUrl();
+    if (this.remote)
+      this.schedule(5000);
+    setInterval(() => {
+      if (this.remote)
+        this.run().catch(() => {
+          return;
+        });
+    }, PERIOD_MS).unref?.();
+  }
+  status() {
+    return { remote: this.remote, lastSyncAt: this.lastSyncAt, lastError: this.lastError, syncing: this.running !== null };
+  }
+  idle() {
+    return this.lock ?? Promise.resolve();
+  }
+  schedule(delay = AUTO_DELAY_MS) {
+    if (!this.remote)
+      return;
+    if (this.timer)
+      clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.run().catch(() => {
+        return;
+      });
+    }, delay);
+    this.timer.unref?.();
+  }
+  async setRemote(url) {
+    const clean = url?.trim() || null;
+    if (clean && !isRemoteUrl(clean))
+      throw new Error("Use an https, ssh, git@host:path, file:// URL or an absolute path.");
+    await this.store.setRemote(clean);
+    this.remote = clean;
+    this.lastError = null;
+    this.lastSyncAt = null;
+    if (clean)
+      this.schedule(1000);
+    return this.status();
+  }
+  run() {
+    if (!this.remote)
+      return Promise.reject(new Error("No sync remote is set."));
+    this.running ??= this.sync().finally(() => {
+      this.running = null;
+    });
+    return this.running;
+  }
+  async sync() {
+    try {
+      await this.store.fetchRemote();
+      let release;
+      this.lock = new Promise((resolve) => {
+        release = resolve;
+      });
+      try {
+        await this.store.commitNow();
+        if (await this.store.mergeRemote())
+          this.planner.reload();
+      } finally {
+        this.lock = null;
+        release();
+      }
+      await this.store.pushRemote();
+      this.lastSyncAt = new Date().toISOString();
+      this.lastError = null;
+    } catch (error) {
+      this.lastError = (error instanceof Error ? error.message : String(error)).split(`
+`).slice(0, 3).join(" ").slice(0, 400);
+      this.log(`sync failed: ${this.lastError}`);
+    }
+    return { ...this.status(), syncing: false };
+  }
+}
+
+// service/github.ts
+import { execFile as execFile2 } from "node:child_process";
+var ghRunner = (args) => new Promise((resolve, reject) => {
+  execFile2("gh", args, { timeout: 20000, maxBuffer: 8000000 }, (error, stdout, stderr) => {
+    if (error)
+      reject(Object.assign(new Error(`${error.message}
+${stderr}`), { code: error.code, stderr: String(stderr) }));
+    else
+      resolve(stdout);
+  });
+});
+var ITEM_FIELDS = `__typename
+  ... on Issue { id number title url state updatedAt repository { nameWithOwner } }
+  ... on PullRequest { id number title url state isDraft updatedAt repository { nameWithOwner } }`;
+var LIST_QUERY = `query PlannerGitHubList($q: String!) { search(query: $q, type: ISSUE, first: 50) { nodes { ${ITEM_FIELDS} } } }`;
+var NODES_QUERY = `query PlannerGitHubNodes($ids: [ID!]!) { nodes(ids: $ids) { ${ITEM_FIELDS} } }`;
+var LISTS = {
+  assigned: "is:open is:issue assignee:@me archived:false sort:updated-desc",
+  review: "is:open is:pr review-requested:@me archived:false sort:updated-desc",
+  mine: "is:open is:pr author:@me archived:false sort:updated-desc"
+};
+var parseNodes = (nodes) => nodes.flatMap((node) => {
+  if (!node?.id || !node.number || !node.title || !node.url || !node.repository?.nameWithOwner)
+    return [];
+  const kind = node.__typename === "PullRequest" ? "pull" : "issue";
+  return [{
+    id: node.id,
+    kind,
+    repo: node.repository.nameWithOwner,
+    number: node.number,
+    key: `${node.repository.nameWithOwner}#${node.number}`,
+    title: node.title,
+    url: node.url,
+    state: node.state ?? "OPEN",
+    draft: Boolean(node.isDraft),
+    updatedAt: node.updatedAt ?? ""
+  }];
+});
+var explain = (error) => {
+  const failure = error;
+  if (failure.code === "ENOENT")
+    return "The GitHub CLI (gh) is not installed on the machine running OpenChamber.";
+  const text = `${failure.stderr ?? ""} ${failure.message ?? ""}`;
+  if (/auth login|not logged|authentication/i.test(text))
+    return "Log in once with `gh auth login` on the machine running OpenChamber.";
+  return text.trim().split(`
+`)[0]?.slice(0, 300) || "gh failed";
+};
+
+class GitHubSource {
+  run;
+  constructor(run = ghRunner) {
+    this.run = run;
+  }
+  async status() {
+    try {
+      const login = (await this.run(["api", "user", "--jq", ".login"])).trim();
+      return { available: true, login: login || null, message: null };
+    } catch (error) {
+      return { available: false, login: null, message: explain(error) };
+    }
+  }
+  async list(kind) {
+    const out = await this.run(["api", "graphql", "-f", `query=${LIST_QUERY}`, "-f", `q=${LISTS[kind]}`]).catch((error) => {
+      throw new Error(explain(error));
+    });
+    return parseNodes(JSON.parse(out).data?.search?.nodes ?? []);
+  }
+  async items(ids) {
+    if (ids.length === 0)
+      return [];
+    const out = await this.run(["api", "graphql", "-f", `query=${NODES_QUERY}`, ...ids.slice(0, 100).flatMap((id) => ["-f", `ids[]=${id}`])]).catch((error) => {
+      throw new Error(explain(error));
+    });
+    return parseNodes(JSON.parse(out).data?.nodes ?? []);
+  }
+}
+
 // service/main.ts
 var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -1857,9 +2105,15 @@ if (!port || !token) {
 }
 var BODY_LIMIT = 1e6;
 var dir = process.env.PLANNER_DATA_DIR || join3(homedir(), ".local", "share", "openchamber-planner", "data");
-var store = new EventStore({ dir, log: (message) => console.error(`[planner] ${message}`) });
+var log = (message) => console.error(`[planner] ${message}`);
+var sync = null;
+var store = new EventStore({ dir, log, onCommit: () => sync?.schedule() });
 await store.init();
 var planner = new Planner(store);
+sync = new SyncManager(store, planner, log);
+await sync.init();
+var snapshot = () => ({ ...planner.snapshot(), sync: sync.status() });
+var github = new GitHubSource;
 var feeds = new CalendarFeeds(join3(dirname(dir), "cache"));
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -1899,8 +2153,59 @@ var server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === "/state" && req.method === "GET") {
-      json(res, 200, planner.snapshot());
+      json(res, 200, snapshot());
       return;
+    }
+    if (url.pathname === "/github/status" && req.method === "GET") {
+      json(res, 200, await github.status());
+      return;
+    }
+    if (url.pathname === "/github/list" && req.method === "GET") {
+      const kind = url.searchParams.get("kind") ?? "assigned";
+      if (!(kind in LISTS)) {
+        json(res, 400, { error: "kind must be assigned, review or mine" });
+        return;
+      }
+      try {
+        json(res, 200, { items: await github.list(kind) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === "/github/items" && req.method === "POST") {
+      const body = await readJson(req);
+      const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === "string" && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+      try {
+        json(res, 200, { items: await github.items(ids) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === "/sync") {
+      if (req.method === "GET") {
+        json(res, 200, sync.status());
+        return;
+      }
+      if (req.method === "PUT") {
+        const body = await readJson(req);
+        if (body.remote !== null && typeof body.remote !== "string") {
+          json(res, 400, { error: "remote must be a string or null" });
+          return;
+        }
+        try {
+          json(res, 200, await sync.setRemote(body.remote));
+        } catch (error) {
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+      if (req.method === "POST") {
+        const status = await sync.run().catch((error) => ({ ...sync.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        json(res, 200, { status, ...snapshot() });
+        return;
+      }
     }
     if (url.pathname === "/calendar" && req.method === "GET") {
       const from = url.searchParams.get("from") ?? "";
@@ -1924,12 +2229,13 @@ var server = http.createServer(async (req, res) => {
         json(res, 400, { error: "commands must be an array" });
         return;
       }
+      await sync.idle();
       const result = planner.execute(body.commands);
       if (!result.ok) {
         json(res, 400, { error: result.error, index: result.index });
         return;
       }
-      json(res, 200, { applied: result.applied, ...planner.snapshot() });
+      json(res, 200, { applied: result.applied, ...snapshot() });
       return;
     }
     json(res, 404, { error: "not found" });

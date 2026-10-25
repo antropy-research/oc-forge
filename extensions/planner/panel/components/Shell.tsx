@@ -7,7 +7,7 @@ import { useAgents, usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 
-export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'agents' | 'archive' | 'stats' | 'settings';
+export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'github' | 'agents' | 'archive' | 'stats' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -36,7 +36,7 @@ const TimerBar = ({ onRoute }: { onRoute: (route: Route) => void }) => {
   );
 };
 
-export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (route: Route) => void; onSearch: () => void }) => {
+export const Nav = ({ route, onRoute, onSearch, onAsk }: { route: Route; onRoute: (route: Route) => void; onSearch: () => void; onAsk: () => void }) => {
   const view = useView();
   const open = tasksForDay(view.state, view.today).filter((task) => !task.completedAt).length;
   const archived = archivedTasks(view.state).length;
@@ -51,6 +51,9 @@ export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (rout
       <button class="nav-search" onClick={onSearch} aria-label="Search and commands">
         <span>Search</span>
         <kbd>⌘K</kbd>
+      </button>
+      <button class="nav-item nav-ask" onClick={onAsk} aria-label="Ask Planner">
+        <span>✦ Ask Planner</span>
       </button>
       <NavItem route="home" current={route} onRoute={onRoute}>Home</NavItem>
       <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>
@@ -100,6 +103,7 @@ export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (rout
         <button class="nav-item nav-sub nav-add" onClick={() => setAddingFolder(true)}><span>+ Add folder</span></button>
       )}
       <NavItem route="linear" current={route} onRoute={onRoute}>Linear</NavItem>
+      <NavItem route="github" current={route} onRoute={onRoute}>GitHub</NavItem>
       <NavItem route="agents" current={route} onRoute={onRoute} badge={agents.attention}>Agents</NavItem>
       <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>
       <NavItem route="stats" current={route} onRoute={onRoute}>Stats</NavItem>

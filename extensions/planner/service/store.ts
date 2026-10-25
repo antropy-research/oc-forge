@@ -13,6 +13,8 @@ export interface EventStoreOptions {
   /** Quiet period before pending events are committed. */
   commitDelayMs?: number;
   log?: (message: string) => void;
+  /** Called after each successful commit (to schedule a sync). */
+  onCommit?: () => void;
 }
 
 const MONTH_FILE = /^\d{4}-\d{2}\.jsonl$/;
@@ -128,6 +130,7 @@ export class EventStore {
       await this.git(['commit', '-q', '-m', message]);
       this.lastCommitAt = new Date().toISOString();
       this.lastError = null;
+      this.options.onCommit?.();
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (!/nothing to commit/.test(text)) {
@@ -137,13 +140,75 @@ export class EventStore {
     }
   }
 
-  private git(args: string[]): Promise<string> {
+  /** The `origin` remote, or null when none is set. */
+  async remoteUrl(): Promise<string | null> {
+    if (!this.gitEnabled) return null;
+    try {
+      return (await this.git(['remote', 'get-url', 'origin'])).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async setRemote(url: string | null): Promise<void> {
+    if (!this.gitEnabled) throw new Error('git is not available on this machine');
+    const current = await this.remoteUrl();
+    if (!url) {
+      if (current) await this.git(['remote', 'remove', 'origin']);
+      return;
+    }
+    await this.git(current ? ['remote', 'set-url', 'origin', url] : ['remote', 'add', 'origin', url]);
+  }
+
+  /** Commit what is pending right away (before a merge rewrites the files). */
+  async commitNow(): Promise<void> {
+    if (this.commitTimer) {
+      clearTimeout(this.commitTimer);
+      this.commitTimer = null;
+    }
+    await this.commit();
+    await this.gitChain;
+  }
+
+  fetchRemote(): Promise<string> {
+    return this.git(['fetch', '--quiet', 'origin'], 120_000);
+  }
+
+  /**
+   * Merge `origin/main` into the local history. Event files merge by git's
+   * union driver (one event per line); any other conflicting file keeps the
+   * local copy. Returns whether anything new came in.
+   */
+  async mergeRemote(): Promise<boolean> {
+    const remote = (await this.git(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main']).catch(() => '')).trim();
+    if (!remote) return false;
+    const before = (await this.git(['rev-parse', 'HEAD'])).trim();
+    try {
+      await this.git(['merge', '--quiet', '--no-edit', '--allow-unrelated-histories', '-m', 'Merge planner data from origin', 'refs/remotes/origin/main']);
+    } catch (error) {
+      const conflicted = (await this.git(['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
+      if (conflicted.length === 0 || conflicted.some((file) => file.startsWith('events/'))) {
+        await this.git(['merge', '--abort']).catch(() => undefined);
+        throw error;
+      }
+      await this.git(['checkout', '--ours', '--', ...conflicted]);
+      await this.git(['add', '--', ...conflicted]);
+      await this.git(['commit', '--quiet', '--no-edit']);
+    }
+    return (await this.git(['rev-parse', 'HEAD'])).trim() !== before;
+  }
+
+  pushRemote(): Promise<string> {
+    return this.git(['push', '--quiet', 'origin', 'HEAD:refs/heads/main'], 120_000);
+  }
+
+  private git(args: string[], timeout = 30_000): Promise<string> {
     const run = (): Promise<string> =>
       new Promise((resolve, reject) => {
         execFile(
           'git',
           ['-c', 'user.name=OpenChamber Planner', '-c', 'user.email=planner@localhost', '-c', 'commit.gpgsign=false', ...args],
-          { cwd: this.dir, timeout: 30_000 },
+          { cwd: this.dir, timeout },
           (error, stdout, stderr) => (error ? reject(new Error(`${error.message}\n${stderr}${stdout}`)) : resolve(stdout)),
         );
       });

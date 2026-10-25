@@ -18,10 +18,18 @@ export interface StorageInfo {
   skippedLines: number;
 }
 
+export interface SyncStatus {
+  remote: string | null;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  syncing: boolean;
+}
+
 interface Snapshot {
   state: PlannerState;
   today: DateKey | null;
   storage: StorageInfo;
+  sync?: SyncStatus;
 }
 
 /** Why the service cannot answer, in terms the user can act on. */
@@ -34,6 +42,7 @@ export interface ClientView {
   state: PlannerState;
   today: DateKey;
   storage: StorageInfo | null;
+  sync: SyncStatus | null;
   saving: boolean;
   /** Label of the last undoable action, while it can still be undone. */
   undoLabel: string | null;
@@ -51,7 +60,7 @@ export interface DispatchOptions {
   origin?: Origin;
 }
 
-export type Origin = 'user' | 'linear' | 'agent';
+export type Origin = 'user' | 'linear' | 'github' | 'agent';
 
 /** Called after the service accepted a batch, with the confirmed state before and after it. */
 export type CommitListener = (commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin) => void;
@@ -92,6 +101,7 @@ export class PlannerClient {
       state: this.confirmed,
       today: todayIn(browserZone()),
       storage: null,
+      sync: null,
       saving: false,
       undoLabel: null,
     };
@@ -167,6 +177,25 @@ export class PlannerClient {
     if (this.view.undoLabel) this.set({ undoLabel: null });
   }
 
+  /** A raw call to the local service, for modules with their own endpoints. */
+  call<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
+    return this.request<T>(method, path, body);
+  }
+
+  /** Set (or clear) the git remote the planner data syncs with. */
+  async setRemote(remote: string | null): Promise<void> {
+    const status = await this.request<SyncStatus>('PUT', '/sync', { remote });
+    this.set({ sync: status });
+  }
+
+  /** Sync with the remote now; merged events from other machines come back in the snapshot. */
+  async syncNow(): Promise<void> {
+    if (this.view.sync) this.set({ sync: { ...this.view.sync, syncing: true } });
+    const answer = await this.request<Snapshot & { status: SyncStatus }>('POST', '/sync');
+    this.accept(answer);
+    this.set({ sync: answer.status });
+  }
+
   /** Occurrences from the subscribed calendars for [from, to]. */
   async calendarEvents(from: DateKey, to: DateKey, refresh = false): Promise<{ events: CalendarEvent[]; errors: { calendarId: string; message: string }[] }> {
     return this.request('GET', `/calendar?from=${from}&to=${to}${refresh ? '&refresh=1' : ''}`);
@@ -232,6 +261,7 @@ export class PlannerClient {
       problem: null,
       today: snapshot.today ?? todayIn(snapshot.state.settings.timezone ?? browserZone()),
       storage: snapshot.storage,
+      sync: snapshot.sync ?? null,
     });
   }
 
@@ -246,7 +276,7 @@ export class PlannerClient {
     for (const listener of this.listeners) listener();
   }
 
-  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
     const response = await this.host.serviceRequest({ method, path, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const data = response.body ? (JSON.parse(response.body) as T & { error?: string }) : ({} as T & { error?: string });
     if (response.status >= 400) throw new Error(data.error ?? `Planner service answered ${response.status}`);

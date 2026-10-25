@@ -135,6 +135,39 @@ const LinearSettings = () => {
   );
 };
 
+const SyncSettings = () => {
+  const { client } = usePlanner();
+  const view = useView();
+  const sync = view.sync;
+  const [remote, setRemote] = useState(sync?.remote ?? '');
+  const [problem, setProblem] = useState<string | null>(null);
+  const save = () => {
+    setProblem(null);
+    client.setRemote(remote.trim() || null).catch((error) => setProblem(error instanceof Error ? error.message : String(error)));
+  };
+  return (
+    <fieldset>
+      <legend>Sync</legend>
+      <p class="hint">
+        Keep the planner's data repository in step with a git remote, for example a private GitHub repository. Each change is one line in an event file and lines merge on
+        their own, so several machines can share one plan. The service uses this machine's git credentials (SSH keys or a credential helper).
+      </p>
+      <div class="row">
+        <input class="grow" aria-label="Sync remote" placeholder="git@github.com:you/planner-data.git" value={remote} onInput={(event) => setRemote(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && save()} />
+        <button onClick={save}>{remote.trim() ? 'Save' : 'Remove'}</button>
+      </div>
+      {problem && <p class="danger">{problem}</p>}
+      {sync?.remote && (
+        <div class="row sync-row">
+          <button onClick={() => void client.syncNow().catch((error) => setProblem(error instanceof Error ? error.message : String(error)))} disabled={sync.syncing}>{sync.syncing ? 'Syncing…' : 'Sync now'}</button>
+          <span class="muted" aria-live="polite">{sync.lastSyncAt ? `Last synced ${new Date(sync.lastSyncAt).toLocaleString()}` : 'Not synced yet'}</span>
+        </div>
+      )}
+      {sync?.lastError && <p class="danger" role="alert">Sync failed: {sync.lastError}</p>}
+    </fieldset>
+  );
+};
+
 export const Settings = () => {
   const { client } = usePlanner();
   const view = useView();
@@ -218,6 +251,7 @@ export const Settings = () => {
         <Channels />
         <Calendars />
         <LinearSettings />
+        <SyncSettings />
         <fieldset>
           <legend>Storage</legend>
           {view.storage ? (

@@ -5,6 +5,7 @@ import { applyHostReady } from '@openchamber/sdk/ui';
 import { PlannerClient } from './lib/client.ts';
 import { LinearStore } from './lib/linear.ts';
 import { AgentStore } from './lib/agents.ts';
+import { GitHubStore } from './lib/github.ts';
 import { registerBackground } from './lib/background.ts';
 import { PlannerContext } from './lib/context.ts';
 import { App } from './components/App.tsx';
@@ -24,8 +25,9 @@ host.onReady((ready) => {
   mounted = true;
   const linear = new LinearStore(host, client, ready.surface);
   const agents = new AgentStore(host, client, ready.surface);
+  const github = new GitHubStore(client, ready.surface);
   render(
-    <PlannerContext.Provider value={{ client, host, linear, agents }}>
+    <PlannerContext.Provider value={{ client, host, linear, agents, github }}>
       <App surface={ready.surface} />
     </PlannerContext.Provider>,
     root,

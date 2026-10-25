@@ -85,6 +85,10 @@ const cleanUp = async (final) => {
 await cleanUp(false);
 
 const page = await context.newPage();
+// OpenChamber's own toasts (an OpenCode update offer) can cover the Planner's buttons.
+await page.addLocatorHandler(page.getByText('OpenCode update'), async () => {
+  await page.getByRole('button', { name: 'Dismiss' }).first().click({ timeout: 2000 }).catch(() => {});
+});
 const problems = [];
 page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
 page.on('console', (message) => {
@@ -796,6 +800,65 @@ try {
   await frame.getByRole('spinbutton', { name: 'Pomodoro break minutes' }).fill('5');
   await frame.getByRole('spinbutton', { name: 'Pomodoro break minutes' }).press('Tab');
   await shot('22-settings');
+
+  // Phase 8b: GitHub source state, Ask Planner, and git sync with another machine.
+  await nav('GitHub').click();
+  const ghState = (await frame.locator('.view-scroll').innerText({ timeout: 10_000 })).replace(/\s+/g, ' ');
+  check('GitHub says plainly when the gh CLI is missing', /GitHub CLI \(gh\) is not installed|Signed in as/.test(ghState + (await frame.locator('.view-sub').first().innerText())), ghState.slice(0, 120));
+
+  const isAskGenerate = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/generate';
+  await context.route(isAskGenerate, (route) => {
+    const prompt = JSON.parse(route.request().postData() ?? '{}').prompt ?? '';
+    const gymId = new RegExp(`\\[([A-Za-z0-9_-]+)\\] ${run} gym`).exec(prompt)?.[1] ?? 'missing';
+    return route.fulfill({ json: { ok: true, result: { text: JSON.stringify({ reply: 'Moved the gym and added a stretch.', ops: [{ op: 'move', taskId: gymId, when: 'tomorrow' }, { op: 'create', title: `${run} stretch`, when: 'today', minutes: 10, channel: null }] }) } } });
+  });
+  await nav('Home').click();
+  await frame.getByRole('heading', { name: 'Home' }).click();
+  await page.keyboard.press('Control+k');
+  await frame.getByRole('combobox', { name: 'Search tasks or commands' }).fill('move my gym to tomorrow');
+  await frame.getByRole('option', { name: /^Ask Planner: "move my gym to tomorrow"/ }).click();
+  const ask = frame.getByRole('dialog', { name: 'Ask Planner' });
+  check('the palette hands a question to Ask Planner', (await ask.getByRole('textbox', { name: 'Ask Planner' }).inputValue()) === 'move my gym to tomorrow');
+  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Apply 2 changes' }).waitFor({ timeout: 10_000 });
+  const preview = (await ask.locator('.assistant-ops').innerText()).replace(/\s+/g, ' ');
+  await shot('23-ask');
+  await ask.getByRole('button', { name: 'Apply 2 changes' }).click();
+  const tomorrowKey2 = (() => { const d = new Date(`${todayKey}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
+  const asked = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.title === `${run} gym` && task.placement.date === tomorrowKey2 && !task.deletedAt) && Boolean(taskTitled(latest, `${run} stretch`)));
+  check('Ask Planner previews and applies the changes', preview.includes(`Move "${run} gym" to tomorrow`) && Boolean(taskTitled(asked, `${run} stretch`)), preview.slice(0, 140));
+  await frame.getByRole('status').filter({ hasText: 'Assistant made 2 changes' }).getByRole('button', { name: 'Undo' }).click();
+  const undone = await waitForState((latest) => !taskTitled(latest, `${run} stretch`) && !Object.values(latest.state.tasks).some((task) => task.title === `${run} gym` && task.placement.date === tomorrowKey2 && !task.deletedAt));
+  check('the assistant changes undo in one step', !taskTitled(undone, `${run} stretch`));
+  await context.unroute(isAskGenerate);
+
+  const bare = '/home/node/planner-sync-e2e.git';
+  execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', `rm -rf ${bare} /tmp/planner-replica && git init --quiet --bare -b main ${bare}`]);
+  await nav('Settings').click();
+  await frame.getByRole('textbox', { name: 'Sync remote' }).fill(bare);
+  await frame.getByRole('button', { name: 'Save' }).click();
+  await frame.getByRole('button', { name: 'Sync now' }).click();
+  await frame.getByText(/^Last synced /).waitFor({ timeout: 60_000 });
+  const pushed = execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'git', `--git-dir=${bare}`, 'log', '--oneline', '-1', 'main'], { encoding: 'utf8' }).trim();
+  check('Sync pushes the planner history to the remote', pushed.length > 0, pushed);
+  const remoteAt = new Date().toISOString();
+  const remoteEvent = JSON.stringify({ v: 1, id: `zz-${run}`, at: remoteAt, type: 'task.created', task: { id: `remote-${run}`, title: `${run} from another machine`, placement: { kind: 'day', date: todayKey }, position: 999999 } });
+  execFileSync('docker', ['exec', '-i', 'oc-forge-openchamber-dev', 'sh', '-c', [
+    `git clone --quiet ${bare} /tmp/planner-replica`,
+    'cd /tmp/planner-replica',
+    `cat >> events/${remoteAt.slice(0, 7)}.jsonl`,
+    'git -c user.name=Other -c user.email=other@localhost commit --quiet -am "From another machine"',
+    'git push --quiet origin HEAD:main',
+  ].join(' && ')], { input: `${remoteEvent}\n` });
+  await frame.getByRole('button', { name: 'Sync now' }).click();
+  const merged = await waitForState((latest) => Boolean(taskTitled(latest, `${run} from another machine`)), 30_000);
+  check('a change pushed from another machine arrives on Sync now', Boolean(taskTitled(merged, `${run} from another machine`)));
+  await shot('24-sync');
+  await frame.getByRole('textbox', { name: 'Sync remote' }).fill('');
+  await frame.getByRole('button', { name: 'Remove' }).click();
+  await frame.getByRole('button', { name: 'Sync now' }).waitFor({ state: 'detached', timeout: 10_000 });
+  execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', `rm -rf ${bare} /tmp/planner-replica`]);
+  check('the remote can be removed again', !(await serviceState()).sync?.remote);
 
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });

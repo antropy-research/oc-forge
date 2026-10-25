@@ -11,6 +11,7 @@ import { clockLabel, zonedDateMinutes } from '../../src/domain/dates.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 import { setHoveredTask } from '../lib/hover.ts';
 import { isClosedType } from '../../src/domain/linear.ts';
+import { shortKey } from '../../src/domain/github.ts';
 import { AgentChip } from './Agents.tsx';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
@@ -168,8 +169,8 @@ export const TaskCard = ({ task }: { task: Task }) => {
                 title={`${task.source.key}${task.source.status ? ` · ${task.source.status.name}` : ''} in ${task.source.kind === 'linear' ? 'Linear' : 'GitHub'}`}
               >
                 <span class="dot" aria-hidden="true" />
-                {task.source.key}
-                {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in Linear` : ''}
+                {task.source.kind === 'github' ? shortKey(task.source.key) : task.source.key}
+                {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in ${task.source.kind === 'linear' ? 'Linear' : 'GitHub'}` : ''}
               </span>
             )}
             {hasRuns && <AgentChip taskId={task.id} />}

@@ -1,6 +1,6 @@
 {
   "name": "@oc-forge/openchamber-planner",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Sunsama-style daily planning inside OpenChamber.",
@@ -69,7 +69,8 @@
         "runtime": "host",
         "permissions": {
           "exec": [
-            "git"
+            "git",
+            "gh"
           ]
         }
       }

@@ -24,7 +24,7 @@ const where = (task: Task): string => {
 };
 
 /** Cmd/Ctrl+K: jump anywhere, run an action, or find a task. */
-export const CommandPalette = ({ onClose, onRoute, onAddTask }: { onClose: () => void; onRoute: (route: Route) => void; onAddTask: () => void }) => {
+export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose: () => void; onRoute: (route: Route) => void; onAddTask: () => void; onAsk: (query: string) => void }) => {
   const { client } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
@@ -47,6 +47,7 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask }: { onClose: () =>
     go('weeklyReview', 'Weekly review', ''),
     go('backlog', 'Backlog', ''),
     go('linear', 'Linear', ''),
+    go('github', 'GitHub', ''),
     go('agents', 'Agents', ''),
     go('archive', 'Archive', ''),
     go('stats', 'Stats', ''),
@@ -62,7 +63,8 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask }: { onClose: () =>
         .slice(0, 20)
         .map((task) => ({ id: task.id, label: task.title, hint: `${where(task)}${task.plannedMinutes ? ` · ${formatMinutes(task.plannedMinutes)}` : ''}`, run: () => setUi({ openTaskId: task.id }) }))
     : [];
-  const items = [...commands.filter((item) => !q || item.label.toLowerCase().includes(q)), ...tasks];
+  const ask: Item[] = q.length >= 3 ? [{ id: 'ask', label: `Ask Planner: "${query.trim()}"`, hint: '✦', run: () => onAsk(query.trim()) }] : [];
+  const items = [...commands.filter((item) => !q || item.label.toLowerCase().includes(q)), ...tasks, ...ask];
   const active = Math.min(index, Math.max(0, items.length - 1));
   const run = (item: Item | undefined) => {
     if (!item) return;

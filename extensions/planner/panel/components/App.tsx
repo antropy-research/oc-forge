@@ -18,19 +18,22 @@ import { CompactToday, TodayView } from './TodayView.tsx';
 import { StatsView } from './StatsView.tsx';
 import { LinearPage, LinearPromptBar } from './LinearPanel.tsx';
 import { AgentsView } from './Agents.tsx';
+import { GitHubPage } from './GitHubPanel.tsx';
 import { isGuestAttachItem } from '@openchamber/sdk';
 import { CommandPalette, QuickAddModal } from './CommandPalette.tsx';
+import { AssistantModal } from './Assistant.tsx';
 import { hoveredTask } from '../lib/hover.ts';
 import { moveTo } from '../lib/commands.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 
 export const App = ({ surface }: { surface: string }) => {
-  const { client, host, linear, agents } = usePlanner();
+  const { client, host, linear, agents, github } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
   const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
-  const [overlay, setOverlay] = useState<'palette' | 'quickadd' | null>(null);
+  const [overlay, setOverlay] = useState<'palette' | 'quickadd' | 'ask' | null>(null);
+  const [askText, setAskText] = useState('');
 
   useEffect(() => {
     // Linear starts after the first snapshot, so its first sync sees the real tasks.
@@ -38,8 +41,9 @@ export const App = ({ surface }: { surface: string }) => {
       client.startPolling();
       linear.start();
       void agents.start();
+      void github.start();
     });
-  }, [client, linear, agents]);
+  }, [client, linear, agents, github]);
 
   // Clicking a task's chip in a chat opens that task here.
   useEffect(
@@ -109,7 +113,7 @@ export const App = ({ surface }: { surface: string }) => {
         <CompactToday />
       ) : (
         <div class="app">
-          <Nav route={route} onRoute={setRoute} onSearch={() => setOverlay('palette')} />
+          <Nav route={route} onRoute={setRoute} onSearch={() => setOverlay('palette')} onAsk={() => { setAskText(''); setOverlay('ask'); }} />
           <main class="main">
             {route === 'home' && <Board />}
             {route === 'today' && <TodayView onShutdown={() => setRoute('shutdown')} />}
@@ -123,6 +127,7 @@ export const App = ({ surface }: { surface: string }) => {
             {route === 'backlog' && <Backlog />}
             {route === 'linear' && <LinearPage />}
             {route === 'agents' && <AgentsView />}
+            {route === 'github' && <GitHubPage />}
             {route === 'archive' && <ArchiveView />}
             {route === 'stats' && <StatsView />}
             {route === 'settings' && <Settings />}
@@ -130,7 +135,19 @@ export const App = ({ surface }: { surface: string }) => {
         </div>
       )}
       {ui.openTaskId && <TaskDetail key={ui.openTaskId} taskId={ui.openTaskId} />}
-      {overlay === 'palette' && <CommandPalette onClose={() => setOverlay(null)} onRoute={setRoute} onAddTask={() => setOverlay('quickadd')} />}
+      {overlay === 'palette' && (
+        <CommandPalette
+          onClose={() => setOverlay(null)}
+          onRoute={setRoute}
+          onAddTask={() => setOverlay('quickadd')}
+          onAsk={(query) => {
+            setAskText(query);
+            setOverlay('ask');
+          }}
+        />
+      )}
+      {overlay === 'ask' && <AssistantModal initial={askText} onClose={() => setOverlay(null)} />}
+
       {overlay === 'quickadd' && <QuickAddModal onClose={() => setOverlay(null)} />}
       <LinearPromptBar />
       <Toasts />

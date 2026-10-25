@@ -146,6 +146,19 @@ export class Planner {
     return { ok: true, applied: events.length };
   }
 
+  /** Read the whole log again, after a merge brought in events from another machine. */
+  reload(): void {
+    const events = this.store.load();
+    this.log.length = 0;
+    this.log.push(...events);
+    this.applied.clear();
+    for (const event of events) {
+      if (event.cmd) this.applied.add(event.cmd);
+      this.lastAt = Math.max(this.lastAt, Date.parse(event.at) || 0);
+    }
+    this.state = foldEvents(events);
+  }
+
   /** The latest events that concern one task, oldest first. */
   activity(taskId: string, limit = 200): PlannerEvent[] {
     return this.log.filter((event) => touchesTask(event, taskId)).slice(-limit);

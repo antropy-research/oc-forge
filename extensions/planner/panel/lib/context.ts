@@ -4,12 +4,14 @@ import type { HostClient } from '@openchamber/sdk';
 import type { ClientView, PlannerClient } from './client.ts';
 import type { LinearStore, LinearView } from './linear.ts';
 import type { AgentStore, AgentView } from './agents.ts';
+import type { GitHubStore, GitHubView } from './github.ts';
 
 export interface PlannerContextValue {
   client: PlannerClient;
   host: HostClient;
   linear: LinearStore;
   agents: AgentStore;
+  github: GitHubStore;
 }
 
 export const PlannerContext = createContext<PlannerContextValue | null>(null);
@@ -44,7 +46,17 @@ export const useAgents = (): AgentView => {
   return view;
 };
 
+/** Re-render on every GitHub change. */
+export const useGitHub = (): GitHubView => {
+  const { github } = usePlanner();
+  const [view, setView] = useState(github.getView());
+  useEffect(() => github.subscribe(() => setView(github.getView())), [github]);
+  return view;
+};
+
 /** Drag payload type for task cards. */
 export const DRAG_TYPE = 'application/x-planner-task';
 /** Drag payload type for a Linear issue (the issue as JSON). */
 export const LINEAR_DRAG_TYPE = 'application/x-planner-linear';
+/** Drag payload type for a GitHub issue or pull request (the item as JSON). */
+export const GITHUB_DRAG_TYPE = 'application/x-planner-github';

@@ -16,6 +16,7 @@ import { DayColumn } from '../DayColumn.tsx';
 import { TaskList } from '../TaskList.tsx';
 import { Wizard } from './Wizard.tsx';
 import { LinearIssues } from '../LinearPanel.tsx';
+import { GitHubItems } from '../GitHubPanel.tsx';
 
 const STEPS = ['Review yesterday', 'Add tasks', 'Estimate', 'Prioritize & timebox', 'Finalize'];
 
@@ -41,7 +42,7 @@ const TriageRow = ({ task, date }: { task: Task; date: DateKey }) => {
 const Sources = ({ date }: { date: DateKey }) => {
   const { client } = usePlanner();
   const view = useView();
-  const [tab, setTab] = useState<'backlog' | 'linear' | 'meetings' | 'objectives'>('backlog');
+  const [tab, setTab] = useState<'backlog' | 'linear' | 'github' | 'meetings' | 'objectives'>('backlog');
   const feed = useCalendarEvents(date, date);
   const objectives = objectivesForWeek(view.state, weekStartOf(view.state, date));
   const titles = new Set(tasksForDay(view.state, date).map((task) => task.title));
@@ -52,6 +53,7 @@ const Sources = ({ date }: { date: DateKey }) => {
       <div class="tabs side-tabs" role="tablist">
         <button role="tab" aria-selected={tab === 'backlog'} onClick={() => setTab('backlog')}>Backlog</button>
         <button role="tab" aria-selected={tab === 'linear'} onClick={() => setTab('linear')}>Linear</button>
+        <button role="tab" aria-selected={tab === 'github'} onClick={() => setTab('github')}>GitHub</button>
         <button role="tab" aria-selected={tab === 'meetings'} onClick={() => setTab('meetings')}>Meetings</button>
         <button role="tab" aria-selected={tab === 'objectives'} onClick={() => setTab('objectives')}>Objectives</button>
       </div>
@@ -62,6 +64,7 @@ const Sources = ({ date }: { date: DateKey }) => {
         </>
       )}
       {tab === 'linear' && <LinearIssues />}
+      {tab === 'github' && <GitHubItems />}
       {tab === 'meetings' && (
         <ul class="source-list">
           {feed.events.filter((event) => !event.allDay).map((event) => {

@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path';
 import { EventStore } from './store.ts';
 import { Planner } from './planner.ts';
 import { CalendarFeeds } from './calendars.ts';
+import { SyncManager } from './sync.ts';
+import { GitHubSource, LISTS, type ListKind } from './github.ts';
 import { daysBetween, isDateKey } from '../src/domain/dates.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
@@ -17,9 +19,15 @@ if (!port || !token) {
 
 const BODY_LIMIT = 1_000_000;
 const dir = process.env.PLANNER_DATA_DIR || join(homedir(), '.local', 'share', 'openchamber-planner', 'data');
-const store = new EventStore({ dir, log: (message) => console.error(`[planner] ${message}`) });
+const log = (message: string): void => console.error(`[planner] ${message}`);
+let sync: SyncManager | null = null;
+const store = new EventStore({ dir, log, onCommit: () => sync?.schedule() });
 await store.init();
 const planner = new Planner(store);
+sync = new SyncManager(store, planner, log);
+await sync.init();
+const snapshot = () => ({ ...planner.snapshot(), sync: sync!.status() });
+const github = new GitHubSource();
 // Feed copies are a cache, kept beside the git-tracked data rather than in it.
 const feeds = new CalendarFeeds(join(dirname(dir), 'cache'));
 
@@ -64,8 +72,59 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/state' && req.method === 'GET') {
-      json(res, 200, planner.snapshot());
+      json(res, 200, snapshot());
       return;
+    }
+    if (url.pathname === '/github/status' && req.method === 'GET') {
+      json(res, 200, await github.status());
+      return;
+    }
+    if (url.pathname === '/github/list' && req.method === 'GET') {
+      const kind = url.searchParams.get('kind') ?? 'assigned';
+      if (!(kind in LISTS)) {
+        json(res, 400, { error: 'kind must be assigned, review or mine' });
+        return;
+      }
+      try {
+        json(res, 200, { items: await github.list(kind as ListKind) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/items' && req.method === 'POST') {
+      const body = (await readJson(req)) as { ids?: unknown };
+      const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+      try {
+        json(res, 200, { items: await github.items(ids) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/sync') {
+      if (req.method === 'GET') {
+        json(res, 200, sync!.status());
+        return;
+      }
+      if (req.method === 'PUT') {
+        const body = (await readJson(req)) as { remote?: unknown };
+        if (body.remote !== null && typeof body.remote !== 'string') {
+          json(res, 400, { error: 'remote must be a string or null' });
+          return;
+        }
+        try {
+          json(res, 200, await sync!.setRemote(body.remote));
+        } catch (error) {
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+      if (req.method === 'POST') {
+        const status = await sync!.run().catch((error) => ({ ...sync!.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        json(res, 200, { status, ...snapshot() });
+        return;
+      }
     }
     if (url.pathname === '/calendar' && req.method === 'GET') {
       const from = url.searchParams.get('from') ?? '';
@@ -89,12 +148,14 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { error: 'commands must be an array' });
         return;
       }
+      // A sync may be merging events from another machine; let it finish first.
+      await sync!.idle();
       const result = planner.execute(body.commands);
       if (!result.ok) {
         json(res, 400, { error: result.error, index: result.index });
         return;
       }
-      json(res, 200, { applied: result.applied, ...planner.snapshot() });
+      json(res, 200, { applied: result.applied, ...snapshot() });
       return;
     }
     json(res, 404, { error: 'not found' });
