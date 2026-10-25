@@ -2113,6 +2113,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 // src/domain/linear.ts
+var ISSUE_INPUT_KEYS = ["title", "description", "stateId", "priority", "assigneeId", "dueDate", "addedLabelIds", "removedLabelIds"];
 var ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt branchName
     state { id name type color }
     team { id key name }
@@ -2179,6 +2180,29 @@ var PROJECT_QUERY = `query PlannerProject($id: String!) {
     issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
   }
 }`;
+var COMMENT_FIELDS = `id body createdAt editedAt user { id name } botActor { name } parent { id }`;
+var DETAIL_FIELDS = `${ISSUE_FIELDS}
+    description
+    labels(first: 50) { nodes { id name color } }
+    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }`;
+var ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
+  issue(id: $id) { ${DETAIL_FIELDS} }
+}`;
+var TEAM_OPTIONS_QUERY = `query PlannerTeamOptions($id: String!) {
+  team(id: $id) {
+    id
+    states(first: 100) { nodes { id name type color position } }
+    members(first: 250) { nodes { id name displayName active } }
+    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } }
+  }
+  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } }
+}`;
+var UPDATE_ISSUE_MUTATION = `mutation PlannerUpdateIssue($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) { success issue { ${DETAIL_FIELDS} } }
+}`;
+var ADD_COMMENT_MUTATION = `mutation PlannerAddComment($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success comment { ${COMMENT_FIELDS} } }
+}`;
 var SET_STATE_MUTATION = `mutation PlannerSetState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) { success issue { ${ISSUE_FIELDS} } }
 }`;
@@ -2197,9 +2221,18 @@ var ALL_DOCUMENTS = [
   WHOAMI_QUERY,
   PROJECTS_QUERY,
   PROJECT_QUERY,
+  ISSUE_DETAIL_QUERY,
+  TEAM_OPTIONS_QUERY,
   SET_STATE_MUTATION,
-  CREATE_ISSUE_MUTATION
+  CREATE_ISSUE_MUTATION,
+  UPDATE_ISSUE_MUTATION,
+  ADD_COMMENT_MUTATION
 ];
+var MUTATION_INPUT_KEYS = new Map([
+  [UPDATE_ISSUE_MUTATION, ISSUE_INPUT_KEYS],
+  [ADD_COMMENT_MUTATION, ["issueId", "body"]],
+  [CREATE_ISSUE_MUTATION, ["teamId", "title", "assigneeId", "priority", "description", "dueDate"]]
+]);
 var readGraphql = (body) => {
   const parsed = JSON.parse(body);
   if (parsed.errors?.length) {
@@ -2286,6 +2319,13 @@ class LinearWorkspaces {
   async graphql(id, query, variables) {
     if (!ALLOWED.has(query))
       throw new WorkspaceError(400, "only the Planner's own Linear queries can run");
+    const keys = MUTATION_INPUT_KEYS.get(query);
+    if (keys) {
+      const input = variables?.input;
+      if (typeof input !== "object" || input === null || Array.isArray(input) || Object.keys(input).some((key) => !keys.includes(key))) {
+        throw new WorkspaceError(400, "that change is not one the Planner makes");
+      }
+    }
     await this.load();
     const entry = this.items.find((item) => item.id === id);
     if (!entry)

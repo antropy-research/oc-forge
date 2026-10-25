@@ -73,6 +73,52 @@ export interface LinearProject {
   workspaceId?: string;
 }
 
+export interface LinearLabel {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export interface LinearComment {
+  id: string;
+  /** Markdown. */
+  body: string;
+  createdAt: string;
+  editedAt: string | null;
+  user: { id: string; name: string } | null;
+  botActor: { name: string | null } | null;
+  parent: { id: string } | null;
+}
+
+/** An issue as the editor shows it: its Markdown description, labels and comments. */
+export interface LinearIssueDetail extends LinearIssue {
+  description: string | null;
+  labels: { nodes: LinearLabel[] };
+  comments: { nodes: LinearComment[] };
+}
+
+/** What an issue of a team can be set to. */
+export interface TeamOptions {
+  states: LinearState[];
+  members: { id: string; name: string; displayName: string; active: boolean }[];
+  /** The team's labels and the workspace's, without label groups. */
+  labels: LinearLabel[];
+}
+
+/** The fields the Planner edits; Linear takes the description as Markdown. */
+export interface IssueInput {
+  title?: string;
+  description?: string;
+  stateId?: string;
+  priority?: number;
+  assigneeId?: string | null;
+  dueDate?: string | null;
+  addedLabelIds?: string[];
+  removedLabelIds?: string[];
+}
+
+export const ISSUE_INPUT_KEYS: readonly (keyof IssueInput)[] = ['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds'];
+
 export interface LinearProjectDetail extends LinearProject {
   content: string | null;
   projectMilestones: { nodes: { id: string; name: string; targetDate: string | null; progress: number; sortOrder: number }[] };
@@ -164,6 +210,38 @@ export const PROJECT_QUERY = `query PlannerProject($id: String!) {
   }
 }`;
 
+const COMMENT_FIELDS = `id body createdAt editedAt user { id name } botActor { name } parent { id }`;
+
+const DETAIL_FIELDS = `${ISSUE_FIELDS}
+    description
+    labels(first: 50) { nodes { id name color } }
+    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }`;
+
+/** One issue with its description, labels and comments, for the editor. */
+export const ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
+  issue(id: $id) { ${DETAIL_FIELDS} }
+}`;
+
+/** A team's workflow states, active members and labels (its own and the workspace's). */
+export const TEAM_OPTIONS_QUERY = `query PlannerTeamOptions($id: String!) {
+  team(id: $id) {
+    id
+    states(first: 100) { nodes { id name type color position } }
+    members(first: 250) { nodes { id name displayName active } }
+    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } }
+  }
+  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } }
+}`;
+
+export const UPDATE_ISSUE_MUTATION = `mutation PlannerUpdateIssue($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) { success issue { ${DETAIL_FIELDS} } }
+}`;
+
+/** A comment's body is Markdown. */
+export const ADD_COMMENT_MUTATION = `mutation PlannerAddComment($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success comment { ${COMMENT_FIELDS} } }
+}`;
+
 export const SET_STATE_MUTATION = `mutation PlannerSetState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) { success issue { ${ISSUE_FIELDS} } }
 }`;
@@ -184,9 +262,23 @@ export const ALL_DOCUMENTS = [
   WHOAMI_QUERY,
   PROJECTS_QUERY,
   PROJECT_QUERY,
+  ISSUE_DETAIL_QUERY,
+  TEAM_OPTIONS_QUERY,
   SET_STATE_MUTATION,
   CREATE_ISSUE_MUTATION,
+  UPDATE_ISSUE_MUTATION,
+  ADD_COMMENT_MUTATION,
 ];
+
+/**
+ * The input fields each mutation may carry. The service checks these before it
+ * runs a mutation with a workspace's API key.
+ */
+export const MUTATION_INPUT_KEYS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  [UPDATE_ISSUE_MUTATION, ISSUE_INPUT_KEYS],
+  [ADD_COMMENT_MUTATION, ['issueId', 'body']],
+  [CREATE_ISSUE_MUTATION, ['teamId', 'title', 'assigneeId', 'priority', 'description', 'dueDate']],
+]);
 
 const FROM_LINEAR_PRIORITY: Record<number, Priority | null> = { 0: null, 1: 'urgent', 2: 'high', 3: 'medium', 4: 'low' };
 const TO_LINEAR_PRIORITY: Record<Priority, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
@@ -469,6 +561,61 @@ export const groupProjects = (projects: readonly LinearProject[]): { type: strin
   const groups = PROJECT_STATUSES.map((status) => ({ ...status, projects: sorted.filter((project) => project.status.type === status.type) }));
   groups.push({ type: 'other', label: 'Other', projects: sorted.filter((project) => !known.has(project.status.type)) });
   return groups.filter((group) => group.projects.length > 0);
+};
+
+// ── Editing ──────────────────────────────────────────────────────────────────
+
+export interface IssueText {
+  title: string;
+  /** Markdown; an issue without a description has ''. */
+  description: string;
+}
+
+/**
+ * What saving an edit sends, given the text the edit started from (`base`),
+ * what Linear has now (`current`) and the edit (`next`). Only fields the user
+ * changed are sent; it is a conflict when someone changed one of those same
+ * fields in Linear meanwhile, so their change is never overwritten silently.
+ */
+export const planTextSave = (base: IssueText, current: IssueText, next: IssueText): { input: Pick<IssueInput, 'title' | 'description'>; conflict: boolean } => {
+  const input: Pick<IssueInput, 'title' | 'description'> = {};
+  let conflict = false;
+  for (const field of ['title', 'description'] as const) {
+    if (next[field] === base[field] || next[field] === current[field]) continue;
+    input[field] = next[field];
+    if (current[field] !== base[field]) conflict = true;
+  }
+  return { input, conflict };
+};
+
+const STATE_ORDER = ['triage', 'backlog', 'unstarted', 'started', 'completed', 'canceled'];
+
+/** Workflow states in Linear's order: by type, then by position on the board. */
+export const workflowOrder = (states: readonly LinearState[]): LinearState[] =>
+  [...states].sort((a, b) => {
+    const rank = (state: LinearState) => (STATE_ORDER.includes(state.type) ? STATE_ORDER.indexOf(state.type) : STATE_ORDER.length);
+    return rank(a) - rank(b) || (a.position ?? 0) - (b.position ?? 0);
+  });
+
+/** Comments oldest first, each reply right after the comment it answers. */
+export const commentThreads = (comments: readonly LinearComment[]): { comment: LinearComment; reply: boolean }[] => {
+  const byTime = [...comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const byId = new Map(byTime.map((comment) => [comment.id, comment]));
+  // A reply to a reply belongs to the same thread; a parent not loaded starts its own.
+  const rootOf = (comment: LinearComment): string => {
+    const seen = new Set<string>();
+    let current = comment;
+    while (current.parent && byId.has(current.parent.id) && !seen.has(current.id)) {
+      seen.add(current.id);
+      current = byId.get(current.parent.id)!;
+    }
+    return current.id;
+  };
+  const roots = byTime.filter((comment) => rootOf(comment) === comment.id);
+  return roots.flatMap((root) => [
+    { comment: root, reply: false },
+    ...byTime.filter((comment) => comment.id !== root.id && rootOf(comment) === root.id).map((comment) => ({ comment, reply: true })),
+  ]);
 };
 
 /** Open tasks that plan Linear issues: on today, on a later day, or in the backlog. */

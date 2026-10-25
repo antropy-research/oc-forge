@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import {
+  ADD_COMMENT_MUTATION,
   ALL_DOCUMENTS,
+  MUTATION_INPUT_KEYS,
+  UPDATE_ISSUE_MUTATION,
+  commentThreads,
+  planTextSave,
+  workflowOrder,
   groupIssues,
   groupProjects,
   inWorkspace,
@@ -238,6 +244,42 @@ describe('views', () => {
     expect(validateCommand({ cmd: 's2', type: 'settings.updated', patch: { linearLayout: 'grid' } }, state)).toContain('linearLayout');
     expect(validateCommand({ cmd: 's3', type: 'settings.updated', patch: { linearGroupBy: 'cycle' } }, state)).toContain('linearGroupBy');
     expect(validateCommand({ cmd: 's4', type: 'settings.updated', patch: { linearOrderBy: 'random' } }, state)).toContain('linearOrderBy');
+  });
+});
+
+describe('editing', () => {
+  const base = { title: 'Fix the agent', description: '- [ ] tests' };
+  test('only what I changed is sent', () => {
+    expect(planTextSave(base, base, { ...base, title: 'Fix the agent backend' })).toEqual({ input: { title: 'Fix the agent backend' }, conflict: false });
+    expect(planTextSave(base, base, base)).toEqual({ input: {}, conflict: false });
+  });
+  test("a teammate's change to another field is kept, not reverted", () => {
+    const theirs = { ...base, description: 'Rewritten by a teammate' };
+    expect(planTextSave(base, theirs, { ...base, title: 'New title' })).toEqual({ input: { title: 'New title' }, conflict: false });
+  });
+  test('the same field changed on both sides is a conflict', () => {
+    const theirs = { ...base, description: 'Theirs' };
+    expect(planTextSave(base, theirs, { ...base, description: 'Mine' })).toEqual({ input: { description: 'Mine' }, conflict: true });
+    // Both made the same change: nothing to send, nothing lost.
+    expect(planTextSave(base, theirs, { ...base, description: 'Theirs' })).toEqual({ input: {}, conflict: false });
+  });
+  test('states in workflow order and comment threads', () => {
+    const states = [
+      { id: 'd', name: 'Done', type: 'completed', color: '', position: 0 },
+      { id: 'r', name: 'In Review', type: 'started', color: '', position: 2 },
+      { id: 'p', name: 'In Progress', type: 'started', color: '', position: 1 },
+      { id: 'b', name: 'Backlog', type: 'backlog', color: '', position: 9 },
+      { id: 't', name: 'Triage', type: 'triage', color: '', position: 0 },
+    ];
+    expect(workflowOrder(states).map((state) => state.id)).toEqual(['t', 'b', 'p', 'r', 'd']);
+    const comment = (id: string, at: string, parent: string | null = null) => ({ id, body: id, createdAt: `2026-10-25T0${at}:00:00.000Z`, editedAt: null, user: null, botActor: null, parent: parent ? { id: parent } : null });
+    const threads = commentThreads([comment('c3', '3', 'c1'), comment('c1', '1'), comment('c2', '2'), comment('c4', '4', 'c3'), comment('c5', '5', 'missing')]);
+    expect(threads.map((item) => `${item.comment.id}${item.reply ? '↳' : ''}`)).toEqual(['c1', 'c3↳', 'c4↳', 'c2', 'c5']);
+  });
+  test('the service lets each mutation carry only the fields the Planner edits', () => {
+    expect(MUTATION_INPUT_KEYS.get(UPDATE_ISSUE_MUTATION)).toEqual(['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds']);
+    expect(MUTATION_INPUT_KEYS.get(ADD_COMMENT_MUTATION)).toEqual(['issueId', 'body']);
+    expect(ALL_DOCUMENTS).toEqual(expect.arrayContaining([...MUTATION_INPUT_KEYS.keys()]));
   });
 });
 

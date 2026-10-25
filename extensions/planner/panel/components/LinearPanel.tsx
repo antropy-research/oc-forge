@@ -88,7 +88,22 @@ const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: 
     >
       <span class="issue-state" style={{ '--item-color': issue.state.color }} title={issue.state.name} aria-hidden="true" />
       <span class="issue-main">
-        <span class="issue-title">{issue.title}</span>
+        {/* A span, not a button, so dragging the row still starts on the title. */}
+        <span
+          class="issue-title is-openable"
+          role="button"
+          tabIndex={0}
+          aria-label={`Edit ${issue.identifier}`}
+          title="Open the issue"
+          onClick={() => setUi({ openIssue: { id: issue.id, workspaceId: issue.workspaceId ?? null } })}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            setUi({ openIssue: { id: issue.id, workspaceId: issue.workspaceId ?? null } });
+          }}
+        >
+          {issue.title}
+        </span>
         <span class="issue-meta">
           <span class="issue-key">{issue.identifier}</span>
           {workspace && <span class="ws-badge">{workspace}</span>}
@@ -439,7 +454,7 @@ const PlannedRow = ({ task }: { task: Task }) => {
     <li class="issue-row is-planned" aria-label={`${source.key} ${task.title}`}>
       <span class="issue-state" style={{ '--item-color': status?.color ?? '#5e6ad2' }} title={status?.name} aria-hidden="true" />
       <span class="issue-main">
-        <span class="issue-title">{task.title}</span>
+        <button class="issue-title is-openable" aria-label={`Edit ${source.key}`} title="Open the issue" onClick={() => setUi({ openIssue: { id: source.id, workspaceId: linear.workspaceOf(source) } })}>{task.title}</button>
         <span class="issue-meta">
           <span class="issue-key">{source.key}</span>
           {workspace && <span class="ws-badge">{workspace}</span>}
@@ -587,6 +602,7 @@ const CreateIssue = ({ task }: { task: Task }) => {
 export const LinearTaskSection = ({ task }: { task: Task }) => {
   const { client, host, linear } = usePlanner();
   const lv = useLinear();
+  const { setUi } = useUi();
   const source = task.source;
   if (source?.kind === 'linear') {
     const live = lv.linked[source.id];
@@ -603,6 +619,7 @@ export const LinearTaskSection = ({ task }: { task: Task }) => {
           {workspace && <span class="ws-badge">{workspace}</span>}
         </h3>
         <div class="row">
+          {reachable && <button class="link" onClick={() => setUi({ openIssue: { id: source.id, workspaceId: linear.workspaceOf(source) } })}>Edit issue</button>}
           <button class="link" onClick={() => void host.openUrl(source.url)}>Open in Linear</button>
           {!closed && reachable && <button class="link" onClick={() => void linear.moveIssue(task, 'completed')}>Mark done in Linear</button>}
           {['backlog', 'unstarted', 'triage'].includes(status?.type ?? '') && reachable && <button class="link" onClick={() => void linear.moveIssue(task, 'started')}>Start in Linear</button>}

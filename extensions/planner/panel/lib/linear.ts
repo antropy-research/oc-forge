@@ -5,8 +5,10 @@
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 import type { Command, EventBody } from '../../src/domain/events.ts';
 import {
+  ADD_COMMENT_MUTATION,
   ASSIGNED_QUERY,
   CREATE_ISSUE_MUTATION,
+  ISSUE_DETAIL_QUERY,
   ISSUE_QUERY,
   LINKED_QUERY,
   PROJECTS_QUERY,
@@ -14,7 +16,9 @@ import {
   SEARCH_QUERY,
   SET_STATE_MUTATION,
   TEAMS_QUERY,
+  TEAM_OPTIONS_QUERY,
   TEAM_STATES_QUERY,
+  UPDATE_ISSUE_MUTATION,
   VIEWS_QUERY,
   VIEW_ISSUES_QUERY,
   WHOAMI_QUERY,
@@ -25,15 +29,23 @@ import {
   linkedIssueIdsByWorkspace,
   linkedTask,
   planLinearSync,
+  planTextSave,
   priorityToLinear,
   readGraphql,
   stateOfType,
   taskFromIssue,
+  workflowOrder,
+  type IssueInput,
+  type IssueText,
+  type LinearComment,
   type LinearIssue,
+  type LinearIssueDetail,
+  type LinearLabel,
   type LinearProject,
   type LinearProjectDetail,
   type LinearState,
   type LinearWorkspace,
+  type TeamOptions,
 } from '../../src/domain/linear.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
@@ -57,6 +69,12 @@ export interface LinearTeam {
   key: string;
   name: string;
   workspaceId: string;
+}
+
+/** An issue to open in the editor; a null workspace means OpenChamber's connection. */
+export interface IssueRef {
+  id: string;
+  workspaceId: string | null;
 }
 
 export interface WorkspaceView extends LinearWorkspace {
@@ -130,6 +148,7 @@ export class LinearStore {
   private readonly listeners = new Set<() => void>();
   private readonly teamStates = new Map<string, LinearState[]>();
   private readonly teamLists = new Map<string, LinearTeam[]>();
+  private readonly teamOptionCache = new Map<string, TeamOptions>();
   /** My user id in each workspace, for assigning new issues. */
   private readonly viewerIds = new Map<string, string>();
   private hostWorkspace: WorkspaceView | null = null;
@@ -373,6 +392,71 @@ export class LinearStore {
     return this.moveTo({ id: issue.id, key: issue.identifier, teamId: issue.team.id, workspaceId: issue.workspaceId ?? this.hostWorkspace?.id ?? null }, type, task && !task.completedAt ? task : null);
   }
 
+  /** The issue with its Markdown description, labels and comments. */
+  async issueDetail(ref: IssueRef): Promise<LinearIssueDetail> {
+    const workspaceId = this.resolve(ref);
+    const data = await this.graphqlIn<{ issue: LinearIssueDetail | null }>(workspaceId, ISSUE_DETAIL_QUERY, { id: ref.id });
+    if (!data.issue) throw new Error('Linear no longer has this issue');
+    return inWorkspace(data.issue, workspaceId);
+  }
+
+  /** What an issue of `teamId` can be set to: states in workflow order, active members, labels. */
+  async teamOptions(workspaceId: string, teamId: string): Promise<TeamOptions> {
+    const cached = this.teamOptionCache.get(teamId);
+    if (cached) return cached;
+    type Answer = {
+      team: { states: { nodes: LinearState[] }; members: { nodes: TeamOptions['members'] }; labels: { nodes: LinearLabel[] } } | null;
+      issueLabels: { nodes: LinearLabel[] };
+    };
+    const data = await this.graphqlIn<Answer>(workspaceId, TEAM_OPTIONS_QUERY, { id: teamId });
+    if (!data.team) throw new Error('Linear no longer has this team');
+    const labels = new Map([...data.team.labels.nodes, ...data.issueLabels.nodes].map((label) => [label.id, label]));
+    const options: TeamOptions = {
+      states: workflowOrder(data.team.states.nodes),
+      members: data.team.members.nodes.filter((member) => member.active).sort((a, b) => a.name.localeCompare(b.name)),
+      labels: [...labels.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    };
+    this.teamStates.set(teamId, options.states);
+    this.teamOptionCache.set(teamId, options);
+    return options;
+  }
+
+  /** My user id in a workspace, once known. */
+  viewerId(workspaceId: string | null): string | null {
+    return workspaceId ? this.viewerIds.get(workspaceId) ?? null : null;
+  }
+
+  /** Change fields of an issue in Linear; lists and linked tasks follow. */
+  async updateIssue(ref: IssueRef, input: IssueInput): Promise<LinearIssueDetail> {
+    const workspaceId = this.resolve(ref);
+    const data = await this.graphqlIn<{ issueUpdate: { success: boolean; issue: LinearIssueDetail | null } }>(workspaceId, UPDATE_ISSUE_MUTATION, { id: ref.id, input });
+    if (!data.issueUpdate.success || !data.issueUpdate.issue) throw new Error('Linear did not accept the change');
+    const issue = inWorkspace(data.issueUpdate.issue, workspaceId);
+    await this.issueChanged(issue);
+    return issue;
+  }
+
+  /**
+   * Save an edited title and description. It reads the issue first: if someone
+   * changed a field the user also changed since `base`, nothing is written and
+   * the current issue comes back as a conflict, unless `force`.
+   */
+  async saveIssueText(ref: IssueRef, base: IssueText, next: IssueText, force = false): Promise<{ saved: LinearIssueDetail } | { conflict: LinearIssueDetail }> {
+    const current = await this.issueDetail(ref);
+    const plan = planTextSave(base, { title: current.title, description: current.description ?? '' }, next);
+    if (plan.conflict && !force) return { conflict: current };
+    if (Object.keys(plan.input).length === 0) return { saved: current };
+    return { saved: await this.updateIssue(ref, plan.input) };
+  }
+
+  /** Post a Markdown comment on the issue. */
+  async addComment(ref: IssueRef, body: string): Promise<LinearComment> {
+    const workspaceId = this.resolve(ref);
+    const data = await this.graphqlIn<{ commentCreate: { success: boolean; comment: LinearComment | null } }>(workspaceId, ADD_COMMENT_MUTATION, { input: { issueId: ref.id, body } });
+    if (!data.commentCreate.success || !data.commentCreate.comment) throw new Error('Linear did not add the comment');
+    return data.commentCreate.comment;
+  }
+
   /** The workspace a linked task's issue lives in; older links mean OpenChamber's connection. */
   workspaceOf(source: TaskSourceRef): string | null {
     return source.workspaceId ?? this.hostWorkspace?.id ?? null;
@@ -419,6 +503,21 @@ export class LinearStore {
       moving.delete(target.id);
       this.set({ moving });
     }
+  }
+
+  /** A connected workspace for `ref`, or an error saying it is not. */
+  private resolve(ref: IssueRef): string {
+    const workspaceId = ref.workspaceId ?? this.hostWorkspace?.id ?? null;
+    if (!workspaceId || !this.workspace(workspaceId)) throw new Error('its Linear workspace is not connected');
+    return workspaceId;
+  }
+
+  /** An edit made here: show it everywhere and bring linked tasks along (not sent back). */
+  private async issueChanged(issue: LinearIssueDetail): Promise<void> {
+    // Lists keep the light shape (they travel as drag data); the editor keeps the full one.
+    const { description: _description, labels: _labels, comments: _comments, ...listed } = issue;
+    this.replaceIssue(listed);
+    if (this.surface !== 'status') await this.sync({ [issue.id]: listed });
   }
 
   /** Put a changed issue everywhere it shows; a closed one leaves the open lists. */

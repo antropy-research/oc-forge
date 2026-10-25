@@ -17,6 +17,7 @@ import { TaskDetail } from './TaskDetail.tsx';
 import { CompactToday, TodayView } from './TodayView.tsx';
 import { StatsView } from './StatsView.tsx';
 import { LinearPage, LinearPromptBar } from './LinearPanel.tsx';
+import { IssueEditor } from './IssueEditor.tsx';
 import { AgentsView } from './Agents.tsx';
 import { GitHubPage } from './GitHubPanel.tsx';
 import { isGuestAttachItem } from '@openchamber/sdk';
@@ -30,7 +31,7 @@ export const App = ({ surface }: { surface: string }) => {
   const { client, host, linear, agents, github } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
-  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false });
+  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | 'ask' | null>(null);
   const [askText, setAskText] = useState('');
@@ -68,7 +69,7 @@ export const App = ({ surface }: { surface: string }) => {
         setOverlay('palette');
         return;
       }
-      if (typing || overlay || ui.openTaskId || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (typing || overlay || ui.openTaskId || ui.openIssue || event.metaKey || event.ctrlKey || event.altKey) return;
       const state = client.getView().state;
       const hovered = hoveredTask();
       const task = hovered ? state.tasks[hovered] : undefined;
@@ -135,6 +136,7 @@ export const App = ({ surface }: { surface: string }) => {
         </div>
       )}
       {ui.openTaskId && <TaskDetail key={ui.openTaskId} taskId={ui.openTaskId} />}
+      {ui.openIssue && <IssueEditor key={`${ui.openIssue.workspaceId}:${ui.openIssue.id}`} issueRef={ui.openIssue} />}
       {overlay === 'palette' && (
         <CommandPalette
           onClose={() => setOverlay(null)}

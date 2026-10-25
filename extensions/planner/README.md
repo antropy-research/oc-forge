@@ -14,7 +14,7 @@ and `02-draft/syncopation/2026-10-24-planner-sunsama-build-log.md`.
 |---|---|---|
 | Domain | `src/domain/` | Types, events and validation, reducer, rollover, recurrence, scheduling (free slots, lanes, playlist), ICS parsing, Linear/GitHub mapping, agent runs, rituals, suggestions, Braindump and assistant parsing. Pure; shared by service and panel. |
 | Service | `service/` → `service/main.js` | Local Node service the host starts on the first `serviceRequest`: validates commands, appends events, folds state, commits history, syncs with a git remote, fetches ICS feeds, reads GitHub through `gh`, keeps the API keys of extra Linear workspaces and runs the Planner's Linear queries with them. |
-| Panel | `panel/` → `panel/main.js` | Preact UI bundled as a classic IIFE. One bundle serves the full page, the rail panel, the Work Status section and a hidden background frame (message actions and slash commands). |
+| Panel | `panel/` → `panel/main.js` | Preact UI bundled as a classic IIFE. One bundle serves the full page, the rail panel, the Work Status section and a hidden background frame (message actions and slash commands). Markdown is parsed with `marked`'s lexer and drawn as plain elements (`panel/lib/markdown.ts`): raw HTML stays text, only http(s) and mailto links, images become links, never `innerHTML`. |
 | Tests | `tests/*.test.ts`, `tests/e2e/run.mjs` | `bun test` for domain and service; a Playwright journey against the dev container (`containers/openchamber-dev`). |
 
 **Data.** An append-only event log, `events/YYYY-MM.jsonl`, in a git repository at
@@ -33,7 +33,7 @@ connection (`integration.host.provider = "linear"`) reaches one workspace; more 
 in Settings → Linear with a personal API key. The service keeps those keys in
 `~/.local/share/openchamber-planner/linear-workspaces.json` (mode 0600, outside the synced
 data repository), never returns them to the panel, and runs only the Planner's own GraphQL
-documents with them. Each link records its workspace (`source.workspaceId`, the Linear
+documents with them; a mutation may carry only the fields the Planner edits. Each link records its workspace (`source.workspaceId`, the Linear
 organization id), so reads and writes go to the right one; links made before workspaces
 belong to OpenChamber's connection. A pasted issue URL is looked up in the workspace its
 URL names.
@@ -55,7 +55,7 @@ URL names.
 | Recurrence | Daily, weekdays, every n weeks on chosen days, monthly (end-of-month aware), yearly; instances a week ahead; untouched instances give way to the next one; apply edits to upcoming; stop. |
 | Stats | Completed tasks, actual time, actual vs planned, days planned, streak, work per day, time by channel. |
 | Search & keys | Ctrl/Cmd+K palette (navigate, act, find any task, ask the assistant); `A`, `T`, `F`, `P`, `O`, and `C` / `Z` / `X` on the hovered card. |
-| Linear | Several workspaces, shown merged or one at a time; Issues (My issues, custom views, search), Projects (status, health, progress, lead, dates, teams; a project's open issues, milestones, latest update and description) and Planned (issues already in the plan, by day); group by status, priority, project, team, assignee or workspace, order by priority, update, due date or number; list or board, where dropping a card on a status column moves the issue in Linear; plan by click or drag (also onto the calendar); keys and states on cards; completing asks (or always / never) to move the issue to Done; optional move to In Progress when planned; optional completion import; create an issue from a task in any workspace's team; an agent's new worktree defaults to Linear's branch name for the issue. |
+| Linear | Several workspaces, shown merged or one at a time; Issues (My issues, custom views, search), Projects (status, health, progress, lead, dates, teams; a project's open issues, milestones, latest update and description) and Planned (issues already in the plan, by day); group by status, priority, project, team, assignee or workspace, order by priority, update, due date or number; list or board, where dropping a card on a status column moves the issue in Linear; plan by click or drag (also onto the calendar); keys and states on cards; completing asks (or always / never) to move the issue to Done; optional move to In Progress when planned; optional completion import; create an issue from a task in any workspace's team; an agent's new worktree defaults to Linear's branch name for the issue. Edit an issue in the Planner (click its title, or Edit issue on a linked task): status, priority, assignee, labels and due date apply at once; title and Markdown description (Write / Preview, a formatting bar, Ctrl+B / Ctrl+I / Ctrl+Enter) save together, and a save that would overwrite a change made in Linear meanwhile asks first; tick checklist items in place; read and post Markdown comments; links to issues open in the same editor. |
 | GitHub | Assigned issues, review requests, my open PRs (read-only, like Sunsama); plan and drag like Linear; linked items keep their state and title. |
 | Agents | Send a task to an agent in a project folder or a new or existing worktree; the task travels as a chip; runs show working, has a question, needs permission, ready for review, failed; Accept and complete is the user's call; Agents page; Work Status line; rail badge. From a chat: "Add to Planner" on a message, "Track chat in Planner", `/task`, `/today`. |
 | Assistant | Ask Planner: the request and a compact plan go to the Small Model; known operations on known tasks only; preview, apply, undo. |
@@ -69,8 +69,8 @@ URL names.
 2. Linear: Settings → Integrations → Linear in OpenChamber (or Connect in the Planner).
    The Planner never disconnects OpenChamber's Linear connection. Further workspaces:
    Planner → Settings → Linear → paste a personal API key (Linear → Settings → Security &
-   access → Personal API keys). The key needs read access, and write access to move or
-   create issues.
+   access → Personal API keys). The key needs read access, and write access to move,
+   create or edit issues and to comment.
 3. Sync (optional): Settings → Sync → a remote such as `git@github.com:you/planner-data.git`.
    The service uses that machine's git credentials.
 4. GitHub (optional): install `gh` on the machine running OpenChamber and `gh auth login`.

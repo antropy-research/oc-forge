@@ -5,7 +5,7 @@
 // own GraphQL documents and nothing else.
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { ALL_DOCUMENTS, WHOAMI_QUERY, readGraphql } from '../src/domain/linear.ts';
+import { ALL_DOCUMENTS, MUTATION_INPUT_KEYS, WHOAMI_QUERY, readGraphql } from '../src/domain/linear.ts';
 
 export const LINEAR_API = 'https://api.linear.app/graphql';
 const TIMEOUT_MS = 20_000;
@@ -96,9 +96,19 @@ export class LinearWorkspaces {
     });
   }
 
-  /** Run one of the Planner's documents in a workspace; Linear's answer comes back as it is. */
+  /**
+   * Run one of the Planner's documents in a workspace; Linear's answer comes back
+   * as it is. A mutation's input may carry only the fields the Planner edits.
+   */
   async graphql(id: string, query: string, variables: unknown): Promise<{ status: number; body: string }> {
     if (!ALLOWED.has(query)) throw new WorkspaceError(400, "only the Planner's own Linear queries can run");
+    const keys = MUTATION_INPUT_KEYS.get(query);
+    if (keys) {
+      const input = (variables as { input?: unknown } | null)?.input;
+      if (typeof input !== 'object' || input === null || Array.isArray(input) || Object.keys(input).some((key) => !keys.includes(key))) {
+        throw new WorkspaceError(400, 'that change is not one the Planner makes');
+      }
+    }
     await this.load();
     const entry = this.items.find((item) => item.id === id);
     if (!entry) throw new WorkspaceError(404, 'that Linear workspace is not connected');

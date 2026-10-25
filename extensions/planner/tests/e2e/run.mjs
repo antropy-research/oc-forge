@@ -523,7 +523,7 @@ try {
   const makeIssue = (n, title, stateId, assigned = true) => ({
     id: `iss-${run}-${n}`, identifier: `E2E-${n}`, title: `${run} ${title}`, url: `https://linear.app/e2e/issue/E2E-${n}/x`, priority: 2, dueDate: null, branchName: `e2e/e2e-${n}`,
     updatedAt: new Date().toISOString(), state: linearStates.find((state) => state.id === stateId), team, assignee: assigned ? { id: 'u-e2e', name: 'E2E Linear' } : null,
-    project: { id: 'p1', name: 'Planner' }, cycle: null, assigned,
+    project: { id: 'p1', name: 'Planner' }, cycle: null, assigned, description: null, labels: { nodes: [] }, comments: { nodes: [] },
   });
   const linearIssues = [makeIssue(1, 'linear first', 'st-todo'), makeIssue(2, 'linear second', 'st-prog'), makeIssue(3, 'linear third', 'st-backlog'), makeIssue(5, 'linear by url', 'st-todo', false)];
   const sideStates = makeStates('st-side-');
@@ -531,7 +531,7 @@ try {
   const sideIssue = (n, title, stateId) => ({
     id: `side-${run}-${n}`, identifier: `SIDE-${n}`, title: `${run} ${title}`, url: `https://linear.app/side/issue/SIDE-${n}/x`, priority: 1, dueDate: null, branchName: `side-me/side-${n}-${title.replace(/\s+/g, '-')}`,
     updatedAt: new Date().toISOString(), state: sideStates.find((state) => state.id === stateId), team: sideTeam, assignee: { id: 'u-side', name: 'Side Me' },
-    project: { id: 'sp1', name: 'Side Project' }, cycle: null, assigned: true,
+    project: { id: 'sp1', name: 'Side Project' }, cycle: null, assigned: true, description: null, labels: { nodes: [] }, comments: { nodes: [] },
   });
   const project = (id, name, statusType, extra) => ({
     id, name, url: `https://linear.app/x/project/${id}`, color: '#26b5ce', icon: null, description: `${name} in one line`, progress: 0.25, health: null, priority: 2, startDate: '2026-10-01', targetDate: '2026-11-30',
@@ -541,10 +541,14 @@ try {
     host: {
       org: { id: 'org-e2e', name: 'E2E Org', urlKey: 'e2e' }, viewer: { id: 'u-e2e', name: 'E2E Linear' }, states: linearStates, teams: [team], issues: linearIssues,
       projects: [project('p1', 'Planner', 'started', { progress: 0.4, lead: { id: 'u-e2e', name: 'E2E Linear' }, teams: { nodes: [team] } })],
+      members: [{ id: 'u-e2e', name: 'E2E Linear', displayName: 'e2e', active: true }, { id: 'u-mate', name: 'Teammate', displayName: 'mate', active: true }, { id: 'u-gone', name: 'Former', displayName: 'former', active: false }],
+      labels: [{ id: 'lbl-bug', name: 'Bug', color: '#eb5757' }, { id: 'lbl-feat', name: 'Feature', color: '#bb87fc' }],
+      workspaceLabels: [{ id: 'lbl-cust', name: 'Customer', color: '#4ea7fc' }],
     },
     side: {
       org: { id: 'org-side', name: 'Side Org', urlKey: 'side' }, viewer: { id: 'u-side', name: 'Side Me' }, states: sideStates, teams: [sideTeam], issues: [sideIssue(1, 'side first', 'st-side-todo'), sideIssue(2, 'side second', 'st-side-todo')],
       projects: [project('sp1', 'Side Project', 'planned', { health: 'atRisk', teams: { nodes: [sideTeam] } })],
+      members: [{ id: 'u-side', name: 'Side Me', displayName: 'side', active: true }], labels: [], workspaceLabels: [],
     },
   };
   const linearCalls = [];
@@ -579,6 +583,32 @@ try {
       if (!issue || !state) return null;
       issue.state = state;
       return { issueUpdate: { success: true, issue: strip(issue) } };
+    }
+    if (op === 'PlannerIssueDetail') return { issue: find(variables.id) ? strip(find(variables.id)) : null };
+    if (op === 'PlannerTeamOptions') return { team: { id: variables.id, states: { nodes: o.states }, members: { nodes: o.members }, labels: { nodes: o.labels } }, issueLabels: { nodes: o.workspaceLabels } };
+    if (op === 'PlannerUpdateIssue') {
+      const issue = find(variables.id);
+      const input = variables.input ?? {};
+      if (!issue) return null;
+      if ('stateId' in input) {
+        const state = o.states.find((item) => item.id === input.stateId);
+        if (!state) return null;
+        issue.state = state;
+      }
+      for (const field of ['title', 'description', 'priority', 'dueDate']) if (field in input) issue[field] = input[field];
+      if ('assigneeId' in input) issue.assignee = input.assigneeId ? o.members.find((member) => member.id === input.assigneeId) ?? null : null;
+      const allLabels = [...o.labels, ...o.workspaceLabels];
+      for (const id of input.addedLabelIds ?? []) if (!issue.labels.nodes.some((label) => label.id === id)) issue.labels.nodes.push(allLabels.find((label) => label.id === id));
+      if (input.removedLabelIds) issue.labels.nodes = issue.labels.nodes.filter((label) => !input.removedLabelIds.includes(label.id));
+      issue.updatedAt = new Date().toISOString();
+      return { issueUpdate: { success: true, issue: strip(issue) } };
+    }
+    if (op === 'PlannerAddComment') {
+      const issue = find(variables.input.issueId);
+      if (!issue) return null;
+      const comment = { id: `c-${issue.comments.nodes.length + 1}`, body: variables.input.body, createdAt: new Date().toISOString(), editedAt: null, user: { id: o.viewer.id, name: o.viewer.name }, botActor: null, parent: null };
+      issue.comments.nodes.push(comment);
+      return { commentCreate: { success: true, comment } };
     }
     if (op === 'PlannerCreateIssue') {
       const issue = makeIssue(o.issues.length + 10, 'x', 'st-todo');
@@ -780,6 +810,116 @@ try {
   check('removing a workspace takes its issues away', (await frame.locator('.linear-page li.issue-row', { hasText: /SIDE-\d/ }).count()) === 0);
   await frame.getByRole('radio', { name: 'List' }).click();
   await context.unroute(isServiceRoute);
+
+  // Phase 10: edit a Linear issue in the Planner, in Markdown.
+  const until = async (test, timeout = 10_000) => {
+    for (const end = Date.now() + timeout; Date.now() < end; await page.waitForTimeout(200)) {
+      const value = test();
+      if (value) return value;
+    }
+    return null;
+  };
+  const updates = () => linearCalls.filter((call) => call.op === 'PlannerUpdateIssue');
+  const edited = linearOrgs.host.issues.find((issue) => issue.identifier === 'E2E-3');
+  edited.description = '### Plan\nFix **the agent** and `a < b`, see [docs](https://example.com/docs).\n<img src=x onerror=alert(1)> [bad](javascript:alert(1))\n\n- [ ] write tests\n- [x] read the code';
+  edited.comments.nodes.push({ id: 'c-0', body: 'Earlier _note_', createdAt: '2026-10-20T10:00:00.000Z', editedAt: null, user: { id: 'u-mate', name: 'Teammate' }, botActor: null, parent: null });
+  await frame.getByRole('button', { name: 'Edit E2E-3' }).click();
+  const issueEditor = frame.getByRole('dialog', { name: 'Linear issue E2E-3' });
+  const shown = issueEditor.locator('section.issue-description .md');
+  await shown.locator('.md-h3').waitFor({ timeout: 10_000 });
+  const rendered = {
+    heading: await shown.locator('.md-h3').innerText(),
+    strong: await shown.locator('strong').innerText(),
+    code: await shown.locator('code').first().innerText(),
+    link: await shown.getByRole('link', { name: 'docs' }).getAttribute('href'),
+    images: await issueEditor.locator('img').count(),
+    scriptLinks: await issueEditor.locator('a[href^="javascript"]').count(),
+    rawHtmlAsText: (await shown.innerText()).includes('<img src=x onerror=alert(1)>'),
+    boxes: await shown.getByRole('checkbox').count(),
+  };
+  check('the description renders as Markdown; raw HTML and script links stay inert', rendered.heading === 'Plan' && rendered.strong === 'the agent' && rendered.code === 'a < b' && rendered.link === 'https://example.com/docs' && rendered.images === 0 && rendered.scriptLinks === 0 && rendered.rawHtmlAsText && rendered.boxes === 2, JSON.stringify(rendered));
+  await shown.getByRole('checkbox', { name: 'Tick this item', exact: true }).click();
+  const ticked = await until(() => updates().find((call) => call.variables.input.description?.includes('- [x] write tests')));
+  check('ticking a checklist item saves the Markdown to Linear', Boolean(ticked) && Object.keys(ticked.variables.input).join() === 'description', JSON.stringify(ticked?.variables.input ?? null).slice(0, 120));
+  await shown.getByRole('checkbox', { name: 'Tick this item', exact: true }).waitFor({ state: 'detached', timeout: 10_000 });
+
+  await issueEditor.getByRole('button', { name: 'Edit title and description' }).click();
+  await issueEditor.getByRole('textbox', { name: 'Issue title' }).fill(`${run} linear third edited`);
+  const descriptionBox = issueEditor.getByRole('textbox', { name: 'Issue description' });
+  await descriptionBox.fill(`${await descriptionBox.inputValue()}\n\n## Next\n- [ ] ship it`);
+  await issueEditor.getByRole('tablist', { name: 'Issue description mode' }).getByRole('tab', { name: 'Preview' }).click();
+  await issueEditor.locator('.md-preview .md-h2', { hasText: 'Next' }).waitFor({ timeout: 5000 });
+  check('Preview shows the Markdown being written', (await issueEditor.locator('.md-preview').getByRole('checkbox').count()) === 3);
+  await issueEditor.getByRole('button', { name: 'Save', exact: true }).click();
+  await issueEditor.getByRole('heading', { name: `${run} linear third edited` }).waitFor({ timeout: 10_000 });
+  const savedText = updates().at(-1)?.variables.input;
+  const followed = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.title === `${run} linear third edited` && !task.deletedAt));
+  check(
+    'saving sends the title and the Markdown description; the linked task follows the title',
+    savedText?.title === `${run} linear third edited` && savedText.description.endsWith('## Next\n- [ ] ship it') && Object.values(followed.state.tasks).some((task) => task.title === `${run} linear third edited`),
+    JSON.stringify(savedText ?? null).slice(0, 160),
+  );
+
+  edited.description = 'Rewritten by a teammate';
+  await issueEditor.getByRole('button', { name: 'Edit title and description' }).click();
+  await issueEditor.getByRole('textbox', { name: 'Issue description' }).fill('My version');
+  await issueEditor.getByRole('button', { name: 'Save', exact: true }).click();
+  const conflictBanner = issueEditor.getByRole('alert').filter({ hasText: 'changed this issue in Linear' });
+  await conflictBanner.waitFor({ timeout: 10_000 });
+  check('an edit that would overwrite a change made in Linear meanwhile is held back', edited.description === 'Rewritten by a teammate');
+  await conflictBanner.getByRole('button', { name: 'Replace it with mine' }).click();
+  check('…and goes through once I choose to replace it', Boolean(await until(() => edited.description === 'My version')));
+  await issueEditor.getByRole('button', { name: 'Edit title and description' }).waitFor({ timeout: 10_000 });
+
+  const assignee = issueEditor.getByRole('combobox', { name: 'Assignee' });
+  const formerListed = await assignee.locator('option', { hasText: 'Former' }).count();
+  await issueEditor.getByRole('combobox', { name: 'Issue priority' }).selectOption({ label: 'Urgent' });
+  await until(() => updates().find((call) => call.variables.input.priority === 1));
+  await assignee.selectOption({ label: 'Teammate' });
+  await until(() => updates().find((call) => call.variables.input.assigneeId === 'u-mate'));
+  await issueEditor.getByRole('combobox', { name: 'Status' }).selectOption({ label: 'In Progress' });
+  await until(() => updates().find((call) => call.variables.input.stateId === 'st-prog'));
+  await issueEditor.locator('summary[aria-label="Edit labels"]').click();
+  await issueEditor.getByRole('checkbox', { name: 'Bug' }).check();
+  await until(() => updates().find((call) => call.variables.input.addedLabelIds?.includes('lbl-bug')));
+  await issueEditor.locator('input[aria-label="Issue due date"]').fill('2026-11-02');
+  await until(() => updates().find((call) => call.variables.input.dueDate === '2026-11-02'));
+  const fieldInputs = updates().map((call) => Object.keys(call.variables.input).join('+'));
+  check(
+    'status, priority, assignee, labels and due date each go to Linear at once',
+    ['priority', 'assigneeId', 'stateId', 'addedLabelIds', 'dueDate'].every((field) => fieldInputs.includes(field)) && edited.state.id === 'st-prog' && edited.labels.nodes.some((label) => label.id === 'lbl-bug') && formerListed === 0,
+    fieldInputs.join(', '),
+  );
+  const syncedState = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.source?.key === 'E2E-3' && task.source.status?.name === 'In Progress'));
+  check('the linked task shows the new status', Object.values(syncedState.state.tasks).some((task) => task.source?.key === 'E2E-3' && task.source.status?.name === 'In Progress'));
+
+  const commentBox = issueEditor.getByRole('textbox', { name: 'New comment' });
+  await commentBox.click();
+  await issueEditor.getByRole('button', { name: 'Bold' }).click();
+  await page.waitForTimeout(150);
+  await page.keyboard.type('LGTM');
+  check('the toolbar writes Markdown', (await commentBox.inputValue()) === '**LGTM**', await commentBox.inputValue());
+  await issueEditor.getByRole('button', { name: 'Comment', exact: true }).click();
+  await issueEditor.locator('.comment-list li', { hasText: 'LGTM' }).locator('.md strong').waitFor({ timeout: 10_000 });
+  const posted = linearCalls.find((call) => call.op === 'PlannerAddComment');
+  check(
+    'a Markdown comment is posted and shown under the earlier ones',
+    posted?.variables.input.body === '**LGTM**' && (await issueEditor.locator('.comment-list li').count()) === 2 && (await issueEditor.locator('.comment-list li').first().locator('em').innerText()) === 'note',
+    JSON.stringify(posted?.variables.input ?? null),
+  );
+  await shot('28-issue-editor');
+  await page.keyboard.press('Escape');
+  await issueEditor.waitFor({ state: 'detached', timeout: 5000 });
+
+  await nav('Today').click();
+  await linearCard('linear third edited').getByRole('button', { name: new RegExp(`Open ${run} linear third edited`) }).click();
+  const thirdTask = frame.getByRole('dialog', { name: 'Task details' });
+  await thirdTask.getByRole('button', { name: 'Edit issue' }).click();
+  await issueEditor.locator('.issue-title-view').waitFor({ timeout: 10_000 });
+  await page.keyboard.press('Escape');
+  await issueEditor.waitFor({ state: 'detached', timeout: 5000 });
+  check('from a task, Escape closes the issue editor and leaves the task open', await thirdTask.isVisible());
+  await thirdTask.getByRole('button', { name: 'Close' }).click();
 
   await context.unroute(isRequestRoute);
   await context.unroute(isStatusRoute);

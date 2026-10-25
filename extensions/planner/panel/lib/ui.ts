@@ -14,6 +14,8 @@ export interface UiState {
   folderFilter: string | null;
   /** Show Sunsama's playlist times on day lists. */
   playlist: boolean;
+  /** Linear issue shown in the issue editor, above any task detail. */
+  openIssue: { id: string; workspaceId: string | null } | null;
 }
 
 export interface UiContextValue {

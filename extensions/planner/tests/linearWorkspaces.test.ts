@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LINEAR_API, LinearWorkspaces, WorkspaceError, type Fetcher } from '../service/linear.ts';
-import { ASSIGNED_QUERY, WHOAMI_QUERY } from '../src/domain/linear.ts';
+import { ADD_COMMENT_MUTATION, ASSIGNED_QUERY, UPDATE_ISSUE_MUTATION, WHOAMI_QUERY } from '../src/domain/linear.ts';
 
 const dirs: string[] = [];
 const fileIn = (): string => {
@@ -100,6 +100,23 @@ describe('Linear workspaces with API keys', () => {
     const unknown = await store.graphql('org-z', ASSIGNED_QUERY, {}).catch((error: unknown) => error);
     expect((unknown as WorkspaceError).status).toBe(404);
     expect(calls.filter((call) => call.query.includes('issueDelete'))).toHaveLength(0);
+  });
+
+  test('a mutation may carry only the fields the Planner edits', async () => {
+    const { calls, fetcher } = fakeLinear(ORGS);
+    const store = new LinearWorkspaces(fileIn(), fetcher);
+    await store.add(KEY_A);
+    const sent = calls.length;
+    await store.graphql('org-a', UPDATE_ISSUE_MUTATION, { id: 'i1', input: { title: 'New', description: '- [x] done', addedLabelIds: ['l1'] } });
+    await store.graphql('org-a', ADD_COMMENT_MUTATION, { input: { issueId: 'i1', body: '**LGTM**' } });
+    expect(calls.length).toBe(sent + 2);
+    for (const variables of [{ id: 'i1', input: { teamId: 'other-team' } }, { id: 'i1', input: ['title'] }, { id: 'i1' }]) {
+      const refused = await store.graphql('org-a', UPDATE_ISSUE_MUTATION, variables).catch((error: unknown) => error);
+      expect((refused as WorkspaceError).status).toBe(400);
+    }
+    const comment = await store.graphql('org-a', ADD_COMMENT_MUTATION, { input: { issueId: 'i1', body: 'x', createAsUser: 'Someone' } }).catch((error: unknown) => error);
+    expect((comment as WorkspaceError).status).toBe(400);
+    expect(calls.length).toBe(sent + 2);
   });
 
   test('removing a workspace forgets its key', async () => {
