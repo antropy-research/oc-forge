@@ -1,7 +1,7 @@
 // Panel-side GitHub: issues and pull requests listed by the local service
 // (through the gh CLI), planned as tasks, kept current while the panel is open.
 import type { EventBody } from '../../src/domain/events.ts';
-import { linkedGitHubIds, planGitHubSync, taskFromGitHub, type GitHubItem } from '../../src/domain/github.ts';
+import { linkedGitHubIds, planGitHubSync, taskForGitHub, taskFromGitHub, type GitHubItem } from '../../src/domain/github.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import type { Placement } from '../../src/domain/types.ts';
@@ -84,8 +84,8 @@ export class GitHubStore {
   importCommands(item: GitHubItem, placement: Placement, position?: number): { bodies: EventBody[]; taskId: string } {
     const state = this.client.getView().state;
     const at = position ?? edgePosition(state, placement, 'bottom');
-    const existing = Object.values(state.tasks).find((task) => task.source?.kind === 'github' && task.source.id === item.id && !task.deletedAt && !task.archivedAt && !task.completedAt);
-    if (existing) return { bodies: [{ type: 'task.moved', taskId: existing.id, placement, position: at }], taskId: existing.id };
+    const existing = taskForGitHub(state, item);
+    if (existing && !existing.completedAt) return { bodies: [{ type: 'task.moved', taskId: existing.id, placement, position: at }], taskId: existing.id };
     const id = newId();
     return { bodies: [{ type: 'task.created', task: taskFromGitHub(item, id, placement, at) }], taskId: id };
   }

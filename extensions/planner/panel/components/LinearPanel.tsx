@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
-import { isClosedType, linkedTask, type LinearIssue } from '../../src/domain/linear.ts';
+import { githubMirrors, isClosedType, linkedTask, type LinearIssue } from '../../src/domain/linear.ts';
 import { LINEAR_DRAG_TYPE, usePlanner, useLinear, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import type { LinearTeam } from '../lib/linear.ts';
@@ -37,7 +37,7 @@ const IssueRow = ({ issue }: { issue: LinearIssue }) => {
   const { linear } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
-  const linked = linkedTask(view.state, issue.id);
+  const linked = linkedTask(view.state, issue.id, githubMirrors(issue));
   return (
     <li
       class="issue-row"

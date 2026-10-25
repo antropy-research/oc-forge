@@ -115,7 +115,8 @@ const isSource = (value: unknown): value is TaskSourceRef =>
   isShortText(value.url, 2000) && /^https:\/\//.test(value.url as string) &&
   (value.title === undefined || isShortText(value.title, TITLE_MAX)) &&
   (value.teamId === undefined || isShortText(value.teamId, 200)) &&
-  (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)));
+  (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40))) &&
+  (value.mirrors === undefined || (Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))));
 
 const PRIORITY_VALUES = new Set(['urgent', 'high', 'medium', 'low']);
 const isPriority = (value: unknown): boolean => value === null || (typeof value === 'string' && PRIORITY_VALUES.has(value));

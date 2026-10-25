@@ -37,6 +37,8 @@ export interface TaskSourceRef {
   teamId?: string;
   /** Workflow state last seen at the source. */
   status?: { name: string; type: string; color: string };
+  /** The same item elsewhere, as `owner/repo#number` (a Linear issue Linear syncs with GitHub), so it is planned once. */
+  mirrors?: string[];
 }
 
 export type Priority = 'urgent' | 'high' | 'medium' | 'low';

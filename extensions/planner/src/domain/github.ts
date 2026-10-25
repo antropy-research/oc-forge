@@ -1,5 +1,5 @@
 // GitHub issues and pull requests as a task source (read-only).
-import type { Placement, PlannerState, TaskSourceRef } from './types.ts';
+import type { Placement, PlannerState, Task, TaskSourceRef } from './types.ts';
 import type { EventBody, NewTask } from './events.ts';
 
 export interface GitHubItem {
@@ -38,6 +38,20 @@ export const taskFromGitHub = (item: GitHubItem, id: string, placement: Placemen
 
 /** A short label for a GitHub key: name#12 instead of owner/name#12. */
 export const shortKey = (key: string): string => key.replace(/^[^/]+\//, '');
+
+/**
+ * The live task planning a GitHub item (an open one first): linked to the item,
+ * or to the Linear issue Linear keeps in sync with it.
+ */
+export const taskForGitHub = (state: PlannerState, item: Pick<GitHubItem, 'id' | 'key'>): Task | null => {
+  const linked = Object.values(state.tasks).filter(
+    (task) =>
+      !task.deletedAt &&
+      !task.archivedAt &&
+      ((task.source?.kind === 'github' && task.source.id === item.id) || (task.source?.kind === 'linear' && Boolean(task.source.mirrors?.includes(item.key)))),
+  );
+  return linked.find((task) => !task.completedAt) ?? linked[0] ?? null;
+};
 
 export const linkedGitHubIds = (state: PlannerState): string[] =>
   [...new Set(Object.values(state.tasks).filter((task) => task.source?.kind === 'github' && !task.deletedAt && !task.archivedAt && !task.completedAt).map((task) => task.source!.id))];

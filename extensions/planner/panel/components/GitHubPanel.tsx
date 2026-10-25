@@ -1,6 +1,6 @@
 import type { Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
-import { shortKey, type GitHubItem } from '../../src/domain/github.ts';
+import { shortKey, taskForGitHub, type GitHubItem } from '../../src/domain/github.ts';
 import { GITHUB_DRAG_TYPE, useGitHub, usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import type { GitHubListKind } from '../lib/github.ts';
@@ -23,7 +23,7 @@ const ItemRow = ({ item }: { item: GitHubItem }) => {
   const { github } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
-  const linked = Object.values(view.state.tasks).find((task) => task.source?.kind === 'github' && task.source.id === item.id && !task.deletedAt && !task.archivedAt);
+  const linked = taskForGitHub(view.state, item);
   return (
     <li
       class="issue-row"

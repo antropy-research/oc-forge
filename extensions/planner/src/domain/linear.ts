@@ -26,13 +26,16 @@ export interface LinearIssue {
   team: { id: string; key: string; name: string };
   project: { id: string; name: string } | null;
   cycle: { id: string; number: number } | null;
+  /** External items Linear keeps in sync with this issue (its GitHub Issues sync). */
+  syncedWith?: { service: string; metadata?: { owner?: string | null; repo?: string | null; number?: number | null } | null }[] | null;
 }
 
 const ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt
     state { id name type color }
     team { id key name }
     project { id name }
-    cycle { id number }`;
+    cycle { id number }
+    syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 
 const OPEN_FILTER = `{ state: { type: { nin: ["completed", "canceled"] } } }`;
 
@@ -109,16 +112,27 @@ export const priorityToLinear = (value: Priority | null): number => (value ? TO_
 
 export const isClosedType = (type: string | undefined): boolean => type === 'completed' || type === 'canceled';
 
+/** GitHub issues Linear keeps in sync with this issue, as `owner/repo#number`. */
+export const githubMirrors = (issue: Pick<LinearIssue, 'syncedWith'>): string[] =>
+  (issue.syncedWith ?? []).flatMap((entry) => {
+    const meta = entry.metadata;
+    return entry.service === 'github' && meta?.owner && meta.repo && meta.number ? [`${meta.owner}/${meta.repo}#${meta.number}`] : [];
+  });
+
 /** The link a task keeps to its issue, with the title and state last seen there. */
-export const issueSource = (issue: LinearIssue): TaskSourceRef => ({
-  kind: 'linear',
-  id: issue.id,
-  key: issue.identifier,
-  url: issue.url,
-  title: issue.title,
-  teamId: issue.team.id,
-  status: { name: issue.state.name, type: issue.state.type, color: issue.state.color },
-});
+export const issueSource = (issue: LinearIssue): TaskSourceRef => {
+  const mirrors = githubMirrors(issue);
+  return {
+    kind: 'linear',
+    id: issue.id,
+    key: issue.identifier,
+    url: issue.url,
+    title: issue.title,
+    teamId: issue.team.id,
+    status: { name: issue.state.name, type: issue.state.type, color: issue.state.color },
+    ...(mirrors.length ? { mirrors } : {}),
+  };
+};
 
 export const taskFromIssue = (issue: LinearIssue, id: string, placement: Placement, position: number): NewTask => ({
   id,
@@ -130,9 +144,17 @@ export const taskFromIssue = (issue: LinearIssue, id: string, placement: Placeme
   source: issueSource(issue),
 });
 
-/** The live task planning an issue, if any (an open one before a completed one). */
-export const linkedTask = (state: PlannerState, issueId: string): Task | null => {
-  const linked = Object.values(state.tasks).filter((task) => task.source?.kind === 'linear' && task.source.id === issueId && !task.deletedAt && !task.archivedAt);
+/**
+ * The live task planning an issue, if any (an open one before a completed one):
+ * linked to the issue itself, or to a GitHub issue Linear keeps in sync with it.
+ */
+export const linkedTask = (state: PlannerState, issueId: string, mirrors: readonly string[] = []): Task | null => {
+  const linked = Object.values(state.tasks).filter(
+    (task) =>
+      !task.deletedAt &&
+      !task.archivedAt &&
+      ((task.source?.kind === 'linear' && task.source.id === issueId) || (task.source?.kind === 'github' && mirrors.includes(task.source.key))),
+  );
   return linked.find((task) => !task.completedAt) ?? linked[0] ?? null;
 };
 
@@ -171,7 +193,8 @@ export const planLinearSync = (state: PlannerState, issues: ReadonlyMap<string, 
       source.teamId !== next.teamId ||
       source.status?.name !== next.status?.name ||
       source.status?.type !== next.status?.type ||
-      source.status?.color !== next.status?.color;
+      source.status?.color !== next.status?.color ||
+      (source.mirrors ?? []).join(' ') !== (next.mirrors ?? []).join(' ');
     if (changed) bodies.push({ type: 'task.sourceSynced', taskId: task.id, source: next, ...(titleFollows ? { title: issue.title } : {}) });
     if (options.importCompletion && isClosedType(issue.state.type) && !task.completedAt) {
       bodies.push({ type: 'task.completed', taskId: task.id, on: options.today });

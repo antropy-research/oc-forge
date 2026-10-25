@@ -139,3 +139,23 @@ describe.skipIf(!schemaPath || !existsSync(schemaPath))('Linear schema', () => {
     for (const document of ALL_DOCUMENTS) expect(validate(schema, parse(document)).map((error) => error.message)).toEqual([]);
   });
 });
+
+import { taskForGitHub } from '../src/domain/github.ts';
+
+describe('Linear issues synced with GitHub', () => {
+  const synced = issue({ syncedWith: [{ service: 'github', metadata: { owner: 'acme', repo: 'app', number: 12 } }, { service: 'slack', metadata: null }] });
+  test('the GitHub key travels with the link and updates on sync', () => {
+    expect(issueSource(synced).mirrors).toEqual(['acme/app#12']);
+    expect(issueSource(issue()).mirrors).toBeUndefined();
+    const bodies = planLinearSync(withLinked(), new Map([['iss-1', synced]]), { today: '2026-10-24', importCompletion: false });
+    expect(bodies).toEqual([{ type: 'task.sourceSynced', taskId: 't1', source: issueSource(synced) }]);
+  });
+  test('planned once, from either side', () => {
+    const viaLinear = foldEvents([ev({ type: 'task.created', task: taskFromIssue(synced, 'tl', { kind: 'day', date: '2026-10-24' }, 1) })]);
+    expect(taskForGitHub(viaLinear, { id: 'I_12', key: 'acme/app#12' })?.id).toBe('tl');
+    expect(taskForGitHub(viaLinear, { id: 'I_13', key: 'acme/app#13' })).toBeNull();
+    const viaGitHub = foldEvents([ev({ type: 'task.created', task: { id: 'tg', title: 'Crash', placement: { kind: 'day', date: '2026-10-24' }, position: 1, source: { kind: 'github', id: 'I_12', key: 'acme/app#12', url: 'https://github.com/acme/app/issues/12' } } })]);
+    expect(linkedTask(viaGitHub, synced.id, ['acme/app#12'])?.id).toBe('tg');
+    expect(linkedTask(viaGitHub, synced.id)).toBeNull();
+  });
+});

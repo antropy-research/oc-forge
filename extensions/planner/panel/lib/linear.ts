@@ -15,6 +15,7 @@ import {
   VIEW_ISSUES_QUERY,
   isClosedType,
   issueSource,
+  githubMirrors,
   linkedIssueIds,
   linkedTask,
   planLinearSync,
@@ -145,7 +146,7 @@ export class LinearStore {
   importCommands(issue: LinearIssue, placement: Placement, position?: number): { bodies: EventBody[]; taskId: string } {
     const state = this.client.getView().state;
     const at = position ?? edgePosition(state, placement, 'bottom');
-    const existing = linkedTask(state, issue.id);
+    const existing = linkedTask(state, issue.id, githubMirrors(issue));
     if (existing && !existing.completedAt) return { bodies: [{ type: 'task.moved', taskId: existing.id, placement, position: at }], taskId: existing.id };
     const id = newId();
     return { bodies: [{ type: 'task.created', task: taskFromIssue(issue, id, placement, at) }], taskId: id };
