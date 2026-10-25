@@ -5,7 +5,7 @@ import { clockLabel, instantAt, monthDay, weekdayName, zonedDateMinutes } from '
 import { blocksOnDay } from '../../src/domain/selectors.ts';
 import { layoutLanes } from '../../src/domain/schedule.ts';
 import { newId } from '../../src/domain/ids.ts';
-import { DRAG_TYPE, GITHUB_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
+import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
 import { isGitHubItem } from '../../src/domain/github.ts';
 import { isLinearIssue } from '../../src/domain/linear.ts';
 import { useUi } from '../lib/ui.ts';
@@ -47,7 +47,7 @@ interface Item {
 
 /** A Sunsama-style calendar: time grid for `dates`, working sessions you can drop, drag and resize. */
 export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: CalendarEvent[] }) => {
-  const { client, linear, github } = usePlanner();
+  const { client, linear, github, google } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -174,7 +174,7 @@ export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: Calendar
                 }}
                 onDragOver={(event) => {
                   const types = event.dataTransfer?.types ?? [];
-                  if (!types.includes(DRAG_TYPE) && !types.includes(LINEAR_DRAG_TYPE) && !types.includes(GITHUB_DRAG_TYPE)) return;
+                  if (!types.includes(DRAG_TYPE) && !types.includes(LINEAR_DRAG_TYPE) && !types.includes(GITHUB_DRAG_TYPE) && !types.includes(GOOGLE_DRAG_TYPE)) return;
                   event.preventDefault();
                   setDropHint({ date, minutes: minutesAt(date, event.clientY) });
                 }}
@@ -212,6 +212,15 @@ export const TimeGrid = ({ dates, events }: { dates: DateKey[]; events: Calendar
                     const length = Math.max(SNAP, view.state.tasks[planned]?.plannedMinutes ?? 30);
                     bodies.push({ type: 'block.created', block: { id: newId(), taskId: planned, start: instantAt(date, start, zone), end: instantAt(date, Math.min(DAY_MIN, start + length), zone) } });
                     void client.dispatch(bodies, { undo: 'Timeboxed' });
+                    return;
+                  }
+                  const googleData = event.dataTransfer?.getData(GOOGLE_DRAG_TYPE);
+                  if (googleData) {
+                    const planned = google.importDropped(googleData, { kind: 'day', date });
+                    if (!planned) return;
+                    const length = Math.max(SNAP, view.state.tasks[planned.taskId]?.plannedMinutes ?? 30);
+                    planned.bodies.push({ type: 'block.created', block: { id: newId(), taskId: planned.taskId, start: instantAt(date, start, zone), end: instantAt(date, Math.min(DAY_MIN, start + length), zone) } });
+                    void client.dispatch(planned.bodies, { undo: 'Timeboxed' });
                     return;
                   }
                   const taskId = event.dataTransfer?.getData(DRAG_TYPE);

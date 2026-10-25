@@ -11,7 +11,7 @@ const KINDS: { id: GitHubListKind; label: string }[] = [
   { id: 'mine', label: 'My open pull requests' },
 ];
 
-const plannedLabel = (task: Task, today: string): string => {
+export const plannedLabel = (task: Task, today: string): string => {
   if (task.completedAt) return 'Done';
   if (task.placement.kind === 'backlog') return 'In backlog';
   if (task.placement.date === today) return 'Today';

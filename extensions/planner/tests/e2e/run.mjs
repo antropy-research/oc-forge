@@ -58,10 +58,13 @@ const cleanUp = async (final) => {
       console.log(`INFO worktree cleanup: ${String(error).split('\n')[0]}`);
     }
     const display = { linearLayout: 'list', linearGroupBy: 'status', linearOrderBy: 'priority', linearImportCompletion: false };
+    // The Google phase's fake account must not stay the calendar sessions are written to.
+    const googleLeft = state.settings.googleTimebox?.account === 'e2e@example.com';
     const displayChanged = Object.entries(display).some(([key, value]) => state.settings[key] !== undefined && state.settings[key] !== value);
     const commands = [
       // The Linear page's layout is a setting; put it back so the next run starts from the list.
       ...(displayChanged ? [{ cmd: `cleanup-display-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: display }] : []),
+      ...(googleLeft ? [{ cmd: `cleanup-google-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: { googleTimebox: null } }] : []),
       ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
       ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
       ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
@@ -1291,7 +1294,8 @@ try {
   execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', `rm -rf ${bare} /tmp/planner-replica && git init --quiet --bare -b main ${bare}`]);
   await nav('Settings').click();
   await frame.getByRole('textbox', { name: 'Sync remote' }).fill(bare);
-  await frame.getByRole('button', { name: 'Save' }).click();
+  // Settings has more than one Save (Google's client form too); this is Sync's.
+  await frame.getByRole('group', { name: 'Sync', exact: true }).getByRole('button', { name: 'Save' }).click();
   await frame.getByRole('button', { name: 'Sync now' }).click();
   await frame.getByText(/^Last synced /).waitFor({ timeout: 60_000 });
   const pushed = execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'git', `--git-dir=${bare}`, 'log', '--oneline', '-1', 'main'], { encoding: 'utf8' }).trim();
@@ -1348,6 +1352,142 @@ try {
   const firstColumn = (await frame.locator('section.day-column').first().getAttribute('aria-label')) ?? '';
   check('the board jumps to a picked date', firstColumn.includes(monthDayLabel(jumpTo)), firstColumn);
   await frame.getByRole('button', { name: 'Today', exact: true }).last().click().catch(() => {});
+
+  // Phase 13: Google Calendar, Google Tasks and Gmail. The service's /google routes answer from a
+  // fake account here: the real ones would need Google and a person to sign in.
+  const GMAIL = 'e2e@example.com';
+  const gtask = (id, title, due) => ({ account: GMAIL, listId: 'L1', id, title: `${run} ${title}`, notes: id === 'gt1' ? 'at the post office' : '', due, completed: false, parent: null, position: id, url: `https://tasks.google.com/task/${id}`, updated: new Date().toISOString() });
+  const fake = {
+    client: null,
+    accounts: [],
+    signedIn: false,
+    calendars: [
+      { account: GMAIL, id: 'primary', name: `${run} Me`, color: '#4285f4', primary: true, writable: true },
+      { account: GMAIL, id: 'holidays', name: `${run} Holidays`, color: '#0b8043', primary: false, writable: false },
+    ],
+    lists: [{ account: GMAIL, id: 'L1', title: 'My Tasks' }],
+    tasks: [gtask('gt1', 'buy stamps', todayKey), gtask('gt2', 'call the bank', tomorrowKey), gtask('gt3', 'renew passport', null)],
+    mail: [{ account: GMAIL, id: 'm1', threadId: 'th1', subject: `${run} review the deck`, from: 'Ann Lee <ann@example.com>', date: new Date().toISOString(), snippet: 'Could you look at slides 3 to 5?', unread: true, url: 'https://mail.google.com/mail/u/e2e%40example.com/#all/th1' }],
+    writes: [],
+  };
+  const googleAnswer = (method, path, body) => {
+    const url = new URL(path, 'http://service');
+    const status = () => ({ client: fake.client, accounts: fake.accounts, timeboxError: null });
+    if (url.pathname === '/google/status') return status();
+    if (url.pathname === '/google/client' && method === 'PUT') {
+      if (!/\.apps\.googleusercontent\.com$/.test(body.id)) return { httpStatus: 400, error: 'That is not an OAuth client ID (it ends in .apps.googleusercontent.com)' };
+      fake.client = { id: body.id };
+      return status();
+    }
+    if (url.pathname === '/google/connect' && method === 'POST') return { id: 'signin-e2e-1', authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=e2e', redirectUri: 'http://127.0.0.1:43210/' };
+    if (url.pathname === '/google/connect/signin-e2e-1') return fake.signedIn ? { status: 'connected', email: GMAIL, features: ['calendar', 'tasks', 'mail'] } : { status: 'pending' };
+    if (url.pathname === '/google/connect/signin-e2e-1/finish') {
+      if (!body.url.startsWith('http://127.0.0.1:43210/') || !body.url.includes('code=')) return { httpStatus: 400, error: 'That address is not the one this sign-in waits for' };
+      fake.signedIn = true;
+      fake.accounts = [{ email: GMAIL, features: ['calendar', 'tasks', 'mail'], addedAt: new Date().toISOString() }];
+      return { status: 'connected', email: GMAIL, features: ['calendar', 'tasks', 'mail'] };
+    }
+    if (url.pathname === '/google/calendars') return { calendars: fake.accounts.length ? fake.calendars : [], errors: [] };
+    if (url.pathname === '/google/tasklists') return { lists: fake.accounts.length ? fake.lists : [], errors: [] };
+    if (url.pathname === '/google/tasks' && method === 'GET') return { tasks: fake.tasks.filter((item) => !item.completed) };
+    if (url.pathname === '/google/tasks/linked') return { tasks: fake.tasks.filter((item) => body.groups.some((group) => group.ids.includes(item.id))) };
+    if (url.pathname === '/google/tasks' && method === 'PATCH') {
+      fake.writes.push({ method, ...body });
+      const item = fake.tasks.find((task) => task.id === body.id);
+      if (body.completed !== undefined) item.completed = body.completed;
+      if (body.due !== undefined) item.due = body.due;
+      return { task: item };
+    }
+    if (url.pathname === '/google/tasks' && method === 'POST') {
+      fake.writes.push({ method, ...body });
+      const item = { ...gtask(`gt${fake.tasks.length + 1}`, 'x', body.due ?? null), title: body.title };
+      fake.tasks.push(item);
+      return { task: item };
+    }
+    if (url.pathname === '/google/mail') return { messages: fake.mail };
+    return null;
+  };
+  await context.route(isServiceRoute, async (route) => {
+    const outer = route.request().postDataJSON();
+    if (!String(outer?.path ?? '').startsWith('/google/')) return route.continue();
+    const answer = googleAnswer(outer.method ?? 'GET', outer.path, outer.body ? JSON.parse(outer.body) : {});
+    if (!answer) return route.continue();
+    await route.fulfill({ json: answer.httpStatus ? { status: answer.httpStatus, body: JSON.stringify({ error: answer.error }) } : { status: 200, body: JSON.stringify(answer) } });
+  });
+  // Google's sign-in page is not visited for real.
+  await context.route('https://accounts.google.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<p>Google sign-in (e2e)</p>' }));
+  frame = await openPlanner();
+  await nav('Settings').click();
+  const googleBox = frame.getByRole('group', { name: 'Google', exact: true });
+  await googleBox.getByRole('textbox', { name: 'Google OAuth client ID' }).fill('not-a-client');
+  await googleBox.getByRole('textbox', { name: 'Google OAuth client secret' }).fill('GOCSPX-e2e-secret-value');
+  await googleBox.getByRole('button', { name: 'Save' }).click();
+  check('a client ID that is not one is refused, with the reason', await googleBox.getByRole('alert').filter({ hasText: 'OAuth client ID' }).waitFor({ timeout: 5000 }).then(() => true).catch(() => false));
+  await googleBox.getByRole('textbox', { name: 'Google OAuth client ID' }).fill('123456789012-e2eabcdefghijklmnop.apps.googleusercontent.com');
+  await googleBox.getByRole('button', { name: 'Save' }).click();
+  await googleBox.getByText('No account connected yet.').waitFor({ timeout: 5000 });
+  await googleBox.getByRole('button', { name: 'Connect a Google account' }).click();
+  const pasteBox = googleBox.getByRole('textbox', { name: 'Address Google sent the browser to' });
+  check('connecting waits for Google and offers to paste the address it ends on', await pasteBox.waitFor({ timeout: 5000 }).then(() => true).catch(() => false));
+  await pasteBox.fill('http://127.0.0.1:43210/?state=e2e&code=e2e-code&scope=x');
+  await googleBox.getByRole('button', { name: 'Finish' }).click();
+  const accountRow = googleBox.getByRole('list', { name: 'Google accounts' }).getByRole('listitem').filter({ hasText: GMAIL });
+  await accountRow.waitFor({ timeout: 8000 });
+  check('the connected account shows with what it allows', (await accountRow.innerText()).includes('Calendar, Tasks, Gmail'), (await accountRow.innerText()).replace(/\s+/g, ' '));
+  await googleBox.getByRole('checkbox', { name: `${run} Me` }).check();
+  const withCalendar = await waitForState((latest) => Object.values(latest.state.calendars).some((calendar) => calendar.google?.account === GMAIL && calendar.google.calendarId === 'primary'));
+  check('a Google calendar shows beside the plan, read through its account', Object.values(withCalendar.state.calendars).some((calendar) => calendar.google?.calendarId === 'primary' && calendar.visible));
+  await googleBox.getByRole('combobox', { name: 'Google calendar for working sessions' }).selectOption({ label: `${run} Me` });
+  const withTarget = await waitForState((latest) => latest.state.settings.googleTimebox?.calendarId === 'primary');
+  check('working sessions can be written to a Google calendar (only writable ones are offered)', withTarget.state.settings.googleTimebox?.account === GMAIL && (await googleBox.getByRole('combobox', { name: 'Google calendar for working sessions' }).locator('option', { hasText: `${run} Holidays` }).count()) === 0);
+  await shot('34-google-settings');
+
+  await nav('Today').click();
+  await frame.getByRole('tab', { name: 'Google Tasks' }).click();
+  const stamps = frame.locator('.side-panel li.issue-row', { hasText: `${run} buy stamps` });
+  await stamps.waitFor({ timeout: 8000 });
+  check('Google Tasks shows a list\'s open tasks with their due dates', (await stamps.innerText()).includes('Due today') && (await frame.locator('.side-panel li.issue-row', { hasText: `${run} renew passport` }).count()) === 1);
+  await stamps.getByRole('button', { name: `Plan ${run} buy stamps today` }).click();
+  await frame.locator('.side-panel li.issue-row', { hasText: `${run} renew passport` }).getByRole('button', { name: `Plan ${run} renew passport today` }).click();
+  const plannedGoogle = await waitForState((latest) => Boolean(taskTitled(latest, `${run} buy stamps`)) && Boolean(taskTitled(latest, `${run} renew passport`)));
+  const stampsTask = taskTitled(plannedGoogle, `${run} buy stamps`);
+  check('a Google task becomes a linked task, with its notes and due date', stampsTask?.source?.kind === 'gtask' && stampsTask.source.listId === 'L1' && stampsTask.notes === 'at the post office' && stampsTask.dueDate === todayKey, JSON.stringify(stampsTask?.source ?? null));
+  const dueWrite = await (async () => { for (let i = 0; i < 40 && !fake.writes.some((write) => write.id === 'gt3'); i++) await page.waitForTimeout(250); return fake.writes.find((write) => write.id === 'gt3'); })();
+  check('planning a Google task on a day makes it due that day in Google, unless it already was', dueWrite?.due === todayKey && !fake.writes.some((write) => write.id === 'gt1' && write.due), JSON.stringify(fake.writes));
+  const stampsCard = todayCol.locator('li.task-card', { hasText: `${run} buy stamps` });
+  await stampsCard.getByRole('button', { name: 'Mark complete' }).click();
+  const completedThere = await (async () => { for (let i = 0; i < 40 && !fake.writes.some((write) => write.id === 'gt1' && write.completed === true); i++) await page.waitForTimeout(250); return fake.writes.some((write) => write.id === 'gt1' && write.completed === true); })();
+  const syncedDone = await waitForState((latest) => taskTitled(latest, `${run} buy stamps`)?.source?.status?.type === 'completed');
+  check('completing it here completes it in Google Tasks', completedThere && taskTitled(syncedDone, `${run} buy stamps`)?.source?.status?.name === 'Completed');
+
+  await frame.getByRole('tab', { name: 'Gmail' }).click();
+  const deck = frame.locator('.side-panel li.issue-row', { hasText: `${run} review the deck` });
+  await deck.waitFor({ timeout: 8000 });
+  check('Gmail lists the inbox, sender first', (await deck.innerText()).includes('Ann Lee'));
+  await deck.getByRole('button', { name: `Plan ${run} review the deck today` }).click();
+  const mailed = await waitForState((latest) => Boolean(taskTitled(latest, `${run} review the deck`)));
+  const deckTask = taskTitled(mailed, `${run} review the deck`);
+  check('an email becomes a task linked back to Gmail, with who sent it', deckTask?.source?.kind === 'email' && deckTask.source.url === fake.mail[0].url && deckTask.notes.startsWith('From Ann Lee'), JSON.stringify(deckTask?.source ?? null));
+  await shot('35-gmail');
+
+  await addInToday(`${run} plain errand`);
+  await todayCol.locator('li.task-card', { hasText: `${run} plain errand` }).getByRole('button', { name: new RegExp(`Open ${run} plain errand`) }).click();
+  const errandDialog = frame.getByRole('dialog', { name: 'Task details' });
+  await errandDialog.getByRole('button', { name: 'Add to Google Tasks' }).click();
+  const added = await waitForState((latest) => taskTitled(latest, `${run} plain errand`)?.source?.kind === 'gtask');
+  check('a task can be added to Google Tasks, and stays linked to it', taskTitled(added, `${run} plain errand`)?.source?.listId === 'L1' && fake.writes.some((write) => write.method === 'POST' && write.title === `${run} plain errand` && write.due === todayKey));
+  check('the task detail offers to open it in Google Tasks', await errandDialog.getByRole('button', { name: 'Open in Google Tasks' }).isVisible());
+  await errandDialog.getByRole('button', { name: 'Close' }).click();
+
+  // Leave no Google calendar or session calendar behind for later runs (the real service has no such account).
+  await nav('Settings').click();
+  await googleBox.getByRole('checkbox', { name: `${run} Me` }).uncheck();
+  await googleBox.getByRole('combobox', { name: 'Google calendar for working sessions' }).selectOption({ label: "Don't write them" });
+  const reset = await waitForState((latest) => !latest.state.settings.googleTimebox && !Object.values(latest.state.calendars).some((calendar) => calendar.google?.account === GMAIL));
+  check('a Google calendar and the session calendar can be turned off again', !reset.state.settings.googleTimebox);
+  await context.unroute(isServiceRoute);
+  await context.unroute('https://accounts.google.com/**');
+  frame = await openPlanner();
 
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });

@@ -6,6 +6,7 @@ import { PlannerClient } from './lib/client.ts';
 import { LinearStore } from './lib/linear.ts';
 import { AgentStore } from './lib/agents.ts';
 import { GitHubStore } from './lib/github.ts';
+import { GoogleStore } from './lib/google.ts';
 import { registerBackground } from './lib/background.ts';
 import { PlannerContext } from './lib/context.ts';
 import { App } from './components/App.tsx';
@@ -26,8 +27,9 @@ host.onReady((ready) => {
   const linear = new LinearStore(host, client, ready.surface);
   const agents = new AgentStore(host, client, ready.surface);
   const github = new GitHubStore(client, ready.surface);
+  const google = new GoogleStore(host, client, ready.surface);
   render(
-    <PlannerContext.Provider value={{ client, host, linear, agents, github }}>
+    <PlannerContext.Provider value={{ client, host, linear, agents, github, google }}>
       <App surface={ready.surface} />
     </PlannerContext.Provider>,
     root,
