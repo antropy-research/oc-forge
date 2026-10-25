@@ -8,3 +8,4 @@
     a. calenader and task: 像是gcal和google task可以一起联动的所有功能。
     b. Sunsama 一样可以把Linear issue/Github issues/Email给加入到task里面来的能力。
     c. 可以直接load Linear里面已经保存好的view以及像是linear一样可以临时的去filter一些东西。可以直接修改linear issue的内容。可以直接像是github或者是linear里面一样把task assign给某个agent，然后对应的agent直接开了worktree之后提pr。
+   ii. `./extensions/vscode`应该写了一些中间组建，可以把已经编译好的vscode给粘到openchamber里面来，包括但是不限于代码的渲染等等。
