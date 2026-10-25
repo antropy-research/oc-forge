@@ -71,6 +71,21 @@ export interface Task {
   source: TaskSourceRef | null;
 }
 
+/** Actual time spent on a task; a timer run or a manual entry. */
+export interface TimeEntry {
+  id: string;
+  taskId: string;
+  start: string;
+  end: string;
+  source: 'timer' | 'manual';
+}
+
+/** The one running task timer. */
+export interface TimerState {
+  taskId: string;
+  startedAt: string;
+}
+
 export interface Settings {
   /** IANA zone that decides what "today" and midnight mean. Null until the panel reports one. */
   timezone: string | null;
@@ -80,6 +95,8 @@ export interface Settings {
   archiveAfterRollovers: number | null;
   /** 0 = Sunday, 1 = Monday. */
   weekStartsOn: 0 | 1;
+  /** Count planned time as actual when a task is completed without any tracked time. */
+  plannedAsActual: boolean;
 }
 
 export interface PlannerState {
@@ -87,6 +104,8 @@ export interface PlannerState {
   version: number;
   tasks: Record<string, Task>;
   channels: Record<string, Channel>;
+  entries: Record<string, TimeEntry>;
+  timer: TimerState | null;
   settings: Settings;
 }
 
@@ -95,11 +114,14 @@ export const DEFAULT_SETTINGS: Settings = {
   workloadMinutes: 6 * 60,
   archiveAfterRollovers: 7,
   weekStartsOn: 1,
+  plannedAsActual: true,
 };
 
 export const emptyState = (): PlannerState => ({
   version: 0,
   tasks: {},
   channels: {},
+  entries: {},
+  timer: null,
   settings: { ...DEFAULT_SETTINGS },
 });

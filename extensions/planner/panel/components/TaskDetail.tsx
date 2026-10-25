@@ -4,10 +4,12 @@ import { BACKLOG_BUCKETS, type BacklogBucket, type Placement, type Priority, typ
 import { addDays, formatMinutes, isDateKey, monthDay } from '../../src/domain/dates.ts';
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { describe, timeAgo } from '../../src/domain/activity.ts';
-import { edgePosition, liveChannels } from '../../src/domain/selectors.ts';
+import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
+import { formatClock, useNow } from '../lib/time.ts';
+import { TimerButton } from './TimerButton.tsx';
 
 const PRIORITIES: { id: Priority; label: string }[] = [
   { id: 'urgent', label: 'Urgent' },
@@ -68,7 +70,7 @@ const StartPicker = ({ task }: { task: Task }) => {
   );
 };
 
-const Subtasks = ({ task }: { task: Task }) => {
+export const Subtasks = ({ task }: { task: Task }) => {
   const { client } = usePlanner();
   const [draft, setDraft] = useState('');
   const save = (subtasks: Subtask[]) => void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { subtasks } }]);
@@ -106,6 +108,48 @@ const Subtasks = ({ task }: { task: Task }) => {
         ))}
       </ul>
       <input class="subtask-add" value={draft} placeholder="Add subtask" aria-label="Add subtask" onInput={(event) => setDraft(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && add()} />
+    </section>
+  );
+};
+
+const ActualTime = ({ task }: { task: Task }) => {
+  const { client } = usePlanner();
+  const view = useView();
+  const [draft, setDraft] = useState('');
+  const running = view.state.timer?.taskId === task.id;
+  const now = useNow(running);
+  const entries = entriesFor(view.state, task.id);
+  const actual = actualMinutes(view.state, task, now);
+  const add = () => {
+    const minutes = parseDuration(draft);
+    if (!minutes) return;
+    const end = new Date();
+    const start = new Date(end.getTime() - minutes * 60_000);
+    void client.dispatch([{ type: 'time.logged', entry: { id: newId(), taskId: task.id, start: start.toISOString(), end: end.toISOString() } }]);
+    setDraft('');
+  };
+  return (
+    <section class="detail-section" aria-label="Actual time">
+      <h3>
+        Actual {running ? formatClock(actual) : formatMinutes(actual) || '0:00'}
+        {actualIsFromPlan(view.state, task) && <span class="count" title="Completed without tracked time; planned time counts as actual">from plan</span>}
+        <TimerButton task={task} />
+      </h3>
+      {entries.length > 0 && (
+        <ul class="entries">
+          {entries.map((entry) => (
+            <li key={entry.id}>
+              <span>{new Date(entry.start).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+              <span class="muted">{entry.source === 'timer' ? 'timer' : 'manual'}</span>
+              <span>{formatMinutes((Date.parse(entry.end) - Date.parse(entry.start)) / 60_000)}</span>
+              <button class="link danger" aria-label="Delete time entry" onClick={() => void client.dispatch([{ type: 'time.deleted', entryId: entry.id }])}>×</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div class="row">
+        <input class="subtask-add" value={draft} placeholder="Add time, e.g. 0:25" aria-label="Add actual time" onInput={(event) => setDraft(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && add()} />
+      </div>
     </section>
   );
 };
@@ -249,6 +293,7 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
           }}
         />
         <Subtasks task={task} />
+        <ActualTime task={task} />
         <Activity task={task} />
       </div>
     </div>

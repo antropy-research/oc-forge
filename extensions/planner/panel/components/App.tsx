@@ -4,23 +4,32 @@ import { UiContext, type UiState } from '../lib/ui.ts';
 import { ArchiveView } from './ArchiveView.tsx';
 import { Backlog } from './Backlog.tsx';
 import { Board } from './Board.tsx';
+import { FocusView } from './FocusView.tsx';
 import { Settings } from './Settings.tsx';
 import { Nav, ServiceGate, Toasts, type Route } from './Shell.tsx';
+import { StatusSection } from './StatusSection.tsx';
 import { TaskDetail } from './TaskDetail.tsx';
 import { CompactToday, TodayView } from './TodayView.tsx';
 
 export const App = ({ surface }: { surface: string }) => {
-  const { client } = usePlanner();
+  const { client, host } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
-  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null });
+  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
 
   useEffect(() => {
     void client.load();
   }, [client]);
 
-  if (!view.loaded) return <ServiceGate />;
+  if (!view.loaded) return surface === 'status' ? null : <ServiceGate />;
+  if (surface === 'status') {
+    return (
+      <UiContext.Provider value={{ ui, setUi }}>
+        <StatusSection host={host} />
+      </UiContext.Provider>
+    );
+  }
   return (
     <UiContext.Provider value={{ ui, setUi }}>
       {surface === 'panel' ? (
@@ -31,6 +40,7 @@ export const App = ({ surface }: { surface: string }) => {
           <main class="main">
             {route === 'home' && <Board />}
             {route === 'today' && <TodayView />}
+            {route === 'focus' && <FocusView onExit={() => setRoute('today')} />}
             {route === 'backlog' && <Backlog />}
             {route === 'archive' && <ArchiveView />}
             {route === 'settings' && <Settings />}

@@ -1,5 +1,5 @@
 // Read models over PlannerState.
-import type { BacklogBucket, DateKey, Placement, PlannerState, Task } from './types.ts';
+import type { BacklogBucket, DateKey, Placement, PlannerState, Task, TimeEntry } from './types.ts';
 
 const POSITION_STEP = 1024;
 
@@ -29,6 +29,47 @@ export const plannedTotal = (tasks: readonly Task[]): number => tasks.reduce((su
 /** Planned minutes that count toward the workload threshold: personal-context channels are left out. */
 export const workloadTotal = (state: PlannerState, tasks: readonly Task[]): number =>
   plannedTotal(tasks.filter((task) => !task.channelId || state.channels[task.channelId]?.context !== 'personal'));
+
+// Entries grouped by task, cached per entries object so renders stay linear.
+const entryIndex = new WeakMap<Record<string, TimeEntry>, Map<string, TimeEntry[]>>();
+const entriesByTask = (state: PlannerState): Map<string, TimeEntry[]> => {
+  let index = entryIndex.get(state.entries);
+  if (!index) {
+    index = new Map();
+    for (const entry of Object.values(state.entries)) {
+      const list = index.get(entry.taskId) ?? [];
+      list.push(entry);
+      index.set(entry.taskId, list);
+    }
+    for (const list of index.values()) list.sort((a, b) => a.start.localeCompare(b.start));
+    entryIndex.set(state.entries, index);
+  }
+  return index;
+};
+
+export const entriesFor = (state: PlannerState, taskId: string): TimeEntry[] => entriesByTask(state).get(taskId) ?? [];
+
+/** Minutes tracked for a task; with `now`, includes the running timer. */
+export const trackedMinutes = (state: PlannerState, taskId: string, now?: number): number => {
+  let ms = 0;
+  for (const entry of entriesFor(state, taskId)) ms += Date.parse(entry.end) - Date.parse(entry.start);
+  if (now !== undefined && state.timer?.taskId === taskId) ms += Math.max(0, now - Date.parse(state.timer.startedAt));
+  return ms / 60_000;
+};
+
+/**
+ * Actual time as Sunsama reports it: tracked time, or, for a task completed
+ * without any tracking, its planned time when that setting is on.
+ */
+export const actualMinutes = (state: PlannerState, task: Task, now?: number): number => {
+  const tracked = trackedMinutes(state, task.id, now);
+  if (tracked > 0) return tracked;
+  return state.settings.plannedAsActual && task.completedAt && task.plannedMinutes ? task.plannedMinutes : 0;
+};
+
+/** Whether an actual figure is an estimate filled in from the plan. */
+export const actualIsFromPlan = (state: PlannerState, task: Task): boolean =>
+  trackedMinutes(state, task.id) === 0 && state.settings.plannedAsActual && Boolean(task.completedAt && task.plannedMinutes);
 
 export const liveChannels = (state: PlannerState) =>
   Object.values(state.channels).filter((channel) => !channel.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));

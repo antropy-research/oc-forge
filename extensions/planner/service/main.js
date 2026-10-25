@@ -21,12 +21,15 @@ var DEFAULT_SETTINGS = {
   timezone: null,
   workloadMinutes: 6 * 60,
   archiveAfterRollovers: 7,
-  weekStartsOn: 1
+  weekStartsOn: 1,
+  plannedAsActual: true
 };
 var emptyState = () => ({
   version: 0,
   tasks: {},
   channels: {},
+  entries: {},
+  timer: null,
   settings: { ...DEFAULT_SETTINGS }
 });
 
@@ -65,6 +68,7 @@ var byPosition = (a, b) => a.position - b.position || a.createdAt.localeCompare(
 var samePlacement = (a, b) => a.kind === "day" ? b.kind === "day" && a.date === b.date : b.kind === "backlog" && a.bucket === b.bucket;
 var tasksIn = (state, placement) => Object.values(state.tasks).filter((task) => isLive(task) && samePlacement(task.placement, placement)).sort(byPosition);
 var tasksForDay = (state, date) => tasksIn(state, { kind: "day", date });
+var entryIndex = new WeakMap;
 
 // src/domain/reducer.ts
 var touch = (state, taskId, at, change) => {
@@ -72,6 +76,19 @@ var touch = (state, taskId, at, change) => {
   if (!task)
     return;
   state.tasks[taskId] = { ...change(task), updatedAt: at };
+};
+var stopTimer = (state, at, entryId) => {
+  const timer = state.timer;
+  if (!timer)
+    return;
+  state.timer = null;
+  if (Date.parse(at) > Date.parse(timer.startedAt)) {
+    state.entries[entryId] = { id: entryId, taskId: timer.taskId, start: timer.startedAt, end: at, source: "timer" };
+  }
+};
+var stopTimerFor = (state, taskId, event) => {
+  if (state.timer?.taskId === taskId)
+    stopTimer(state, event.at, event.id);
 };
 var applyInto = (state, event) => {
   state.version += 1;
@@ -119,19 +136,40 @@ var applyInto = (state, event) => {
       }));
       return;
     case "task.completed":
+      stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, completedAt: event.at, completedOn: event.on }));
       return;
     case "task.reopened":
       touch(state, event.taskId, event.at, (task) => ({ ...task, completedAt: null, completedOn: null }));
       return;
     case "task.deleted":
+      stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: event.at }));
       return;
     case "task.restored":
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: null, archivedAt: null }));
       return;
     case "task.archived":
+      stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, archivedAt: event.at }));
+      return;
+    case "timer.started": {
+      if (!state.tasks[event.taskId] || state.timer?.taskId === event.taskId)
+        return;
+      stopTimer(state, event.at, `${event.id}-prev`);
+      state.timer = { taskId: event.taskId, startedAt: event.at };
+      return;
+    }
+    case "timer.stopped":
+      stopTimer(state, event.at, event.id);
+      return;
+    case "time.logged":
+      if (!state.tasks[event.entry.taskId] || state.entries[event.entry.id])
+        return;
+      state.entries[event.entry.id] = { ...event.entry, source: "manual" };
+      return;
+    case "time.deleted":
+      delete state.entries[event.entryId];
       return;
     case "tasks.rolledOver":
       for (const rolled of event.moved) {
@@ -177,7 +215,7 @@ var applyInto = (state, event) => {
 var applyEvents = (state, events) => {
   if (events.length === 0)
     return state;
-  const next = { ...state, tasks: { ...state.tasks }, channels: { ...state.channels }, settings: { ...state.settings } };
+  const next = { ...state, tasks: { ...state.tasks }, channels: { ...state.channels }, entries: { ...state.entries }, settings: { ...state.settings } };
   for (const event of events)
     applyInto(next, event);
   return next;
@@ -421,11 +459,15 @@ var validateSettingsPatch = (patch) => {
       return "archiveAfterRollovers must be 1-365 or null";
     else if (key === "weekStartsOn" && value !== 0 && value !== 1)
       return "weekStartsOn must be 0 or 1";
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn"].includes(key))
+    else if (key === "plannedAsActual" && typeof value !== "boolean")
+      return "plannedAsActual must be true or false";
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
 };
+var isInstant = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value)) && /^\d{4}-\d{2}-\d{2}T/.test(value);
+var MAX_ENTRY_MS = 24 * 60 * 60 * 1000;
 var validateCommand = (command, context) => {
   if (!isRecord(command))
     return "command must be an object";
@@ -479,6 +521,25 @@ var validateCommand = (command, context) => {
     case "task.restored":
     case "task.archived":
       return needTask();
+    case "timer.started":
+      return needTask();
+    case "timer.stopped":
+      return null;
+    case "time.logged": {
+      const entry = command.entry;
+      if (!isRecord(entry) || !isId(entry.id))
+        return "entry needs an id";
+      if (context.entries[entry.id])
+        return "entry id already exists";
+      if (!(isId(entry.taskId) && tasks[entry.taskId]))
+        return "unknown task";
+      if (!isInstant(entry.start) || !isInstant(entry.end))
+        return "start and end must be ISO instants";
+      const span = Date.parse(entry.end) - Date.parse(entry.start);
+      return span > 0 && span <= MAX_ENTRY_MS ? null : "an entry must last between 0 and 24 hours";
+    }
+    case "time.deleted":
+      return isId(command.entryId) && context.entries[command.entryId] ? null : "unknown entry";
     case "channel.created": {
       const channel = command.channel;
       if (!isRecord(channel) || !isId(channel.id))
@@ -575,6 +636,14 @@ var summarize = (events, titleOf) => {
       return `Archive task: ${titleOf(event.taskId)}`;
     case "tasks.rolledOver":
       return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ""}`;
+    case "timer.started":
+      return `Start timer: ${titleOf(event.taskId)}`;
+    case "timer.stopped":
+      return "Stop timer";
+    case "time.logged":
+      return `Log time: ${titleOf(event.entry.taskId)}`;
+    case "time.deleted":
+      return "Delete time entry";
     case "channel.created":
       return `Add channel: ${event.channel.name}`;
     case "channel.updated":

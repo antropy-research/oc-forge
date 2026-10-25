@@ -11,6 +11,21 @@ const touch = (state: PlannerState, taskId: string, at: string, change: (task: T
   state.tasks[taskId] = { ...change(task), updatedAt: at };
 };
 
+/** Close the running timer into a time entry ending at `at`. */
+const stopTimer = (state: PlannerState, at: string, entryId: string): void => {
+  const timer = state.timer;
+  if (!timer) return;
+  state.timer = null;
+  if (Date.parse(at) > Date.parse(timer.startedAt)) {
+    state.entries[entryId] = { id: entryId, taskId: timer.taskId, start: timer.startedAt, end: at, source: 'timer' };
+  }
+};
+
+/** Finishing, deleting or archiving a task stops its timer. */
+const stopTimerFor = (state: PlannerState, taskId: string, event: PlannerEvent): void => {
+  if (state.timer?.taskId === taskId) stopTimer(state, event.at, event.id);
+};
+
 const applyInto = (state: PlannerState, event: PlannerEvent): void => {
   state.version += 1;
   switch (event.type) {
@@ -58,19 +73,39 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       }));
       return;
     case 'task.completed':
+      stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, completedAt: event.at, completedOn: event.on }));
       return;
     case 'task.reopened':
       touch(state, event.taskId, event.at, (task) => ({ ...task, completedAt: null, completedOn: null }));
       return;
     case 'task.deleted':
+      stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: event.at }));
       return;
     case 'task.restored':
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: null, archivedAt: null }));
       return;
     case 'task.archived':
+      stopTimerFor(state, event.taskId, event);
       touch(state, event.taskId, event.at, (task) => ({ ...task, archivedAt: event.at }));
+      return;
+    case 'timer.started': {
+      if (!state.tasks[event.taskId] || state.timer?.taskId === event.taskId) return;
+      // One timer at a time: starting another task closes the running one.
+      stopTimer(state, event.at, `${event.id}-prev`);
+      state.timer = { taskId: event.taskId, startedAt: event.at };
+      return;
+    }
+    case 'timer.stopped':
+      stopTimer(state, event.at, event.id);
+      return;
+    case 'time.logged':
+      if (!state.tasks[event.entry.taskId] || state.entries[event.entry.id]) return;
+      state.entries[event.entry.id] = { ...event.entry, source: 'manual' };
+      return;
+    case 'time.deleted':
+      delete state.entries[event.entryId];
       return;
     case 'tasks.rolledOver':
       for (const rolled of event.moved) {
@@ -114,7 +149,7 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
 /** Apply a batch; copies the containers once and replaces only the tasks it touches. */
 export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]): PlannerState => {
   if (events.length === 0) return state;
-  const next: PlannerState = { ...state, tasks: { ...state.tasks }, channels: { ...state.channels }, settings: { ...state.settings } };
+  const next: PlannerState = { ...state, tasks: { ...state.tasks }, channels: { ...state.channels }, entries: { ...state.entries }, settings: { ...state.settings } };
   for (const event of events) applyInto(next, event);
   return next;
 };

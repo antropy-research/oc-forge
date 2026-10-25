@@ -104,6 +104,10 @@ export const Settings = () => {
             />
           </label>
           <label>
+            Count planned time as actual
+            <input type="checkbox" checked={settings.plannedAsActual} onChange={(event) => update({ plannedAsActual: event.currentTarget.checked })} />
+          </label>
+          <label>
             Week starts on
             <select value={String(settings.weekStartsOn)} onChange={(event) => update({ weekStartsOn: event.currentTarget.value === '0' ? 0 : 1 })}>
               <option value="1">Monday</option>

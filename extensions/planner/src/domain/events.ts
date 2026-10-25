@@ -37,6 +37,10 @@ export type EventBody =
   | { type: 'task.restored'; taskId: string }
   | { type: 'task.archived'; taskId: string }
   | { type: 'tasks.rolledOver'; date: DateKey; moved: RolledTask[]; archived: string[] }
+  | { type: 'timer.started'; taskId: string }
+  | { type: 'timer.stopped' }
+  | { type: 'time.logged'; entry: { id: string; taskId: string; start: string; end: string } }
+  | { type: 'time.deleted'; entryId: string }
   | { type: 'channel.created'; channel: NewChannel }
   | { type: 'channel.updated'; channelId: string; patch: ChannelPatch }
   | { type: 'channel.deleted'; channelId: string }
@@ -114,7 +118,8 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'workloadMinutes' && !(typeof value === 'number' && value > 0 && value <= 24 * 60)) return 'workloadMinutes must be 1-1440';
     else if (key === 'archiveAfterRollovers' && !(value === null || (Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 365))) return 'archiveAfterRollovers must be 1-365 or null';
     else if (key === 'weekStartsOn' && value !== 0 && value !== 1) return 'weekStartsOn must be 0 or 1';
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn'].includes(key)) return `unknown setting ${key}`;
+    else if (key === 'plannedAsActual' && typeof value !== 'boolean') return 'plannedAsActual must be true or false';
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };
@@ -123,7 +128,11 @@ const validateSettingsPatch = (patch: unknown): string | null => {
 export interface CommandContext {
   tasks: Record<string, Task>;
   channels: Record<string, Channel>;
+  entries: Record<string, { id: string }>;
 }
+
+const isInstant = (value: unknown): value is string => typeof value === 'string' && !Number.isNaN(Date.parse(value)) && /^\d{4}-\d{2}-\d{2}T/.test(value);
+const MAX_ENTRY_MS = 24 * 60 * 60 * 1000;
 
 /** Shape check for a client command against current state. Returns an error message or null. */
 export const validateCommand = (command: unknown, context: CommandContext): string | null => {
@@ -163,6 +172,21 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     case 'task.restored':
     case 'task.archived':
       return needTask();
+    case 'timer.started':
+      return needTask();
+    case 'timer.stopped':
+      return null;
+    case 'time.logged': {
+      const entry = command.entry;
+      if (!isRecord(entry) || !isId(entry.id)) return 'entry needs an id';
+      if (context.entries[entry.id as string]) return 'entry id already exists';
+      if (!(isId(entry.taskId) && tasks[entry.taskId as string])) return 'unknown task';
+      if (!isInstant(entry.start) || !isInstant(entry.end)) return 'start and end must be ISO instants';
+      const span = Date.parse(entry.end as string) - Date.parse(entry.start as string);
+      return span > 0 && span <= MAX_ENTRY_MS ? null : 'an entry must last between 0 and 24 hours';
+    }
+    case 'time.deleted':
+      return isId(command.entryId) && context.entries[command.entryId as string] ? null : 'unknown entry';
     case 'channel.created': {
       const channel = command.channel;
       if (!isRecord(channel) || !isId(channel.id)) return 'channel needs an id';

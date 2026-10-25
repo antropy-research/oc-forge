@@ -29,6 +29,10 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'task.restored': return `Restore task: ${titleOf(event.taskId)}`;
     case 'task.archived': return `Archive task: ${titleOf(event.taskId)}`;
     case 'tasks.rolledOver': return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ''}`;
+    case 'timer.started': return `Start timer: ${titleOf(event.taskId)}`;
+    case 'timer.stopped': return 'Stop timer';
+    case 'time.logged': return `Log time: ${titleOf(event.entry.taskId)}`;
+    case 'time.deleted': return 'Delete time entry';
     case 'channel.created': return `Add channel: ${event.channel.name}`;
     case 'channel.updated': return `Edit channel: ${event.channelId}`;
     case 'channel.deleted': return `Delete channel: ${event.channelId}`;

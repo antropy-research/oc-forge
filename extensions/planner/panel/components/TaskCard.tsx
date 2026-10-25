@@ -5,6 +5,9 @@ import { addDays, formatMinutes, monthDay, nextWeekday } from '../../src/domain/
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
 import { moveTo } from '../lib/commands.ts';
+import { actualMinutes } from '../../src/domain/selectors.ts';
+import { formatClock, useNow } from '../lib/time.ts';
+import { TimerButton } from './TimerButton.tsx';
 import { useUi } from '../lib/ui.ts';
 
 const PRIORITY_LABEL = { urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' } as const;
@@ -89,6 +92,9 @@ export const TaskCard = ({ task }: { task: Task }) => {
   const due = task.dueDate;
   const dueClass = due && !done ? (due < view.today ? ' is-overdue' : due === view.today ? ' is-due-today' : '') : '';
   const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes;
+  const running = view.state.timer?.taskId === task.id;
+  const now = useNow(running);
+  const actual = actualMinutes(view.state, task, now);
 
   const toggle = () =>
     void client.dispatch([done ? { type: 'task.reopened', taskId: task.id } : { type: 'task.completed', taskId: task.id, on: view.today }]);
@@ -96,7 +102,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
   return (
     <li
       data-task={task.id}
-      class={`task-card${done ? ' is-done' : ''}${menuOpen ? ' has-menu' : ''}`}
+      class={`task-card${done ? ' is-done' : ''}${menuOpen ? ' has-menu' : ''}${running ? ' is-running' : ''}`}
       draggable={!editingTime}
       onDragStart={(event) => {
         event.dataTransfer?.setData(DRAG_TYPE, task.id);
@@ -132,9 +138,14 @@ export const TaskCard = ({ task }: { task: Task }) => {
           onCancel={() => setEditingTime(false)}
         />
       ) : (
-        <button class={`planned${task.plannedMinutes ? '' : ' is-empty'}`} title="Planned time" aria-label="Planned time" onClick={() => setEditingTime(true)}>
-          {task.plannedMinutes ? formatMinutes(task.plannedMinutes) : '–:––'}
-        </button>
+        <span class="times">
+          <TimerButton task={task} />
+          {actual > 0 && <span class={`actual${running ? ' is-running' : ''}`} title="Actual time">{running ? formatClock(actual) : formatMinutes(actual)}</span>}
+          {actual > 0 && <span class="slash">/</span>}
+          <button class={`planned${task.plannedMinutes ? '' : ' is-empty'}`} title="Planned time" aria-label="Planned time" onClick={() => setEditingTime(true)}>
+            {task.plannedMinutes ? formatMinutes(task.plannedMinutes) : '–:––'}
+          </button>
+        </span>
       )}
       <div class="menu-anchor">
         <button class="more" aria-label="Task actions" aria-haspopup="menu" onClick={() => setMenuOpen((open) => !open)}>⋯</button>

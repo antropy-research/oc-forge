@@ -191,3 +191,58 @@ button.link { background: none; border: 0; padding: 0; color: var(--oc-primary-t
 .spinner { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--pl-soft); border-top-color: var(--oc-primary); animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: var(--pl-card-radius); box-shadow: 0 6px 24px color-mix(in srgb, var(--oc-fg) 14%, transparent); padding: 8px 14px; max-width: min(560px, 90vw); }
+
+/* Timer */
+.times { display: flex; align-items: center; gap: 3px; }
+.timer-btn { width: 20px; height: 20px; display: grid; place-items: center; background: none; border: 0; border-radius: 50%; padding: 0; color: var(--oc-muted); opacity: 0; }
+.timer-btn svg { width: 12px; height: 12px; fill: currentColor; }
+.task-card:hover .timer-btn, .timer-btn.is-running, .timer-btn:focus-visible, .detail-section .timer-btn, .status-row .timer-btn { opacity: 1; }
+.timer-btn:hover { background: var(--pl-soft); color: var(--oc-fg); }
+.timer-btn.is-running { color: var(--oc-success-text, #2f9e44); }
+.timer-btn.is-large { width: 44px; height: 44px; background: var(--oc-primary); color: var(--oc-primary-fg); opacity: 1; }
+.timer-btn.is-large svg { width: 18px; height: 18px; }
+.timer-btn.is-large.is-running { background: var(--oc-success, #2f9e44); color: #fff; }
+.actual { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--oc-fg); }
+.actual.is-running { color: var(--oc-success-text, #2f9e44); font-weight: 600; }
+.slash { font-size: 12px; color: var(--oc-muted); }
+.task-card.is-running { border-color: var(--oc-success, #2f9e44); }
+.timer-bar { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px; margin: 0 0 8px; padding: 8px; border-radius: 8px; background: color-mix(in srgb, var(--oc-success, #2f9e44) 12%, transparent); }
+.timer-bar-title { display: flex; align-items: center; gap: 6px; min-width: 0; background: none; border: 0; padding: 0; text-align: left; }
+.timer-bar .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timer-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--oc-success, #2f9e44); flex: none; animation: pulse 1.6s ease-in-out infinite; }
+.timer-bar .clock { font-variant-numeric: tabular-nums; font-size: 12px; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.entries { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.entries li { display: grid; grid-template-columns: 1fr auto 48px 18px; gap: 8px; align-items: center; }
+.muted { color: var(--oc-muted); }
+
+/* Focus */
+.focus-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 24px; padding: 8px 20px 20px; flex: 1; min-height: 0; overflow: auto; }
+.focus-card { max-width: 720px; width: 100%; justify-self: center; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 12px; padding: 22px 26px; align-self: start; }
+.focus-meta { display: flex; gap: 12px; font-size: 12px; color: var(--oc-muted); margin-bottom: 10px; }
+.focus-title-row { display: grid; grid-template-columns: 24px 1fr; gap: 12px; align-items: start; }
+.focus-title-row .check { width: 22px; height: 22px; margin-top: 6px; }
+.focus-title-row h2 { font-size: 24px; font-weight: 600; line-height: 1.3; }
+.focus-timer { display: flex; align-items: center; gap: 16px; margin: 20px 0 6px; padding: 14px 16px; border-radius: 10px; background: var(--pl-softer); }
+.focus-timer .clock { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.focus-timer.is-running .clock { color: var(--oc-success-text, #2f9e44); }
+.focus-notes { padding-left: 0; }
+.focus-nav { display: flex; justify-content: space-between; margin-top: 12px; }
+.focus-nav button { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 4px 12px; }
+.focus-nav button:disabled { opacity: 0.4; }
+.up-next { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.up-next button { width: 100%; display: flex; justify-content: space-between; gap: 8px; background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 8px; text-align: left; }
+.up-next button:hover { background: var(--pl-soft); }
+.up-next button.is-current { border-color: var(--oc-primary); background: var(--pl-softer); }
+.done-for-day { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; }
+.done-for-day h2 { font-size: 22px; }
+.done-for-day p { color: var(--oc-muted); margin: 0; }
+
+/* Work Status section */
+html[data-surface='status'], html[data-surface='status'] body { height: auto; background: transparent; }
+.status-section { padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 4px; }
+.status-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto 20px; gap: 8px; align-items: center; }
+.status-row.muted { display: block; }
+.status-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-time { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--oc-muted); }
+.status-sub { font-size: 11.5px; color: var(--oc-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 26px; }

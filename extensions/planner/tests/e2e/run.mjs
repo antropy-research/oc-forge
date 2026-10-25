@@ -42,7 +42,8 @@ page.on('console', (message) => {
 const openPlanner = async () => {
   await page.goto(`${base}/`, { waitUntil: 'load' });
   await page.getByRole('button', { name: 'Planner', exact: true }).first().click({ timeout: 20_000 });
-  const frame = page.frameLocator('iframe[src*="oc-forge-planner"]');
+  // The full page sits in the host's inset overlay; the Work Status section is a separate frame.
+  const frame = page.frameLocator('.inset-0 > iframe[src*="oc-forge-planner"]');
   await frame.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 30_000 });
   return frame;
 };
@@ -147,6 +148,53 @@ try {
   const order = (await todayCol.locator('li.task-card .task-title').allTextContents()).filter((title) => title.includes(run));
   check('sort by priority puts urgent first', order.findIndex((title) => title.includes('sort-urgent')) < order.findIndex((title) => title.includes('sort-low')), order.join(' | '));
   await shot('07-sorted');
+
+  // Phase 3a: timer, actual time, Focus, Work Status section.
+  const timed = todayCol.locator('li.task-card', { hasText: `${run} sort-urgent` });
+  await timed.hover();
+  await timed.getByRole('button', { name: `Start timer for ${run} sort-urgent` }).click();
+  const timerBar = frame.getByRole('status', { name: 'Running timer' });
+  await timerBar.waitFor({ timeout: 10_000 });
+  check('timer bar shows the running task', (await timerBar.innerText()).includes(`${run} sort-urgent`));
+  await page.waitForTimeout(2200);
+  check('running card shows a ticking clock', /\d+:\d{2}/.test(await timed.locator('.actual.is-running').innerText().catch(() => '')));
+  await shot('08-timer');
+  await timerBar.getByRole('button', { name: 'Stop timer' }).click();
+  await timerBar.waitFor({ state: 'detached', timeout: 10_000 });
+  await timed.getByRole('button', { name: new RegExp(`Open ${run} sort-urgent`) }).click();
+  const timedDialog = frame.getByRole('dialog', { name: 'Task details' });
+  const entriesText = await timedDialog.locator('section[aria-label="Actual time"]').innerText();
+  check('stopping the timer records an actual-time entry', /timer/.test(entriesText), entriesText.replace(/\s+/g, ' ').slice(0, 120));
+  await timedDialog.getByRole('button', { name: 'Close' }).click();
+
+  await frame.getByRole('button', { name: 'Focus', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Focus' }).waitFor();
+  const focusTitle = async () => (await frame.locator('.focus-title-row h2').innerText()).trim();
+  const first = await focusTitle();
+  await frame.locator('.focus-view').click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press('ArrowDown');
+  const second = await focusTitle();
+  check('Focus shows one task and ↓ moves to the next', Boolean(first) && first !== second, `${first} → ${second}`);
+  await shot('09-focus');
+  await frame.locator('.focus-card .check').click();
+  await page.waitForTimeout(600);
+  const third = await focusTitle().catch(() => '');
+  check('completing in Focus moves on to another task', third !== second, `${second} → ${third || 'done for the day'}`);
+
+  // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
+  await page.goto(`${base}/`, { waitUntil: 'load' });
+  const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
+  const statusMounted = () => page.locator(statusSelector).first().waitFor({ timeout: 8000 }).then(() => true).catch(() => false);
+  let mounted = await statusMounted();
+  const toggle = page.getByRole('button', { name: 'Toggle work-status panel' }).first();
+  if (!mounted && (await toggle.count())) {
+    await toggle.click();
+    mounted = await statusMounted();
+  }
+  const statusText = mounted ? await page.frameLocator(statusSelector).locator('.status-section').innerText({ timeout: 8000 }).catch(() => '') : '';
+  check('Work Status section shows today\'s progress', /done today/.test(statusText), statusText.replace(/\s+/g, ' ').slice(0, 120) || 'section not mounted');
+  await shot('10-work-status');
+  frame = await openPlanner();
 
   // Clean up this run's tasks through the task menu.
   for (const view of ['Home', 'Backlog']) {

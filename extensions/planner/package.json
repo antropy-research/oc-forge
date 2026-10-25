@@ -1,6 +1,6 @@
 {
   "name": "@oc-forge/openchamber-planner",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Sunsama-style daily planning inside OpenChamber.",
@@ -17,6 +17,12 @@
         "entry": "panel/index.html"
       },
       "page": true,
+      "statusSection": {
+        "entry": "panel/index.html",
+        "title": "Planner",
+        "height": 76,
+        "requiresProject": false
+      },
       "capabilities": [
         "sessions"
       ],

@@ -1,9 +1,10 @@
 import type { ComponentChildren } from 'preact';
-import { archivedTasks, tasksForDay } from '../../src/domain/selectors.ts';
+import { actualMinutes, archivedTasks, tasksForDay } from '../../src/domain/selectors.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
+import { formatClock, useNow } from '../lib/time.ts';
 
-export type Route = 'home' | 'today' | 'backlog' | 'archive' | 'settings';
+export type Route = 'home' | 'today' | 'focus' | 'backlog' | 'archive' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -11,6 +12,26 @@ const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; c
     {badge ? <span class="nav-badge">{badge}</span> : null}
   </button>
 );
+
+/** The running timer, visible from every view. */
+const TimerBar = ({ onRoute }: { onRoute: (route: Route) => void }) => {
+  const { client } = usePlanner();
+  const view = useView();
+  const timer = view.state.timer;
+  const now = useNow(Boolean(timer));
+  const task = timer ? view.state.tasks[timer.taskId] : null;
+  if (!timer || !task) return null;
+  return (
+    <div class="timer-bar" role="status" aria-label="Running timer">
+      <button class="timer-bar-title" onClick={() => onRoute('focus')} title="Open Focus">
+        <span class="dot" aria-hidden="true" />
+        <span class="title">{task.title}</span>
+      </button>
+      <span class="clock">{formatClock(actualMinutes(view.state, task, now))}</span>
+      <button class="link" aria-label="Stop timer" onClick={() => void client.dispatch([{ type: 'timer.stopped' }])}>Stop</button>
+    </div>
+  );
+};
 
 export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) => void }) => {
   const view = useView();
@@ -21,10 +42,12 @@ export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) 
       <div class="brand">Planner</div>
       <NavItem route="home" current={route} onRoute={onRoute}>Home</NavItem>
       <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>
+      <NavItem route="focus" current={route} onRoute={onRoute}>Focus</NavItem>
       <div class="nav-section">Lists</div>
       <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>
       <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>
       <div class="nav-spacer" />
+      <TimerBar onRoute={onRoute} />
       <NavItem route="settings" current={route} onRoute={onRoute}>Settings</NavItem>
       <div class={`save-state${view.saving ? ' is-saving' : ''}`} aria-live="polite">{view.saving ? 'Saving…' : 'Saved'}</div>
     </nav>
