@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -12,6 +12,7 @@ export interface NewTask {
   placement: Placement;
   position: number;
   channelId?: string | null;
+  folderId?: string | null;
   objectiveId?: string | null;
   source?: TaskSourceRef | null;
   subtasks?: Subtask[];
@@ -21,7 +22,7 @@ export interface NewTask {
 
 export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title'>;
 
-export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'objectiveId', 'subtasks', 'source'] as const;
+export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'subtasks', 'source'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
 
 export type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
@@ -62,6 +63,9 @@ export type EventBody =
   | { type: 'objective.updated'; objectiveId: string; patch: { title?: string; completed?: boolean } }
   | { type: 'objective.deleted'; objectiveId: string }
   | { type: 'ritual.saved'; ritual: Ritual; date: DateKey; fields: RitualRecord }
+  | { type: 'folder.created'; folder: Pick<Folder, 'id' | 'name'> }
+  | { type: 'folder.renamed'; folderId: string; name: string }
+  | { type: 'folder.deleted'; folderId: string }
   | { type: 'run.started'; run: NewRun }
   | { type: 'run.outcome'; runId: string; outcome: 'completed' | 'failed' }
   | { type: 'run.reviewed'; runId: string; verdict: 'accepted' | 'changes'; note?: string }
@@ -118,7 +122,7 @@ const isPriority = (value: unknown): boolean => value === null || (typeof value 
 const isColor = (value: unknown): boolean => typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
 const isChannelName = (value: unknown): boolean => typeof value === 'string' && /^[\p{L}\p{N}_-]{1,40}$/u.test(value);
 
-const validatePatch = (patch: unknown, channels: Record<string, Channel>, objectives: Record<string, Objective>): string | null => {
+const validatePatch = (patch: unknown, channels: Record<string, Channel>, objectives: Record<string, Objective>, folders: Record<string, Folder>): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'title' && !isTitle(value)) return 'title must be 1-500 characters';
@@ -128,6 +132,7 @@ const validatePatch = (patch: unknown, channels: Record<string, Channel>, object
     else if (key === 'dueDate' && !(value === null || isDateKey(value))) return 'dueDate must be a date or null';
     else if (key === 'channelId' && !(value === null || (isId(value) && channels[value as string]))) return 'unknown channel';
     else if (key === 'objectiveId' && !(value === null || (isId(value) && objectives[value as string]))) return 'unknown objective';
+    else if (key === 'folderId' && !(value === null || (isId(value) && folders[value as string] && !folders[value as string]!.deletedAt))) return 'unknown folder';
     else if (key === 'subtasks' && !isSubtasks(value)) return 'subtasks are invalid';
     else if (key === 'source' && !(value === null || isSource(value))) return 'source is invalid';
     else if (!(PATCH_FIELDS as readonly string[]).includes(key)) return `unknown field ${key}`;
@@ -158,7 +163,9 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'linearOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'linearOnComplete must be ask, complete or nothing';
     else if (key === 'linearOnPlan' && !['ask', 'start', 'nothing'].includes(value as string)) return 'linearOnPlan must be ask, start or nothing';
     else if (key === 'linearImportCompletion' && typeof value !== 'boolean') return 'linearImportCompletion must be true or false';
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion'].includes(key)) return `unknown setting ${key}`;
+    else if (key === 'suggestFromHistory' && typeof value !== 'boolean') return 'suggestFromHistory must be true or false';
+    else if ((key === 'pomodoroMinutes' || key === 'breakMinutes') && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 180)) return `${key} must be 1-180`;
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };
@@ -173,7 +180,10 @@ export interface CommandContext {
   objectives: Record<string, Objective>;
   series: Record<string, Series>;
   runs: Record<string, TaskRun>;
+  folders: Record<string, Folder>;
 }
+
+const isFolderName = (value: unknown): boolean => typeof value === 'string' && value.trim().length > 0 && value.length <= 60;
 
 const isSessionRef = (value: unknown): boolean =>
   value === null ||
@@ -273,13 +283,14 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       if (task.source !== undefined && !(task.source === null || isSource(task.source))) return 'source is invalid';
       if (task.objectiveId !== undefined && !(task.objectiveId === null || (isId(task.objectiveId) && context.objectives[task.objectiveId as string]))) return 'unknown objective';
       if (task.subtasks !== undefined && !isSubtasks(task.subtasks)) return 'subtasks are invalid';
+      if (task.folderId !== undefined && !(task.folderId === null || (isId(task.folderId) && context.folders[task.folderId as string] && !context.folders[task.folderId as string]!.deletedAt))) return 'unknown folder';
       // Recurrence comes from series.created and the service's instances, never from a client's task.
       if (task.recurrence !== undefined && task.recurrence !== null) return 'recurrence is set through a series';
       if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef)) return 'sessionRef is invalid';
       return null;
     }
     case 'task.updated':
-      return needTask() ?? validatePatch(command.patch, channels, context.objectives);
+      return needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
     case 'task.moved':
       if (!isPlacement(command.placement)) return 'placement is invalid';
       if (typeof command.position !== 'number' || !Number.isFinite(command.position)) return 'position must be a number';
@@ -386,6 +397,17 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     case 'series.stopped':
       if (!(isId(command.seriesId) && context.series[command.seriesId as string])) return 'unknown series';
       return isDateKey(command.from) ? null : 'from must be a date';
+    case 'folder.created': {
+      const folder = command.folder;
+      if (!isRecord(folder) || !isId(folder.id)) return 'folder needs an id';
+      if (context.folders[folder.id as string]) return 'folder id already exists';
+      return isFolderName(folder.name) ? null : 'folder name must be 1-60 characters';
+    }
+    case 'folder.renamed':
+      if (!(isId(command.folderId) && context.folders[command.folderId as string])) return 'unknown folder';
+      return isFolderName(command.name) ? null : 'folder name must be 1-60 characters';
+    case 'folder.deleted':
+      return isId(command.folderId) && context.folders[command.folderId as string] ? null : 'unknown folder';
     case 'run.started': {
       const run = command.run;
       const error = isRunShape(run);

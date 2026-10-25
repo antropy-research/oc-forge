@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { BACKLOG_BUCKETS, type Placement } from '../../src/domain/types.ts';
 import { formatMinutes, monthDay } from '../../src/domain/dates.ts';
 import { parseQuickAdd, type QuickAdd } from '../../src/domain/quickAdd.ts';
+import { suggestFor } from '../../src/domain/suggest.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { addParsedTask } from '../lib/addTask.ts';
 
@@ -18,8 +19,26 @@ const Chips = ({ parsed }: { parsed: QuickAdd }) => (
   </div>
 );
 
+/** What history would fill in for the fields left empty (when that setting is on). */
+const SuggestionChips = ({ parsed }: { parsed: QuickAdd }) => {
+  const view = useView();
+  if (!view.state.settings.suggestFromHistory || (parsed.plannedMinutes !== null && parsed.channel)) return null;
+  const suggestion = parsed.title.trim().length >= 3 ? suggestFor(view.state, parsed.title) : null;
+  if (!suggestion) return null;
+  const channel = !parsed.channel && suggestion.channelId ? view.state.channels[suggestion.channelId] : null;
+  const minutes = parsed.plannedMinutes === null ? suggestion.minutes : null;
+  if (!channel && minutes === null) return null;
+  return (
+    <div class="chips suggested" title={`From ${suggestion.basis} similar task${suggestion.basis === 1 ? '' : 's'}`}>
+      {minutes !== null && <span class="chip">≈{formatMinutes(minutes)}</span>}
+      {channel && <span class="chip">#{channel.name}</span>}
+      <span class="chip-note">suggested</span>
+    </div>
+  );
+};
+
 /** Sunsama's inline Add task: `~30m` planned time, `@tomorrow` / `@backlog` start, `#channel`, `!high`. */
-export const AddTask = ({ placement, edge = 'bottom' }: { placement: Placement; edge?: 'top' | 'bottom' }) => {
+export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { placement: Placement; edge?: 'top' | 'bottom'; folderId?: string | null }) => {
   const { client, linear } = usePlanner();
   const view = useView();
   const [open, setOpen] = useState(false);
@@ -34,7 +53,7 @@ export const AddTask = ({ placement, edge = 'bottom' }: { placement: Placement; 
 
   const submit = () => {
     if (!parsed || !parsed.title.trim()) return;
-    void addParsedTask(client, linear, parsed, placement, edge, view.today);
+    void addParsedTask(client, linear, parsed, placement, edge, view.today, folderId);
     setText('');
   };
 
@@ -65,6 +84,7 @@ export const AddTask = ({ placement, edge = 'bottom' }: { placement: Placement; 
         }}
       />
       {parsed && <Chips parsed={parsed} />}
+      {parsed && <SuggestionChips parsed={parsed} />}
     </div>
   );
 };

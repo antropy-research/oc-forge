@@ -17,7 +17,7 @@ export const UnscheduledToday = () => {
   const { ui } = useUi();
   const zone = view.state.settings.timezone ?? 'UTC';
   const tasks = tasksForDay(view.state, view.today).filter(
-    (task) => matchesFilter(task, ui.channelFilter) && !task.completedAt && !blocksFor(view.state, task.id).some((block) => zonedDateMinutes(block.start, zone).date === view.today),
+    (task) => matchesFilter(task, ui.channelFilter, view.state.channels) && !task.completedAt && !blocksFor(view.state, task.id).some((block) => zonedDateMinutes(block.start, zone).date === view.today),
   );
   return <TaskList placement={{ kind: 'day', date: view.today }} tasks={tasks} empty="Everything today has a time" />;
 };

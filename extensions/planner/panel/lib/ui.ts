@@ -1,7 +1,7 @@
 // View-only state shared across components (never persisted to the event log).
 import { createContext } from 'preact';
 import { useContext } from 'preact/hooks';
-import type { Task } from '../../src/domain/types.ts';
+import type { Channel, Task } from '../../src/domain/types.ts';
 
 export interface UiState {
   /** Task shown in the detail modal. */
@@ -10,6 +10,8 @@ export interface UiState {
   channelFilter: string | null;
   /** Task chosen in Focus; null follows the running timer or the first open task. */
   focusTaskId: string | null;
+  /** Backlog folder filter: a folder id, 'none', or null for all. */
+  folderFilter: string | null;
 }
 
 export interface UiContextValue {
@@ -25,5 +27,14 @@ export const useUi = (): UiContextValue => {
   return value;
 };
 
-export const matchesFilter = (task: Task, filter: string | null): boolean =>
-  filter === null || (filter === 'none' ? task.channelId === null : task.channelId === filter);
+/**
+ * Channel filter: null for all, 'none' for tasks without a channel, 'ctx:work' or
+ * 'ctx:personal' for a context (tasks without a channel count as work), or a channel id.
+ */
+export const matchesFilter = (task: Task, filter: string | null, channels: Record<string, Channel>): boolean => {
+  if (filter === null) return true;
+  if (filter === 'none') return task.channelId === null;
+  if (filter === 'ctx:work') return !task.channelId || channels[task.channelId]?.context !== 'personal';
+  if (filter === 'ctx:personal') return Boolean(task.channelId && channels[task.channelId]?.context === 'personal');
+  return task.channelId === filter;
+};

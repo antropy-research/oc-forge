@@ -431,3 +431,33 @@ kbd { font: 11px var(--oc-mono, ui-monospace, monospace); padding: 0 5px; border
 .agent-task { display: flex; flex-direction: column; gap: 4px; }
 .agent-task-title { font-weight: 600; text-align: left; color: var(--oc-fg); }
 .status-agents { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; font-size: 12px; padding-left: 26px; }
+
+/* Backlog folders, Braindump, suggestions, shutdown banner, Pomodoro */
+.nav-sub { padding-left: 22px; font-size: 12.5px; }
+.nav-add { color: var(--oc-muted); }
+.nav-input { margin: 2px 0 2px 16px; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 3px 6px; }
+.backlog-search { min-width: 180px; }
+.date-nav input.filter { padding: 2px 8px; }
+.folder-bar { display: flex; gap: 14px; padding: 0 20px 8px; align-items: center; }
+.braindump { width: min(760px, 100%); display: flex; flex-direction: column; gap: 10px; }
+.braindump-head { display: flex; justify-content: space-between; align-items: center; }
+.braindump-head h2 { font-size: 17px; }
+.braindump .close { background: none; border: 0; font-size: 20px; color: var(--oc-muted); }
+.braindump textarea { width: 100%; resize: vertical; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 10px; }
+.braindump .row { display: flex; gap: 8px; align-items: center; }
+.braindump .row button:not(.link):not(.primary) { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 4px 12px; }
+.braindump .row button.primary:disabled, .braindump .row button:disabled { opacity: 0.5; cursor: default; }
+.dump-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.dump-list li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 170px 56px 120px; gap: 8px; align-items: center; }
+.dump-list li.is-dropped { opacity: 0.45; }
+.dump-list input:not([type='checkbox']), .dump-list select { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 3px 6px; min-width: 0; }
+.dump-time { text-align: right; font-variant-numeric: tabular-nums; }
+.chips.suggested .chip { background: color-mix(in srgb, var(--oc-primary) 10%, transparent); }
+.chip-note { font-size: 11px; color: var(--oc-muted); align-self: center; }
+.suggest { font-size: 11.5px; }
+.detail-planned .suggest { margin-top: 2px; }
+.banner { display: flex; gap: 12px; align-items: center; margin: 0 20px 8px; padding: 8px 12px; border-radius: 8px; background: color-mix(in srgb, var(--oc-warning, #f08c00) 14%, transparent); }
+.pomodoro { display: flex; gap: 14px; align-items: center; margin: 4px 0 10px; font-size: 12.5px; }
+.pomodoro-phase { font-weight: 600; font-variant-numeric: tabular-nums; }
+.pomodoro-phase.is-focus { color: var(--oc-success-text, #2f9e44); }
+.pomodoro-phase.is-break { color: var(--oc-info-text, #1c7ed6); }

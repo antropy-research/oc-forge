@@ -49,6 +49,9 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'calendar.added': return `Subscribe to calendar: ${event.calendar.name}`;
     case 'calendar.updated': return 'Edit calendar';
     case 'calendar.removed': return 'Remove calendar';
+    case 'folder.created': return `Add folder: ${event.folder.name}`;
+    case 'folder.renamed': return `Rename folder: ${event.name}`;
+    case 'folder.deleted': return 'Delete folder';
     case 'run.started': return `Start agent: ${titleOf(event.run.taskId)}`;
     case 'run.outcome': return `Agent run ${event.outcome}`;
     case 'run.reviewed': return `Review agent run: ${event.verdict}`;

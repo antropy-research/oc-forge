@@ -1,5 +1,7 @@
 import { useState } from 'preact/hooks';
-import { monthDay, weekdayName } from '../../src/domain/dates.ts';
+import { clockLabel, monthDay, weekdayName, zonedDateMinutes } from '../../src/domain/dates.ts';
+import { ritualRecord } from '../../src/domain/rituals.ts';
+import { useNow } from '../lib/time.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
 import { useView } from '../lib/context.ts';
 import { BacklogBuckets } from './Backlog.tsx';
@@ -12,8 +14,12 @@ import { LinearIssues } from './LinearPanel.tsx';
 
 
 /** Today: only today's work, with the calendar or the backlog beside it. */
-export const TodayView = () => {
+export const TodayView = ({ onShutdown }: { onShutdown?: () => void }) => {
   const view = useView();
+  const now = useNow(true, 60_000);
+  const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const shutdownAt = ritualRecord(view.state, 'planning', view.today).shutdownTime ?? view.state.settings.workdayEnd;
+  const pastShutdown = zonedDateMinutes(now, zone).minutes >= shutdownAt && !ritualRecord(view.state, 'shutdown', view.today).completedAt;
   const [side, setSide] = useState<'calendar' | 'backlog' | 'linear'>('calendar');
   return (
     <section class="view">
@@ -24,6 +30,12 @@ export const TodayView = () => {
           <ChannelFilter />
         </div>
       </header>
+      {pastShutdown && onShutdown && (
+        <div class="banner" role="status">
+          <span>It's past {clockLabel(shutdownAt)}, your shutdown time.</span>
+          <button class="link" onClick={onShutdown}>Start the daily shutdown</button>
+        </div>
+      )}
       <div class="today-layout">
         <DayColumn date={view.today} wide />
         <aside class={`side-panel${side === 'calendar' ? ' is-calendar' : ''}`} aria-label={side === 'calendar' ? 'Calendar' : side === 'backlog' ? 'Backlog' : 'Linear'}>

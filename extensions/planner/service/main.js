@@ -29,7 +29,10 @@ var DEFAULT_SETTINGS = {
   workdayEnd: 18 * 60,
   linearOnComplete: "ask",
   linearOnPlan: "nothing",
-  linearImportCompletion: false
+  linearImportCompletion: false,
+  suggestFromHistory: true,
+  pomodoroMinutes: 25,
+  breakMinutes: 5
 };
 var emptyState = () => ({
   version: 0,
@@ -43,6 +46,7 @@ var emptyState = () => ({
   rituals: {},
   series: {},
   runs: {},
+  folders: {},
   settings: { ...DEFAULT_SETTINGS }
 });
 
@@ -221,6 +225,7 @@ var createTask = (state, input, at) => {
     createdAt: at,
     updatedAt: at,
     channelId: input.channelId ?? null,
+    folderId: input.folderId ?? null,
     objectiveId: input.objectiveId ?? null,
     subtasks: input.subtasks ?? [],
     source: input.source ?? null,
@@ -352,6 +357,27 @@ var applyInto = (state, event) => {
       state.rituals[key] = { ...state.rituals[key], ...event.fields };
       return;
     }
+    case "folder.created":
+      if (!state.folders[event.folder.id])
+        state.folders[event.folder.id] = { id: event.folder.id, name: event.folder.name.trim(), createdAt: event.at, deletedAt: null };
+      return;
+    case "folder.renamed": {
+      const folder = state.folders[event.folderId];
+      if (folder)
+        state.folders[event.folderId] = { ...folder, name: event.name.trim() };
+      return;
+    }
+    case "folder.deleted": {
+      const folder = state.folders[event.folderId];
+      if (!folder)
+        return;
+      state.folders[event.folderId] = { ...folder, deletedAt: event.at };
+      for (const task of Object.values(state.tasks)) {
+        if (task.folderId === event.folderId)
+          state.tasks[task.id] = { ...task, folderId: null, updatedAt: event.at };
+      }
+      return;
+    }
     case "run.started":
       if (state.runs[event.run.id] || !state.tasks[event.run.taskId])
         return;
@@ -388,6 +414,9 @@ var applyInto = (state, event) => {
       return;
     case "tasks.rolledOver":
       for (const rolled of event.moved) {
+        const current = state.tasks[rolled.taskId];
+        if (!current || current.placement.kind !== "day" || current.placement.date !== rolled.from)
+          continue;
         touch(state, rolled.taskId, event.at, (task) => ({
           ...task,
           placement: { kind: "day", date: event.date },
@@ -467,6 +496,7 @@ var applyEvents = (state, events) => {
     rituals: { ...state.rituals },
     series: { ...state.series },
     runs: { ...state.runs },
+    folders: { ...state.folders },
     settings: { ...state.settings }
   };
   for (const event of events)
@@ -638,7 +668,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
 }
 
 // src/domain/events.ts
-var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "objectiveId", "subtasks", "source"];
+var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "folderId", "objectiveId", "subtasks", "source"];
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver", "tasks.recurred"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
@@ -663,7 +693,7 @@ var PRIORITY_VALUES = new Set(["urgent", "high", "medium", "low"]);
 var isPriority = (value) => value === null || typeof value === "string" && PRIORITY_VALUES.has(value);
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
 var isChannelName = (value) => typeof value === "string" && /^[\p{L}\p{N}_-]{1,40}$/u.test(value);
-var validatePatch = (patch, channels, objectives) => {
+var validatePatch = (patch, channels, objectives, folders) => {
   if (!isRecord(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
@@ -681,6 +711,8 @@ var validatePatch = (patch, channels, objectives) => {
       return "unknown channel";
     else if (key === "objectiveId" && !(value === null || isId(value) && objectives[value]))
       return "unknown objective";
+    else if (key === "folderId" && !(value === null || isId(value) && folders[value] && !folders[value].deletedAt))
+      return "unknown folder";
     else if (key === "subtasks" && !isSubtasks(value))
       return "subtasks are invalid";
     else if (key === "source" && !(value === null || isSource(value)))
@@ -727,11 +759,16 @@ var validateSettingsPatch = (patch) => {
       return "linearOnPlan must be ask, start or nothing";
     else if (key === "linearImportCompletion" && typeof value !== "boolean")
       return "linearImportCompletion must be true or false";
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion"].includes(key))
+    else if (key === "suggestFromHistory" && typeof value !== "boolean")
+      return "suggestFromHistory must be true or false";
+    else if ((key === "pomodoroMinutes" || key === "breakMinutes") && !(Number.isInteger(value) && value >= 1 && value <= 180))
+      return `${key} must be 1-180`;
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "suggestFromHistory", "pomodoroMinutes", "breakMinutes"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
 };
+var isFolderName = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 60;
 var isSessionRef = (value) => value === null || isRecord(value) && isShortText(value.sessionId, 200) && value.sessionId.length > 0 && isShortText(value.title, 500) && (value.directory === null || isShortText(value.directory, 1024));
 var isRunShape = (value) => {
   if (!isRecord(value) || !isId(value.id))
@@ -858,6 +895,8 @@ var validateCommand = (command, context) => {
         return "unknown objective";
       if (task.subtasks !== undefined && !isSubtasks(task.subtasks))
         return "subtasks are invalid";
+      if (task.folderId !== undefined && !(task.folderId === null || isId(task.folderId) && context.folders[task.folderId] && !context.folders[task.folderId].deletedAt))
+        return "unknown folder";
       if (task.recurrence !== undefined && task.recurrence !== null)
         return "recurrence is set through a series";
       if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef))
@@ -865,7 +904,7 @@ var validateCommand = (command, context) => {
       return null;
     }
     case "task.updated":
-      return needTask() ?? validatePatch(command.patch, channels, context.objectives);
+      return needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
     case "task.moved":
       if (!isPlacement(command.placement))
         return "placement is invalid";
@@ -1014,6 +1053,20 @@ var validateCommand = (command, context) => {
       if (!(isId(command.seriesId) && context.series[command.seriesId]))
         return "unknown series";
       return isDateKey(command.from) ? null : "from must be a date";
+    case "folder.created": {
+      const folder = command.folder;
+      if (!isRecord(folder) || !isId(folder.id))
+        return "folder needs an id";
+      if (context.folders[folder.id])
+        return "folder id already exists";
+      return isFolderName(folder.name) ? null : "folder name must be 1-60 characters";
+    }
+    case "folder.renamed":
+      if (!(isId(command.folderId) && context.folders[command.folderId]))
+        return "unknown folder";
+      return isFolderName(command.name) ? null : "folder name must be 1-60 characters";
+    case "folder.deleted":
+      return isId(command.folderId) && context.folders[command.folderId] ? null : "unknown folder";
     case "run.started": {
       const run = command.run;
       const error = isRunShape(run);
@@ -1251,6 +1304,12 @@ var summarize = (events, titleOf) => {
       return "Edit calendar";
     case "calendar.removed":
       return "Remove calendar";
+    case "folder.created":
+      return `Add folder: ${event.folder.name}`;
+    case "folder.renamed":
+      return `Rename folder: ${event.name}`;
+    case "folder.deleted":
+      return "Delete folder";
     case "run.started":
       return `Start agent: ${titleOf(event.run.taskId)}`;
     case "run.outcome":

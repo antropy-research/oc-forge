@@ -197,6 +197,17 @@ export const Settings = () => {
             <input type="checkbox" checked={settings.plannedAsActual} onChange={(event) => update({ plannedAsActual: event.currentTarget.checked })} />
           </label>
           <label>
+            Suggest time and channel from similar tasks
+            <input type="checkbox" checked={settings.suggestFromHistory} onChange={(event) => update({ suggestFromHistory: event.currentTarget.checked })} />
+          </label>
+          <label>
+            Pomodoro focus / break (minutes)
+            <span class="row">
+              <input type="number" min="1" max="180" aria-label="Pomodoro focus minutes" value={settings.pomodoroMinutes} onChange={(event) => { const value = Number(event.currentTarget.value); if (Number.isInteger(value) && value >= 1 && value <= 180) update({ pomodoroMinutes: value }); }} />
+              <input type="number" min="1" max="180" aria-label="Pomodoro break minutes" value={settings.breakMinutes} onChange={(event) => { const value = Number(event.currentTarget.value); if (Number.isInteger(value) && value >= 1 && value <= 180) update({ breakMinutes: value }); }} />
+            </span>
+          </label>
+          <label>
             Week starts on
             <select value={String(settings.weekStartsOn)} onChange={(event) => update({ weekStartsOn: event.currentTarget.value === '0' ? 0 : 1 })}>
               <option value="1">Monday</option>

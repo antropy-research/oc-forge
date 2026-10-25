@@ -72,6 +72,7 @@ const createTask = (state: PlannerState, input: NewTask, at: string): void => {
     createdAt: at,
     updatedAt: at,
     channelId: input.channelId ?? null,
+    folderId: input.folderId ?? null,
     objectiveId: input.objectiveId ?? null,
     subtasks: input.subtasks ?? [],
     source: input.source ?? null,
@@ -201,6 +202,24 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       state.rituals[key] = { ...state.rituals[key], ...event.fields };
       return;
     }
+    case 'folder.created':
+      if (!state.folders[event.folder.id]) state.folders[event.folder.id] = { id: event.folder.id, name: event.folder.name.trim(), createdAt: event.at, deletedAt: null };
+      return;
+    case 'folder.renamed': {
+      const folder = state.folders[event.folderId];
+      if (folder) state.folders[event.folderId] = { ...folder, name: event.name.trim() };
+      return;
+    }
+    case 'folder.deleted': {
+      const folder = state.folders[event.folderId];
+      if (!folder) return;
+      state.folders[event.folderId] = { ...folder, deletedAt: event.at };
+      // Deleting a folder never deletes its tasks; they stay in the backlog without it.
+      for (const task of Object.values(state.tasks)) {
+        if (task.folderId === event.folderId) state.tasks[task.id] = { ...task, folderId: null, updatedAt: event.at };
+      }
+      return;
+    }
     case 'run.started':
       if (state.runs[event.run.id] || !state.tasks[event.run.taskId]) return;
       state.runs[event.run.id] = { ...event.run, startedAt: event.at, outcome: null, outcomeAt: null, review: null };
@@ -233,6 +252,9 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       return;
     case 'tasks.rolledOver':
       for (const rolled of event.moved) {
+        // Two replicas may both roll the same day over; the second finds the task moved already.
+        const current = state.tasks[rolled.taskId];
+        if (!current || current.placement.kind !== 'day' || current.placement.date !== rolled.from) continue;
         touch(state, rolled.taskId, event.at, (task) => ({
           ...task,
           placement: { kind: 'day', date: event.date },
@@ -307,6 +329,7 @@ export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]
     rituals: { ...state.rituals },
     series: { ...state.series },
     runs: { ...state.runs },
+    folders: { ...state.folders },
     settings: { ...state.settings },
   };
   for (const event of events) applyInto(next, event);

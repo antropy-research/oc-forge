@@ -3,6 +3,7 @@ import type { DateKey, Task } from '../../../src/domain/types.ts';
 import { addDays, formatMinutes, monthDay, weekdayName, zonedDateMinutes } from '../../../src/domain/dates.ts';
 import { blocksFor, edgePosition, tasksForDay, workloadTotal, plannedTotal } from '../../../src/domain/selectors.ts';
 import { completedOnDay } from '../../../src/domain/rituals.ts';
+import { suggestFor } from '../../../src/domain/suggest.ts';
 import { objectivesForWeek, planningDate, ritualRecord, weekStartOf } from '../../../src/domain/rituals.ts';
 import { DayCalendar } from '../TimeGrid.tsx';
 import { newId } from '../../../src/domain/ids.ts';
@@ -176,6 +177,14 @@ export const DailyPlanning = ({ onDone }: { onDone: () => void }) => {
             <div class="load-bar"><div class={`load-fill${workload > threshold ? ' is-over' : ''}`} style={{ width: `${Math.min(100, (workload / threshold) * 100)}%` }} /></div>
             {workload > threshold && <p class="warning">This is more than you said you can do in a day. Move something to another day or the backlog.</p>}
             {open.some((task) => !task.plannedMinutes) && <p class="hint">Tasks without an estimate show –:––; click to set one.</p>}
+            {(() => {
+              const fills = open.flatMap((task) => {
+                if (task.plannedMinutes) return [];
+                const minutes = suggestFor(view.state, task.title, task.id)?.minutes;
+                return minutes ? [{ type: 'task.updated' as const, taskId: task.id, patch: { plannedMinutes: minutes } }] : [];
+              });
+              return fills.length > 0 ? <button class="link" onClick={() => void client.dispatch(fills, { undo: 'Estimates filled' })}>Fill {fills.length} suggested estimate{fills.length === 1 ? '' : 's'} from history</button> : null;
+            })()}
           </div>
           <TaskList placement={{ kind: 'day', date }} tasks={tasks} />
         </div>

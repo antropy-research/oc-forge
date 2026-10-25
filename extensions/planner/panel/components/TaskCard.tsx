@@ -5,7 +5,8 @@ import { addDays, formatMinutes, monthDay, nextWeekday } from '../../src/domain/
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
 import { moveTo } from '../lib/commands.ts';
-import { actualMinutes, blocksFor } from '../../src/domain/selectors.ts';
+import { actualMinutes, blocksFor, positionAt, tasksIn } from '../../src/domain/selectors.ts';
+import { newId } from '../../src/domain/ids.ts';
 import { clockLabel, zonedDateMinutes } from '../../src/domain/dates.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 import { setHoveredTask } from '../lib/hover.ts';
@@ -89,6 +90,26 @@ const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
           Timebox automatically
         </button>
       )}
+      <button
+        role="menuitem"
+        onClick={() => {
+          const list = tasksIn(state, task.placement);
+          const position = positionAt(state, task.placement, list.findIndex((item) => item.id === task.id) + 1);
+          run(
+            {
+              type: 'task.created',
+              task: {
+                id: newId(), title: task.title, notes: task.notes, plannedMinutes: task.plannedMinutes, priority: task.priority, dueDate: task.dueDate,
+                placement: task.placement, position, channelId: task.channelId, folderId: task.folderId, objectiveId: task.objectiveId,
+                subtasks: task.subtasks.map((subtask) => ({ ...subtask, id: newId(), done: false })), source: task.source,
+              },
+            },
+            'Task duplicated',
+          );
+        }}
+      >
+        Duplicate
+      </button>
       <hr />
       <button role="menuitem" onClick={() => run({ type: 'task.archived', taskId: task.id }, 'Task archived')}>Archive</button>
       <button role="menuitem" class="danger" onClick={() => run({ type: 'task.deleted', taskId: task.id }, 'Task deleted')}>Delete</button>

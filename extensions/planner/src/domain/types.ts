@@ -74,6 +74,8 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   channelId: string | null;
+  /** Backlog folder; kept when the task is scheduled, shown in the backlog. */
+  folderId: string | null;
   objectiveId: string | null;
   subtasks: Subtask[];
   source: TaskSourceRef | null;
@@ -104,6 +106,14 @@ export interface WorkBlock {
   taskId: string;
   start: string;
   end: string;
+}
+
+/** A backlog folder (Sunsama: folders exist only in the backlog). */
+export interface Folder {
+  id: string;
+  name: string;
+  createdAt: string;
+  deletedAt: string | null;
 }
 
 /** A weekly objective: a goal for one week that tasks can align to. */
@@ -227,6 +237,11 @@ export interface Settings {
   linearOnPlan: 'ask' | 'start' | 'nothing';
   /** Complete the task when its issue is completed or canceled in Linear (Sunsama does not). */
   linearImportCompletion: boolean;
+  /** Suggest planned time and channel for new tasks from similar past tasks. */
+  suggestFromHistory: boolean;
+  /** Focus mode's Pomodoro lengths, in minutes. */
+  pomodoroMinutes: number;
+  breakMinutes: number;
 }
 
 export interface PlannerState {
@@ -243,6 +258,7 @@ export interface PlannerState {
   rituals: Record<string, RitualRecord>;
   series: Record<string, Series>;
   runs: Record<string, TaskRun>;
+  folders: Record<string, Folder>;
   settings: Settings;
 }
 
@@ -259,6 +275,9 @@ export const DEFAULT_SETTINGS: Settings = {
   linearOnComplete: 'ask',
   linearOnPlan: 'nothing',
   linearImportCompletion: false,
+  suggestFromHistory: true,
+  pomodoroMinutes: 25,
+  breakMinutes: 5,
 };
 
 export const emptyState = (): PlannerState => ({
@@ -273,5 +292,6 @@ export const emptyState = (): PlannerState => ({
   rituals: {},
   series: {},
   runs: {},
+  folders: {},
   settings: { ...DEFAULT_SETTINGS },
 });

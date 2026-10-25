@@ -53,7 +53,7 @@ export const DayColumn = ({ date, wide = false }: { date: DateKey; wide?: boolea
   const view = useView();
   const { ui } = useUi();
   const [menuOpen, setMenuOpen] = useState(false);
-  const tasks = tasksForDay(view.state, date).filter((task) => matchesFilter(task, ui.channelFilter));
+  const tasks = tasksForDay(view.state, date).filter((task) => matchesFilter(task, ui.channelFilter, view.state.channels));
   const planned = plannedTotal(tasks);
   const workload = workloadTotal(view.state, tasks);
   const threshold = view.state.settings.workloadMinutes;

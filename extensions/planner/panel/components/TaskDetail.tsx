@@ -3,6 +3,7 @@ import type { EventBody, PlannerEvent, TaskPatch } from '../../src/domain/events
 import { BACKLOG_BUCKETS, type BacklogBucket, type Placement, type Priority, type Subtask, type Task } from '../../src/domain/types.ts';
 import { addDays, formatMinutes, isDateKey, monthDay } from '../../src/domain/dates.ts';
 import { parseDuration } from '../../src/domain/quickAdd.ts';
+import { suggestFor } from '../../src/domain/suggest.ts';
 import { describe, timeAgo } from '../../src/domain/activity.ts';
 import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
@@ -243,6 +244,15 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
               })()}
             </select>
           </label>
+          {Object.values(view.state.folders).some((folder) => !folder.deletedAt) && (
+            <label class="field">
+              <span>Folder</span>
+              <select value={task.folderId ?? ''} onChange={(event) => update({ folderId: event.currentTarget.value || null })}>
+                <option value="">No folder</option>
+                {Object.values(view.state.folders).filter((folder) => !folder.deletedAt || folder.id === task.folderId).map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+              </select>
+            </label>
+          )}
           <label class="field">
             <span>Due</span>
             <input type="date" value={task.dueDate ?? ''} onChange={(event) => update({ dueDate: isDateKey(event.currentTarget.value) ? event.currentTarget.value : null })} />
@@ -296,6 +306,14 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
               }}
               onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
             />
+            {!task.plannedMinutes && view.state.settings.suggestFromHistory && (() => {
+              const suggestion = suggestFor(view.state, task.title, task.id);
+              return suggestion?.minutes ? (
+                <button class="link suggest" title={`From ${suggestion.basis} similar task${suggestion.basis === 1 ? '' : 's'}`} onClick={() => update({ plannedMinutes: suggestion.minutes })}>
+                  Use {formatMinutes(suggestion.minutes)}
+                </button>
+              ) : null;
+            })()}
           </label>
         </div>
 

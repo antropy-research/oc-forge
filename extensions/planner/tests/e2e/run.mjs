@@ -36,6 +36,54 @@ for (const enabled of [false, true]) {
   if (toggle.status() !== 200) check(`service restart (${enabled ? 'enable' : 'pause'})`, false, `status ${toggle.status()}`);
 }
 
+/** Remove every e2e task, run, chat, worktree, calendar, objective, series, folder and highlight. */
+const cleanUp = async (final) => {
+  const call = async (method, path, body) => {
+    const response = await context.request.post(`${base}/api/guests/oc-forge-planner/service/request`, { data: { method, path, ...(body ? { body: JSON.stringify(body) } : {}) } });
+    const outer = await response.json().catch(() => ({}));
+    return JSON.parse(outer.body ?? '{}');
+  };
+  const isTestTask = (task) => !task.deletedAt && (/^e2e-/.test(task.title) || Boolean(task.sessionRef?.title?.includes('e2e-')));
+  try {
+    const { state } = await call('GET', '/state');
+    const testTaskIds = new Set(Object.values(state.tasks).filter(isTestTask).map((task) => task.id));
+    const testRuns = Object.values(state.runs ?? {}).filter((item) => testTaskIds.has(item.taskId));
+    // Real chats the journey started in the dev container, then the worktrees and branches it made.
+    for (const session of new Map(testRuns.map((item) => [item.sessionId, item])).values()) {
+      await context.request.delete(`${base}/api/session/${session.sessionId}?directory=${encodeURIComponent(session.directory ?? '')}`).catch(() => {});
+    }
+    try {
+      execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', "cd /home/node/projects/planner-demo-a && git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch refs\\/heads\\/planner\\/e2e-/{print w}' | while read w; do git worktree remove --force \"$w\"; done; git worktree prune; git branch --list 'planner/e2e-*' | xargs -r git branch -D >/dev/null"]);
+    } catch (error) {
+      console.log(`INFO worktree cleanup: ${String(error).split('\n')[0]}`);
+    }
+    const commands = [
+      ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
+      ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
+      ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
+      ...Object.values(state.calendars).filter((calendar) => /^e2e-/.test(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
+      ...Object.values(state.objectives ?? {}).filter((objective) => /^e2e-/.test(objective.title) && !objective.deletedAt).map((objective) => ({ cmd: `cleanup-${objective.id}`, type: 'objective.deleted', objectiveId: objective.id })),
+      ...Object.values(state.series ?? {}).filter((series) => /^e2e-/.test(series.template.title) && !series.stoppedFrom).map((series) => ({ cmd: `cleanup-${series.id}`, type: 'series.stopped', seriesId: series.id, from: '2000-01-01' })),
+      ...Object.values(state.folders ?? {}).filter((folder) => /^e2e-/.test(folder.name) && !folder.deletedAt).map((folder) => ({ cmd: `cleanup-${folder.id}`, type: 'folder.deleted', folderId: folder.id })),
+      // Custom highlights the journey typed in are not tasks; drop them from the day's record too.
+      ...Object.entries(state.rituals ?? {})
+        .filter(([key, record]) => key.startsWith('highlights:') && (record.items ?? []).some((item) => /^e2e-/.test(item.text)))
+        .map(([key, record]) => ({ cmd: `cleanup-hl-${key.slice('highlights:'.length)}-${run}`, type: 'ritual.saved', ritual: 'highlights', date: key.slice('highlights:'.length), fields: { items: record.items.filter((item) => !/^e2e-/.test(item.text)) } })),
+    ];
+    if (commands.length) {
+      const answer = await call('POST', '/commands', { commands });
+      if (answer.error) console.log(`INFO cleanup batch rejected: ${answer.error} (command ${answer.index})`);
+    }
+    const after = await call('GET', '/state');
+    if (final) check('cleanup leaves no live test tasks', !Object.values(after.state.tasks).some(isTestTask));
+  } catch (error) {
+    if (final) check('cleanup leaves no live test tasks', false, String(error));
+  }
+};
+
+// A crashed earlier run may have left test data behind; start from a clean planner.
+await cleanUp(false);
+
 const page = await context.newPage();
 const problems = [];
 page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
@@ -354,19 +402,24 @@ try {
   await frame.getByRole('textbox', { name: 'Add highlight' }).fill(`${run} helped a teammate`);
   await frame.getByRole('textbox', { name: 'Add highlight' }).press('Enter');
   await frame.getByRole('button', { name: `Remove ${run} helped a teammate` }).waitFor({ timeout: 10_000 });
-  const summarize = frame.getByRole('button', { name: /Summarize with AI/ });
-  if (await summarize.isEnabled()) {
-    await summarize.click();
-    const summary = frame.getByRole('textbox', { name: 'Summary' });
-    const filled = await summary.evaluate(async (element) => {
-      for (let i = 0; i < 90; i++) {
-        if (element.value.trim()) return element.value.trim();
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-      return '';
-    }).catch(() => '');
-    console.log(`INFO AI summary (small model, soft check): ${filled ? `"${filled.slice(0, 140)}"` : 'no summary — see the toast for the model error'}`);
+  // The dev container has no Small Model; answer the host's generate route like a model would.
+  const isSummaryGenerate = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/generate';
+  let summaryPrompt = '';
+  await context.route(isSummaryGenerate, (route) => {
+    summaryPrompt = JSON.parse(route.request().postData() ?? '{}').prompt ?? '';
+    return route.fulfill({ json: { ok: true, result: { text: `I shipped the calendar and helped a teammate (${run}).` } } });
+  });
+  // A summary saved by an earlier run turns the button into "Summarize again".
+  await frame.getByRole('button', { name: /^Summarize (with AI|again)$/ }).click();
+  // The field is re-created when the summary is saved, so look it up again each time.
+  const expectedSummary = `I shipped the calendar and helped a teammate (${run}).`;
+  let summaryText = '';
+  for (let i = 0; i < 40 && summaryText !== expectedSummary; i++) {
+    summaryText = (await frame.getByRole('textbox', { name: 'Summary' }).inputValue().catch(() => '')).trim();
+    if (summaryText !== expectedSummary) await page.waitForTimeout(250);
   }
+  check('the AI summary is written from the highlights', summaryText === expectedSummary && summaryPrompt.includes(`${run} helped a teammate`), summaryText);
+  await context.unroute(isSummaryGenerate);
   await frame.getByRole('button', { name: /^Publish/ }).click();
   await page.waitForTimeout(800);
   check('highlights publish with a starred and an added item', (await subtitle()).includes('published'));
@@ -587,23 +640,32 @@ try {
   const agentRun = runsOf(afterStart, agentTitle)[0];
   check('the run keeps project, directory and session', Boolean(agentRun?.sessionId && agentRun.projectId && agentRun.directory?.endsWith('planner-demo-a')), JSON.stringify(agentRun ?? null).slice(0, 160));
   const reviewed = await firstAgent.dialog.locator('li.run-row', { hasText: 'Ready for review' }).waitFor({ timeout: 180_000 }).then(() => true).catch(() => false);
-  check('a finished turn shows as Ready for review', reviewed, (await firstAgent.dialog.locator('li.run-row').first().innerText()).replace(/\s+/g, ' ').slice(0, 120));
+  if (reviewed) {
+    check('a finished turn shows as Ready for review', true);
+  } else {
+    // Tell a slow free model apart from a stale Planner: ask OpenCode whether the turn finished.
+    const messages = await (await context.request.get(`${base}/api/session/${agentRun.sessionId}/message?directory=${encodeURIComponent(agentRun.directory)}`)).json().catch(() => []);
+    const finished = (Array.isArray(messages) ? messages : messages.data ?? []).some((message) => (message.info ?? message).time?.completed && (message.info ?? message).finish);
+    if (finished) check('a finished turn shows as Ready for review', false, 'OpenCode finished the turn but the Planner still shows it running');
+    else console.log('INFO the dev container\'s free model did not finish within 3 minutes; skipped the review checks');
+  }
   check('a finished turn does not complete the task', !taskTitled(await serviceState(), agentTitle)?.completedAt);
   await shot('19-agent-run');
   await firstAgent.dialog.getByRole('button', { name: 'Close' }).click();
-  check('the card shows the agent state', (await firstAgent.card.locator('.agent-chip').innerText().catch(() => '')).includes('Review'));
   const sessionsResponse = await context.request.get(`${base}/api/session?directory=${encodeURIComponent(agentRun.directory)}`);
   const chat = (await sessionsResponse.json()).data.find((item) => item.id === agentRun.sessionId);
   check('the chat is named with the task chip', /^PLN-\w{4} /.test(chat?.title ?? '') && chat.title.includes(agentTitle), chat?.title);
-
-  await nav('Agents').click();
-  const reviewGroup = frame.locator('section.agent-group[aria-label="Ready for review"]');
-  await reviewGroup.locator('li.agent-task', { hasText: agentTitle }).waitFor({ timeout: 10_000 });
-  check('Agents lists the run under Ready for review', true);
-  await shot('20-agents');
-  await reviewGroup.locator('li.agent-task', { hasText: agentTitle }).getByRole('button', { name: 'Accept and complete' }).click();
-  const accepted = await waitForState((latest) => Boolean(taskTitled(latest, agentTitle)?.completedAt) && runsOf(latest, agentTitle)[0]?.review?.verdict === 'accepted');
-  check('Accept and complete records the review and completes the task', Boolean(taskTitled(accepted, agentTitle)?.completedAt) && runsOf(accepted, agentTitle)[0]?.review?.verdict === 'accepted');
+  if (reviewed) {
+    check('the card shows the agent state', (await firstAgent.card.locator('.agent-chip').innerText().catch(() => '')).includes('Review'));
+    await nav('Agents').click();
+    const reviewGroup = frame.locator('section.agent-group[aria-label="Ready for review"]');
+    await reviewGroup.locator('li.agent-task', { hasText: agentTitle }).waitFor({ timeout: 10_000 });
+    check('Agents lists the run under Ready for review', true);
+    await shot('20-agents');
+    await reviewGroup.locator('li.agent-task', { hasText: agentTitle }).getByRole('button', { name: 'Accept and complete' }).click();
+    const accepted = await waitForState((latest) => Boolean(taskTitled(latest, agentTitle)?.completedAt) && runsOf(latest, agentTitle)[0]?.review?.verdict === 'accepted');
+    check('Accept and complete records the review and completes the task', Boolean(taskTitled(accepted, agentTitle)?.completedAt) && runsOf(accepted, agentTitle)[0]?.review?.verdict === 'accepted');
+  }
 
   const worktreeTitle = `${run} worktree task`;
   const branchName = `planner/${run}`;
@@ -644,6 +706,97 @@ try {
   check('"Track chat in Planner" links the chat to a new task as its run', Object.values(tracked.state.runs).filter((item) => item.sessionId === agentRun.sessionId).length >= 2);
   await shot('21-chat-actions');
 
+  // Phase 8a: folders, backlog search, Braindump, suggestions, context filter, duplicate, Pomodoro.
+  frame = await openPlanner();
+  await nav('Backlog').click();
+  await frame.getByRole('button', { name: '+ Add folder' }).click();
+  await frame.getByRole('textbox', { name: 'New folder name' }).fill(`${run} Reading`);
+  await frame.getByRole('textbox', { name: 'New folder name' }).press('Enter');
+  await frame.getByRole('heading', { name: `${run} Reading` }).waitFor({ timeout: 10_000 });
+  const somedayBucket = frame.locator('section.bucket[aria-label="Someday"]');
+  await somedayBucket.getByRole('button', { name: /Add task/ }).click();
+  await somedayBucket.getByRole('textbox', { name: 'New task' }).fill(`${run} paper on planning`);
+  await somedayBucket.getByRole('textbox', { name: 'New task' }).press('Enter');
+  await somedayBucket.getByRole('textbox', { name: 'New task' }).press('Escape');
+  const inFolder = await waitForState((latest) => Boolean(taskTitled(latest, `${run} paper on planning`)?.folderId));
+  const folderId = taskTitled(inFolder, `${run} paper on planning`)?.folderId;
+  check('a task added inside a folder belongs to it', Boolean(folderId) && inFolder.state.folders[folderId]?.name === `${run} Reading`);
+  await frame.getByRole('combobox', { name: 'Folder' }).selectOption('none');
+  check('the folder filter hides tasks of other folders', (await frame.locator('li.task-card', { hasText: `${run} paper on planning` }).count()) === 0);
+  await frame.getByRole('combobox', { name: 'Folder' }).selectOption('');
+  await frame.getByRole('textbox', { name: 'Search backlog' }).fill(`${run} paper`);
+  await frame.locator('li.task-card', { hasText: `${run} paper on planning` }).waitFor({ timeout: 5000 });
+  check('backlog search finds a task by its words', (await frame.locator('.view-scroll li.task-card').count()) === 1);
+  await frame.getByRole('textbox', { name: 'Search backlog' }).fill('');
+
+  await frame.getByRole('button', { name: 'Braindump' }).click();
+  const dump = frame.getByRole('dialog', { name: 'Braindump' });
+  await dump.getByRole('textbox', { name: 'Brain dump' }).fill(`- ${run} call the bank ~15m\n- ${run} renew passport #personal\n- ${run} not this one`);
+  await dump.getByRole('button', { name: 'One task per line' }).click();
+  await dump.getByRole('checkbox', { name: `Keep ${run} not this one` }).uncheck();
+  await dump.getByRole('button', { name: 'Add 2 tasks' }).click();
+  const dumped = await waitForState((latest) => Boolean(taskTitled(latest, `${run} call the bank`)) && Boolean(taskTitled(latest, `${run} renew passport`)));
+  const bank = taskTitled(dumped, `${run} call the bank`);
+  check('Braindump by line adds the kept lines with their syntax', bank?.plannedMinutes === 15 && bank.placement.kind === 'backlog' && !taskTitled(dumped, `${run} not this one`) && dumped.state.channels[taskTitled(dumped, `${run} renew passport`)?.channelId]?.name === 'personal');
+
+  const isGenerate = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/generate';
+  await context.route(isGenerate, (route) => route.fulfill({ json: { ok: true, result: { text: JSON.stringify([{ title: `${run} book flights`, minutes: 30, when: 'tomorrow', channel: 'work' }, { title: `${run} pay rent`, minutes: null, when: 'someday', channel: null }]) } } }));
+  await frame.getByRole('button', { name: 'Braindump' }).click();
+  await dump.getByRole('textbox', { name: 'Brain dump' }).fill('I need to book flights for the trip and pay the rent at some point');
+  await dump.getByRole('button', { name: 'Organize with AI' }).click();
+  await dump.getByRole('button', { name: 'Add 2 tasks' }).click();
+  const organized = await waitForState((latest) => Boolean(taskTitled(latest, `${run} book flights`)));
+  const flights = taskTitled(organized, `${run} book flights`);
+  check('Braindump with AI adds what the model proposed', flights?.plannedMinutes === 30 && flights.placement.kind === 'day' && taskTitled(organized, `${run} pay rent`)?.placement.kind === 'backlog');
+  await context.unroute(isGenerate);
+
+  await nav('Home').click();
+  await addInToday(`${run} weekly report ~40m`);
+  await frame.locator('section.day-column.is-today li.task-card', { hasText: `${run} weekly report` }).first().getByRole('button', { name: 'Mark complete' }).click();
+  await page.waitForTimeout(800);
+  await todayCol.getByRole('button', { name: /Add task/ }).click();
+  await todayCol.getByRole('textbox', { name: 'New task' }).fill(`${run} weekly report`);
+  const suggestedChips = (await todayCol.locator('.chips.suggested').innerText({ timeout: 5000 }).catch(() => '')).replace(/\s+/g, ' ');
+  await todayCol.getByRole('textbox', { name: 'New task' }).press('Enter');
+  await todayCol.getByRole('textbox', { name: 'New task' }).press('Escape');
+  const suggestedState = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.title === `${run} weekly report` && !task.completedAt && !task.deletedAt));
+  const suggestedTask = Object.values(suggestedState.state.tasks).find((task) => task.title === `${run} weekly report` && !task.completedAt && !task.deletedAt);
+  check('a similar past task suggests the planned time', suggestedChips.includes('≈0:40') && suggestedTask?.plannedMinutes === 40, `${suggestedChips} → ${suggestedTask?.plannedMinutes}`);
+
+  await addInToday(`${run} gym #personal`);
+  await frame.getByRole('combobox', { name: 'Filter by channel' }).selectOption('ctx:personal');
+  const personalVisible = await todayCol.locator('li.task-card', { hasText: `${run} gym` }).count();
+  const workVisible = await todayCol.locator('li.task-card', { hasText: `${run} sort-low` }).count();
+  check('the personal context filter shows personal tasks only', personalVisible === 1 && workVisible === 0, `${personalVisible}/${workVisible}`);
+  await frame.getByRole('combobox', { name: 'Filter by channel' }).selectOption('');
+
+  const gym = todayCol.locator('li.task-card', { hasText: `${run} gym` }).first();
+  await gym.hover();
+  await gym.getByRole('button', { name: 'Task actions' }).click();
+  await gym.getByRole('menuitem', { name: 'Duplicate' }).click();
+  await page.waitForTimeout(800);
+  check('Duplicate makes a second copy', (await todayCol.locator('li.task-card', { hasText: `${run} gym` }).count()) === 2);
+
+  await nav('Settings').click();
+  await frame.getByRole('spinbutton', { name: 'Pomodoro focus minutes' }).fill('1');
+  await frame.getByRole('spinbutton', { name: 'Pomodoro focus minutes' }).press('Tab');
+  await frame.getByRole('spinbutton', { name: 'Pomodoro break minutes' }).fill('1');
+  await frame.getByRole('spinbutton', { name: 'Pomodoro break minutes' }).press('Tab');
+  await nav('Focus').click();
+  await frame.getByRole('button', { name: 'Start a 1-minute Pomodoro' }).click();
+  await frame.locator('.pomodoro-phase.is-focus').waitFor({ timeout: 5000 });
+  const focusRunning = Boolean((await waitForState((latest) => Boolean(latest.state.timer))).state.timer);
+  await frame.locator('.pomodoro-phase.is-break').waitFor({ timeout: 75_000 });
+  const breakState = await waitForState((latest) => !latest.state.timer);
+  check('a Pomodoro runs the timer, then stops it for the break', focusRunning && !breakState.state.timer, `${focusRunning} → ${Boolean(breakState.state.timer)}`);
+  await frame.getByRole('button', { name: 'Stop Pomodoro' }).click();
+  await nav('Settings').click();
+  await frame.getByRole('spinbutton', { name: 'Pomodoro focus minutes' }).fill('25');
+  await frame.getByRole('spinbutton', { name: 'Pomodoro focus minutes' }).press('Tab');
+  await frame.getByRole('spinbutton', { name: 'Pomodoro break minutes' }).fill('5');
+  await frame.getByRole('spinbutton', { name: 'Pomodoro break minutes' }).press('Tab');
+  await shot('22-settings');
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
   const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
@@ -664,39 +817,7 @@ try {
   await shot('99-failure').catch(() => {});
 } finally {
   // Remove every e2e task and calendar through the service, so a failed run cannot leak into the next.
-  const call = async (method, path, body) => {
-    const response = await context.request.post(`${base}/api/guests/oc-forge-planner/service/request`, { data: { method, path, ...(body ? { body: JSON.stringify(body) } : {}) } });
-    const outer = await response.json().catch(() => ({}));
-    return JSON.parse(outer.body ?? '{}');
-  };
-  const isTestTask = (task) => !task.deletedAt && (/^e2e-/.test(task.title) || Boolean(task.sessionRef?.title?.includes('e2e-')));
-  try {
-    const { state } = await call('GET', '/state');
-    const testTaskIds = new Set(Object.values(state.tasks).filter(isTestTask).map((task) => task.id));
-    const testRuns = Object.values(state.runs ?? {}).filter((item) => testTaskIds.has(item.taskId));
-    // Real chats the journey started in the dev container, then the worktrees and branches it made.
-    for (const session of new Map(testRuns.map((item) => [item.sessionId, item])).values()) {
-      await context.request.delete(`${base}/api/session/${session.sessionId}?directory=${encodeURIComponent(session.directory ?? '')}`).catch(() => {});
-    }
-    try {
-      execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', "cd /home/node/projects/planner-demo-a && git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch refs\\/heads\\/planner\\/e2e-/{print w}' | while read w; do git worktree remove --force \"$w\"; done; git worktree prune; git branch --list 'planner/e2e-*' | xargs -r git branch -D >/dev/null"]);
-    } catch (error) {
-      console.log(`INFO worktree cleanup: ${String(error).split('\n')[0]}`);
-    }
-    const commands = [
-      ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
-      ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
-      ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
-      ...Object.values(state.calendars).filter((calendar) => /^e2e-/.test(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
-      ...Object.values(state.objectives ?? {}).filter((objective) => /^e2e-/.test(objective.title) && !objective.deletedAt).map((objective) => ({ cmd: `cleanup-${objective.id}`, type: 'objective.deleted', objectiveId: objective.id })),
-      ...Object.values(state.series ?? {}).filter((series) => /^e2e-/.test(series.template.title) && !series.stoppedFrom).map((series) => ({ cmd: `cleanup-${series.id}`, type: 'series.stopped', seriesId: series.id, from: '2000-01-01' })),
-    ];
-    if (commands.length) await call('POST', '/commands', { commands });
-    const after = await call('GET', '/state');
-    check('cleanup leaves no live test tasks', !Object.values(after.state.tasks).some(isTestTask));
-  } catch (error) {
-    check('cleanup leaves no live test tasks', false, String(error));
-  }
+  await cleanUp(true);
   check('no page errors from the extension', problems.length === 0, problems.slice(0, 3).join(' | '));
   await browser.close();
 }

@@ -28,7 +28,7 @@ export const App = ({ surface }: { surface: string }) => {
   const { client, host, linear, agents } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
-  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null });
+  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | null>(null);
 
@@ -112,7 +112,7 @@ export const App = ({ surface }: { surface: string }) => {
           <Nav route={route} onRoute={setRoute} onSearch={() => setOverlay('palette')} />
           <main class="main">
             {route === 'home' && <Board />}
-            {route === 'today' && <TodayView />}
+            {route === 'today' && <TodayView onShutdown={() => setRoute('shutdown')} />}
             {route === 'calendar' && <CalendarView />}
             {route === 'focus' && <FocusView onExit={() => setRoute('today')} />}
             {route === 'planning' && <DailyPlanning onDone={() => setRoute('today')} />}

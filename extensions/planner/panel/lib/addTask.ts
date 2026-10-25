@@ -7,7 +7,7 @@ import type { LinearStore } from './linear.ts';
 import { createTaskCommands } from './commands.ts';
 
 /** Add a parsed line; a pasted Linear issue URL becomes a task linked to that issue, as in Sunsama. */
-export const addParsedTask = async (client: PlannerClient, linear: LinearStore, parsed: QuickAdd, fallback: Placement, edge: 'top' | 'bottom', today: DateKey): Promise<void> => {
+export const addParsedTask = async (client: PlannerClient, linear: LinearStore, parsed: QuickAdd, fallback: Placement, edge: 'top' | 'bottom', today: DateKey, folderId: string | null = null): Promise<void> => {
   const key = parseLinearUrl(parsed.title);
   if (key && linear.getView().connected !== false) {
     try {
@@ -23,5 +23,5 @@ export const addParsedTask = async (client: PlannerClient, linear: LinearStore, 
       client.notify(`Couldn't look up ${key} in Linear; added the link as a task`);
     }
   }
-  await client.dispatch(createTaskCommands(client.getView().state, parsed, fallback, edge, today));
+  await client.dispatch(createTaskCommands(client.getView().state, parsed, fallback, edge, today, folderId));
 };

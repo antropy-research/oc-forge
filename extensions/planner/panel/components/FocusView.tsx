@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { formatMinutes, monthDay, weekdayName } from '../../src/domain/dates.ts';
 import { actualMinutes, tasksForDay } from '../../src/domain/selectors.ts';
@@ -21,7 +21,32 @@ export const FocusView = ({ onExit }: { onExit: () => void }) => {
   const open = today.filter((task) => !task.completedAt);
   const task = focusTask(open, ui.focusTaskId, view.state.timer?.taskId ?? null);
   const running = Boolean(task && view.state.timer?.taskId === task.id);
-  const now = useNow(running);
+  const [pomodoro, setPomodoro] = useState<{ phase: 'focus' | 'break' | 'done'; endsAt: number; cycles: number } | null>(null);
+  const now = useNow(running || (pomodoro !== null && pomodoro.phase !== 'done'));
+  const { pomodoroMinutes, breakMinutes } = view.state.settings;
+
+  // A phase that ran out: focus stops the timer and starts the break; the break ends and waits.
+  useEffect(() => {
+    if (!pomodoro || pomodoro.phase === 'done' || now < pomodoro.endsAt) return;
+    if (pomodoro.phase === 'focus') {
+      if (view.state.timer) void client.dispatch([{ type: 'timer.stopped' }]);
+      setPomodoro({ phase: 'break', endsAt: Date.now() + breakMinutes * 60_000, cycles: pomodoro.cycles + 1 });
+      client.notify(`Pomodoro done. Take a ${breakMinutes}-minute break.`);
+    } else {
+      setPomodoro({ ...pomodoro, phase: 'done' });
+      client.notify('Break over. Start the next Pomodoro when you are ready.');
+    }
+  }, [now, pomodoro]);
+
+  const startPomodoro = () => {
+    if (!task) return;
+    if (view.state.timer?.taskId !== task.id) void client.dispatch([{ type: 'timer.started', taskId: task.id }]);
+    setPomodoro({ phase: 'focus', endsAt: Date.now() + pomodoroMinutes * 60_000, cycles: pomodoro?.cycles ?? 0 });
+  };
+  const stopPomodoro = () => {
+    if (pomodoro?.phase === 'focus' && view.state.timer) void client.dispatch([{ type: 'timer.stopped' }]);
+    setPomodoro(null);
+  };
   const index = task ? open.findIndex((item) => item.id === task.id) : -1;
 
   const go = (delta: number) => {
@@ -79,6 +104,17 @@ export const FocusView = ({ onExit }: { onExit: () => void }) => {
                 <div class="clock" aria-live="off">{formatClock(actualMinutes(view.state, task, now))}</div>
                 <div class="hint">{running ? 'Timer running' : 'Start the timer to track actual time'}{task.plannedMinutes ? ` · planned ${formatMinutes(task.plannedMinutes)}` : ''}</div>
               </div>
+            </div>
+            <div class="pomodoro" aria-label="Pomodoro">
+              {pomodoro && pomodoro.phase !== 'done' ? (
+                <>
+                  <span class={`pomodoro-phase is-${pomodoro.phase}`}>{pomodoro.phase === 'focus' ? 'Focus' : 'Break'} {formatClock(Math.max(0, pomodoro.endsAt - now) / 60_000)}</span>
+                  <button class="link" onClick={stopPomodoro}>Stop Pomodoro</button>
+                </>
+              ) : (
+                <button class="link" onClick={startPomodoro}>{pomodoro?.phase === 'done' ? 'Start the next Pomodoro' : `Start a ${pomodoroMinutes}-minute Pomodoro`}</button>
+              )}
+              {pomodoro?.cycles ? <span class="muted">{pomodoro.cycles} done</span> : null}
             </div>
             <Subtasks task={task} />
             <textarea

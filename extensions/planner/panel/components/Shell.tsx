@@ -1,4 +1,7 @@
 import type { ComponentChildren } from 'preact';
+import { useState } from 'preact/hooks';
+import { newId } from '../../src/domain/ids.ts';
+import { useUi } from '../lib/ui.ts';
 import { actualMinutes, archivedTasks, tasksForDay } from '../../src/domain/selectors.ts';
 import { useAgents, usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
@@ -38,6 +41,10 @@ export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (rout
   const open = tasksForDay(view.state, view.today).filter((task) => !task.completedAt).length;
   const archived = archivedTasks(view.state).length;
   const agents = useAgents();
+  const { client } = usePlanner();
+  const { ui, setUi } = useUi();
+  const [addingFolder, setAddingFolder] = useState(false);
+  const folders = Object.values(view.state.folders).filter((folder) => !folder.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   return (
     <nav class="nav" aria-label="Planner">
       <div class="brand">Planner</div>
@@ -57,7 +64,41 @@ export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (rout
       <NavItem route="weeklyPlanning" current={route} onRoute={onRoute}>Weekly planning</NavItem>
       <NavItem route="weeklyReview" current={route} onRoute={onRoute}>Weekly review</NavItem>
       <div class="nav-section">Lists</div>
-      <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>
+      <NavItem route="backlog" current={route === 'backlog' && ui.folderFilter && ui.folderFilter !== 'none' ? 'home' : route} onRoute={(next) => { setUi({ folderFilter: null }); onRoute(next); }}>Backlog</NavItem>
+      {folders.map((folder) => (
+        <button
+          key={folder.id}
+          class={`nav-item nav-sub${route === 'backlog' && ui.folderFilter === folder.id ? ' is-active' : ''}`}
+          onClick={() => {
+            setUi({ folderFilter: folder.id });
+            onRoute('backlog');
+          }}
+        >
+          <span>{folder.name}</span>
+        </button>
+      ))}
+      {addingFolder ? (
+        <input
+          class="nav-input"
+          aria-label="New folder name"
+          placeholder="Folder name"
+          ref={(element) => element?.focus()}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setAddingFolder(false);
+            if (event.key !== 'Enter') return;
+            const name = event.currentTarget.value.trim().slice(0, 60);
+            setAddingFolder(false);
+            if (!name) return;
+            const id = newId();
+            void client.dispatch([{ type: 'folder.created', folder: { id, name } }]);
+            setUi({ folderFilter: id });
+            onRoute('backlog');
+          }}
+          onBlur={() => setAddingFolder(false)}
+        />
+      ) : (
+        <button class="nav-item nav-sub nav-add" onClick={() => setAddingFolder(true)}><span>+ Add folder</span></button>
+      )}
       <NavItem route="linear" current={route} onRoute={onRoute}>Linear</NavItem>
       <NavItem route="agents" current={route} onRoute={onRoute} badge={agents.attention}>Agents</NavItem>
       <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>
