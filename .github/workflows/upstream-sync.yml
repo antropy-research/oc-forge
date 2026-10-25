@@ -1,6 +1,7 @@
 name: Upstream sync
 
-# Follows the latest official stable release tags listed in vendors.json.
+# Follows the latest official stable release tags listed in vendors.json, or the
+# branch head for a vendor without releases, and adds a newly listed vendor.
 on:
   schedule:
     - cron: "17 * * * *"

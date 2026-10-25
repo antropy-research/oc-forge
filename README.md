@@ -3,13 +3,17 @@
 Patched, jointly pinned releases of OpenCode, OpenChamber, Orca, and VS Code.
 
 The `vendors/` submodules are pinned to official stable release git tags in
-`vendors.json` and are **never modified**. Fixes live in `adapters/` and are
-applied in memory while the OpenCode build runs.
+`vendors.json` and are **never modified**. Only upstream sync (CI) changes
+`vendors/`: a vendor newly listed in `vendors.json` becomes a submodule on its
+next run. Fixes live in `adapters/` and are applied in memory while the OpenCode
+build runs.
 
 OpenCode V2 uses npm `@opencode/cli`'s `latest` version and its matching git tag;
 GitHub's latest release still tracks V1. OpenChamber, Orca, and VS Code use GitHub's latest
-non-draft, non-prerelease desktop release. Current binary builds cover OpenCode;
-OpenChamber, Orca, and VS Code are source-pinned for future joint packaging.
+non-draft, non-prerelease desktop release. dawn-mac-antropy has no releases, so it
+follows the head of its `main` branch; it is private, and sync skips it until CI can
+read it. Current binary builds cover OpenCode; OpenChamber, Orca, VS Code, and
+dawn-mac-antropy are source-pinned for future joint packaging.
 
 ## Adapters
 
@@ -21,8 +25,8 @@ OpenChamber, Orca, and VS Code are source-pinned for future joint packaging.
 
 | Folder | Contains |
 |---|---|
-| `vendors/` | Pristine OpenCode, OpenChamber, Orca, and VS Code release submodules. |
-| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/`, `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added. |
+| `vendors/` | Pristine OpenCode, OpenChamber, Orca, VS Code, and dawn-mac-antropy submodules. |
+| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/`, `orca/`, `vscode/`, and `dawn-mac-antropy/`. Empty vendor folders are kept with `.gitkeep` until patches are added. |
 | `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `upstream.py`, `verify.py`. |
 | `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`. |
 
@@ -67,7 +71,8 @@ flowchart LR
   E --> F[GitHub Release]
 ```
 
-- `upstream-sync.yml` follows formal release tags only, never moving branches. A
+- `upstream-sync.yml` follows formal release tags, never moving branches, except
+  for a vendor without releases, which follows its branch head. A
   new version is staged on the `upstream-sync` branch; main moves and
   a release is published only after tests pass and all targets build. If an
   adapter no longer matches upstream, the run fails and publishes nothing.
