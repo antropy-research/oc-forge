@@ -13,6 +13,7 @@ import { setHoveredTask } from '../lib/hover.ts';
 import { isClosedType } from '../../src/domain/linear.ts';
 import { shortKey } from '../../src/domain/github.ts';
 import { AgentChip } from './Agents.tsx';
+import type { PlaylistEntry } from '../../src/domain/schedule.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { useUi } from '../lib/ui.ts';
@@ -118,7 +119,7 @@ const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
   );
 };
 
-export const TaskCard = ({ task }: { task: Task }) => {
+export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEntry }) => {
   const { client } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
@@ -160,7 +161,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
       </button>
       <button class="task-body" onClick={() => setUi({ openTaskId: task.id })} aria-label={`Open ${task.title}`}>
         <span class="task-title">{task.title}</span>
-        {(hasMeta || hasRuns) && (
+        {(hasMeta || hasRuns || playlist) && (
           <span class="task-meta">
             {task.source && (
               <span
@@ -171,6 +172,11 @@ export const TaskCard = ({ task }: { task: Task }) => {
                 <span class="dot" aria-hidden="true" />
                 {task.source.kind === 'github' ? shortKey(task.source.key) : task.source.key}
                 {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in ${task.source.kind === 'linear' ? 'Linear' : 'GitHub'}` : ''}
+              </span>
+            )}
+            {playlist && (
+              <span class={`playlist-time${playlist.late ? ' is-late' : ''}`} title={playlist.late ? 'Past your working hours if you go in order' : 'If you work through the list in order'}>
+                ▸ {clockLabel(zonedDateMinutes(playlist.start, zone).minutes)}{playlist.end > playlist.start ? `–${clockLabel(zonedDateMinutes(playlist.end, zone).minutes)}` : ''}
               </span>
             )}
             {hasRuns && <AgentChip taskId={task.id} />}

@@ -1,6 +1,7 @@
 import { Fragment } from 'preact';
 import { useRef, useState } from 'preact/hooks';
 import type { Placement, Task } from '../../src/domain/types.ts';
+import type { PlaylistEntry } from '../../src/domain/schedule.ts';
 import { positionAt } from '../../src/domain/selectors.ts';
 import { DRAG_TYPE, GITHUB_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
 import { isGitHubItem } from '../../src/domain/github.ts';
@@ -11,10 +12,12 @@ interface TaskListProps {
   placement: Placement;
   tasks: Task[];
   empty?: string;
+  /** Projected playlist times by task id. */
+  times?: ReadonlyMap<string, PlaylistEntry>;
 }
 
 /** A droppable list: cards dragged onto it land at the indicated slot. */
-export const TaskList = ({ placement, tasks, empty }: TaskListProps) => {
+export const TaskList = ({ placement, tasks, empty, times }: TaskListProps) => {
   const { client, linear, github } = usePlanner();
   const view = useView();
   const ref = useRef<HTMLUListElement>(null);
@@ -82,7 +85,7 @@ export const TaskList = ({ placement, tasks, empty }: TaskListProps) => {
       {tasks.map((task, index) => (
         <Fragment key={task.id}>
           {dropIndex === index && <li class="drop-line" aria-hidden="true" />}
-          <TaskCard task={task} />
+          <TaskCard task={task} playlist={times?.get(task.id)} />
         </Fragment>
       ))}
       {dropIndex === tasks.length && <li class="drop-line" aria-hidden="true" />}

@@ -81,3 +81,34 @@ describe('rollover from two replicas', () => {
     expect(twice.tasks.t).toMatchObject({ placement: day('2026-10-24'), rolloverCount: 2 });
   });
 });
+
+import { instantAt } from '../src/domain/dates.ts';
+import { playlistTimes } from '../src/domain/schedule.ts';
+
+describe('playlist', () => {
+  const LA = 'America/Los_Angeles';
+  const at = (minutes: number) => Date.parse(instantAt('2026-10-26', minutes, LA));
+  const task = (id: string, plannedMinutes: number | null, extra: Partial<{ done: boolean; timeboxed: boolean }> = {}) => ({ id, plannedMinutes, done: false, timeboxed: false, ...extra });
+  test('tasks in order from now, around a meeting, timeboxed and done ones skipped', () => {
+    const list = [task('a', 30), task('done', 60, { done: true }), task('boxed', 60, { timeboxed: true }), task('b', 90), task('c', null), task('d', 120)];
+    const meeting = [{ start: at(10 * 60 + 30), end: at(11 * 60) }];
+    const out = playlistTimes(list, '2026-10-26', LA, 9 * 60, 13 * 60, meeting, at(9 * 60 + 50));
+    expect(out.map((entry) => [entry.taskId, (entry.start - at(0)) / 60_000, (entry.end - at(0)) / 60_000, entry.late])).toEqual([
+      ['a', 600, 630, false],
+      ['b', 660, 750, false],
+      ['c', 750, 750, false],
+      ['d', 750, 870, true],
+    ]);
+  });
+  test('scheduling a backlog task takes it out of its folder', () => {
+    const state = applyEvents(
+      foldEvents([
+        ev({ type: 'folder.created', folder: { id: 'f', name: 'Reading' } }),
+        ev({ type: 'task.created', task: { id: 'p', title: 'Paper', placement: { kind: 'backlog', bucket: 'someday' }, position: 1, folderId: 'f' } }),
+      ]),
+      [ev({ type: 'task.moved', taskId: 'p', placement: { kind: 'backlog', bucket: 'next-month' }, position: 1 })],
+    );
+    expect(state.tasks.p!.folderId).toBe('f');
+    expect(applyEvents(state, [ev({ type: 'task.moved', taskId: 'p', placement: { kind: 'day', date: '2026-10-26' }, position: 1 })]).tasks.p!.folderId).toBeNull();
+  });
+});

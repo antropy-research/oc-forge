@@ -123,7 +123,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--oc-primary-t
 .detail-section { border-top: 1px solid var(--pl-line); margin-top: 12px; padding-top: 12px; }
 .detail-section h3 { font-size: 12px; font-weight: 600; color: var(--oc-muted); margin-bottom: 6px; display: flex; gap: 6px; }
 .subtasks { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.subtasks li { display: grid; grid-template-columns: 18px 1fr 20px; gap: 8px; align-items: center; }
+.subtasks li { display: grid; grid-template-columns: 18px 1fr 20px 20px; gap: 6px; align-items: center; }
 .subtasks li.is-done .subtask-title { color: var(--oc-muted); text-decoration: line-through; }
 .subtask-title, .subtask-add { border: 1px solid transparent; border-radius: 4px; background: transparent; padding: 2px 4px; outline: 0; width: 100%; }
 .subtask-title:focus, .subtask-add:focus, .subtask-add:hover { border-color: var(--pl-line); }
@@ -479,3 +479,8 @@ kbd { font: 11px var(--oc-mono, ui-monospace, monospace); padding: 0 5px; border
 .assistant-ops { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .assistant-ops label.inline { display: flex; gap: 8px; align-items: center; }
 .assistant-note { margin: 0; }
+
+/* Playlist */
+.playlist-time { font-variant-numeric: tabular-nums; color: var(--oc-info-text, #1c7ed6); }
+.playlist-time.is-late { color: var(--oc-warning-text, #e67700); }
+.date-jump { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 1px 6px; }

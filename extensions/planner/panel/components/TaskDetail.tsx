@@ -5,7 +5,7 @@ import { addDays, formatMinutes, isDateKey, monthDay } from '../../src/domain/da
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { suggestFor } from '../../src/domain/suggest.ts';
 import { describe, timeAgo } from '../../src/domain/activity.ts';
-import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels } from '../../src/domain/selectors.ts';
+import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels, positionAt, tasksIn } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { objectivesForWeek, weekStartOf } from '../../src/domain/rituals.ts';
@@ -78,6 +78,7 @@ const StartPicker = ({ task }: { task: Task }) => {
 
 export const Subtasks = ({ task }: { task: Task }) => {
   const { client } = usePlanner();
+  const view = useView();
   const [draft, setDraft] = useState('');
   const save = (subtasks: Subtask[]) => void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { subtasks } }]);
   const add = () => {
@@ -109,6 +110,24 @@ export const Subtasks = ({ task }: { task: Task }) => {
               }}
               onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
             />
+            <button
+              class="link"
+              aria-label={`Turn ${subtask.title} into a task`}
+              title="Turn into a task"
+              onClick={() => {
+                const list = tasksIn(view.state, task.placement);
+                const position = positionAt(view.state, task.placement, list.findIndex((item) => item.id === task.id) + 1);
+                void client.dispatch(
+                  [
+                    { type: 'task.created', task: { id: newId(), title: subtask.title, placement: task.placement, position, channelId: task.channelId, folderId: task.folderId, objectiveId: task.objectiveId } },
+                    { type: 'task.updated', taskId: task.id, patch: { subtasks: task.subtasks.filter((item) => item.id !== subtask.id) } },
+                  ],
+                  { undo: 'Subtask became a task' },
+                );
+              }}
+            >
+              ↗
+            </button>
             <button class="link danger" aria-label={`Delete ${subtask.title}`} onClick={() => save(task.subtasks.filter((item) => item.id !== subtask.id))}>×</button>
           </li>
         ))}

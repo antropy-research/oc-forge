@@ -12,6 +12,8 @@ export interface UiState {
   focusTaskId: string | null;
   /** Backlog folder filter: a folder id, 'none', or null for all. */
   folderFilter: string | null;
+  /** Show Sunsama's playlist times on day lists. */
+  playlist: boolean;
 }
 
 export interface UiContextValue {

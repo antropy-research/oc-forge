@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { DateKey } from '../../src/domain/types.ts';
+import type { DateKey, Task } from '../../src/domain/types.ts';
+import { playlistTimes } from '../../src/domain/schedule.ts';
+import { useCalendarEvents } from '../lib/calendar.ts';
+import { useNow } from '../lib/time.ts';
 import { addDays, formatMinutes, monthDay, weekdayName } from '../../src/domain/dates.ts';
-import { plannedTotal, tasksForDay, workloadTotal } from '../../src/domain/selectors.ts';
+import { blocksOnDay, plannedTotal, tasksForDay, workloadTotal } from '../../src/domain/selectors.ts';
 import { reorderCommands, sortTasks, type SortKey } from '../../src/domain/sort.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { matchesFilter, useUi } from '../lib/ui.ts';
@@ -24,6 +27,7 @@ const SORTS: { key: SortKey; label: string }[] = [
 const DayMenu = ({ date, onClose }: { date: DateKey; onClose: () => void }) => {
   const { client } = usePlanner();
   const view = useView();
+  const { ui, setUi } = useUi();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const close = (event: MouseEvent) => !ref.current?.contains(event.target as Node) && onClose();
@@ -32,6 +36,11 @@ const DayMenu = ({ date, onClose }: { date: DateKey; onClose: () => void }) => {
   }, [onClose]);
   return (
     <div class="menu" ref={ref} role="menu">
+      {date >= view.today && (
+        <button role="menuitem" onClick={() => { onClose(); setUi({ playlist: !ui.playlist }); }}>
+          {ui.playlist ? 'Hide playlist times' : 'Show playlist times'}
+        </button>
+      )}
       {SORTS.map((sort) => (
         <button
           key={sort.key}
@@ -74,7 +83,7 @@ export const DayColumn = ({ date, wide = false }: { date: DateKey; wide?: boolea
               <span class="load-count">{done}/{tasks.length}</span>
             </div>
           )}
-          {tasks.length > 1 && (
+          {(tasks.length > 1 || (tasks.length > 0 && date >= view.today)) && (
             <div class="menu-anchor">
               <button class="more is-visible" aria-label={`${dayLabel(date, view.today)} actions`} aria-haspopup="menu" onClick={() => setMenuOpen((open) => !open)}>⋯</button>
               {menuOpen && <DayMenu date={date} onClose={() => setMenuOpen(false)} />}
@@ -88,7 +97,31 @@ export const DayColumn = ({ date, wide = false }: { date: DateKey; wide?: boolea
         </div>
       )}
       <AddTask placement={{ kind: 'day', date }} />
-      <TaskList placement={{ kind: 'day', date }} tasks={tasks} />
+      {ui.playlist && date >= view.today ? <PlaylistList date={date} tasks={tasks} /> : <TaskList placement={{ kind: 'day', date }} tasks={tasks} />}
     </section>
   );
+};
+
+/** The day's list with playlist times: in order from now, around meetings and sessions. */
+const PlaylistList = ({ date, tasks }: { date: DateKey; tasks: Task[] }) => {
+  const view = useView();
+  const feed = useCalendarEvents(date, date);
+  const now = useNow(true, 60_000);
+  const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const blocks = blocksOnDay(view.state, date);
+  const busy = [
+    ...blocks.map((block) => ({ start: Date.parse(block.start), end: Date.parse(block.end) })),
+    ...feed.events.filter((event) => event.busy).map((event) => ({ start: Date.parse(event.start), end: Date.parse(event.end) })),
+  ];
+  const boxed = new Set(blocks.map((block) => block.taskId));
+  const entries = playlistTimes(
+    tasks.map((task) => ({ id: task.id, plannedMinutes: task.plannedMinutes, done: Boolean(task.completedAt), timeboxed: boxed.has(task.id) })),
+    date,
+    zone,
+    view.state.settings.workdayStart,
+    view.state.settings.workdayEnd,
+    busy,
+    date === view.today ? now : 0,
+  );
+  return <TaskList placement={{ kind: 'day', date }} tasks={tasks} times={new Map(entries.map((entry) => [entry.taskId, entry]))} />;
 };

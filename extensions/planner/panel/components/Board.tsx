@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { addDays, monthDay } from '../../src/domain/dates.ts';
+import { addDays, isDateKey, monthDay } from '../../src/domain/dates.ts';
 import { useView } from '../lib/context.ts';
 import { DayColumn } from './DayColumn.tsx';
 import { ChannelFilter } from './ChannelFilter.tsx';
@@ -21,6 +21,7 @@ export const Board = () => {
           <button aria-label="Earlier" onClick={() => setAnchor(addDays(anchor, -1))}>‹</button>
           <button onClick={() => setAnchor(view.today)} disabled={anchor === view.today}>Today</button>
           <button aria-label="Later" onClick={() => setAnchor(addDays(anchor, 1))}>›</button>
+          <input class="date-jump" type="date" aria-label="Jump to date" value={anchor} onChange={(event) => isDateKey(event.currentTarget.value) && setAnchor(event.currentTarget.value)} />
         </div>
       </header>
       <div class="board">

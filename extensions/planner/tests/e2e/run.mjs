@@ -860,6 +860,40 @@ try {
   execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', `rm -rf ${bare} /tmp/planner-replica`]);
   check('the remote can be removed again', !(await serviceState()).sync?.remote);
 
+  // Parity polish: playlist times, folders leave on scheduling, subtask → task, date jump.
+  await nav('Home').click();
+  await todayCol.getByRole('button', { name: 'Today actions' }).click();
+  await todayCol.getByRole('menuitem', { name: 'Show playlist times' }).click();
+  await todayCol.locator('.playlist-time').first().waitFor({ timeout: 10_000 });
+  check('the playlist shows when open tasks would run, in order', (await todayCol.locator('.playlist-time').count()) > 0, (await todayCol.locator('.playlist-time').first().innerText()).trim());
+  await shot('25-playlist');
+  await todayCol.getByRole('button', { name: 'Today actions' }).click();
+  await todayCol.getByRole('menuitem', { name: 'Hide playlist times' }).click();
+
+  await nav('Backlog').click();
+  const paper = frame.locator('li.task-card', { hasText: `${run} paper on planning` }).first();
+  await paper.hover();
+  await paper.getByRole('button', { name: 'Task actions' }).click();
+  await paper.getByRole('menuitem', { name: 'Move to today' }).click();
+  const scheduled = await waitForState((latest) => taskTitled(latest, `${run} paper on planning`)?.placement.kind === 'day');
+  check('scheduling a folder task on a day takes it out of the folder', taskTitled(scheduled, `${run} paper on planning`)?.folderId === null);
+
+  await nav('Home').click();
+  await todayCol.locator('li.task-card', { hasText: `${run} paper on planning` }).getByRole('button', { name: new RegExp(`Open ${run} paper on planning`) }).click();
+  const paperDialog = frame.getByRole('dialog', { name: 'Task details' });
+  await paperDialog.getByRole('textbox', { name: 'Add subtask' }).fill(`${run} read section 2`);
+  await paperDialog.getByRole('textbox', { name: 'Add subtask' }).press('Enter');
+  await paperDialog.getByRole('button', { name: `Turn ${run} read section 2 into a task` }).click();
+  const split = await waitForState((latest) => Boolean(taskTitled(latest, `${run} read section 2`)));
+  check('a subtask can become its own task', Boolean(taskTitled(split, `${run} read section 2`)) && taskTitled(split, `${run} paper on planning`)?.subtasks.length === 0);
+  await paperDialog.getByRole('button', { name: 'Close' }).click();
+
+  const jumpTo = (() => { const d = new Date(`${todayKey}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 10); return d.toISOString().slice(0, 10); })();
+  await frame.getByRole('textbox', { name: 'Jump to date' }).fill(jumpTo);
+  const firstColumn = (await frame.locator('section.day-column').first().getAttribute('aria-label')) ?? '';
+  check('the board jumps to a picked date', firstColumn.includes(monthDayLabel(jumpTo)), firstColumn);
+  await frame.getByRole('button', { name: 'Today', exact: true }).last().click().catch(() => {});
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
   const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';

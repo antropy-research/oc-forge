@@ -25,7 +25,7 @@ const syncTaskToBlocks = (state: PlannerState, taskId: string, at: string, chang
     const date = blockDate(state, changedStart);
     if (next.placement.kind !== 'day' || next.placement.date !== date) {
       const last = Object.values(state.tasks).reduce((max, other) => (other.placement.kind === 'day' && other.placement.date === date ? Math.max(max, other.position) : max), 0);
-      next = { ...next, placement: { kind: 'day', date }, position: last + 1024, rolloverCount: 0, archivedAt: null };
+      next = { ...next, placement: { kind: 'day', date }, position: last + 1024, rolloverCount: 0, archivedAt: null, folderId: null };
     }
   }
   if (next !== task) state.tasks[taskId] = { ...next, updatedAt: at };
@@ -112,6 +112,8 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
         rolloverCount: samePlacement(task.placement, event.placement) ? task.rolloverCount : 0,
         // A move is also how a task comes back out of the archive.
         archivedAt: null,
+        // Folders live in the backlog: scheduling a task on a day takes it out of its folder.
+        folderId: event.placement.kind === 'day' ? null : task.folderId,
       }));
       return;
     }

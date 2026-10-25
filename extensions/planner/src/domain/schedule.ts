@@ -61,3 +61,47 @@ export const layoutLanes = <T extends Interval>(items: readonly T[]): { item: T;
   if (group.length) closeGroup();
   return result;
 };
+
+export interface PlaylistEntry {
+  taskId: string;
+  start: number;
+  end: number;
+  /** Past the end of working hours. */
+  late: boolean;
+}
+
+/**
+ * Sunsama's playlist: when each open task would happen if the day's list is
+ * worked through in order from `notBefore`, around busy time. Tasks that
+ * already have a working session that day keep it and are not projected;
+ * tasks without an estimate take no time. A projection only: nothing is
+ * written anywhere.
+ */
+export const playlistTimes = (
+  tasks: readonly { id: string; plannedMinutes: number | null; done: boolean; timeboxed: boolean }[],
+  date: DateKey,
+  timeZone: string,
+  workdayStart: number,
+  workdayEnd: number,
+  busy: readonly Interval[],
+  notBefore: number,
+): PlaylistEntry[] => {
+  const dayEnd = Date.parse(instantAt(date, 24 * 60, timeZone));
+  const workEnd = Date.parse(instantAt(date, workdayEnd, timeZone));
+  const taken: Interval[] = [...busy];
+  let cursor = Math.max(notBefore, Date.parse(instantAt(date, workdayStart, timeZone)));
+  const out: PlaylistEntry[] = [];
+  for (const task of tasks) {
+    if (task.done || task.timeboxed) continue;
+    const minutes = task.plannedMinutes ?? 0;
+    // Inside working hours when it fits, else the first gap before midnight.
+    const slot = findFreeSlot(date, timeZone, 0, workdayEnd, minutes || 1, taken, cursor) ?? findFreeSlot(date, timeZone, 0, 24 * 60, minutes || 1, taken, cursor);
+    if (!slot) break;
+    const end = slot.start + minutes * 60_000;
+    if (end > dayEnd) break;
+    out.push({ taskId: task.id, start: slot.start, end, late: end > workEnd });
+    if (minutes > 0) taken.push({ start: slot.start, end });
+    cursor = end;
+  }
+  return out;
+};

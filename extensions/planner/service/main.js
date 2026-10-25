@@ -180,7 +180,7 @@ var syncTaskToBlocks = (state, taskId, at, changedStart) => {
     const date = blockDate(state, changedStart);
     if (next.placement.kind !== "day" || next.placement.date !== date) {
       const last = Object.values(state.tasks).reduce((max, other) => other.placement.kind === "day" && other.placement.date === date ? Math.max(max, other.position) : max, 0);
-      next = { ...next, placement: { kind: "day", date }, position: last + 1024, rolloverCount: 0, archivedAt: null };
+      next = { ...next, placement: { kind: "day", date }, position: last + 1024, rolloverCount: 0, archivedAt: null, folderId: null };
     }
   }
   if (next !== task)
@@ -260,7 +260,8 @@ var applyInto = (state, event) => {
         placement: event.placement,
         position: event.position,
         rolloverCount: samePlacement(task.placement, event.placement) ? task.rolloverCount : 0,
-        archivedAt: null
+        archivedAt: null,
+        folderId: event.placement.kind === "day" ? null : task.folderId
       }));
       return;
     }
