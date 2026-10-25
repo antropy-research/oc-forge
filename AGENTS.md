@@ -1,3 +1,5 @@
+0. Containers里面应该安装了opencode, openchamber, and vs code server.
+
 1. Agents should never change any bytes in `./vendors`, it should be updated by ci.
 
 2. `./extensions` is where we mainly work, and this extension is used to installed on latest Openchamber's release. 这里面的任何插件都不要破坏Openchamber原有的功能。
