@@ -39,7 +39,12 @@ bun install
 bun run check                      # tsc, strict
 bun test tests/                    # including a line of TypeScript in Dark Modern's colors
 bun run build                      # panel/main.js, editor/build/main.{js,css}
+node tests/e2e/run.mjs http://<bind>:35310   # on the host, against the dev container
 ```
+
+The E2E check opens a scratch `.ts` file in the Files view (VS Code's grammar and theme colors), saves an edit
+with Ctrl+S, and opens the project in the VS Code Server from the panel; it removes the file and puts the
+extension's settings back afterwards.
 
 To collect the VS Code data again (after the VS Code pin moves), copy a compiled VS Code's `extensions/`,
 `package.json`, `product.json` and `LICENSE` to a folder and run the collector on it, for example from the dev
