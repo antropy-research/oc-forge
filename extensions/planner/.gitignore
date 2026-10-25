@@ -1,0 +1,2 @@
+# The repository ignores lib/ (build output elsewhere); the panel keeps sources there.
+!panel/lib/

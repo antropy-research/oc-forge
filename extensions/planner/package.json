@@ -1,0 +1,98 @@
+{
+  "name": "@oc-forge/openchamber-planner",
+  "version": "0.10.0",
+  "private": true,
+  "type": "module",
+  "description": "Sunsama-style daily planning inside OpenChamber.",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.4.0"
+    },
+    "contributes": {
+      "panel": {
+        "id": "oc-forge-planner",
+        "name": "Planner",
+        "icon": "calendar-event",
+        "entry": "panel/index.html"
+      },
+      "page": true,
+      "background": {
+        "entry": "panel/index.html"
+      },
+      "statusSection": {
+        "entry": "panel/index.html",
+        "title": "Planner",
+        "height": 76,
+        "requiresProject": false
+      },
+      "actions": [
+        {
+          "id": "add-to-planner",
+          "label": "Add to Planner",
+          "icon": "calendar-event",
+          "where": "message",
+          "mode": "background"
+        },
+        {
+          "id": "track-in-planner",
+          "label": "Track chat in Planner",
+          "icon": "calendar-event",
+          "where": "session",
+          "mode": "background"
+        }
+      ],
+      "commands": [
+        {
+          "name": "task",
+          "description": "Add a task to the Planner: /task title ~30m @tomorrow"
+        },
+        {
+          "name": "today",
+          "description": "Attach today's plan from the Planner"
+        }
+      ],
+      "integration": {
+        "name": "Linear",
+        "description": "Plan your Linear issues and projects in the Planner, across workspaces; completing a task can move its issue to Done.",
+        "host": {
+          "provider": "linear"
+        }
+      },
+      "capabilities": [
+        "sessions",
+        "prompt",
+        "model"
+      ],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {
+          "exec": [
+            "git",
+            "gh"
+          ]
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "tsc -p .",
+    "test": "bun test tests/",
+    "build": "bun run build:panel && bun run build:service",
+    "build:panel": "openchamber-guest-bundle panel/main.tsx panel/main.js",
+    "build:service": "openchamber-guest-bundle --node service/main.ts service/main.js"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "2.4.0",
+    "@types/bun": "^1.4.4",
+    "@types/node": "^26.6.5",
+    "graphql": "16",
+    "playwright-core": "1.63.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "marked": "^18.1.1",
+    "preact": "^11.0.2"
+  }
+}

@@ -1,0 +1,25 @@
+# OpenChamber 2.4.0 + OpenCode 2.0.32 for extension development; see README.md.
+name: oc-forge-openchamber-dev
+
+services:
+  openchamber:
+    build: .
+    image: oc-forge/openchamber-dev:2.4.0
+    container_name: oc-forge-openchamber-dev
+    init: true
+    restart: unless-stopped
+    ports:
+      # Loopback by default; set OC_DEV_BIND in the untracked .env to publish
+      # on another address, such as the host's Tailscale IP.
+      - "${OC_DEV_BIND:-127.0.0.1}:${OC_DEV_PORT:-35310}:3000"
+    env_file:
+      # The UI password and provider API keys live outside the repository.
+      - path: ${HOME}/.local/share/oc-forge-openchamber-dev/secrets.env
+        required: true
+    volumes:
+      - home:/home/node
+      - ../../extensions:/extensions
+
+volumes:
+  home:
+    name: oc-forge-openchamber-dev-home
