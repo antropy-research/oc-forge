@@ -2,6 +2,7 @@
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { commandBody, validateCommand, type Command, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { planRollover } from '../src/domain/rollover.ts';
+import { planInstances } from '../src/domain/recurrence.ts';
 import { touchesTask } from '../src/domain/activity.ts';
 import { todayIn } from '../src/domain/dates.ts';
 import { newId } from '../src/domain/ids.ts';
@@ -28,7 +29,11 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'task.deleted': return `Delete task: ${titleOf(event.taskId)}`;
     case 'task.restored': return `Restore task: ${titleOf(event.taskId)}`;
     case 'task.archived': return `Archive task: ${titleOf(event.taskId)}`;
-    case 'tasks.rolledOver': return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ''}`;
+    case 'tasks.rolledOver': return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ''}${event.superseded?.length ? `, replace ${event.superseded.length} repeats` : ''}`;
+    case 'tasks.recurred': return `Create ${event.instances.length} recurring instances`;
+    case 'series.created': return `Repeat: ${event.series.template.title}`;
+    case 'series.updated': return 'Edit recurring task';
+    case 'series.stopped': return `Stop repeating from ${event.from}`;
     case 'timer.started': return `Start timer: ${titleOf(event.taskId)}`;
     case 'timer.stopped': return 'Stop timer';
     case 'time.logged': return `Log time: ${titleOf(event.entry.taskId)}`;
@@ -87,7 +92,17 @@ export class Planner {
     if (body) this.persist([this.toEvent(body)]);
   }
 
+  /** Create recurring instances from today through the horizon. */
+  ensureRecurrence(): void {
+    const today = this.today();
+    if (!today) return;
+    const instances = planInstances(this.state, today);
+    if (instances.length) this.persist([this.toEvent({ type: 'tasks.recurred', instances })]);
+  }
+
   snapshot(): Snapshot {
+    // Instances first, so rollover can tell an old instance has a newer one today.
+    this.ensureRecurrence();
     this.ensureRollover();
     return {
       state: this.state,

@@ -4,7 +4,7 @@ import { usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 
-export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'archive' | 'settings';
+export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'archive' | 'stats' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -33,13 +33,17 @@ const TimerBar = ({ onRoute }: { onRoute: (route: Route) => void }) => {
   );
 };
 
-export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) => void }) => {
+export const Nav = ({ route, onRoute, onSearch }: { route: Route; onRoute: (route: Route) => void; onSearch: () => void }) => {
   const view = useView();
   const open = tasksForDay(view.state, view.today).filter((task) => !task.completedAt).length;
   const archived = archivedTasks(view.state).length;
   return (
     <nav class="nav" aria-label="Planner">
       <div class="brand">Planner</div>
+      <button class="nav-search" onClick={onSearch} aria-label="Search and commands">
+        <span>Search</span>
+        <kbd>⌘K</kbd>
+      </button>
       <NavItem route="home" current={route} onRoute={onRoute}>Home</NavItem>
       <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>
       <NavItem route="calendar" current={route} onRoute={onRoute}>Calendar</NavItem>
@@ -54,6 +58,7 @@ export const Nav = ({ route, onRoute }: { route: Route; onRoute: (route: Route) 
       <div class="nav-section">Lists</div>
       <NavItem route="backlog" current={route} onRoute={onRoute}>Backlog</NavItem>
       <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>
+      <NavItem route="stats" current={route} onRoute={onRoute}>Stats</NavItem>
       <div class="nav-spacer" />
       <TimerBar onRoute={onRoute} />
       <NavItem route="settings" current={route} onRoute={onRoute}>Settings</NavItem>

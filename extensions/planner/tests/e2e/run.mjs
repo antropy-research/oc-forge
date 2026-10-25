@@ -386,6 +386,62 @@ try {
   check('weekly review wraps up', true);
   await shot('15-weekly-review');
 
+  // Phase 5: recurring tasks, command palette, quick add, shortcuts, stats.
+  await frame.getByRole('button', { name: 'Home', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Home' }).waitFor();
+  await addInToday(`${run} repeat ~10m`);
+  const repeatCard = frame.locator('section.day-column.is-today li.task-card', { hasText: `${run} repeat` });
+  await repeatCard.getByRole('button', { name: new RegExp(`Open ${run} repeat`) }).click();
+  const repeatDialog = frame.getByRole('dialog', { name: 'Task details' });
+  await repeatDialog.locator('section[aria-label="Repeat"] select').selectOption('daily');
+  await repeatDialog.locator('.repeat-rule').waitFor({ timeout: 10_000 });
+  check('a task can repeat every day', (await repeatDialog.locator('.repeat-rule').innerText()).includes('Every day'));
+  await repeatDialog.getByRole('button', { name: 'Close' }).click();
+  const tomorrowColumn = frame.locator('section.day-column', { has: frame.locator('.day-name', { hasText: 'Tomorrow' }) });
+  const tomorrowInstance = tomorrowColumn.locator('li.task-card', { hasText: `${run} repeat` });
+  await tomorrowInstance.waitFor({ timeout: 10_000 });
+  check('tomorrow already shows the next instance, marked as repeating', (await tomorrowInstance.locator('.repeats').count()) === 1);
+  await repeatCard.getByRole('button', { name: new RegExp(`Open ${run} repeat`) }).click();
+  await repeatDialog.getByRole('button', { name: 'Stop repeating' }).click();
+  await repeatDialog.getByRole('button', { name: 'Close' }).click();
+  await tomorrowInstance.waitFor({ state: 'detached', timeout: 10_000 });
+  check('stopping the series removes upcoming instances', true);
+
+  await frame.getByRole('heading', { name: 'Home' }).click();
+  await page.keyboard.press('Control+k');
+  const palette = frame.getByRole('dialog', { name: 'Command palette' });
+  await palette.waitFor({ timeout: 5000 });
+  await palette.getByRole('combobox', { name: 'Search tasks or commands' }).fill(`${run} sort-l`);
+  await palette.getByRole('option', { name: new RegExp(`${run} sort-low`) }).waitFor({ timeout: 5000 });
+  await page.keyboard.press('Enter');
+  await frame.getByRole('dialog', { name: 'Task details' }).waitFor({ timeout: 5000 });
+  check('Ctrl+K finds a task and opens it', (await frame.getByRole('dialog', { name: 'Task details' }).getByRole('textbox', { name: 'Title' }).inputValue()).includes('sort-low'));
+  await frame.getByRole('dialog', { name: 'Task details' }).getByRole('button', { name: 'Close' }).click();
+
+  await frame.getByRole('heading', { name: 'Home' }).click();
+  await page.keyboard.press('a');
+  const quick = frame.getByRole('dialog', { name: 'Add task' });
+  await quick.waitFor({ timeout: 5000 });
+  await quick.getByRole('textbox', { name: 'New task' }).fill(`${run} quick ~5m @tomorrow`);
+  await page.keyboard.press('Enter');
+  await tomorrowColumn.locator('li.task-card', { hasText: `${run} quick` }).waitFor({ timeout: 10_000 });
+  check('A opens Add task and @tomorrow lands it on tomorrow', true);
+
+  const quickCard = tomorrowColumn.locator('li.task-card', { hasText: `${run} quick` });
+  await quickCard.hover();
+  await page.keyboard.press('z');
+  await quickCard.waitFor({ state: 'detached', timeout: 10_000 });
+  check('Z on a hovered card moves it to the backlog', true);
+  await page.keyboard.press('t');
+  await frame.getByRole('heading', { name: 'Today' }).waitFor({ timeout: 5000 });
+  check('T jumps to Today', true);
+
+  await frame.getByRole('button', { name: 'Stats', exact: true }).click();
+  await frame.getByRole('heading', { name: 'Stats' }).waitFor();
+  const completedCount = Number((await frame.locator('.stat-card', { hasText: 'Tasks completed' }).locator('strong').innerText()).trim());
+  check('Stats counts completed tasks', completedCount > 0, `${completedCount} completed`);
+  await shot('16-stats');
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
   const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
@@ -418,6 +474,7 @@ try {
       ...Object.values(state.tasks).filter((task) => /^e2e-/.test(task.title) && !task.deletedAt).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
       ...Object.values(state.calendars).filter((calendar) => /^e2e-/.test(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
       ...Object.values(state.objectives ?? {}).filter((objective) => /^e2e-/.test(objective.title) && !objective.deletedAt).map((objective) => ({ cmd: `cleanup-${objective.id}`, type: 'objective.deleted', objectiveId: objective.id })),
+      ...Object.values(state.series ?? {}).filter((series) => /^e2e-/.test(series.template.title) && !series.stoppedFrom).map((series) => ({ cmd: `cleanup-${series.id}`, type: 'series.stopped', seriesId: series.id, from: '2000-01-01' })),
     ];
     if (commands.length) await call('POST', '/commands', { commands });
     const after = await call('GET', '/state');

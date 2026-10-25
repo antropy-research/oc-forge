@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Objective, type Placement, type Ritual, type RitualRecord, type Settings, type Subtask, type Task, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 
 export interface NewTask {
@@ -14,6 +14,8 @@ export interface NewTask {
   channelId?: string | null;
   objectiveId?: string | null;
   source?: TaskSourceRef | null;
+  subtasks?: Subtask[];
+  recurrence?: { seriesId: string; date: DateKey } | null;
 }
 
 export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'objectiveId', 'subtasks'] as const;
@@ -37,7 +39,11 @@ export type EventBody =
   | { type: 'task.deleted'; taskId: string }
   | { type: 'task.restored'; taskId: string }
   | { type: 'task.archived'; taskId: string }
-  | { type: 'tasks.rolledOver'; date: DateKey; moved: RolledTask[]; archived: string[] }
+  | { type: 'tasks.rolledOver'; date: DateKey; moved: RolledTask[]; archived: string[]; superseded?: string[] }
+  | { type: 'tasks.recurred'; instances: NewTask[] }
+  | { type: 'series.created'; series: Pick<Series, 'id' | 'rule' | 'startDate' | 'template'>; taskId: string }
+  | { type: 'series.updated'; seriesId: string; patch: { rule?: RecurrenceRule; template?: Partial<Series['template']> } }
+  | { type: 'series.stopped'; seriesId: string; from: DateKey }
   | { type: 'timer.started'; taskId: string }
   | { type: 'timer.stopped' }
   | { type: 'time.logged'; entry: { id: string; taskId: string; start: string; end: string } }
@@ -66,7 +72,7 @@ export type Command = EventBody & { cmd: string };
 export type PlannerEvent = EventBody & { v: 1; id: string; at: string; cmd?: string };
 
 /** Event types only the service may write. */
-export const SERVICE_ONLY_TYPES: ReadonlySet<EventType> = new Set(['tasks.rolledOver']);
+export const SERVICE_ONLY_TYPES: ReadonlySet<EventType> = new Set(['tasks.rolledOver', 'tasks.recurred']);
 
 const TITLE_MAX = 500;
 // serviceRequest bodies are capped at 64 000 characters; leave room for JSON escaping.
@@ -145,7 +151,29 @@ export interface CommandContext {
   blocks: Record<string, WorkBlock>;
   calendars: Record<string, CalendarSubscription>;
   objectives: Record<string, Objective>;
+  series: Record<string, Series>;
 }
+
+const isRule = (value: unknown): value is RecurrenceRule => {
+  if (!isRecord(value)) return false;
+  if (!['daily', 'weekly', 'monthly', 'yearly'].includes(value.freq as string)) return false;
+  if (!(Number.isInteger(value.interval) && (value.interval as number) >= 1 && (value.interval as number) <= 365)) return false;
+  if (value.weekdays !== undefined && !(Array.isArray(value.weekdays) && value.weekdays.length <= 7 && value.weekdays.every((day) => Number.isInteger(day) && day >= 0 && day <= 6))) return false;
+  if (value.monthDay !== undefined && !(Number.isInteger(value.monthDay) && (value.monthDay as number) !== 0 && Math.abs(value.monthDay as number) <= 31)) return false;
+  return true;
+};
+
+const validateTemplate = (template: unknown, channels: Record<string, Channel>, partial: boolean): string | null => {
+  if (!isRecord(template)) return 'template must be an object';
+  const has = (key: string) => key in template;
+  if ((has('title') || !partial) && !isTitle(template.title)) return 'title must be 1-500 characters';
+  if ((has('notes') || !partial) && !(typeof template.notes === 'string' && template.notes.length <= NOTES_MAX)) return 'notes are too long';
+  if ((has('plannedMinutes') || !partial) && !isMinutes(template.plannedMinutes)) return 'plannedMinutes is invalid';
+  if ((has('priority') || !partial) && !isPriority(template.priority)) return 'priority is invalid';
+  if ((has('channelId') || !partial) && !(template.channelId === null || (isId(template.channelId) && channels[template.channelId as string]))) return 'unknown channel';
+  if ((has('subtasks') || !partial) && !(Array.isArray(template.subtasks) && template.subtasks.length <= 200 && template.subtasks.every(isTitle))) return 'subtasks are invalid';
+  return null;
+};
 
 const TEXT_MAX = 20_000;
 const RITUAL_FIELDS: Record<Ritual, readonly string[]> = {
@@ -210,6 +238,9 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       if (task.channelId !== undefined && !(task.channelId === null || (isId(task.channelId) && channels[task.channelId as string]))) return 'unknown channel';
       if (task.source !== undefined && !(task.source === null || isSource(task.source))) return 'source is invalid';
       if (task.objectiveId !== undefined && !(task.objectiveId === null || (isId(task.objectiveId) && context.objectives[task.objectiveId as string]))) return 'unknown objective';
+      if (task.subtasks !== undefined && !isSubtasks(task.subtasks)) return 'subtasks are invalid';
+      // Recurrence comes from series.created and the service's instances, never from a client's task.
+      if (task.recurrence !== undefined && task.recurrence !== null) return 'recurrence is set through a series';
       return null;
     }
     case 'task.updated':
@@ -295,6 +326,27 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     }
     case 'objective.deleted':
       return isId(command.objectiveId) && context.objectives[command.objectiveId as string] ? null : 'unknown objective';
+    case 'series.created': {
+      const series = command.series;
+      if (!isRecord(series) || !isId(series.id)) return 'series needs an id';
+      if (context.series[series.id as string]) return 'series id already exists';
+      if (!isRule(series.rule)) return 'rule is invalid';
+      if (!isDateKey(series.startDate)) return 'startDate must be a date';
+      if (!(isId(command.taskId) && tasks[command.taskId as string])) return 'unknown task';
+      if (tasks[command.taskId as string]!.recurrence) return 'task already repeats';
+      return validateTemplate(series.template, channels, false);
+    }
+    case 'series.updated': {
+      if (!(isId(command.seriesId) && context.series[command.seriesId as string])) return 'unknown series';
+      const patch = command.patch;
+      if (!isRecord(patch)) return 'patch must be an object';
+      if (patch.rule !== undefined && !isRule(patch.rule)) return 'rule is invalid';
+      if (patch.template !== undefined) return validateTemplate(patch.template, channels, true);
+      return Object.keys(patch).every((key) => key === 'rule' || key === 'template') ? null : 'unknown field';
+    }
+    case 'series.stopped':
+      if (!(isId(command.seriesId) && context.series[command.seriesId as string])) return 'unknown series';
+      return isDateKey(command.from) ? null : 'from must be a date';
     case 'ritual.saved':
       if (!(RITUALS as readonly string[]).includes(command.ritual as string)) return 'unknown ritual';
       if (!isDateKey(command.date)) return 'date must be a date';

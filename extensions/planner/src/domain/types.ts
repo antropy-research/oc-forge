@@ -70,6 +70,8 @@ export interface Task {
   objectiveId: string | null;
   subtasks: Subtask[];
   source: TaskSourceRef | null;
+  /** Set on an instance of a recurring task. */
+  recurrence: { seriesId: string; date: DateKey } | null;
 }
 
 /** Actual time spent on a task; a timer run or a manual entry. */
@@ -137,6 +139,34 @@ export interface RitualRecord {
   journal?: string;
 }
 
+/** When a recurring task comes back. */
+export interface RecurrenceRule {
+  freq: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  /** Every n days, weeks, months or years. */
+  interval: number;
+  /** Weekly: which weekdays (0 = Sunday). Daily with [1..5] means weekdays. */
+  weekdays?: number[];
+  /** Monthly: the day of the month (negative counts from the end). */
+  monthDay?: number;
+}
+
+/** A recurring task: the template every instance starts from. */
+export interface Series {
+  id: string;
+  rule: RecurrenceRule;
+  startDate: DateKey;
+  stoppedFrom: DateKey | null;
+  template: {
+    title: string;
+    notes: string;
+    plannedMinutes: number | null;
+    priority: Priority | null;
+    channelId: string | null;
+    subtasks: string[];
+  };
+  createdAt: string;
+}
+
 /** A read-only calendar the service fetches (an ICS feed or file). */
 export interface CalendarSubscription {
   id: string;
@@ -174,6 +204,7 @@ export interface PlannerState {
   objectives: Record<string, Objective>;
   /** Keyed `${ritual}:${date}`. */
   rituals: Record<string, RitualRecord>;
+  series: Record<string, Series>;
   settings: Settings;
 }
 
@@ -199,5 +230,6 @@ export const emptyState = (): PlannerState => ({
   calendars: {},
   objectives: {},
   rituals: {},
+  series: {},
   settings: { ...DEFAULT_SETTINGS },
 });

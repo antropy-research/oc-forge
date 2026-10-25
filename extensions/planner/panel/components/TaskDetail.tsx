@@ -11,6 +11,7 @@ import { objectivesForWeek, weekStartOf } from '../../src/domain/rituals.ts';
 import { useUi } from '../lib/ui.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
+import { RepeatSection } from './RepeatSection.tsx';
 
 const PRIORITIES: { id: Priority; label: string }[] = [
   { id: 'urgent', label: 'Urgent' },
@@ -307,6 +308,7 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
           }}
         />
         <Subtasks task={task} />
+        <RepeatSection task={task} />
         <ActualTime task={task} />
         <Activity task={task} />
       </div>

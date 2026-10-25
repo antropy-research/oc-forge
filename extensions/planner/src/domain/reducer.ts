@@ -1,6 +1,6 @@
 // Fold events into state. Pure apart from mutating the batch-local copy it creates.
 import { emptyState, ritualKey, type PlannerState, type Task } from './types.ts';
-import type { PlannerEvent } from './events.ts';
+import type { NewTask, PlannerEvent } from './events.ts';
 import { daysBetween, zonedDateMinutes } from './dates.ts';
 import { samePlacement } from './selectors.ts';
 
@@ -53,35 +53,38 @@ const stopTimerFor = (state: PlannerState, taskId: string, event: PlannerEvent):
   if (state.timer?.taskId === taskId) stopTimer(state, event.at, event.id);
 };
 
+const createTask = (state: PlannerState, input: NewTask, at: string): void => {
+  if (state.tasks[input.id]) return;
+  state.tasks[input.id] = {
+    id: input.id,
+    title: input.title.trim(),
+    notes: input.notes ?? '',
+    plannedMinutes: input.plannedMinutes ?? null,
+    priority: input.priority ?? null,
+    dueDate: input.dueDate ?? null,
+    placement: input.placement,
+    position: input.position,
+    completedAt: null,
+    completedOn: null,
+    rolloverCount: 0,
+    archivedAt: null,
+    deletedAt: null,
+    createdAt: at,
+    updatedAt: at,
+    channelId: input.channelId ?? null,
+    objectiveId: input.objectiveId ?? null,
+    subtasks: input.subtasks ?? [],
+    source: input.source ?? null,
+    recurrence: input.recurrence ?? null,
+  };
+};
+
 const applyInto = (state: PlannerState, event: PlannerEvent): void => {
   state.version += 1;
   switch (event.type) {
-    case 'task.created': {
-      const input = event.task;
-      if (state.tasks[input.id]) return;
-      state.tasks[input.id] = {
-        id: input.id,
-        title: input.title.trim(),
-        notes: input.notes ?? '',
-        plannedMinutes: input.plannedMinutes ?? null,
-        priority: input.priority ?? null,
-        dueDate: input.dueDate ?? null,
-        placement: input.placement,
-        position: input.position,
-        completedAt: null,
-        completedOn: null,
-        rolloverCount: 0,
-        archivedAt: null,
-        deletedAt: null,
-        createdAt: event.at,
-        updatedAt: event.at,
-        channelId: input.channelId ?? null,
-        objectiveId: input.objectiveId ?? null,
-        subtasks: [],
-        source: input.source ?? null,
-      };
+    case 'task.created':
+      createTask(state, event.task, event.at);
       return;
-    }
     case 'task.updated':
       touch(state, event.taskId, event.at, (task) => ({
         ...task,
@@ -217,7 +220,30 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       for (const taskId of event.archived) {
         touch(state, taskId, event.at, (task) => ({ ...task, archivedAt: event.at }));
       }
+      // An untouched recurring instance gives way to the series' newer one.
+      for (const taskId of event.superseded ?? []) {
+        touch(state, taskId, event.at, (task) => ({ ...task, deletedAt: event.at }));
+      }
       return;
+    case 'tasks.recurred':
+      for (const instance of event.instances) createTask(state, instance, event.at);
+      return;
+    case 'series.created':
+      if (state.series[event.series.id] || !state.tasks[event.taskId]) return;
+      state.series[event.series.id] = { ...event.series, stoppedFrom: null, createdAt: event.at };
+      touch(state, event.taskId, event.at, (task) => ({ ...task, recurrence: { seriesId: event.series.id, date: event.series.startDate } }));
+      return;
+    case 'series.updated': {
+      const series = state.series[event.seriesId];
+      if (!series) return;
+      state.series[event.seriesId] = { ...series, ...(event.patch.rule ? { rule: event.patch.rule } : {}), template: { ...series.template, ...event.patch.template } };
+      return;
+    }
+    case 'series.stopped': {
+      const series = state.series[event.seriesId];
+      if (series) state.series[event.seriesId] = { ...series, stoppedFrom: event.from };
+      return;
+    }
     case 'channel.created': {
       if (state.channels[event.channel.id]) return;
       state.channels[event.channel.id] = { ...event.channel, createdAt: event.at, deletedAt: null };
@@ -256,6 +282,7 @@ export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]
     calendars: { ...state.calendars },
     objectives: { ...state.objectives },
     rituals: { ...state.rituals },
+    series: { ...state.series },
     settings: { ...state.settings },
   };
   for (const event of events) applyInto(next, event);

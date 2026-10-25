@@ -15,6 +15,11 @@ import { Nav, ServiceGate, Toasts, type Route } from './Shell.tsx';
 import { StatusSection } from './StatusSection.tsx';
 import { TaskDetail } from './TaskDetail.tsx';
 import { CompactToday, TodayView } from './TodayView.tsx';
+import { StatsView } from './StatsView.tsx';
+import { CommandPalette, QuickAddModal } from './CommandPalette.tsx';
+import { hoveredTask } from '../lib/hover.ts';
+import { moveTo } from '../lib/commands.ts';
+import { autoTimebox } from '../lib/autoSchedule.ts';
 
 export const App = ({ surface }: { surface: string }) => {
   const { client, host } = usePlanner();
@@ -22,10 +27,53 @@ export const App = ({ surface }: { surface: string }) => {
   const [route, setRoute] = useState<Route>('home');
   const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
+  const [overlay, setOverlay] = useState<'palette' | 'quickadd' | null>(null);
 
   useEffect(() => {
     void client.load();
   }, [client]);
+
+  // Sunsama's keyboard shortcuts, on the full page only and never while typing.
+  useEffect(() => {
+    if (surface !== 'page') return;
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typing = Boolean(target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable));
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setOverlay('palette');
+        return;
+      }
+      if (typing || overlay || ui.openTaskId || event.metaKey || event.ctrlKey || event.altKey) return;
+      const state = client.getView().state;
+      const hovered = hoveredTask();
+      const task = hovered ? state.tasks[hovered] : undefined;
+      switch (event.key.toLowerCase()) {
+        case 'a': setOverlay('quickadd'); break;
+        case 't': setRoute('today'); break;
+        case 'f': setRoute('focus'); break;
+        case 'p': setRoute('planning'); break;
+        case 'o': setRoute('shutdown'); break;
+        case 'c':
+          if (route === 'focus' || !task) return;
+          void client.dispatch([task.completedAt ? { type: 'task.reopened', taskId: task.id } : { type: 'task.completed', taskId: task.id, on: client.getView().today }]);
+          break;
+        case 'z':
+          if (!task || task.placement.kind === 'backlog') return;
+          void client.dispatch([moveTo(state, task.id, { kind: 'backlog', bucket: 'next-weeks' }, 'top')], { undo: 'Moved to backlog' });
+          break;
+        case 'x':
+          if (!task || task.completedAt) return;
+          void autoTimebox(client, state, client.getView().today, task, task.placement.kind === 'day' ? task.placement.date : client.getView().today).then((problem) => problem && client.notify(problem));
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  });
 
   if (!view.loaded) return surface === 'status' ? null : <ServiceGate />;
   if (surface === 'status') {
@@ -41,7 +89,7 @@ export const App = ({ surface }: { surface: string }) => {
         <CompactToday />
       ) : (
         <div class="app">
-          <Nav route={route} onRoute={setRoute} />
+          <Nav route={route} onRoute={setRoute} onSearch={() => setOverlay('palette')} />
           <main class="main">
             {route === 'home' && <Board />}
             {route === 'today' && <TodayView />}
@@ -54,11 +102,14 @@ export const App = ({ surface }: { surface: string }) => {
             {route === 'weeklyReview' && <WeeklyReview />}
             {route === 'backlog' && <Backlog />}
             {route === 'archive' && <ArchiveView />}
+            {route === 'stats' && <StatsView />}
             {route === 'settings' && <Settings />}
           </main>
         </div>
       )}
       {ui.openTaskId && <TaskDetail key={ui.openTaskId} taskId={ui.openTaskId} />}
+      {overlay === 'palette' && <CommandPalette onClose={() => setOverlay(null)} onRoute={setRoute} onAddTask={() => setOverlay('quickadd')} />}
+      {overlay === 'quickadd' && <QuickAddModal onClose={() => setOverlay(null)} />}
       <Toasts />
     </UiContext.Provider>
   );

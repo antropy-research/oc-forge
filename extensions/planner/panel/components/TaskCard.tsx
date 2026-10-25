@@ -8,6 +8,7 @@ import { moveTo } from '../lib/commands.ts';
 import { actualMinutes, blocksFor } from '../../src/domain/selectors.ts';
 import { clockLabel, zonedDateMinutes } from '../../src/domain/dates.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
+import { setHoveredTask } from '../lib/hover.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { useUi } from '../lib/ui.ts';
@@ -111,7 +112,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
   const dayKey = task.placement.kind === 'day' ? task.placement.date : null;
   const timebox = dayKey ? blocksFor(view.state, task.id).find((block) => zonedDateMinutes(block.start, zone).date === dayKey) : undefined;
   const objective = task.objectiveId ? view.state.objectives[task.objectiveId] : null;
-  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox || objective;
+  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox || objective || task.recurrence;
 
   const toggle = () =>
     void client.dispatch([done ? { type: 'task.reopened', taskId: task.id } : { type: 'task.completed', taskId: task.id, on: view.today }]);
@@ -121,6 +122,8 @@ export const TaskCard = ({ task }: { task: Task }) => {
       data-task={task.id}
       class={`task-card${done ? ' is-done' : ''}${menuOpen ? ' has-menu' : ''}${running ? ' is-running' : ''}`}
       draggable={!editingTime}
+      onMouseEnter={() => setHoveredTask(task.id)}
+      onMouseLeave={() => setHoveredTask(null)}
       onDragStart={(event) => {
         event.dataTransfer?.setData(DRAG_TYPE, task.id);
         if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
@@ -140,6 +143,7 @@ export const TaskCard = ({ task }: { task: Task }) => {
             {due && <span class={`due${dueClass}`}>Due {due === view.today ? 'today' : monthDay(due)}</span>}
             {task.subtasks.length > 0 && <span class="subtask-count" title="Subtasks">☑ {subtasksDone}/{task.subtasks.length}</span>}
             {task.notes && <span class="has-notes" title="Has notes">≡</span>}
+            {task.recurrence && <span class="repeats" title="Repeats">⟳</span>}
             {task.rolloverCount > 0 && <span class="rollover" title={`Rolled over ${task.rolloverCount} day${task.rolloverCount === 1 ? '' : 's'}`}>↻ {task.rolloverCount}</span>}
           </span>
         )}

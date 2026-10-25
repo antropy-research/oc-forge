@@ -38,6 +38,7 @@ var emptyState = () => ({
   calendars: {},
   objectives: {},
   rituals: {},
+  series: {},
   settings: { ...DEFAULT_SETTINGS }
 });
 
@@ -115,12 +116,43 @@ var instantAt = (date, minutes, timeZone) => {
 };
 
 // src/domain/selectors.ts
+var POSITION_STEP = 1024;
 var isLive = (task) => !task.deletedAt && !task.archivedAt;
 var byPosition = (a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt);
 var samePlacement = (a, b) => a.kind === "day" ? b.kind === "day" && a.date === b.date : b.kind === "backlog" && a.bucket === b.bucket;
 var tasksIn = (state, placement) => Object.values(state.tasks).filter((task) => isLive(task) && samePlacement(task.placement, placement)).sort(byPosition);
 var tasksForDay = (state, date) => tasksIn(state, { kind: "day", date });
 var entryIndex = new WeakMap;
+var entriesByTask = (state) => {
+  let index = entryIndex.get(state.entries);
+  if (!index) {
+    index = new Map;
+    for (const entry of Object.values(state.entries)) {
+      const list = index.get(entry.taskId) ?? [];
+      list.push(entry);
+      index.set(entry.taskId, list);
+    }
+    for (const list of index.values())
+      list.sort((a, b) => a.start.localeCompare(b.start));
+    entryIndex.set(state.entries, index);
+  }
+  return index;
+};
+var entriesFor = (state, taskId) => entriesByTask(state).get(taskId) ?? [];
+var trackedMinutes = (state, taskId, now) => {
+  let ms = 0;
+  for (const entry of entriesFor(state, taskId))
+    ms += Date.parse(entry.end) - Date.parse(entry.start);
+  if (now !== undefined && state.timer?.taskId === taskId)
+    ms += Math.max(0, now - Date.parse(state.timer.startedAt));
+  return ms / 60000;
+};
+var edgePosition = (state, placement, edge) => {
+  const list = tasksIn(state, placement);
+  if (list.length === 0)
+    return POSITION_STEP;
+  return edge === "top" ? list[0].position - POSITION_STEP : list[list.length - 1].position + POSITION_STEP;
+};
 
 // src/domain/reducer.ts
 var zoneOf = (state) => state.settings.timezone ?? "UTC";
@@ -165,36 +197,38 @@ var stopTimerFor = (state, taskId, event) => {
   if (state.timer?.taskId === taskId)
     stopTimer(state, event.at, event.id);
 };
+var createTask = (state, input, at) => {
+  if (state.tasks[input.id])
+    return;
+  state.tasks[input.id] = {
+    id: input.id,
+    title: input.title.trim(),
+    notes: input.notes ?? "",
+    plannedMinutes: input.plannedMinutes ?? null,
+    priority: input.priority ?? null,
+    dueDate: input.dueDate ?? null,
+    placement: input.placement,
+    position: input.position,
+    completedAt: null,
+    completedOn: null,
+    rolloverCount: 0,
+    archivedAt: null,
+    deletedAt: null,
+    createdAt: at,
+    updatedAt: at,
+    channelId: input.channelId ?? null,
+    objectiveId: input.objectiveId ?? null,
+    subtasks: input.subtasks ?? [],
+    source: input.source ?? null,
+    recurrence: input.recurrence ?? null
+  };
+};
 var applyInto = (state, event) => {
   state.version += 1;
   switch (event.type) {
-    case "task.created": {
-      const input = event.task;
-      if (state.tasks[input.id])
-        return;
-      state.tasks[input.id] = {
-        id: input.id,
-        title: input.title.trim(),
-        notes: input.notes ?? "",
-        plannedMinutes: input.plannedMinutes ?? null,
-        priority: input.priority ?? null,
-        dueDate: input.dueDate ?? null,
-        placement: input.placement,
-        position: input.position,
-        completedAt: null,
-        completedOn: null,
-        rolloverCount: 0,
-        archivedAt: null,
-        deletedAt: null,
-        createdAt: event.at,
-        updatedAt: event.at,
-        channelId: input.channelId ?? null,
-        objectiveId: input.objectiveId ?? null,
-        subtasks: [],
-        source: input.source ?? null
-      };
+    case "task.created":
+      createTask(state, event.task, event.at);
       return;
-    }
     case "task.updated":
       touch(state, event.taskId, event.at, (task) => ({
         ...task,
@@ -335,7 +369,33 @@ var applyInto = (state, event) => {
       for (const taskId of event.archived) {
         touch(state, taskId, event.at, (task) => ({ ...task, archivedAt: event.at }));
       }
+      for (const taskId of event.superseded ?? []) {
+        touch(state, taskId, event.at, (task) => ({ ...task, deletedAt: event.at }));
+      }
       return;
+    case "tasks.recurred":
+      for (const instance of event.instances)
+        createTask(state, instance, event.at);
+      return;
+    case "series.created":
+      if (state.series[event.series.id] || !state.tasks[event.taskId])
+        return;
+      state.series[event.series.id] = { ...event.series, stoppedFrom: null, createdAt: event.at };
+      touch(state, event.taskId, event.at, (task) => ({ ...task, recurrence: { seriesId: event.series.id, date: event.series.startDate } }));
+      return;
+    case "series.updated": {
+      const series = state.series[event.seriesId];
+      if (!series)
+        return;
+      state.series[event.seriesId] = { ...series, ...event.patch.rule ? { rule: event.patch.rule } : {}, template: { ...series.template, ...event.patch.template } };
+      return;
+    }
+    case "series.stopped": {
+      const series = state.series[event.seriesId];
+      if (series)
+        state.series[event.seriesId] = { ...series, stoppedFrom: event.from };
+      return;
+    }
     case "channel.created": {
       if (state.channels[event.channel.id])
         return;
@@ -376,6 +436,7 @@ var applyEvents = (state, events) => {
     calendars: { ...state.calendars },
     objectives: { ...state.objectives },
     rituals: { ...state.rituals },
+    series: { ...state.series },
     settings: { ...state.settings }
   };
   for (const event of events)
@@ -548,7 +609,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
 
 // src/domain/events.ts
 var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "objectiveId", "subtasks"];
-var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver"]);
+var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver", "tasks.recurred"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
 var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -632,6 +693,37 @@ var validateSettingsPatch = (patch) => {
   }
   return null;
 };
+var isRule = (value) => {
+  if (!isRecord(value))
+    return false;
+  if (!["daily", "weekly", "monthly", "yearly"].includes(value.freq))
+    return false;
+  if (!(Number.isInteger(value.interval) && value.interval >= 1 && value.interval <= 365))
+    return false;
+  if (value.weekdays !== undefined && !(Array.isArray(value.weekdays) && value.weekdays.length <= 7 && value.weekdays.every((day) => Number.isInteger(day) && day >= 0 && day <= 6)))
+    return false;
+  if (value.monthDay !== undefined && !(Number.isInteger(value.monthDay) && value.monthDay !== 0 && Math.abs(value.monthDay) <= 31))
+    return false;
+  return true;
+};
+var validateTemplate = (template, channels, partial) => {
+  if (!isRecord(template))
+    return "template must be an object";
+  const has = (key) => (key in template);
+  if ((has("title") || !partial) && !isTitle(template.title))
+    return "title must be 1-500 characters";
+  if ((has("notes") || !partial) && !(typeof template.notes === "string" && template.notes.length <= NOTES_MAX))
+    return "notes are too long";
+  if ((has("plannedMinutes") || !partial) && !isMinutes(template.plannedMinutes))
+    return "plannedMinutes is invalid";
+  if ((has("priority") || !partial) && !isPriority(template.priority))
+    return "priority is invalid";
+  if ((has("channelId") || !partial) && !(template.channelId === null || isId(template.channelId) && channels[template.channelId]))
+    return "unknown channel";
+  if ((has("subtasks") || !partial) && !(Array.isArray(template.subtasks) && template.subtasks.length <= 200 && template.subtasks.every(isTitle)))
+    return "subtasks are invalid";
+  return null;
+};
 var TEXT_MAX = 20000;
 var RITUAL_FIELDS = {
   planning: ["completedAt", "obstacles", "shutdownTime"],
@@ -711,6 +803,10 @@ var validateCommand = (command, context) => {
         return "source is invalid";
       if (task.objectiveId !== undefined && !(task.objectiveId === null || isId(task.objectiveId) && context.objectives[task.objectiveId]))
         return "unknown objective";
+      if (task.subtasks !== undefined && !isSubtasks(task.subtasks))
+        return "subtasks are invalid";
+      if (task.recurrence !== undefined && task.recurrence !== null)
+        return "recurrence is set through a series";
       return null;
     }
     case "task.updated":
@@ -825,6 +921,38 @@ var validateCommand = (command, context) => {
     }
     case "objective.deleted":
       return isId(command.objectiveId) && context.objectives[command.objectiveId] ? null : "unknown objective";
+    case "series.created": {
+      const series = command.series;
+      if (!isRecord(series) || !isId(series.id))
+        return "series needs an id";
+      if (context.series[series.id])
+        return "series id already exists";
+      if (!isRule(series.rule))
+        return "rule is invalid";
+      if (!isDateKey(series.startDate))
+        return "startDate must be a date";
+      if (!(isId(command.taskId) && tasks[command.taskId]))
+        return "unknown task";
+      if (tasks[command.taskId].recurrence)
+        return "task already repeats";
+      return validateTemplate(series.template, channels, false);
+    }
+    case "series.updated": {
+      if (!(isId(command.seriesId) && context.series[command.seriesId]))
+        return "unknown series";
+      const patch = command.patch;
+      if (!isRecord(patch))
+        return "patch must be an object";
+      if (patch.rule !== undefined && !isRule(patch.rule))
+        return "rule is invalid";
+      if (patch.template !== undefined)
+        return validateTemplate(patch.template, channels, true);
+      return Object.keys(patch).every((key) => key === "rule" || key === "template") ? null : "unknown field";
+    }
+    case "series.stopped":
+      if (!(isId(command.seriesId) && context.series[command.seriesId]))
+        return "unknown series";
+      return isDateKey(command.from) ? null : "from must be a date";
     case "ritual.saved":
       if (!RITUALS.includes(command.ritual))
         return "unknown ritual";
@@ -858,6 +986,72 @@ var commandBody = (command) => {
   return body;
 };
 
+// src/domain/recurrence.ts
+var RECURRENCE_HORIZON_DAYS = 7;
+var parts = (date) => date.split("-").map(Number);
+var daysInMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+var occursOn = (rule, startDate, date) => {
+  if (date < startDate)
+    return false;
+  const interval = Math.max(1, rule.interval || 1);
+  switch (rule.freq) {
+    case "daily":
+      return daysBetween(startDate, date) % interval === 0 && (!rule.weekdays?.length || rule.weekdays.includes(weekday(date)));
+    case "weekly": {
+      const days = rule.weekdays?.length ? rule.weekdays : [weekday(startDate)];
+      const weeks = Math.round(daysBetween(startOfWeek(startDate, 1), startOfWeek(date, 1)) / 7);
+      return weeks % interval === 0 && days.includes(weekday(date));
+    }
+    case "monthly": {
+      const [sy, sm, sd] = parts(startDate);
+      const [y, m, d] = parts(date);
+      if (((y - sy) * 12 + (m - sm)) % interval !== 0)
+        return false;
+      const total = daysInMonth(y, m);
+      const wanted = rule.monthDay ?? sd;
+      const target = wanted < 0 ? total + wanted + 1 : Math.min(wanted, total);
+      return d === target;
+    }
+    case "yearly": {
+      const [sy, sm, sd] = parts(startDate);
+      const [y, m, d] = parts(date);
+      return (y - sy) % interval === 0 && m === sm && d === Math.min(sd, daysInMonth(y, m));
+    }
+  }
+};
+var instanceId = (seriesId, date) => `r-${seriesId}-${date.replaceAll("-", "")}`.slice(0, 64);
+var planInstances = (state, today, horizon = RECURRENCE_HORIZON_DAYS) => {
+  const existing = new Set(Object.values(state.tasks).filter((task) => task.recurrence).map((task) => `${task.recurrence.seriesId}|${task.recurrence.date}`));
+  const out = [];
+  const offsets = new Map;
+  for (const series of Object.values(state.series)) {
+    const first = series.startDate > today ? series.startDate : today;
+    for (let date = first;date <= addDays(today, horizon); date = addDays(date, 1)) {
+      if (series.stoppedFrom && date >= series.stoppedFrom)
+        break;
+      if (!occursOn(series.rule, series.startDate, date) || existing.has(`${series.id}|${date}`))
+        continue;
+      const offset = (offsets.get(date) ?? 0) + 1;
+      offsets.set(date, offset);
+      out.push(instanceFrom(series, date, edgePosition(state, { kind: "day", date }, "bottom") + (offset - 1) * 1024));
+    }
+  }
+  return out;
+};
+var instanceFrom = (series, date, position) => ({
+  id: instanceId(series.id, date),
+  title: series.template.title,
+  notes: series.template.notes,
+  plannedMinutes: series.template.plannedMinutes,
+  priority: series.template.priority,
+  channelId: series.template.channelId,
+  placement: { kind: "day", date },
+  position,
+  subtasks: series.template.subtasks.map((title, index) => ({ id: `${instanceId(series.id, date)}-s${index}`, title, done: false })),
+  recurrence: { seriesId: series.id, date }
+});
+var isUntouchedInstance = (task, series) => task.title === series.template.title && task.notes === series.template.notes && !task.subtasks.some((subtask) => subtask.done);
+
 // src/domain/rollover.ts
 var planRollover = (state, today) => {
   const stale = Object.values(state.tasks).filter((task) => !task.deletedAt && !task.archivedAt && !task.completedAt && task.placement.kind === "day" && task.placement.date < today).sort((a, b) => dayOf(a).localeCompare(dayOf(b)) || a.position - b.position);
@@ -865,8 +1059,15 @@ var planRollover = (state, today) => {
     return null;
   const threshold = state.settings.archiveAfterRollovers;
   const archived = [];
+  const superseded = [];
   const carried = [];
+  const seriesToday = new Set(Object.values(state.tasks).filter((task) => task.recurrence && !task.deletedAt && task.placement.kind === "day" && task.placement.date === today).map((task) => task.recurrence.seriesId));
   for (const task of stale) {
+    const series = task.recurrence ? state.series[task.recurrence.seriesId] : undefined;
+    if (series && seriesToday.has(series.id) && isUntouchedInstance(task, series) && trackedMinutes(state, task.id) === 0) {
+      superseded.push(task.id);
+      continue;
+    }
     const count = task.rolloverCount + Math.max(1, daysBetween(dayOf(task), today));
     if (threshold !== null && count >= threshold)
       archived.push(task.id);
@@ -879,7 +1080,7 @@ var planRollover = (state, today) => {
     from: dayOf(task),
     position: first === undefined ? (index + 1) * 1024 : first - (carried.length - index) * 1024
   }));
-  return { type: "tasks.rolledOver", date: today, moved, archived };
+  return { type: "tasks.rolledOver", date: today, moved, archived, ...superseded.length ? { superseded } : {} };
 };
 var dayOf = (task) => task.placement.kind === "day" ? task.placement.date : "";
 
@@ -926,7 +1127,15 @@ var summarize = (events, titleOf) => {
     case "task.archived":
       return `Archive task: ${titleOf(event.taskId)}`;
     case "tasks.rolledOver":
-      return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ""}`;
+      return `Roll over ${event.moved.length} tasks to ${event.date}${event.archived.length ? `, archive ${event.archived.length}` : ""}${event.superseded?.length ? `, replace ${event.superseded.length} repeats` : ""}`;
+    case "tasks.recurred":
+      return `Create ${event.instances.length} recurring instances`;
+    case "series.created":
+      return `Repeat: ${event.series.template.title}`;
+    case "series.updated":
+      return "Edit recurring task";
+    case "series.stopped":
+      return `Stop repeating from ${event.from}`;
     case "timer.started":
       return `Start timer: ${titleOf(event.taskId)}`;
     case "timer.stopped":
@@ -1003,7 +1212,16 @@ class Planner {
     if (body)
       this.persist([this.toEvent(body)]);
   }
+  ensureRecurrence() {
+    const today = this.today();
+    if (!today)
+      return;
+    const instances = planInstances(this.state, today);
+    if (instances.length)
+      this.persist([this.toEvent({ type: "tasks.recurred", instances })]);
+  }
   snapshot() {
+    this.ensureRecurrence();
     this.ensureRollover();
     return {
       state: this.state,
@@ -1244,10 +1462,10 @@ var parseIcs = (text) => {
 var icsInstant = (time, userZone) => Date.parse(instantAt(time.date, time.allDay ? 0 : time.minutes, time.allDay ? userZone : time.zone ?? userZone));
 var WEEKDAY_CODES = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
 var MAX_OCCURRENCES = 5000;
-var daysInMonth = (year, month) => new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+var daysInMonth2 = (year, month) => new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
 var keyOf = (year, month, day) => `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 var nthWeekdayOfMonth = (year, month, day, n) => {
-  const total = daysInMonth(year, month);
+  const total = daysInMonth2(year, month);
   const matches = [];
   for (let d = 1;d <= total; d++)
     if (new Date(Date.UTC(year, month, d)).getUTCDay() === day)
@@ -1309,14 +1527,14 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
               if (date)
                 candidates.push(date);
             } else {
-              for (let d = 1;d <= daysInMonth(year, month); d++)
+              for (let d = 1;d <= daysInMonth2(year, month); d++)
                 if (new Date(Date.UTC(year, month, d)).getUTCDay() === day)
                   candidates.push(keyOf(year, month, d));
             }
           }
         } else {
           for (const value of monthDays.length ? monthDays : [startDay]) {
-            const total = daysInMonth(year, month);
+            const total = daysInMonth2(year, month);
             const day = value < 0 ? total + value + 1 : value;
             if (day >= 1 && day <= total)
               candidates.push(keyOf(year, month, day));
@@ -1332,7 +1550,7 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
     case "YEARLY":
       for (let year = startYear, guard = 0;!done && guard < MAX_OCCURRENCES; year += interval, guard++) {
         const month = startMonth - 1;
-        if (startDay <= daysInMonth(year, month))
+        if (startDay <= daysInMonth2(year, month))
           take(keyOf(year, month, startDay));
         if (keyOf(year, 0, 1) > lastDate)
           done = true;
