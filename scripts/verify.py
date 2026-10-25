@@ -14,7 +14,11 @@ def main() -> None:
         path = root / "vendors" / name
         def git(*args: str) -> str:
             return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
-        if git("rev-parse", "HEAD") != pin["commit"] or git("rev-parse", f"refs/tags/{pin['release']}^{{commit}}") != pin["commit"]:
+        tag = f"refs/tags/{pin['release']}"
+        # CI checks submodules out shallow and without tags; fetch just the pinned one.
+        if subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}"], capture_output=True).returncode != 0:
+            git("fetch", "--quiet", "--depth=1", "origin", f"+{tag}:{tag}")
+        if git("rev-parse", "HEAD") != pin["commit"] or git("rev-parse", f"{tag}^{{commit}}") != pin["commit"]:
             raise SystemExit(f"{name}: HEAD/tag differs from vendors.json")
         if git("status", "--porcelain"):
             raise SystemExit(f"{name}: vendor checkout must stay pristine")
