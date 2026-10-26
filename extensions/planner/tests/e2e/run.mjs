@@ -91,6 +91,11 @@ const cleanUp = async (final) => {
 // A crashed earlier run may have left test data behind; start from a clean planner.
 await cleanUp(false);
 
+// OpenChamber's own Linear connection may be signed in to a real workspace in the dev container. Until the
+// journey's fake Linear takes over (later routes win), the Planner sees no connection and reaches no Linear.
+await context.route((url) => new URL(url).pathname === '/api/guests/oc-forge-planner/oauth/status', (route) => route.fulfill({ json: { connected: false, account: null, hasClient: true, settings: {}, redirectUri: '' } }));
+await context.route((url) => new URL(url).pathname === '/api/guests/oc-forge-planner/request', (route) => route.fulfill({ json: { status: 401, body: JSON.stringify({ errors: [{ message: 'Linear is not connected in this journey yet' }] }) } }));
+
 const page = await context.newPage();
 // OpenChamber's own toasts (an OpenCode update offer) can cover the Planner's buttons.
 await page.addLocatorHandler(page.getByText('OpenCode update'), async () => {
@@ -100,8 +105,10 @@ const problems = [];
 page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
 page.on('console', (message) => {
   const url = message.location().url ?? '';
+  // The Planner's own frames and routes only: OpenChamber's requests for the demo projects say "planner" too.
   // A failed generate is the dev container having no model, not a Planner error.
-  if (message.type() === 'error' && /oc-forge-planner|planner/i.test(url) && !url.includes('/generate')) problems.push(`console: ${message.text()}`);
+  const planners = /\/api\/guests\/oc-forge-planner\//.test(url) || /\/api\/guest-files\/[^/]+\/panel\/(main\.js|index\.html)/.test(url);
+  if (message.type() === 'error' && planners && !url.includes('/generate')) problems.push(`console: ${message.text()} (${url.replace(/guest-files\/[^/]+/, 'guest-files/…')})`);
 });
 
 const openPlanner = async () => {
@@ -518,7 +525,7 @@ try {
   check('Stats counts completed tasks', completedCount > 0, `${completedCount} completed`);
   await shot('16-stats');
 
-  // Phase 6: Linear. First the real state of the dev container (not connected)…
+  // Phase 6: Linear. First without a Linear connection (OpenChamber's own is hidden from the journey)…
   const nav = (name) => frame.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name, exact: true });
   await nav('Linear').click();
   await frame.getByRole('heading', { name: 'Linear' }).waitFor();
@@ -1280,7 +1287,8 @@ try {
   // Phase 8b: GitHub source state, Ask Planner, and git sync with another machine.
   await nav('GitHub').click();
   const ghState = (await frame.locator('.view-scroll').innerText({ timeout: 10_000 })).replace(/\s+/g, ' ');
-  check('GitHub says plainly when the gh CLI is missing', /GitHub CLI \(gh\) is not installed|Signed in as/.test(ghState + (await frame.locator('.view-sub').first().innerText())), ghState.slice(0, 120));
+  // The dev container has gh (2.5.2 image) but no GitHub sign-in; elsewhere gh may be missing or signed in.
+  check('GitHub says plainly how to connect when gh is missing or signed out', /GitHub CLI \(gh\) is not installed|gh auth login|Signed in as/.test(ghState + (await frame.locator('.view-sub').first().innerText())), ghState.slice(0, 120));
 
   const isAskGenerate = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/generate';
   await context.route(isAskGenerate, (route) => {
