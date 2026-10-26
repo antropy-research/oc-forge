@@ -127,7 +127,14 @@ docker compose exec -w /extensions/planner openchamber bun test tests/
 docker compose exec -w /extensions/planner openchamber sh -c 'LINEAR_SCHEMA=/tmp/linear-schema.graphql bun test tests/linear.test.ts'
 docker compose exec -w /extensions/planner openchamber bun run build   # panel/main.js + service/main.js
 node ../../extensions/planner/tests/e2e/run.mjs http://<bind>:35310     # on the host
+node ../../extensions/planner/tests/e2e/sunsama.mjs                       # on the host, this checkout's build
 ```
+
+`sunsama.mjs` runs this checkout's panel and a private copy of its service in the dev
+container's OpenChamber (`tests/e2e/harness.mjs`): the sources panel, drags onto days and the
+calendar, daily planning, the assignee picker, and two real chats in `planner-demo-a` as
+OpenCode's read-only plan agent, through a command file it writes to the container
+(`oc-planner-harness-plan.md`) and removes, with the chats and worktrees, at the end.
 
 The built `panel/main.js` and `service/main.js` are committed so the folder installs
 without a build. The repository's root `.gitignore` ignores `lib/`; this package's own

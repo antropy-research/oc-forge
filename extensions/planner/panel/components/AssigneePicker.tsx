@@ -235,10 +235,22 @@ export const AssignButton = ({
   children: ComponentChildren;
 }) => {
   const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
   return (
     <span class="menu-anchor assign-anchor">
-      <button class={className} aria-label={label} aria-haspopup="dialog" aria-expanded={open} title={label} onClick={() => setOpen(!open)}>{children}</button>
-      {open && <AssignPopover taskId={taskId} prepare={prepare} align={align} onClose={() => setOpen(false)} />}
+      <button ref={trigger} class={className} aria-label={label} aria-haspopup="dialog" aria-expanded={open} title={label} onClick={() => setOpen(!open)}>{children}</button>
+      {open && (
+        <AssignPopover
+          taskId={taskId}
+          prepare={prepare}
+          align={align}
+          onClose={() => {
+            setOpen(false);
+            // Back to the button that opened it, as a menu does, when the focus was in the picker.
+            if (trigger.current?.parentElement?.contains(document.activeElement)) trigger.current.focus();
+          }}
+        />
+      )}
     </span>
   );
 };

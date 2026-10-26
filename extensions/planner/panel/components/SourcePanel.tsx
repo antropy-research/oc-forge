@@ -153,11 +153,26 @@ export const SourcePanel = ({ days, primary }: { days: DateKey[]; primary: DateK
         </aside>
       )}
       <nav class="source-rail" aria-label="Sources">
-        <div role="tablist" aria-orientation="vertical" aria-label="Sources">
+        <div
+          role="tablist"
+          aria-orientation="vertical"
+          aria-label="Sources"
+          onKeyDown={(event) => {
+            // Up and down move between the sources, as in a vertical tab list.
+            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const at = SOURCES.findIndex((item) => item.id === (event.target as HTMLElement).dataset.source);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? SOURCES.length - 1 : (at + (event.key === 'ArrowDown' ? 1 : SOURCES.length - 1)) % SOURCES.length;
+            setShared({ open: SOURCES[next]!.id });
+            (event.currentTarget.querySelector(`[data-source="${SOURCES[next]!.id}"]`) as HTMLElement | null)?.focus();
+          }}
+        >
           {SOURCES.map((item) => (
             <button
               key={item.id}
               role="tab"
+              data-source={item.id}
+              tabIndex={panel.open === item.id || (!panel.open && item.id === panel.last) ? 0 : -1}
               class={`rail-button${panel.open === item.id ? ' is-active' : ''}`}
               aria-selected={panel.open === item.id}
               aria-controls={panel.open === item.id ? 'planner-source-panel' : undefined}
