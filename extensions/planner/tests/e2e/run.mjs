@@ -113,7 +113,13 @@ const openPlanner = async () => {
   // OpenChamber 2.5 reopens the page it showed before a reload, and the sidebar's Planner button
   // toggles it; the rail's button (a panel surface) and the Work Status heading share the name.
   if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-    await page.locator('button[aria-label="Planner"]:not([data-context-surface])').first().click({ timeout: 20_000 });
+    // OpenChamber 2.5.1 has a sidebar button per extension page; 2.5.2 lists them under "Extension pages".
+    const button = page.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
+    if (await button.isVisible().catch(() => false)) await button.click();
+    else {
+      await page.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+      await page.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
+    }
     await home.waitFor({ timeout: 30_000 });
   }
   return frame;
