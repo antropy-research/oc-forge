@@ -193,7 +193,39 @@ try {
   const persisted = reopened ? (await panelAgain.locator('.editor-instance .monaco-editor .minimap').first().isVisible().catch(() => false)) === !before : false;
   check('VS Code keeps its state across a reload (open editor, a toggled setting)', toggled && Boolean(reopened) && persisted, `toggled ${toggled}, editor reopened ${Boolean(reopened)}, setting kept ${persisted}`);
 
-  // The full page: Extension pages → VS Code, in OpenChamber's main area.
+  // OpenChamber's own editor keeps its jumps: a search hit opens at its line (the extension claims no files).
+  const needleFile = `${run}-needle.ts`;
+  const needle = `${run.replaceAll('-', '_')}_needle`;
+  execFileSync('docker', ['exec', '-i', 'oc-forge-openchamber-dev', 'sh', '-c', `cat > ${project}/${needleFile}`], { input: Array.from({ length: 80 }, (_, index) => (index === 59 ? `export const ${needle} = 60;` : `// line ${index + 1}`)).join('\n') });
+  await page.locator('button[aria-label="Files"][data-context-surface]').first().click({ timeout: 20_000 });
+  await page.getByRole('button', { name: 'Search mode', exact: true }).click({ timeout: 20_000 });
+  await page.getByRole('menuitemradio', { name: 'File contents', exact: true }).click();
+  await page.getByPlaceholder('Search in files...').fill(needle);
+  await page.locator(`button[title="${needleFile}:60"]`).click({ timeout: 30_000 });
+  const lineShown = await until(async () => {
+    const line = page.locator('.cm-editor .cm-line', { hasText: needle }).first();
+    if (!(await line.isVisible())) return null;
+    // Within the scrolled view of the editor that holds it.
+    return line.evaluate((element) => {
+      const scroller = element.closest('.cm-scroller');
+      if (!scroller) return false;
+      const box = element.getBoundingClientRect();
+      const view = scroller.getBoundingClientRect();
+      return box.top >= view.top && box.bottom <= view.bottom;
+    });
+  }, 20_000);
+  const extensionEditor = await page.locator('iframe[src*="/editor/index.html"]').count();
+  check("OpenChamber's own editor opens a search hit at its line (no extension editor in the way)", Boolean(lineShown) && extensionEditor === 0, `line 60 visible: ${Boolean(lineShown)}, extension editors: ${extensionEditor}`);
+  await page.screenshot({ path: join(out, '08-native-search-line.png') });
+
+  // The full page: Extension pages → VS Code, in OpenChamber's main area (the side panel closed first).
+  const closeButtons = page.locator('button[aria-label="Close panel"]');
+  let rightmost = null;
+  for (let index = 0; index < await closeButtons.count(); index++) {
+    const box = await closeButtons.nth(index).boundingBox().catch(() => null);
+    if (box && (!rightmost || box.x > rightmost.x)) rightmost = { index, x: box.x };
+  }
+  if (rightmost) await closeButtons.nth(rightmost.index).click().catch(() => {});
   await page.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
   await page.getByRole('menuitem', { name: 'VS Code' }).click({ timeout: 10_000 });
   // The page is the widest VS Code frame (the rail panel may be open beside it).
@@ -240,6 +272,7 @@ try {
   try {
     execFileSync('docker', ['exec', '-i', 'oc-forge-openchamber-dev', 'sh', '-c', `cat > ${project}/README.md`], { input: readme });
     inVscode('rm', '-f', `/tmp/${run}.txt`);
+    docker('rm', '-f', `${project}/${run}-needle.ts`);
   } catch (error) {
     console.log(`INFO cleanup: ${String(error).split('\n')[0]}`);
   }

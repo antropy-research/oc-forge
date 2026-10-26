@@ -61,7 +61,7 @@ node tests/e2e/run.mjs http://<bind>:35310   # on the host, against the dev cont
 
 The E2E check connects the panel to the dev container's VS Code Server, checks the Explorer, file icons, the
 editor's grammar colors, a save with Ctrl+S, Source Control and its diff editor, Search, the terminal, state kept
-across a reload, the page, and "Open in VS Code" on a chat, and that no other page or tab opened. It puts the
+across a reload, the page, "Open in VS Code" on a chat, that OpenChamber's own editor still opens a search hit at its line, and that no other page or tab opened. It puts the
 demo project's README, the extension's settings and its chats back afterwards.
 
 After the VS Code pin moves, refresh `service/web-files.json` from a server of that release:
