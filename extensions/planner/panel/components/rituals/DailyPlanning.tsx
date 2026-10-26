@@ -17,6 +17,8 @@ import { TaskList } from '../TaskList.tsx';
 import { Wizard } from './Wizard.tsx';
 import { LinearIssues } from '../LinearPanel.tsx';
 import { GitHubItems } from '../GitHubPanel.tsx';
+import { GmailItems, GoogleTasksItems } from '../GooglePanel.tsx';
+import { DayTargetsContext, planningTargets } from '../../lib/dayTargets.ts';
 
 const STEPS = ['Review yesterday', 'Add tasks', 'Estimate', 'Prioritize & timebox', 'Finalize'];
 
@@ -39,23 +41,31 @@ const TriageRow = ({ task, date }: { task: Task; date: DateKey }) => {
   );
 };
 
+type SourceTab = 'backlog' | 'linear' | 'github' | 'mail' | 'tasks' | 'meetings' | 'objectives';
+const SOURCE_TABS: { id: SourceTab; label: string }[] = [
+  { id: 'backlog', label: 'Backlog' },
+  { id: 'linear', label: 'Linear' },
+  { id: 'github', label: 'GitHub' },
+  { id: 'mail', label: 'Gmail' },
+  { id: 'tasks', label: 'Google Tasks' },
+  { id: 'meetings', label: 'Meetings' },
+  { id: 'objectives', label: 'Objectives' },
+];
+
+/** Where today's work comes from, every source planning onto `date`, the day being planned. */
 const Sources = ({ date }: { date: DateKey }) => {
   const { client } = usePlanner();
   const view = useView();
-  const [tab, setTab] = useState<'backlog' | 'linear' | 'github' | 'meetings' | 'objectives'>('backlog');
+  const [tab, setTab] = useState<SourceTab>('backlog');
   const feed = useCalendarEvents(date, date);
   const objectives = objectivesForWeek(view.state, weekStartOf(view.state, date));
   const titles = new Set(tasksForDay(view.state, date).map((task) => task.title));
   const addTask = (title: string, extra: { plannedMinutes?: number | null; objectiveId?: string | null }) =>
     void client.dispatch([{ type: 'task.created', task: { id: newId(), title, placement: { kind: 'day', date }, position: edgePosition(view.state, { kind: 'day', date }, 'bottom'), plannedMinutes: extra.plannedMinutes ?? null, objectiveId: extra.objectiveId ?? null } }]);
   return (
-    <>
-      <div class="tabs side-tabs" role="tablist">
-        <button role="tab" aria-selected={tab === 'backlog'} onClick={() => setTab('backlog')}>Backlog</button>
-        <button role="tab" aria-selected={tab === 'linear'} onClick={() => setTab('linear')}>Linear</button>
-        <button role="tab" aria-selected={tab === 'github'} onClick={() => setTab('github')}>GitHub</button>
-        <button role="tab" aria-selected={tab === 'meetings'} onClick={() => setTab('meetings')}>Meetings</button>
-        <button role="tab" aria-selected={tab === 'objectives'} onClick={() => setTab('objectives')}>Objectives</button>
+    <DayTargetsContext.Provider value={planningTargets(date)}>
+      <div class="tabs side-tabs" role="tablist" aria-label="Sources">
+        {SOURCE_TABS.map((item) => <button key={item.id} role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}
       </div>
       {tab === 'backlog' && (
         <>
@@ -63,8 +73,11 @@ const Sources = ({ date }: { date: DateKey }) => {
           <BacklogBuckets compact />
         </>
       )}
+      {tab !== 'backlog' && tab !== 'meetings' && tab !== 'objectives' && <p class="hint">Plan onto {date === view.today ? 'today' : `${weekdayName(date)}, ${monthDay(date)}`} with a click, or drag into the day.</p>}
       {tab === 'linear' && <LinearIssues />}
       {tab === 'github' && <GitHubItems />}
+      {tab === 'mail' && <GmailItems />}
+      {tab === 'tasks' && <GoogleTasksItems />}
       {tab === 'meetings' && (
         <ul class="source-list">
           {feed.events.filter((event) => !event.allDay).map((event) => {
@@ -92,7 +105,7 @@ const Sources = ({ date }: { date: DateKey }) => {
           {objectives.length === 0 && <li class="empty">No objectives for this week yet. Set them in Weekly planning.</li>}
         </ul>
       )}
-    </>
+    </DayTargetsContext.Provider>
   );
 };
 

@@ -103,7 +103,9 @@ export const planAdoptions = (state: PlannerState, sessions: Iterable<LiveSessio
   for (const session of sessions) {
     if (known.has(session.id)) continue;
     for (const item of session.items) {
-      const data = (item.data ?? {}) as { taskId?: unknown; runId?: unknown; wantsPr?: unknown; assignee?: unknown };
+      const data = (item.data ?? {}) as { taskId?: unknown; runId?: unknown; wantsPr?: unknown; assignee?: unknown; worktreeFor?: unknown };
+      // The empty chat that made an assignee's worktree is not a run.
+      if (data.worktreeFor !== undefined) continue;
       const taskId = typeof data.taskId === 'string' ? data.taskId : item.id;
       const task = state.tasks[taskId];
       if (!task || task.deletedAt) continue;

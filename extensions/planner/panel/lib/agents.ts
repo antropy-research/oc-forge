@@ -1,10 +1,11 @@
 // Agents on tasks: start OpenChamber sessions for tasks, follow their live state,
 // and keep the run facts (adopted runs, settled outcomes) in the Planner's log.
 import type { GuestProject, GuestSessionRecord, GuestSessionsSnapshot, GuestWorktree, HostClient } from '@openchamber/sdk';
-import { needsYou, planAdoptions, planPullRequests, planRunOutcomes, pullRequestLookups, runStatus, taskChipId, taskUrl, type LiveSession } from '../../src/domain/runs.ts';
+import { assignPrompt, needsYou, planAdoptions, planLinkedPullRequests, planPullRequests, planRunOutcomes, pullRequestLookups, runStatus, runsFor, taskChipId, taskUrl, type LiveSession } from '../../src/domain/runs.ts';
+import { commandText, type AgentCatalog } from '../../src/domain/assignees.ts';
 import type { SeenPullRequest } from '../../src/domain/events.ts';
 import { newId } from '../../src/domain/ids.ts';
-import type { PlannerState, TaskRun } from '../../src/domain/types.ts';
+import type { PlannerState, RunAssignee, TaskRun } from '../../src/domain/types.ts';
 import type { PlannerClient } from './client.ts';
 
 export const PANEL_ID = 'oc-forge-planner';
@@ -14,6 +15,16 @@ const ATTACH_TEXT_MAX = 16_000;
 const PR_REFRESH_MS = 2 * 60_000;
 /** The service answers four lookups per request, so each request stays short. */
 const PR_BATCH = 4;
+/** OpenCode reloads its commands 100 ms after a file changes; when it cannot be asked whether it did, wait this long. */
+const COMMAND_SETTLE_MS = 1500;
+/**
+ * A folder OpenCode has just started serving lists no commands for about
+ * 100 ms (measured with OpenCode 2.1.4), and OpenChamber 2.5.2 sends a new
+ * chat's first message within that time; this is how long a new worktree gets.
+ */
+const LOCATION_SETTLE_MS = 1500;
+const WORKTREE_WAIT_MS = 15_000;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export type WorkspaceChoice = { kind: 'project' } | { kind: 'new'; branch: string } | { kind: 'existing'; directory: string };
 
@@ -25,6 +36,8 @@ export interface DispatchChoice {
   open: boolean;
   /** Assigned, as in GitHub or Linear: the agent is to open a pull request, which the Planner then follows. */
   wantsPr?: boolean;
+  /** The agent and model to start the chat as, through its command; none takes OpenChamber's defaults. */
+  assignee?: RunAssignee | null;
 }
 
 export interface AgentView {
@@ -39,6 +52,10 @@ export interface AgentView {
   attention: number;
   /** Why the last pull request lookup failed (no gh, not logged in), until one works. */
   prError: string | null;
+  /** The agents and models to assign to, as the service found them; null until asked. */
+  catalog: AgentCatalog | null;
+  catalogLoading: boolean;
+  catalogError: string | null;
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -54,6 +71,7 @@ const toLive = (record: GuestSessionRecord): LiveSession => ({
   archivedAt: record.archivedAt,
   worktree: record.worktree ? { directory: record.worktree.directory, branch: record.worktree.branch } : null,
   items: record.items,
+  ...(record.links ? { links: record.links.map((link) => ({ title: link.title, url: link.url, kind: link.kind })) } : {}),
 });
 
 /** A branch name from a task title; non-Latin titles fall back to the task id. */
@@ -62,8 +80,20 @@ export const branchFor = (title: string, taskId: string): string => {
   return `planner/${slug.length >= 3 ? slug : `task-${taskId.slice(-6)}`}`;
 };
 
+/** A branch for a new assignment: Linear's name for the issue, else from the title; a number on the end when an earlier run of the task used it. */
+export const assignBranch = (state: PlannerState, taskId: string): string => {
+  const task = state.tasks[taskId];
+  if (!task) return 'planner/task';
+  const base = (task.source?.kind === 'linear' && task.source.branch) || branchFor(task.title, task.id);
+  const used = new Set(runsFor(state, taskId).flatMap((run) => (run.worktree?.branch ? [run.worktree.branch] : [])));
+  let branch = base;
+  for (let n = 2; used.has(branch); n++) branch = `${base}-${n}`;
+  return branch;
+};
+
 export class AgentStore {
-  private view: AgentView = { available: null, projects: [], sessions: new Map(), dispatching: new Set(), attention: 0, prError: null };
+  private view: AgentView = { available: null, projects: [], sessions: new Map(), dispatching: new Set(), attention: 0, prError: null, catalog: null, catalogLoading: false, catalogError: null };
+  private catalogFor: string | null | undefined = undefined;
   private lookingUp = false;
   private readonly listeners = new Set<() => void>();
   private readonly watched = new Map<string, () => void>();
@@ -169,8 +199,102 @@ export class AgentStore {
   }
 
   /**
+   * The agents and models to assign to, from the service (which asks OpenCode),
+   * with the project folder's own agents. Kept until another folder or a refresh is asked for.
+   */
+  async loadCatalog(directory: string | null = null, refresh = false): Promise<void> {
+    if (!refresh && this.catalogFor === directory && (this.view.catalog || this.view.catalogLoading)) return;
+    this.catalogFor = directory;
+    this.set({ catalogLoading: true });
+    try {
+      const query = [directory ? `directory=${encodeURIComponent(directory)}` : '', refresh ? 'refresh=1' : ''].filter(Boolean).join('&');
+      const catalog = await this.client.call<AgentCatalog>('GET', `/agents${query ? `?${query}` : ''}`);
+      if (this.catalogFor === directory) this.set({ catalog, catalogLoading: false, catalogError: null });
+    } catch (error) {
+      if (this.catalogFor === directory) this.set({ catalogLoading: false, catalogError: messageOf(error) });
+    }
+  }
+
+  /**
+   * Assign a task, as in GitHub or Linear: `assignee` works on it in a new
+   * worktree (Linear's branch name, else from the title) of the task's project
+   * and opens a pull request. Returns whether a run started.
+   */
+  assign(taskId: string, assignee: RunAssignee | null, projectId?: string | null): Promise<boolean> {
+    const state = this.client.getView().state;
+    const project = (projectId ? this.view.projects.find((item) => item.id === projectId) : null) ?? this.defaultProject(state, taskId);
+    if (!state.tasks[taskId]) return Promise.resolve(false);
+    if (!project) {
+      this.client.notify(this.view.available === false ? 'OpenChamber did not allow the Planner to see projects. Approve its access in Settings → Extensions.' : 'Add a project in OpenChamber first; agents work inside a project.');
+      return Promise.resolve(false);
+    }
+    const branch = assignBranch(state, taskId);
+    return this.dispatch(taskId, { projectId: project.id, workspace: { kind: 'new', branch }, prompt: assignPrompt(state, taskId, branch), open: false, wantsPr: true, assignee });
+  }
+
+  /**
+   * The command that starts a chat as `assignee`, written by the service and
+   * listed by OpenCode before the chat starts: asked twice, then given up on,
+   * since an unknown command would reach the agent as plain text.
+   */
+  private async commandFor(assignee: RunAssignee, directory: string | null): Promise<string> {
+    const presets = this.client.getView().state.settings.agentPresets ?? [];
+    const entry = { assignee, kind: presets.some((preset) => preset.id === assignee.id) ? 'preset' : 'agent' };
+    type Answer = { commands: { name: string; changed: boolean }[]; listed: boolean | null; dir: string };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const answer = await this.client.call<Answer>('POST', '/agents/commands', { entries: [entry], directory, wait: true });
+      const command = answer.commands[0];
+      if (!command) throw new Error('the service wrote no command');
+      if (answer.listed === true) return command.name;
+      // OpenCode's server cannot be asked: give a new file the time OpenCode takes to read it.
+      if (answer.listed === null) {
+        if (command.changed) await sleep(COMMAND_SETTLE_MS);
+        return command.name;
+      }
+      if (attempt === 1) throw new Error(`OpenCode does not list /${command.name} yet. Is its config folder ${answer.dir.replace(/\/command$/, '')}?`);
+    }
+    throw new Error('unreachable');
+  }
+
+  /**
+   * Make a new worktree for an assignee's chat before the chat starts, and
+   * return its folder. OpenChamber makes it with a chat that has no message
+   * ("Worktree for …"), which starts OpenCode there; once OpenChamber lists the
+   * worktree and OpenCode has had time to load its commands, the agent's chat
+   * starts in it and its first message reaches the command.
+   */
+  private async prepareWorktree(taskId: string, runId: string, projectId: string, branch: string): Promise<string> {
+    const state = this.client.getView().state;
+    const task = state.tasks[taskId]!;
+    const made = await this.host.startSession({
+      providerId: PANEL_ID,
+      id: taskChipId(state, taskId),
+      title: `Worktree for ${task.title}`.slice(0, 200),
+      url: taskUrl(state, taskId),
+      // Opens the task when its chip is clicked, but is never taken for a run.
+      data: { taskId, worktreeFor: runId },
+      projectId,
+      navigation: 'preserve',
+      worktree: { kind: 'new', ...(branch.trim() ? { name: branch.trim() } : {}) },
+    });
+    const directory = made.sessionId === null ? made.directory : made.worktree?.directory ?? made.directory;
+    if (!directory) throw new Error('OpenChamber made no worktree');
+    const until = Date.now() + WORKTREE_WAIT_MS;
+    for (;;) {
+      const listed = await this.host.listWorktrees(projectId).catch(() => null);
+      if (listed?.worktrees.some((worktree) => worktree.directory === directory && worktree.status === 'ready')) break;
+      if (Date.now() > until) throw new Error(`OpenChamber does not list the new worktree ${directory} yet`);
+      await sleep(500);
+    }
+    await sleep(LOCATION_SETTLE_MS);
+    return directory;
+  }
+
+  /**
    * Start an agent session for a task, optionally in a worktree, with the task
-   * attached as a chip that carries the run id. Returns whether a run started.
+   * attached as a chip that carries the run id. With an assignee, the first
+   * message is that assignee's command with the instructions as its arguments,
+   * so OpenCode switches to its agent and model. Returns whether a run started.
    */
   async dispatch(taskId: string, choice: DispatchChoice): Promise<boolean> {
     if (this.view.dispatching.has(taskId)) return false;
@@ -180,15 +304,22 @@ export class AgentStore {
     this.set({ dispatching: new Set([...this.view.dispatching, taskId]) });
     const runId = newId();
     try {
-      const workspace = choice.workspace;
+      const assignee = choice.assignee ?? null;
+      const instructions = (choice.prompt.trim() || task.title).slice(0, ATTACH_TEXT_MAX - 80);
+      const project = this.view.projects.find((item) => item.id === choice.projectId);
+      const command = assignee ? await this.commandFor(assignee, choice.workspace.kind === 'existing' ? choice.workspace.directory : project?.directory ?? null) : null;
+      // A command must not be the first message in a folder OpenCode has not started yet.
+      const workspace: WorkspaceChoice = command && choice.workspace.kind === 'new' ? { kind: 'existing', directory: await this.prepareWorktree(task.id, runId, choice.projectId, choice.workspace.branch) } : choice.workspace;
+      // Cutting the end off can never put a `!` next to a backtick, so the cap stays safe.
+      const text = (command ? commandText(command, instructions) : instructions).slice(0, ATTACH_TEXT_MAX);
       const result = await this.host.startSession({
         providerId: PANEL_ID,
         id: taskChipId(state, task.id),
         title: task.title.slice(0, 200),
         url: taskUrl(state, task.id),
-        text: (choice.prompt.trim() || task.title).slice(0, ATTACH_TEXT_MAX),
+        text,
         // The chip carries what an adoption needs to write the same run, should it win the race.
-        data: { taskId: task.id, runId, ...(choice.wantsPr ? { wantsPr: true } : {}) },
+        data: { taskId: task.id, runId, ...(choice.wantsPr ? { wantsPr: true } : {}), ...(assignee ? { assignee: { ...assignee } } : {}) },
         projectId: choice.projectId,
         navigation: choice.open ? 'open' : 'preserve',
         worktree: workspace.kind === 'project' ? false : workspace.kind === 'new' ? { kind: 'new', ...(workspace.branch.trim() ? { name: workspace.branch.trim() } : {}) } : { kind: 'existing', directory: workspace.directory },
@@ -197,7 +328,6 @@ export class AgentStore {
         this.client.notify(`OpenChamber made worktree ${result.worktree.branch} but could not start the chat (${result.failure}). Start again with that existing worktree.`);
         return false;
       }
-      const project = this.view.projects.find((item) => item.id === choice.projectId);
       // The session list may have shown the new chat first and adopted it as this very run.
       if (!this.client.getView().state.runs[runId]) {
         await this.client
@@ -213,6 +343,7 @@ export class AgentStore {
                 worktree: result.worktree ? { directory: result.worktree.directory, branch: result.worktree.branch } : null,
                 title: task.title,
                 ...(choice.wantsPr ? { wantsPr: true } : {}),
+                ...(assignee ? { assignee } : {}),
               },
             },
           ])
@@ -221,9 +352,10 @@ export class AgentStore {
           });
       }
       void this.watch(choice.projectId);
+      const who = assignee?.name ?? 'an agent';
       if (result.sent === 'no-model') this.client.notify('The chat was created, but no model is set up to answer it. Open the chat to pick one.');
       else if (result.sent === 'failed') this.client.notify('The chat was created, but the first message did not send. Open the chat to send it again.');
-      else this.client.notify(choice.wantsPr ? `Assigned "${task.title}" to an agent; it will open a pull request` : `Agent started on "${task.title}"`);
+      else this.client.notify(choice.wantsPr ? `Assigned "${task.title}" to ${who}; it will open a pull request` : `${assignee ? assignee.name : 'Agent'} started on "${task.title}"`);
       return true;
     } catch (error) {
       this.client.notify(`Could not start the agent: ${messageOf(error)}`);
@@ -275,7 +407,7 @@ export class AgentStore {
     if (this.recording) return;
     const state = this.client.getView().state;
     if (!this.client.getView().loaded) return;
-    const bodies = [...planAdoptions(state, this.view.sessions.values()), ...planRunOutcomes(state, this.view.sessions)];
+    const bodies = [...planAdoptions(state, this.view.sessions.values()), ...planRunOutcomes(state, this.view.sessions), ...planLinkedPullRequests(state, this.view.sessions)];
     if (bodies.length === 0) return;
     this.recording = true;
     try {

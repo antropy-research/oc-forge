@@ -27,6 +27,9 @@ import {
 import { LINEAR_DRAG_TYPE, usePlanner, useLinear, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import { issueDisplay, type LinearMode, type LinearTeam, type LinearView, type OpenProject } from '../lib/linear.ts';
+import { useDayTargets } from '../lib/dayTargets.ts';
+import { PlanActions } from './PlanActions.tsx';
+import { AssignButton } from './AssigneePicker.tsx';
 
 const PRIORITY_MARK: Record<number, string> = { 1: '!!!', 2: '!!', 3: '!', 4: '·' };
 const GROUP_LABELS: Record<LinearGroupBy, string> = { status: 'Status', priority: 'Priority', project: 'Project', team: 'Team', assignee: 'Assignee', workspace: 'Workspace', none: 'Nothing' };
@@ -83,11 +86,12 @@ const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: 
   const view = useView();
   const lv = useLinear();
   const { setUi } = useUi();
-  /** Plan the issue today, then open its task's "Assign to an agent". */
+  const targets = useDayTargets();
+  /** Plan the issue on the first day shown: the task its assignee works on. */
   const assign = async () => {
-    const { bodies, taskId } = linear.importCommands(issue, { kind: 'day', date: view.today });
+    const { bodies, taskId } = linear.importCommands(issue, { kind: 'day', date: targets.primary });
     await client.dispatch(bodies, { undo: `Planned ${issue.identifier}` });
-    setUi({ openTaskId: taskId, agentForm: 'assign' });
+    return taskId;
   };
   const linked = linkedTask(view.state, issue.id, githubMirrors(issue));
   const workspace = workspaceLabel(lv, issue.workspaceId);
@@ -135,12 +139,9 @@ const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: 
           {plannedLabel(linked, view.today)}
         </button>
       ) : (
-        <span class="issue-actions">
-          <button onClick={() => void linear.plan(issue, { kind: 'day', date: view.today })} aria-label={`Plan ${issue.identifier} today`}>Today</button>
-          <button onClick={() => void linear.plan(issue, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${issue.identifier} tomorrow`}>Tmrw</button>
-          <button onClick={() => void linear.plan(issue, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${issue.identifier} in the backlog`}>Later</button>
-          <button onClick={() => void assign()} aria-label={`Assign ${issue.identifier} to an agent`} title="Plan it today and assign it to an agent, which opens a pull request">Agent</button>
-        </span>
+        <PlanActions label={issue.identifier} onPlan={(placement) => void linear.plan(issue, placement)}>
+          <AssignButton taskId={null} prepare={assign} label={`Assign ${issue.identifier} to an agent`}>Agent</AssignButton>
+        </PlanActions>
       )}
     </li>
   );

@@ -4,6 +4,8 @@ import { liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { useGoogle, useLinear, usePlanner, useView } from '../lib/context.ts';
 import type { GoogleFeature } from '../lib/google.ts';
+import { AgentSettings } from './AgentSettings.tsx';
+
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -505,6 +507,7 @@ export const Settings = () => {
         <Calendars />
         <GoogleSettings />
         <LinearSettings />
+        <AgentSettings />
         <SyncSettings />
         <fieldset>
           <legend>Storage</legend>

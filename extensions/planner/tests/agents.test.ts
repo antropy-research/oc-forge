@@ -349,6 +349,10 @@ describe('a run keeps its assignee', () => {
     const [plain] = planAdoptions(base(), [live({ id: 'ses_8', items: [{ id: 'PLN-0001', data: { taskId: 't1', runId: 'r8', assignee: { id: 'BAD ID' } } }] })]) as { run: Record<string, unknown> }[];
     expect('assignee' in plain!.run).toBe(false);
   });
+
+  test('the empty chat that made an assignee’s worktree is never taken for a run', () => {
+    expect(planAdoptions(base(), [live({ id: 'ses_7', items: [{ id: 'PLN-0001', data: { taskId: 't1', worktreeFor: 'r9' } }] })])).toEqual([]);
+  });
 });
 
 describe('pull requests linked to the chat', () => {

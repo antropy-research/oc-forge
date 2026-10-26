@@ -4,6 +4,9 @@ import { shortKey, taskForGitHub, type GitHubItem } from '../../src/domain/githu
 import { GITHUB_DRAG_TYPE, useGitHub, usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import type { GitHubListKind } from '../lib/github.ts';
+import { useDayTargets } from '../lib/dayTargets.ts';
+import { PlanActions } from './PlanActions.tsx';
+import { AssignButton } from './AssigneePicker.tsx';
 
 const KINDS: { id: GitHubListKind; label: string }[] = [
   { id: 'assigned', label: 'Issues assigned to me' },
@@ -23,12 +26,13 @@ const ItemRow = ({ item }: { item: GitHubItem }) => {
   const { github, client } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
+  const targets = useDayTargets();
   const linked = taskForGitHub(view.state, item);
-  /** Plan the issue today, then open its task's "Assign to an agent". */
+  /** Plan the issue on the first day shown: the task its assignee works on. */
   const assign = async () => {
-    const { bodies, taskId } = github.importCommands(item, { kind: 'day', date: view.today });
+    const { bodies, taskId } = github.importCommands(item, { kind: 'day', date: targets.primary });
     await client.dispatch(bodies, { undo: `Planned ${item.key}` });
-    setUi({ openTaskId: taskId, agentForm: 'assign' });
+    return taskId;
   };
   return (
     <li
@@ -52,14 +56,39 @@ const ItemRow = ({ item }: { item: GitHubItem }) => {
       {linked ? (
         <button class="link issue-planned" onClick={() => setUi({ openTaskId: linked.id })} aria-label={`Open the task for ${item.key} (${plannedLabel(linked, view.today)})`}>{plannedLabel(linked, view.today)}</button>
       ) : (
-        <span class="issue-actions">
-          <button onClick={() => void github.plan(item, { kind: 'day', date: view.today })} aria-label={`Plan ${item.key} today`}>Today</button>
-          <button onClick={() => void github.plan(item, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${item.key} tomorrow`}>Tmrw</button>
-          <button onClick={() => void github.plan(item, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${item.key} in the backlog`}>Later</button>
-          {item.kind === 'issue' && <button onClick={() => void assign()} aria-label={`Assign ${item.key} to an agent`} title="Plan it today and assign it to an agent, which opens a pull request">Agent</button>}
-        </span>
+        <PlanActions label={item.key} onPlan={(placement) => void github.plan(item, placement)}>
+          {item.kind === 'issue' && <AssignButton taskId={null} prepare={assign} label={`Assign ${item.key} to an agent`}>Agent</AssignButton>}
+        </PlanActions>
       )}
     </li>
+  );
+};
+
+/** What to do when gh is missing or signed out: where to run `gh auth login`, to copy. */
+const GitHubSignIn = () => {
+  const { github, host, client } = usePlanner();
+  const gv = useGitHub();
+  const status = gv.status!;
+  const command = status.container ? `docker exec -it ${status.container} gh auth login` : 'gh auth login';
+  const title = status.reason === 'missing' ? 'Install the GitHub CLI' : status.reason === 'signed-out' ? 'Sign in to GitHub' : 'GitHub is out of reach';
+  return (
+    <div class="connect-linear gh-signin" role="status" aria-label="GitHub sign-in">
+      <p><strong>{title}</strong></p>
+      <p>{status.message ?? 'GitHub is not available.'}</p>
+      {status.reason && (
+        <ol>
+          {status.reason === 'missing' && <li>Install <code>gh</code> where OpenChamber runs (cli.github.com).</li>}
+          <li>
+            {status.container ? 'OpenChamber runs in a container; on its host, run ' : 'Where OpenChamber runs, run '}
+            <code>{command}</code>{' '}
+            <button class="link" onClick={() => void host.writeClipboard(command).then(() => client.notify('Copied')).catch(() => client.notify('Could not copy'))}>Copy</button>
+          </li>
+          <li>Then check again here.</li>
+        </ol>
+      )}
+      <p class="hint">The Planner reads GitHub through that GitHub CLI, read-only, the way Sunsama does; assigned agents open their pull requests with it too.</p>
+      <button onClick={() => void github.checkStatus()}>Check again</button>
+    </div>
   );
 };
 
@@ -68,15 +97,7 @@ export const GitHubItems = () => {
   const { github } = usePlanner();
   const gv = useGitHub();
   if (!gv.status) return <p class="hint">Checking GitHub…</p>;
-  if (!gv.status.available) {
-    return (
-      <div class="connect-linear" role="status">
-        <p>{gv.status.message ?? 'GitHub is not available.'}</p>
-        <p class="hint">Planner reads GitHub through the GitHub CLI of the machine running OpenChamber, read-only, the way Sunsama does.</p>
-        <button onClick={() => void github.checkStatus()}>Check again</button>
-      </div>
-    );
-  }
+  if (!gv.status.available) return <GitHubSignIn />;
   return (
     <div class="linear-issues">
       <div class="linear-toolbar">
