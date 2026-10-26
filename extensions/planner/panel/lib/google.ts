@@ -21,8 +21,10 @@ import {
 } from '../../src/domain/google.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
-import type { DateKey, Placement, PlannerState, Task } from '../../src/domain/types.ts';
+import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
+import type { CalendarSubscription, DateKey, Placement, PlannerState, Task } from '../../src/domain/types.ts';
 import type { Origin, PlannerClient } from './client.ts';
+import { calendarUi } from './gcal.ts';
 
 export type GoogleFeature = 'calendar' | 'tasks' | 'mail';
 
@@ -72,14 +74,31 @@ export interface GoogleView {
   mail: MailItem[];
   mailLoading: boolean;
   mailError: string | null;
+  /** Where Gmail's next page of this search starts; null when there is none. */
+  mailNext: string | null;
   /** Asking whether to complete the Google task too. */
   prompt: { taskId: string; title: string } | null;
+  /** The Tasks view: each list's tasks, completed ones too, by `listKey`. */
+  board: Record<string, TaskBoardList>;
 }
+
+export interface TaskBoardList {
+  items: GoogleTaskItem[];
+  loading: boolean;
+  error: string | null;
+  /** False when the list is longer than the service reads. */
+  complete: boolean;
+}
+
+export const listKey = (account: string, listId: string): string => `${account}\n${listId}`;
 
 /** What a Google task or message carries while it is dragged. */
 export type GoogleDrag = { kind: 'gtask'; item: GoogleTaskItem } | { kind: 'mail'; item: MailItem };
 
 const REFRESH_MS = 5 * 60_000;
+/** Linked tasks are asked for in parts of at most this many lists and tasks, which the service answers in time. */
+const SYNC_GROUPS = 10;
+const SYNC_IDS = 50;
 const SIGN_IN_POLL_MS = 1500;
 const SIGN_IN_MAX_MS = 10 * 60_000;
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -104,7 +123,9 @@ export class GoogleStore {
     mail: [],
     mailLoading: false,
     mailError: null,
+    mailNext: null,
     prompt: null,
+    board: {},
   };
   private readonly listeners = new Set<() => void>();
   private started = false;
@@ -225,6 +246,18 @@ export class GoogleStore {
     ]);
   }
 
+  /**
+   * Google Calendar's checkbox beside a calendar: shown or hidden, keeping its
+   * color; a Google calendar not shown before is added.
+   */
+  setVisible(calendar: GoogleCalendarInfo | CalendarSubscription, visible: boolean): Promise<void> {
+    if ('visible' in calendar) return this.client.dispatch([{ type: 'calendar.updated', calendarId: calendar.id, patch: { visible } }]);
+    const state = this.client.getView().state;
+    const existing = Object.values(state.calendars).filter((item) => item.google?.account === calendar.account && item.google.calendarId === calendar.id);
+    if (existing.length) return this.client.dispatch(existing.filter((item) => item.visible !== visible).map((item) => ({ type: 'calendar.updated' as const, calendarId: item.id, patch: { visible } })));
+    return visible ? this.showCalendar(calendar, true) : Promise.resolve();
+  }
+
   setTimeboxCalendar(target: { account: string; calendarId: string } | null): Promise<void> {
     return this.client.dispatch([{ type: 'settings.updated', patch: { googleTimebox: target } }]);
   }
@@ -275,18 +308,23 @@ export class GoogleStore {
   }
 
   setMailAccount(account: string): void {
-    this.set({ mailAccount: account, mail: [] });
+    this.set({ mailAccount: account, mail: [], mailNext: null });
     void this.searchMail();
   }
 
-  async searchMail(query: string = this.view.mailQuery): Promise<void> {
+  /** A Gmail search's first page; `more` reads the next page of the current one and adds it. */
+  async searchMail(query: string = this.view.mailQuery, more = false): Promise<void> {
     const account = this.view.mailAccount;
     this.set({ mailQuery: query });
     if (!account) return;
+    const pageToken = more ? this.view.mailNext : null;
+    if (more && !pageToken) return;
     this.set({ mailLoading: true, mailError: null });
     try {
-      const answer = await this.client.call<{ messages: MailItem[] }>('GET', `/google/mail?account=${encodeURIComponent(account)}&q=${encodeURIComponent(query)}`);
-      if (this.view.mailAccount === account && this.view.mailQuery === query) this.set({ mail: answer.messages, mailLoading: false });
+      const answer = await this.client.call<{ messages: MailItem[]; nextPageToken?: string | null }>('GET', `/google/mail?account=${encodeURIComponent(account)}&q=${encodeURIComponent(query)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`);
+      if (this.view.mailAccount !== account || this.view.mailQuery !== query) return;
+      const mail = more ? [...this.view.mail, ...answer.messages.filter((item) => !this.view.mail.some((known) => known.id === item.id))] : answer.messages;
+      this.set({ mail, mailNext: answer.nextPageToken ?? null, mailLoading: false });
     } catch (error) {
       this.set({ mailLoading: false, mailError: messageOf(error) });
     }
@@ -326,6 +364,7 @@ export class GoogleStore {
     const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account, listId, title: task.title, ...(task.notes.trim() ? { notes: task.notes.slice(0, 8000) } : {}), ...(due ? { due } : {}) });
     if (!answer.task) throw new Error('Google did not return the task');
     await this.client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { source: gtaskSource(answer.task) } }], { undo: 'Added to Google Tasks' });
+    this.remember(answer.task, true);
     if (this.view.list?.account === account && this.view.list.id === listId) void this.refreshTasks();
   }
 
@@ -336,8 +375,10 @@ export class GoogleStore {
     try {
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { account: source.account, listId: source.listId, id: source.id, ...patch });
       if (answer.task) await this.client.dispatch([{ type: 'task.sourceSynced', taskId: task.id, source: gtaskSource(answer.task) }], { origin: 'google' });
+      if (answer.task) this.remember(answer.task);
       if (!quiet && patch.completed !== undefined) this.client.notify(patch.completed ? `Completed "${task.title}" in Google Tasks` : `Reopened "${task.title}" in Google Tasks`);
       if (this.view.list?.account === source.account && this.view.list.id === source.listId) void this.refreshTasks();
+      calendarUi.refresh();
       return true;
     } catch (error) {
       this.client.notify(`Couldn't update "${task.title}" in Google Tasks: ${messageOf(error)}`);
@@ -354,18 +395,193 @@ export class GoogleStore {
     if (task) void this.writeTask(task, { completed: true });
   }
 
-  /** Bring linked tasks up to date with their Google tasks. */
+  /** Bring linked tasks up to date with their Google tasks, asked for in parts the service answers in time. */
   async sync(): Promise<void> {
-    const groups = linkedGoogleTasks(this.client.getView().state);
-    if (!groups.length) return;
+    const parts = linkedGoogleTasks(this.client.getView().state).flatMap((group) => Array.from({ length: Math.ceil(group.ids.length / SYNC_IDS) }, (_, index) => ({ ...group, ids: group.ids.slice(index * SYNC_IDS, (index + 1) * SYNC_IDS) })));
+    if (!parts.length) return;
     try {
-      const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('POST', '/google/tasks/linked', { groups });
+      const tasks: GoogleTaskItem[] = [];
+      for (let index = 0; index < parts.length; index += SYNC_GROUPS) {
+        const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('POST', '/google/tasks/linked', { groups: parts.slice(index, index + SYNC_GROUPS) });
+        tasks.push(...answer.tasks);
+      }
       const { state, today } = this.client.getView();
-      const bodies = planGoogleTaskSync(state, new Map(answer.tasks.map((item) => [item.id, item])), { today, importCompletion: state.settings.googleTasksImportCompletion });
+      const bodies = planGoogleTaskSync(state, new Map(tasks.map((item) => [item.id, item])), { today, importCompletion: state.settings.googleTasksImportCompletion });
       if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
     } catch (error) {
       console.warn(`[planner] Google Tasks sync skipped: ${messageOf(error)}`);
     }
+  }
+
+  // ── The Tasks view, as the Google Tasks app ──────────────────────────────
+
+  /** Read a list with its completed tasks. */
+  async loadBoard(account: string, listId: string): Promise<void> {
+    const key = listKey(account, listId);
+    const current = this.view.board[key];
+    this.setBoard(key, { items: current?.items ?? [], loading: true, error: null, complete: current?.complete ?? true });
+    try {
+      const answer = await this.client.call<{ tasks: GoogleTaskItem[]; complete: boolean }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}`);
+      this.setBoard(key, { items: answer.tasks, loading: false, error: null, complete: answer.complete });
+    } catch (error) {
+      this.setBoard(key, { items: current?.items ?? [], loading: false, error: messageOf(error), complete: true });
+    }
+  }
+
+  async createList(account: string, title: string): Promise<GoogleTaskList> {
+    const answer = await this.client.call<{ list: GoogleTaskList }>('POST', '/google/tasklists', { account, title });
+    this.set({ lists: [...this.view.lists, answer.list] });
+    this.setBoard(listKey(account, answer.list.id), { items: [], loading: false, error: null, complete: true });
+    return answer.list;
+  }
+
+  async renameList(list: GoogleTaskList, title: string): Promise<void> {
+    const rename = (to: string) => this.set({ lists: this.view.lists.map((item) => (item.account === list.account && item.id === list.id ? { ...item, title: to } : item)) });
+    rename(title);
+    try {
+      await this.client.call('PATCH', '/google/tasklists', { account: list.account, listId: list.id, title });
+    } catch (error) {
+      rename(list.title);
+      throw error;
+    }
+  }
+
+  async deleteList(list: GoogleTaskList): Promise<void> {
+    await this.client.call('DELETE', `/google/tasklists?account=${encodeURIComponent(list.account)}&list=${encodeURIComponent(list.id)}`);
+    const lists = this.view.lists.filter((item) => !(item.account === list.account && item.id === list.id));
+    const { [listKey(list.account, list.id)]: _gone, ...board } = this.view.board;
+    const selected = this.view.list?.account === list.account && this.view.list.id === list.id;
+    this.set({ lists, board, ...(selected ? { list: lists[0] ? { account: lists[0].account, id: lists[0].id } : null, tasks: [] } : {}) });
+    if (selected) void this.refreshTasks();
+    calendarUi.refresh();
+  }
+
+  /** A new task: at the top of the list, or under `parent` after `previous`. Shown at once. */
+  async addListTask(account: string, listId: string, fields: { title: string; notes?: string; due?: DateKey | null; parent?: string | null; previous?: string | null }): Promise<GoogleTaskItem> {
+    const key = listKey(account, listId);
+    const temp: GoogleTaskItem = { account, listId, id: `new-${newId()}`, title: fields.title, notes: fields.notes ?? '', due: fields.due ?? null, completed: false, parent: fields.parent ?? null, position: '', url: 'https://tasks.google.com/', updated: new Date().toISOString() };
+    const items = this.view.board[key]?.items ?? [];
+    this.patchBoard(key, applyMove([...items, temp], temp.id, { parent: temp.parent, previous: fields.previous ?? null }));
+    try {
+      const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account, listId, ...fields, ...(fields.notes ? {} : { notes: undefined }) });
+      if (!answer.task) throw new Error('Google did not return the task');
+      this.patchBoard(key, (this.view.board[key]?.items ?? []).map((item) => (item.id === temp.id ? answer.task! : item)));
+      this.afterTaskWrite(account, listId, Boolean(fields.due));
+      // Google may renumber the other tasks' places: read the list as Google has it now.
+      if (this.view.board[key]) void this.loadBoard(account, listId);
+      return answer.task;
+    } catch (error) {
+      this.patchBoard(key, (this.view.board[key]?.items ?? []).filter((item) => item.id !== temp.id));
+      throw error;
+    }
+  }
+
+  /** Rename a task, change its details or due date (Google Tasks keeps no time). */
+  async editListTask(item: GoogleTaskItem, patch: { title?: string; notes?: string; due?: DateKey | null }): Promise<void> {
+    await this.writeListTask([item], () => patch, patch.due !== undefined || patch.title !== undefined);
+  }
+
+  /**
+   * Complete or reopen a task. As in Google Tasks, completing a task completes
+   * its subtasks, and reopening a subtask reopens the task it is under.
+   */
+  async completeListTask(item: GoogleTaskItem, completed: boolean): Promise<void> {
+    const items = this.view.board[listKey(item.account, item.listId)]?.items ?? [item];
+    const related = completed ? items.filter((other) => other.parent === item.id && !other.completed) : items.filter((other) => other.id === item.parent && other.completed);
+    await this.writeListTask([item, ...related], () => ({ completed }), true);
+    void this.sync();
+  }
+
+  /** Delete a task and its subtasks. */
+  async deleteListTask(item: GoogleTaskItem): Promise<void> {
+    const key = listKey(item.account, item.listId);
+    const before = this.view.board[key]?.items ?? [];
+    this.patchBoard(key, before.filter((other) => other.id !== item.id && other.parent !== item.id));
+    try {
+      await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}&id=${encodeURIComponent(item.id)}`);
+      this.afterTaskWrite(item.account, item.listId, true);
+    } catch (error) {
+      this.patchBoard(key, before);
+      throw error;
+    }
+  }
+
+  /** Put a task under `parent` after `previous`, in its list or another of the same account. Shown at once. */
+  async moveListTask(item: GoogleTaskItem, target: MoveTarget, destinationListId: string = item.listId): Promise<void> {
+    const from = listKey(item.account, item.listId);
+    const to = listKey(item.account, destinationListId);
+    const before = { from: this.view.board[from]?.items ?? [], to: this.view.board[to]?.items ?? [] };
+    if (from === to) this.patchBoard(from, applyMove(before.from, item.id, target));
+    else {
+      const moving = before.from.filter((other) => other.id === item.id || other.parent === item.id).map((other) => ({ ...other, listId: destinationListId }));
+      this.patchBoard(from, before.from.filter((other) => other.id !== item.id && other.parent !== item.id));
+      this.patchBoard(to, applyMove([...before.to, ...moving], item.id, target));
+    }
+    try {
+      await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks/move', { account: item.account, listId: item.listId, id: item.id, parent: target.parent, previous: target.previous, ...(to !== from ? { destinationListId } : {}) });
+      this.afterTaskWrite(item.account, item.listId, to !== from);
+      // A move can renumber the places of the tasks around it: read the lists as Google has them now.
+      if (this.view.board[from]) void this.loadBoard(item.account, item.listId);
+      if (to !== from && this.view.board[to]) void this.loadBoard(item.account, destinationListId);
+    } catch (error) {
+      this.patchBoard(from, before.from);
+      if (to !== from) this.patchBoard(to, before.to);
+      throw error;
+    }
+  }
+
+  /** A Google task shown on the calendar, due another day (from a drag in the calendar). */
+  async setTaskDue(item: GoogleTaskItem, due: DateKey): Promise<void> {
+    await this.writeListTask([item], () => ({ due }), true);
+  }
+
+  /** Several tasks patched alike: shown at once, put back when Google refuses. */
+  private async writeListTask(items: readonly GoogleTaskItem[], patchOf: (item: GoogleTaskItem) => { title?: string; notes?: string; due?: DateKey | null; completed?: boolean }, calendar: boolean): Promise<void> {
+    const first = items[0];
+    if (!first) return;
+    const key = listKey(first.account, first.listId);
+    const before = this.view.board[key]?.items ?? null;
+    const now = new Date().toISOString();
+    const shown = (item: GoogleTaskItem): GoogleTaskItem => {
+      const patch = patchOf(item);
+      return { ...item, ...patch, ...(patch.completed !== undefined ? { completedAt: patch.completed ? now : null } : {}) } as GoogleTaskItem;
+    };
+    if (before) this.patchBoard(key, before.map((item) => (items.some((target) => target.id === item.id) ? shown(item) : item)));
+    try {
+      for (const item of items) {
+        const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { account: item.account, listId: item.listId, id: item.id, ...patchOf(item) });
+        if (answer.task) this.remember(answer.task);
+      }
+      this.afterTaskWrite(first.account, first.listId, calendar);
+    } catch (error) {
+      if (before) this.patchBoard(key, before);
+      throw error;
+    }
+  }
+
+  /** Google's answer for a task, where the Tasks view shows its list; a new one joins it. */
+  private remember(item: GoogleTaskItem, add = false): void {
+    const key = listKey(item.account, item.listId);
+    const list = this.view.board[key];
+    if (!list) return;
+    const known = list.items.some((other) => other.id === item.id);
+    if (!known && !add) return;
+    this.patchBoard(key, known ? list.items.map((other) => (other.id === item.id ? item : other)) : [...list.items, item]);
+  }
+
+  private afterTaskWrite(account: string, listId: string, calendar: boolean): void {
+    if (this.view.list?.account === account && this.view.list.id === listId) void this.refreshTasks();
+    if (calendar) calendarUi.refresh();
+  }
+
+  private setBoard(key: string, list: TaskBoardList): void {
+    this.set({ board: { ...this.view.board, [key]: list } });
+  }
+
+  /** New items for a list the Tasks view has read; lists it has not read stay unread. */
+  private patchBoard(key: string, items: GoogleTaskItem[]): void {
+    const current = this.view.board[key];
+    if (current) this.setBoard(key, { ...current, items });
   }
 
   private async settleSignIn(id: string, result: SignInResult): Promise<void> {

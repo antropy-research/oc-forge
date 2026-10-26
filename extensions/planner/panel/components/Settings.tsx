@@ -379,7 +379,7 @@ const GoogleSettings = () => {
             <input type="checkbox" checked={settings.googleTasksDueFromPlan} onChange={(event) => update({ googleTasksDueFromPlan: event.currentTarget.checked })} />
           </label>
           <label>
-            Show Google tasks on the calendar on their due day, as Google Calendar does, until they are planned
+            Show Google tasks on the calendar on their due day, as Google Calendar does (planned ones too, marked)
             <input type="checkbox" checked={settings.googleTasksOnCalendar} onChange={(event) => update({ googleTasksOnCalendar: event.currentTarget.checked })} />
           </label>
         </>
