@@ -1071,8 +1071,9 @@ try {
   check('a label filter keeps the issues that have it', (await shownKeys()).join() === expectedBug.join() && expectedBug.includes('E2E-31'), `${(await shownKeys()).join(', ')} (want ${expectedBug.join(', ')})`);
   await shot('32-linear-filters');
 
-  // Assign an issue to an agent from its row: planned today, the task opens on "Assign to an agent".
+  // Assign an issue to an agent from its row: the assignee picker; "More options…" plans it today and opens the assignment.
   await viewRow.getByRole('button', { name: 'Assign E2E-31 to an agent' }).click();
+  await frame.getByRole('dialog', { name: 'Assign to an agent' }).getByRole('button', { name: 'More options…' }).click();
   const assignFromRow = frame.getByRole('dialog', { name: 'Task details' }).getByRole('group', { name: 'Assign to an agent' });
   await assignFromRow.waitFor({ timeout: 10_000 });
   const rowBranch = await assignFromRow.getByRole('textbox', { name: 'Worktree branch' }).inputValue();
@@ -1174,9 +1175,15 @@ try {
   await assignCard.hover();
   await assignCard.getByRole('button', { name: 'Task actions' }).click();
   await assignCard.getByRole('menuitem', { name: 'Assign to an agent' }).click();
+  const cardPicker = frame.getByRole('dialog', { name: 'Assign to an agent' });
+  check('"Assign to an agent…" in the card menu opens the assignee picker on the card', await cardPicker.getByRole('group', { name: 'Agents' }).waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
+  await cardPicker.getByRole('button', { name: 'More options…' }).click();
   const assignDialog = frame.getByRole('dialog', { name: 'Task details' });
   const assignForm = assignDialog.getByRole('group', { name: 'Assign to an agent' });
-  check('"Assign to an agent" in the card menu opens the task on the assignment', await assignForm.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+  check('"More options…" opens the task on the assignment', await assignForm.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+  // This phase follows OpenChamber's own default agent; tests/e2e/sunsama.mjs assigns to chosen ones.
+  await assignForm.getByRole('button', { name: 'Agent', exact: true }).click();
+  await frame.getByRole('dialog', { name: 'Choose the agent' }).getByRole('option', { name: "OpenChamber's default" }).click();
   await assignForm.getByRole('combobox', { name: 'Agent project' }).selectOption({ label: 'planner-demo-a' });
   const assignBranch = `planner/${run}-assign`;
   await assignForm.getByRole('textbox', { name: 'Worktree branch' }).fill(assignBranch);

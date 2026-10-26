@@ -3,10 +3,12 @@ import { addDays, isDateKey, monthDay } from '../../src/domain/dates.ts';
 import { useView } from '../lib/context.ts';
 import { DayColumn } from './DayColumn.tsx';
 import { ChannelFilter } from './ChannelFilter.tsx';
+import { SourcePanel } from './SourcePanel.tsx';
+import { boardTargets } from '../lib/dayTargets.ts';
 
 const DAYS = 7;
 
-/** Home: Sunsama's multi-day board, one column per day. */
+/** Home: Sunsama's multi-day board, one column per day, with the sources panel and its rail on the right. */
 export const Board = () => {
   const view = useView();
   const [anchor, setAnchor] = useState(view.today);
@@ -24,8 +26,11 @@ export const Board = () => {
           <input class="date-jump" type="date" aria-label="Jump to date" value={anchor} onChange={(event) => isDateKey(event.currentTarget.value) && setAnchor(event.currentTarget.value)} />
         </div>
       </header>
-      <div class="board">
-        {days.map((date) => <DayColumn key={date} date={date} />)}
+      <div class="sunsama-layout">
+        <div class="board">
+          {days.map((date) => <DayColumn key={date} date={date} />)}
+        </div>
+        <SourcePanel {...boardTargets(days, view.today)} />
       </div>
     </section>
   );

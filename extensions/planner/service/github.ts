@@ -2,6 +2,7 @@
 // OpenChamber. Read-only, like Sunsama's GitHub integration.
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
 import type { GitHubItem } from '../src/domain/github.ts';
 import type { SeenPullRequest } from '../src/domain/events.ts';
@@ -73,6 +74,10 @@ export interface GitHubStatus {
   available: boolean;
   login: string | null;
   message: string | null;
+  /** Why GitHub is out of reach: gh is not installed, or not signed in; null when it works or failed otherwise. */
+  reason?: 'missing' | 'signed-out' | null;
+  /** Where to sign gh in from: inside the container OpenChamber runs in (its id, as `docker exec` takes it), or null for this machine. */
+  container?: string | null;
 }
 
 interface RawPull {
@@ -101,23 +106,36 @@ export const pickPull = (pulls: readonly RawPull[]): SeenPullRequest | null => {
   return parsed.sort((a, b) => rank[a.pr.state] - rank[b.pr.state] || b.updatedAt.localeCompare(a.updatedAt))[0]?.pr ?? null;
 };
 
-const explain = (error: unknown): string => {
+/** gh's failure, in words the user can act on, and whether it is a missing or signed-out gh. */
+export const diagnose = (error: unknown): { reason: 'missing' | 'signed-out' | null; message: string } => {
   const failure = error as { code?: string; stderr?: string; message?: string };
-  if (failure.code === 'ENOENT') return 'The GitHub CLI (gh) is not installed on the machine running OpenChamber.';
+  if (failure.code === 'ENOENT') return { reason: 'missing', message: 'The GitHub CLI (gh) is not installed where OpenChamber runs. Install it there, then sign in with `gh auth login`.' };
   const text = `${failure.stderr ?? ''} ${failure.message ?? ''}`;
-  if (/auth login|not logged|authentication/i.test(text)) return 'Log in once with `gh auth login` on the machine running OpenChamber.';
-  return text.trim().split('\n')[0]?.slice(0, 300) || 'gh failed';
+  if (/auth login|not logged|authentication|GH_TOKEN|bad credentials|HTTP 401/i.test(text)) {
+    return { reason: 'signed-out', message: 'The GitHub CLI (gh) is not signed in. Run `gh auth login` once where OpenChamber runs; a GH_TOKEN set for OpenChamber does not reach the Planner.' };
+  }
+  return { reason: null, message: text.trim().split('\n')[0]?.slice(0, 300) || 'gh failed' };
+};
+
+const explain = (error: unknown): string => diagnose(error).message;
+
+/** The container this service runs in, by the id `docker exec` takes (its hostname), or null on a plain machine. */
+export const containerId = (): string | null => {
+  if (!existsSync('/.dockerenv') && !existsSync('/run/.containerenv')) return null;
+  const name = hostname();
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : null;
 };
 
 export class GitHubSource {
-  constructor(private readonly run: Runner = ghRunner) {}
+  constructor(private readonly run: Runner = ghRunner, private readonly container: () => string | null = containerId) {}
 
   async status(): Promise<GitHubStatus> {
     try {
       const login = (await this.run(['api', 'user', '--jq', '.login'])).trim();
-      return { available: true, login: login || null, message: null };
+      return { available: true, login: login || null, message: null, reason: null, container: null };
     } catch (error) {
-      return { available: false, login: null, message: explain(error) };
+      const { reason, message } = diagnose(error);
+      return { available: false, login: null, message, reason, container: reason ? this.container() : null };
     }
   }
 
@@ -148,6 +166,15 @@ export class GitHubSource {
     }
     if (failure) throw new Error(explain(failure));
     return null;
+  }
+
+  /** A pull request by its URL (one linked to the run's chat, or seen before); gh needs no checkout for it. */
+  async pullRequestAt(url: string): Promise<SeenPullRequest | null> {
+    if (!PULL_URL.test(url)) throw new Error('pull request URL is invalid');
+    const out = await this.run(['pr', 'view', url, '--json', PULL_FIELDS], { timeoutMs: 8_000 }).catch((error) => {
+      throw new Error(explain(error));
+    });
+    return pickPull([JSON.parse(out) as RawPull]);
   }
 
   /** Current state of the items behind linked tasks. */

@@ -13,6 +13,10 @@ export interface GitHubStatus {
   available: boolean;
   login: string | null;
   message: string | null;
+  /** gh is not installed, or not signed in. */
+  reason?: 'missing' | 'signed-out' | null;
+  /** The container OpenChamber runs in, where gh signs in; null on a plain machine. */
+  container?: string | null;
 }
 
 export interface GitHubView {
@@ -76,7 +80,10 @@ export class GitHubStore {
       const bodies = planGitHubSync(this.client.getView().state, new Map(linked.items.map((item) => [item.id, item])));
       if (bodies.length) await this.client.dispatch(bodies, { origin: 'github' });
     } catch (error) {
-      this.set({ loading: false, error: messageOf(error) });
+      const message = messageOf(error);
+      this.set({ loading: false, error: message });
+      // Signed out since the last check: say how to sign in instead of an error over an empty list.
+      if (/not signed in|not installed/.test(message)) void this.checkStatus();
     }
   }
 

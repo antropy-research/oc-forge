@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { GuestWorktree } from '@openchamber/sdk';
-import type { RunPullRequest, Task, TaskRun } from '../../src/domain/types.ts';
+import type { RunAssignee, RunPullRequest, Task, TaskRun } from '../../src/domain/types.ts';
 import { timeAgo } from '../../src/domain/activity.ts';
 import { RUN_STATUS_LABEL, assignPrompt, isActive, needsYou, runStatus, runsFor, taskPrompt, taskPullRequest, taskRunStatus, type RunStatus } from '../../src/domain/runs.ts';
+import { assigneeOptions, defaultAssignee, modelLabel, taskAssignees } from '../../src/domain/assignees.ts';
 import { useAgents, usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
-import { branchFor, type WorkspaceChoice } from '../lib/agents.ts';
+import { assignBranch, type WorkspaceChoice } from '../lib/agents.ts';
+import { AssignButton, AssigneePicker, Avatar, toAssignee, usePickResult } from './AssigneePicker.tsx';
+
+/** An assignee as a small chip: avatar and name, the model in its title. */
+export const AssigneeChip = ({ assignee }: { assignee: RunAssignee }) => (
+  <span class="assignee-chip" title={`${assignee.name}: ${assignee.agent}${assignee.model ? ` · ${assignee.model}` : ", the agent's model"}`}>
+    <Avatar name={assignee.name} id={assignee.id} small />
+    <span>{assignee.name}</span>
+  </span>
+);
 
 const PR_STATE_LABEL = { open: 'Open', merged: 'Merged', closed: 'Closed' } as const;
 
@@ -44,8 +54,11 @@ export const AgentChip = ({ taskId }: { taskId: string }) => {
   const status = taskRunStatus(view.state, taskId, agents.sessions);
   if (!status) return null;
   const pr = taskPullRequest(view.state, taskId);
+  const assignee = taskAssignees(view.state, taskId)[0];
+  const said = `${assignee ? `${assignee.name}: ` : ''}${RUN_STATUS_LABEL[status]}`;
   return (
-    <span class={`agent-chip status-${status}`} title={pr ? `${RUN_STATUS_LABEL[status]} · pull request #${pr.number} ${pr.state}` : RUN_STATUS_LABEL[status]}>
+    <span class={`agent-chip status-${status}`} title={pr ? `${said} · pull request #${pr.number} ${pr.state}` : said}>
+      {assignee && <Avatar name={assignee.name} id={assignee.id} small />}
       <span class="agent-dot" aria-hidden="true" />
       {SHORT_LABEL[status]}
       {pr && <span class={`agent-pr is-${pr.state}`}>#{pr.number}{pr.state === 'merged' ? ' merged' : ''}</span>}
@@ -73,10 +86,12 @@ const RunRow = ({ run }: { run: TaskRun }) => {
   return (
     <li class={`run-row status-${status}`}>
       <div class="run-main">
+        {run.assignee && <AssigneeChip assignee={run.assignee} />}
         <span class={`agent-chip status-${status}`}><span class="agent-dot" aria-hidden="true" />{RUN_STATUS_LABEL[status]}</span>
         {run.wantsPr && <span class="run-kind">Assigned</span>}
         <span class="run-title">{live?.title || run.title}</span>
         <span class="muted">
+          {run.assignee ? `${run.assignee.agent}${run.assignee.model ? ` · ${modelLabel(run.assignee.model)}` : ''} · ` : ''}
           {project?.name ?? run.directory ?? 'project'}
           {branch ? ` · ${branch}` : ''} · started {timeAgo(run.startedAt)}
         </span>
@@ -99,10 +114,43 @@ const RunRow = ({ run }: { run: TaskRun }) => {
   );
 };
 
+/** The agent a form starts the chat as: a button that opens the picker in "choose" mode. */
+const AgentField = ({ task, directory, chosen, onChoose }: { task: Task; directory: string | null; chosen: RunAssignee | null; onChoose: (assignee: RunAssignee | null) => void }) => {
+  const { client } = usePlanner();
+  const result = usePickResult();
+  const [picking, setPicking] = useState(false);
+  return (
+    <div class="field-row">
+      <span>Agent</span>
+      <span class="menu-anchor assign-anchor">
+        <button class="assignee-trigger" aria-label="Agent" aria-haspopup="dialog" aria-expanded={picking} onClick={() => setPicking(!picking)}>
+          {chosen ? <AssigneeChip assignee={chosen} /> : <span class="assignee-chip"><span class="avatar is-small is-default" aria-hidden="true">OC</span><span>OpenChamber's default</span></span>}
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        {picking && (
+          <AssigneePicker
+            taskId={task.id}
+            directory={directory}
+            title="Choose the agent"
+            align="left"
+            chosen={{ id: chosen?.id ?? null }}
+            onClose={() => setPicking(false)}
+            onPick={(option) => {
+              setPicking(false);
+              void result(option).then(onChoose).catch((error) => client.notify(`Could not save the preset: ${error instanceof Error ? error.message : String(error)}`));
+            }}
+          />
+        )}
+      </span>
+    </div>
+  );
+};
+
 /**
- * Start an agent on a task. "assign", as in GitHub or Linear: a new worktree,
- * and instructions to open a pull request the Planner then follows. "send":
- * choose the folder or worktree and write the message yourself.
+ * Start an agent on a task with every choice at hand. "assign", as in GitHub
+ * or Linear: an agent and model, a new worktree, and instructions to open a
+ * pull request the Planner then follows. "send": choose the folder or worktree
+ * and write the message yourself.
  */
 const DispatchForm = ({ task, mode, onDone }: { task: Task; mode: 'assign' | 'send'; onDone: () => void }) => {
   const { agents } = usePlanner();
@@ -113,13 +161,15 @@ const DispatchForm = ({ task, mode, onDone }: { task: Task; mode: 'assign' | 'se
   const [workspaceKind, setWorkspaceKind] = useState<'project' | 'new' | string>(assign ? 'new' : 'project');
   // Linear's own branch name links the pull request back to the issue.
   const linearBranch = task.source?.kind === 'linear' ? task.source.branch ?? null : null;
-  const [branch, setBranch] = useState(() => linearBranch ?? branchFor(task.title, task.id));
+  const [branch, setBranch] = useState(() => assignBranch(view.state, task.id));
   const [worktrees, setWorktrees] = useState<GuestWorktree[]>([]);
   const [prompt, setPrompt] = useState(() => (assign ? assignPrompt(view.state, task.id, branch) : taskPrompt(view.state, task.id)));
   // The assignment's instructions follow the branch name until they are edited by hand.
   const [edited, setEdited] = useState(false);
   const [showPrompt, setShowPrompt] = useState(!assign);
   const [open, setOpen] = useState(false);
+  // Undefined until chosen: an assignment starts on the task's last assignee (or the first preset, or Build); a plain send on OpenChamber's default.
+  const [picked, setPicked] = useState<RunAssignee | null | undefined>(undefined);
   const busy = av.dispatching.has(task.id);
   useEffect(() => {
     if (assign && !edited) setPrompt(assignPrompt(view.state, task.id, branch.trim() || branch));
@@ -128,6 +178,10 @@ const DispatchForm = ({ task, mode, onDone }: { task: Task; mode: 'assign' | 'se
   useEffect(() => {
     if (!projectId && av.projects[0]) setProjectId(agents.defaultProject(view.state, task.id)?.id ?? av.projects[0].id);
   }, [av.projects.length]);
+  const project = av.projects.find((item) => item.id === projectId) ?? null;
+  useEffect(() => {
+    void agents.loadCatalog(project?.directory ?? null);
+  }, [project?.directory]);
   useEffect(() => {
     let live = true;
     setWorktrees([]);
@@ -139,6 +193,9 @@ const DispatchForm = ({ task, mode, onDone }: { task: Task; mode: 'assign' | 'se
 
   if (av.available === false) return <p class="hint">OpenChamber did not allow the Planner to see projects. Approve its access in Settings → Extensions.</p>;
   if (av.projects.length === 0) return <p class="hint">Add a project in OpenChamber first; agents work inside a project.</p>;
+  const options = assigneeOptions(view.state.settings.agentPresets ?? [], av.catalog?.agents ?? []);
+  const fallback = assign ? defaultAssignee(view.state, task.id, options) : null;
+  const assignee = picked !== undefined ? picked : fallback ? toAssignee(fallback) : null;
   const active = runsFor(view.state, task.id).some((run) => isActive(runStatus(run, av.sessions.get(run.sessionId))));
   const workspace: WorkspaceChoice = workspaceKind === 'project' ? { kind: 'project' } : workspaceKind === 'new' ? { kind: 'new', branch } : { kind: 'existing', directory: workspaceKind };
   return (
@@ -146,14 +203,14 @@ const DispatchForm = ({ task, mode, onDone }: { task: Task; mode: 'assign' | 'se
       {active && <p class="warning">An agent is already working on this task; a new one runs alongside it.</p>}
       {assign && (
         <p class="hint">
-          OpenChamber's default agent and model take it (set them in OpenChamber's settings). It works in a new worktree, then pushes the branch and
-          opens a pull request, which shows here.
+          {assignee ? assignee.name : "OpenChamber's default agent"} works on it in a new worktree, then pushes the branch and opens a pull request, which shows here.
         </p>
       )}
+      <AgentField task={task} directory={project?.directory ?? null} chosen={assignee} onChoose={setPicked} />
       <label class="field-row">
         <span>Project</span>
         <select aria-label="Agent project" value={projectId} onChange={(event) => setProjectId(event.currentTarget.value)}>
-          {av.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          {av.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select>
       </label>
       {!assign && (
@@ -199,7 +256,7 @@ const DispatchForm = ({ task, mode, onDone }: { task: Task; mode: 'assign' | 'se
           class="primary"
           disabled={busy || !projectId || !prompt.trim() || (workspaceKind === 'new' && !branch.trim())}
           onClick={() => {
-            void agents.dispatch(task.id, { projectId, workspace, prompt, open, ...(assign ? { wantsPr: true } : {}) }).then((started) => started && onDone());
+            void agents.dispatch(task.id, { projectId, workspace, prompt, open, assignee, ...(assign ? { wantsPr: true } : {}) }).then((started) => started && onDone());
           }}
         >
           {busy ? (workspaceKind === 'new' ? 'Making the worktree…' : 'Starting…') : assign ? 'Assign' : 'Start agent'}
@@ -210,27 +267,39 @@ const DispatchForm = ({ task, mode, onDone }: { task: Task; mode: 'assign' | 'se
   );
 };
 
-/** The task detail's Agent section: its runs, and a way to start one. */
+/**
+ * The task detail's Agent section: who the task is assigned to (a picker, as
+ * GitHub's and Linear's Assignee field), its runs, and the full options.
+ */
 export const AgentSection = ({ task }: { task: Task }) => {
   const view = useView();
   const av = useAgents();
   const { ui, setUi } = useUi();
-  // "Assign to an agent" from a card menu or an issue row opens the form here.
+  // "More options…" from a picker opens the form here.
   const [form, setForm] = useState<'assign' | 'send' | null>(() => ui.agentForm);
   useEffect(() => {
     if (ui.agentForm) setUi({ agentForm: null });
   }, []);
   const runs = runsFor(view.state, task.id).slice().reverse();
-  const active = runs.some((run) => isActive(runStatus(run, av.sessions.get(run.sessionId))));
+  const assignees = taskAssignees(view.state, task.id);
+  const busy = av.dispatching.has(task.id);
   return (
     <section class="detail-section" aria-label="Agent">
       <h3>Agent {runs.length > 0 && <span class="count">{runs.length} run{runs.length === 1 ? '' : 's'}</span>}</h3>
+      <div class="assignee-field">
+        <span class="field-label">Assignee</span>
+        <AssignButton taskId={task.id} label="Assign to an agent" className="assignee-trigger" align="left">
+          {assignees.length ? assignees.slice(0, 3).map((assignee) => <AssigneeChip key={assignee.id} assignee={assignee} />) : <span class="muted">No agent yet: assign one</span>}
+          <span class="caret" aria-hidden="true">▾</span>
+        </AssignButton>
+        {busy && <span class="hint" role="status">Starting the agent; a new worktree can take a minute…</span>}
+      </div>
       {runs.length > 0 && <ul class="runs">{runs.map((run) => <RunRow key={run.id} run={run} />)}</ul>}
       {form ? (
         <DispatchForm key={form} task={task} mode={form} onDone={() => setForm(null)} />
       ) : (
         <div class="row">
-          <button class="link" onClick={() => setForm('assign')}>{active ? 'Assign to another agent' : runs.length ? 'Assign to an agent again' : 'Assign to an agent'}</button>
+          <button class="link" onClick={() => setForm('assign')}>Assign with options…</button>
           <button class="link" onClick={() => setForm('send')}>Send to an agent…</button>
         </div>
       )}
@@ -247,23 +316,35 @@ const GROUPS: { label: string; statuses: RunStatus[] }[] = [
   { label: 'Done', statuses: ['accepted', 'archived'] },
 ];
 
-/** Every agent run across tasks and projects, grouped by what it needs. */
+/** Every agent run across tasks and projects, grouped by what it needs; one assignee's runs, if chosen. */
 export const AgentsView = () => {
   const view = useView();
   const av = useAgents();
   const { setUi } = useUi();
-  const rows = Object.values(view.state.runs)
+  const [who, setWho] = useState('');
+  const all = Object.values(view.state.runs)
     .map((run) => ({ run, task: view.state.tasks[run.taskId], status: runStatus(run, av.sessions.get(run.sessionId)) }))
     .filter((row) => row.task && !row.task.deletedAt)
     .sort((a, b) => b.run.startedAt.localeCompare(a.run.startedAt));
+  const assignees = [...new Map(all.flatMap((row) => (row.run.assignee ? [[row.run.assignee.id, row.run.assignee] as const] : []))).values()];
+  const rows = who ? all.filter((row) => (who === 'default' ? !row.run.assignee : row.run.assignee?.id === who)) : all;
   return (
     <section class="view">
       <header class="view-header">
         <h1>Agents</h1>
         <span class="view-sub">{rows.filter((row) => needsYou(row.status)).length} need you · {rows.filter((row) => row.status === 'running').length} working</span>
+        {assignees.length > 0 && (
+          <div class="date-nav">
+            <select aria-label="Show runs of" value={who} onChange={(event) => setWho(event.currentTarget.value)}>
+              <option value="">Every assignee</option>
+              {assignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}
+              {all.some((row) => !row.run.assignee) && <option value="default">OpenChamber's default</option>}
+            </select>
+          </div>
+        )}
       </header>
       <div class="view-scroll agents-view">
-        {rows.length === 0 && <p class="hint">Open a task and choose "Assign to an agent": it works in a new worktree and opens a pull request. Its chat runs in OpenChamber; the Planner keeps track of it here.</p>}
+        {all.length === 0 && <p class="hint">Open a task and choose "Assign to an agent": pick an agent and model, and it works in a new worktree and opens a pull request. Its chat runs in OpenChamber; the Planner keeps track of it here.</p>}
         {av.prError && rows.some((row) => row.run.worktree?.branch) && <p class="hint" role="status">Pull requests can't be looked up: {av.prError.split('\n')[0]}</p>}
         {GROUPS.map((group) => {
           const items = rows.filter((row) => group.statuses.includes(row.status));

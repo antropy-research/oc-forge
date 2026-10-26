@@ -13,6 +13,7 @@ import type { LinearProperty, Task } from '../../../src/domain/types.ts';
 import { LINEAR_DRAG_TYPE, useLinear, usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
 import type { IssueRef, ListId } from '../../lib/linear.ts';
+import { AssignButton } from '../AssigneePicker.tsx';
 import { Avatar, CycleIcon, Dot, PriorityIcon, ProjectIcon, StatusIcon } from './icons.tsx';
 
 /** Drag payload for moving an issue between groups: its workspace and id. */
@@ -42,17 +43,18 @@ export const PlanActions = ({ issue, compact = false }: { issue: LinearIssue; co
       </button>
     );
   }
+  /** Plan it today: the task its assignee works on (the picker asks for it once an agent is chosen). */
   const assign = async () => {
     const { bodies, taskId } = linear.importCommands(issue, { kind: 'day', date: view.today });
     await client.dispatch(bodies, { undo: `Planned ${issue.identifier}` });
-    setUi({ openTaskId: taskId, agentForm: 'assign' });
+    return taskId;
   };
   return (
     <span class={`lin-plan${compact ? ' is-compact' : ''}`} onClick={stop} onKeyDown={stop}>
       <button type="button" onClick={() => void linear.plan(issue, { kind: 'day', date: view.today })} aria-label={`Plan ${issue.identifier} today`} title="Plan today">Today</button>
       <button type="button" onClick={() => void linear.plan(issue, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${issue.identifier} tomorrow`} title="Plan tomorrow">Tmrw</button>
       <button type="button" onClick={() => void linear.plan(issue, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${issue.identifier} in the backlog`} title="Put it in the backlog">Later</button>
-      <button type="button" onClick={() => void assign()} aria-label={`Assign ${issue.identifier} to an agent`} title="Plan it today and assign it to an agent, which opens a pull request">Agent</button>
+      <AssignButton taskId={null} prepare={assign} label={`Assign ${issue.identifier} to an agent`}>Agent</AssignButton>
     </span>
   );
 };

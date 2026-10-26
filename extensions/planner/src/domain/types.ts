@@ -255,6 +255,31 @@ export interface TaskRun {
   wantsPr?: boolean;
   /** The pull request opened from the run's branch, as gh last showed it. */
   pullRequest?: RunPullRequest | null;
+  /** The agent the task was assigned to, as it was when the run started; absent for OpenChamber's default agent. */
+  assignee?: RunAssignee | null;
+}
+
+/**
+ * An agent to assign tasks to, named in Settings → Agents: an OpenCode agent
+ * (build, plan or one from OpenCode's config) with an optional model.
+ */
+export interface AgentPreset {
+  /** Lowercase letters, digits and dashes; names the OpenCode command `oc-planner-<id>`. */
+  id: string;
+  name: string;
+  /** OpenCode agent id, such as build or plan. */
+  agent: string;
+  /** `provider/model`, optionally `#variant`; null runs the agent's own model. */
+  model: string | null;
+}
+
+/** Who a run was assigned to: a preset, or an OpenCode agent with its own model. */
+export interface RunAssignee {
+  /** The preset id, or `agent-<name>` for an agent without a preset. */
+  id: string;
+  name: string;
+  agent: string;
+  model: string | null;
 }
 
 /** A pull request on GitHub, opened from a run's worktree branch. */
@@ -322,6 +347,8 @@ export interface Settings {
   googleTasksDueFromPlan: boolean;
   /** Show Google tasks that are due on the calendar, as Google Calendar does, until they are planned. */
   googleTasksOnCalendar: boolean;
+  /** Named agents (an OpenCode agent and a model) to assign tasks to. */
+  agentPresets: AgentPreset[];
 }
 
 export interface PlannerState {
@@ -367,6 +394,7 @@ export const DEFAULT_SETTINGS: Settings = {
   googleTasksImportCompletion: true,
   googleTasksDueFromPlan: true,
   googleTasksOnCalendar: true,
+  agentPresets: [],
 };
 
 export const emptyState = (): PlannerState => ({

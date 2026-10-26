@@ -1,6 +1,7 @@
 // Agent runs on tasks: what a run's status is, which need the user, and which
 // facts about sessions are worth writing down.
 import type { PlannerState, RunPullRequest, TaskRun, TaskSourceRef } from './types.ts';
+import { isRunAssignee } from './assignees.ts';
 
 /** How the first message names a task's source. */
 const SOURCE_LABELS: Record<TaskSourceRef['kind'], string> = { linear: 'Linear issue', github: 'GitHub', gtask: 'Google task', email: 'Email in Gmail' };
@@ -21,6 +22,8 @@ export interface LiveSession {
   archivedAt: number | null;
   worktree: { directory: string; branch: string } | null;
   items: { id: string; data?: unknown }[];
+  /** Issues and code changes linked to the chat, by anyone (the agent too); hosts before 2.5.2 send none. */
+  links?: { title: string; url: string; kind: 'issue' | 'change' }[];
 }
 
 export type RunStatus = 'running' | 'question' | 'permission' | 'review' | 'failed' | 'changes' | 'accepted' | 'idle' | 'archived';
@@ -100,7 +103,9 @@ export const planAdoptions = (state: PlannerState, sessions: Iterable<LiveSessio
   for (const session of sessions) {
     if (known.has(session.id)) continue;
     for (const item of session.items) {
-      const data = (item.data ?? {}) as { taskId?: unknown; runId?: unknown; wantsPr?: unknown };
+      const data = (item.data ?? {}) as { taskId?: unknown; runId?: unknown; wantsPr?: unknown; assignee?: unknown; worktreeFor?: unknown };
+      // The empty chat that made an assignee's worktree is not a run.
+      if (data.worktreeFor !== undefined) continue;
       const taskId = typeof data.taskId === 'string' ? data.taskId : item.id;
       const task = state.tasks[taskId];
       if (!task || task.deletedAt) continue;
@@ -118,6 +123,7 @@ export const planAdoptions = (state: PlannerState, sessions: Iterable<LiveSessio
           title: task.title,
           // An assignment's session can be adopted before its start is written down; it stays an assignment.
           ...(data.wantsPr === true ? { wantsPr: true } : {}),
+          ...(isRunAssignee(data.assignee) ? { assignee: data.assignee } : {}),
         },
       });
       known.add(session.id);
@@ -174,34 +180,61 @@ export const assignPrompt = (state: PlannerState, taskId: string, branch: string
       '1. Make the change this task asks for, with tests where the project has them.',
       '2. Commit it with a clear message.',
       `3. Push \`${branch}\` and open a pull request with \`gh pr create\`: a title from the task, and a description of what changed and how you checked it.${link}`,
-      "4. Reply with the pull request's URL, or say why you could not open one.",
+      "4. If you can, link the pull request to this chat (OpenChamber's session.link, kind change).",
+      "5. Reply with the pull request's URL, or say why you could not open one.",
     ].join('\n'),
   ].join('\n\n');
 };
 
-/** What the service needs to look a run's pull request up with gh, in the first directory that exists. */
+/**
+ * What the service needs to look a run's pull request up with gh: by its URL
+ * once one is known, else by the run's branch in the first directory that exists.
+ */
 export interface PullRequestLookup {
   runId: string;
-  branch: string;
+  branch: string | null;
   directories: string[];
+  url?: string;
 }
 
 const LOOKUP_DAYS = 30;
 
 /**
- * Runs whose pull request may still change: they have a worktree branch,
- * started in the last 30 days, and no pull request was seen yet or it is open.
+ * Runs whose pull request may still change: they started in the last 30 days,
+ * have a worktree branch or a known pull request, and no pull request was seen
+ * yet or it is open.
  */
 export const pullRequestLookups = (state: PlannerState, now: number = Date.now()): PullRequestLookup[] =>
   Object.values(state.runs).flatMap((run) => {
-    const branch = run.worktree?.branch;
-    if (!branch || now - Date.parse(run.startedAt) > LOOKUP_DAYS * 86_400_000) return [];
+    const branch = run.worktree?.branch ?? null;
+    const url = run.pullRequest?.url;
+    if ((!branch && !url) || now - Date.parse(run.startedAt) > LOOKUP_DAYS * 86_400_000) return [];
     if (run.pullRequest && run.pullRequest.state !== 'open') return [];
     const task = state.tasks[run.taskId];
     if (!task || task.deletedAt) return [];
     // The worktree may be gone once its branch merged; the project checkout knows the same repository.
-    const directories = [run.worktree!.directory, ...(run.directory && run.directory !== run.worktree!.directory ? [run.directory] : [])];
-    return [{ runId: run.id, branch, directories }];
+    const directories = [...(run.worktree ? [run.worktree.directory] : []), ...(run.directory && run.directory !== run.worktree?.directory ? [run.directory] : [])];
+    return [{ runId: run.id, branch, directories, ...(url ? { url } : {}) }];
+  });
+
+const GITHUB_PULL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})\/pull\/(\d{1,9})(?:[/?#].*)?$/;
+
+/**
+ * Pull requests linked to a run's chat (OpenChamber 2.5.2 keeps them on the
+ * session, whoever linked them: the agent with session.link, or the user) for
+ * runs the log has no pull request for yet. Its state is open until gh says
+ * otherwise; from then on gh follows it by its URL.
+ */
+export const planLinkedPullRequests = (state: PlannerState, sessions: ReadonlyMap<string, LiveSession>): EventBody[] =>
+  Object.values(state.runs).flatMap((run) => {
+    if (run.pullRequest) return [];
+    const links = (sessions.get(run.sessionId)?.links ?? []).filter((link) => link.kind === 'change');
+    const found = links.map((link) => ({ link, match: GITHUB_PULL.exec(link.url) })).filter((entry) => entry.match).at(-1);
+    if (!found) return [];
+    const repo = found.match![1]!;
+    const number = Number(found.match![2]);
+    const title = found.link.title.trim().slice(0, 500) || `Pull request #${number}`;
+    return [{ type: 'run.pullRequest' as const, runId: run.id, taskId: run.taskId, pullRequest: { number, url: `https://github.com/${repo}/pull/${number}`, state: 'open' as const, draft: false, title, repo } }];
   });
 
 /** Events for the pull requests that appeared or changed since the log last saw them. */

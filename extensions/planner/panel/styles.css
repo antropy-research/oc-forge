@@ -808,12 +808,16 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .lin-date { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
 /* The Planner's own actions float over the row's end while it is hovered or focused, as Linear's hover actions do. */
 .lin-row, .lin-card { position: relative; }
-.lin-plan { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); z-index: 1; display: inline-flex; gap: 3px; padding: 3px; border-radius: 7px; background: var(--pl-surface); box-shadow: 0 1px 8px color-mix(in srgb, var(--oc-fg) 16%, transparent); opacity: 0; transition: opacity 0.1s; }
+/* Centred without a transform: a transform would make the assignee picker (position: fixed) place and clip against this bar. */
+.lin-plan { position: absolute; right: 8px; top: 0; bottom: 0; margin: auto 0; height: fit-content; z-index: 1; display: inline-flex; gap: 3px; padding: 3px; border-radius: 7px; background: var(--pl-surface); box-shadow: 0 1px 8px color-mix(in srgb, var(--oc-fg) 16%, transparent); opacity: 0; transition: opacity 0.1s; }
+/* Its open picker stays above the plan bars of the rows below it. */
+.lin-plan:focus-within { z-index: 30; }
 .lin-row:hover .lin-plan, .lin-row:focus .lin-plan, .lin-row:focus-within .lin-plan, .lin-card:hover .lin-plan, .lin-card:focus .lin-plan, .lin-plan:focus-within { opacity: 1; }
-.lin-card .lin-plan { top: auto; bottom: 6px; transform: none; }
-.lin-plan.is-visible { position: static; transform: none; opacity: 1; padding: 0; background: none; box-shadow: none; }
-.lin-plan button { border: 1px solid var(--pl-line); border-radius: 5px; background: var(--pl-surface); padding: 0 6px; font-size: 11.5px; color: var(--oc-fg); }
-.lin-plan button:hover { background: var(--pl-soft); }
+.lin-card .lin-plan { top: auto; bottom: 6px; margin: 0; }
+.lin-plan.is-visible { position: static; margin: 0; opacity: 1; padding: 0; background: none; box-shadow: none; }
+/* The bar's own buttons, not the ones inside the picker it opens. */
+.lin-plan > button, .lin-plan > .assign-anchor > button { border: 1px solid var(--pl-line); border-radius: 5px; background: var(--pl-surface); padding: 0 6px; font-size: 11.5px; color: var(--oc-fg); }
+.lin-plan > button:hover, .lin-plan > .assign-anchor > button:hover { background: var(--pl-soft); }
 .lin-planned { flex: none; border: 0; background: color-mix(in srgb, var(--oc-primary) 12%, transparent); color: var(--oc-fg); border-radius: 10px; padding: 1px 8px; font-size: 11.5px; }
 .lin-more, .lin-end { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 14px 8px 4px; margin: 0; color: var(--oc-muted); font-size: 12px; }
 .lin-empty-group { margin: 4px 34px 8px; }
@@ -901,3 +905,108 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
   .iv-side { border-left: 0; border-top: 1px solid var(--pl-line); }
 }
 /* ── end Linear page ── */
+
+/* ==== Sunsama panel, day-targeted plan actions, assignee picker, agent presets (planner-sunsama) ==== */
+/* Home and Today: the main area, then the sources panel and its icon rail on the right. */
+.sunsama-layout { display: flex; flex: 1; min-height: 0; }
+.sunsama-layout > .board { flex: 1; min-width: 0; align-items: stretch; }
+.sunsama-layout > .board .day-column { max-height: 100%; }
+/* A whole column takes a drop, not just the cards in it. */
+.sunsama-layout > .board .day-column .task-list { flex: 1; min-height: 80px; }
+.sunsama-layout.is-today { gap: 20px; padding: 4px 0 0 20px; }
+.sunsama-layout.is-today > .day-column { flex: 1; max-height: 100%; }
+.sunsama-layout.is-today > .day-column .task-list { flex: 1; }
+.source-panel { flex: none; width: 320px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border-left: 1px solid var(--pl-line); padding: 0 12px 12px 14px; }
+.source-head { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; }
+.source-head h2 { font-size: 13px; font-weight: 600; margin: 0; }
+.source-head .grow { flex: 1; }
+.source-icon svg { width: 16px; height: 16px; display: block; }
+.source-head .icon-button { height: 26px; min-width: 26px; display: inline-flex; align-items: center; justify-content: center; padding: 0 6px; }
+.source-head .icon-button svg { width: 14px; height: 14px; }
+.source-split.is-on { border-color: var(--oc-primary); color: var(--oc-primary-text, var(--oc-primary)); }
+.source-body { flex: 1; min-height: 0; overflow: auto; padding-bottom: 8px; }
+.source-body > .hint:first-child { margin-top: 0; }
+.source-calendar { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+.source-calendar .time-grid { flex: 1; }
+.source-panel.is-split .source-body { flex: 1 1 55%; }
+.source-panel.is-split .source-calendar { flex: 1 1 45%; border-top: 1px solid var(--pl-line); padding-top: 8px; }
+.source-day { display: flex; align-items: center; gap: 6px; }
+.source-day-label { flex: 1; text-align: center; font-size: 12px; font-weight: 600; }
+.source-rail { flex: none; width: 46px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 0 12px; border-left: 1px solid var(--pl-line); background: var(--pl-softer); }
+.source-rail [role='tablist'] { display: flex; flex-direction: column; gap: 6px; }
+.source-rail .grow { flex: 1; }
+.rail-button { position: relative; width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--oc-muted); }
+.rail-button svg { width: 18px; height: 18px; }
+.rail-button:hover { background: var(--pl-soft); color: var(--oc-fg); }
+.rail-button.is-active { background: var(--pl-surface); border-color: var(--pl-line); color: var(--oc-fg); box-shadow: 0 1px 2px color-mix(in srgb, var(--oc-fg) 10%, transparent); }
+.rail-button.is-active::before { content: ''; position: absolute; left: -8px; top: 7px; bottom: 7px; width: 3px; border-radius: 2px; background: var(--oc-primary); }
+.rail-toggle { font-size: 14px; }
+
+/* In the narrow panel a row's actions sit under its title, as on a board card. */
+.source-panel .issue-row, .ritual-aside .issue-row { grid-template-columns: 10px minmax(0, 1fr); row-gap: 4px; }
+.source-panel .issue-row > :last-child, .ritual-aside .issue-row > :last-child { grid-column: 2; justify-self: start; }
+/* A message has no state mark before it. */
+.issue-row.mail-row { grid-template-columns: minmax(0, 1fr) auto; }
+.source-panel .issue-row.mail-row, .ritual-aside .issue-row.mail-row { grid-template-columns: minmax(0, 1fr); }
+.source-panel .issue-row.mail-row > :last-child, .ritual-aside .issue-row.mail-row > :last-child { grid-column: 1; }
+
+/* A source row's plan actions: the days on screen, then more in a menu. */
+.plan-actions { align-items: center; }
+.plan-actions .plan-more { padding: 0 4px; }
+.plan-menu { min-width: 200px; }
+.issue-actions .plan-menu button { border: 0; border-radius: 4px; padding: 5px 8px; font-size: 12.5px; background: none; text-align: left; }
+.issue-actions .plan-menu button:hover { background: var(--pl-soft); }
+.plan-menu button.is-primary { font-weight: 600; }
+.plan-menu input[type='date'] { margin: 4px 8px; }
+
+/* The assignee picker, after GitHub's and Linear's. */
+.assign-anchor { display: inline-flex; }
+.assignee-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 40; width: 300px; max-width: min(300px, 92vw); display: flex; flex-direction: column; overflow: hidden; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 10px; box-shadow: 0 10px 32px color-mix(in srgb, var(--oc-fg) 18%, transparent); text-align: left; font-weight: 400; color: var(--oc-fg); }
+.assignee-menu.is-left { left: 0; right: auto; }
+.assignee-head { display: flex; flex-direction: column; gap: 6px; padding: 10px 10px 8px; border-bottom: 1px solid var(--pl-line); }
+.assignee-title { font-size: 12px; font-weight: 600; }
+.assignee-search { width: 100%; padding: 5px 8px; border: 1px solid var(--pl-line); border-radius: 6px; background: var(--oc-bg); outline: 0; }
+.assignee-search:focus { border-color: var(--oc-primary); }
+.assignee-list { flex: 1 1 auto; min-height: 0; max-height: 300px; overflow: auto; padding: 4px; }
+.plan-menu { overflow: auto; }
+.assignee-section { padding: 8px 8px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--oc-muted); }
+.assignee-option { display: grid; grid-template-columns: 26px minmax(0, 1fr) 16px; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.assignee-option.is-active { background: var(--pl-soft); }
+.assignee-option.is-missing { opacity: 0.6; }
+.assignee-text { display: flex; flex-direction: column; min-width: 0; }
+.assignee-name, .assignee-detail { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.assignee-name { font-size: 12.5px; font-weight: 600; }
+.assignee-detail { font-size: 11.5px; color: var(--oc-muted); }
+.assignee-check { width: 14px; height: 14px; fill: none; stroke: var(--oc-primary-text, var(--oc-primary)); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; visibility: hidden; }
+.assignee-check.is-on { visibility: visible; }
+.assignee-note { margin: 0; padding: 6px 8px; }
+.assignee-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 8px 10px; border-top: 1px solid var(--pl-line); background: var(--pl-softer); font-size: 12px; }
+.assignee-footer select { max-width: 150px; }
+.assignee-footer .link { margin-left: auto; }
+.assignee-project { display: inline-flex; align-items: center; gap: 6px; }
+.avatar { --avatar-color: var(--oc-primary); flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: var(--avatar-color); color: #fff; font-size: 10px; font-weight: 700; letter-spacing: 0.02em; line-height: 1; }
+.avatar.is-small { width: 16px; height: 16px; font-size: 7.5px; }
+.avatar.is-default { background: var(--oc-muted); }
+.assignee-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; }
+.assignee-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 2px 0 8px; }
+.assignee-field .field-label { width: 64px; font-size: 12px; color: var(--oc-muted); }
+.assignee-trigger { display: inline-flex; align-items: center; gap: 8px; padding: 3px 8px; border: 1px solid var(--pl-line); border-radius: 6px; background: var(--pl-surface); }
+.assignee-trigger:hover { border-color: color-mix(in srgb, var(--oc-fg) 25%, transparent); }
+.assignee-trigger .caret { font-size: 10px; color: var(--oc-muted); }
+.agent-chip .avatar { margin-right: 1px; }
+.run-main .assignee-chip { margin-right: 2px; }
+.dispatch-form .field-row .assign-anchor { justify-self: start; }
+
+/* Settings → Agents. */
+.preset-list { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.preset-row { display: grid; grid-template-columns: 24px minmax(120px, 1.2fr) minmax(90px, 0.8fr) minmax(140px, 1.4fr) minmax(70px, 0.5fr) auto; gap: 8px; align-items: center; }
+.preset-add { flex-wrap: wrap; }
+.agent-catalog { margin: 8px 0 0; }
+.agent-catalog ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.agent-catalog li { display: flex; align-items: center; gap: 8px; }
+.ws-badge.is-source { text-transform: none; }
+
+/* gh not signed in: how to sign in, in place of an empty list. */
+.gh-signin code { user-select: all; }
+.gh-signin ol { margin: 6px 0; padding-left: 18px; }
+.dispatch-form > button.link { align-self: flex-start; }

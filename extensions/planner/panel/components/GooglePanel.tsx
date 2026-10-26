@@ -6,6 +6,7 @@ import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context
 import { useUi } from '../lib/ui.ts';
 import { MAIL_SEARCHES, type GoogleDrag } from '../lib/google.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
+import { PlanActions } from './PlanActions.tsx';
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -45,12 +46,9 @@ const TaskRow = ({ item }: { item: GoogleTaskItem }) => {
       {linked ? (
         <button class="link issue-planned" onClick={() => setUi({ openTaskId: linked.id })} aria-label={`Open the task for ${item.title} (${plannedLabel(linked, view.today)})`}>{plannedLabel(linked, view.today)}</button>
       ) : (
-        <span class="issue-actions">
-          <button onClick={() => void google.planTask(item, { kind: 'day', date: view.today })} aria-label={`Plan ${item.title} today`}>Today</button>
-          <button onClick={() => void google.planTask(item, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${item.title} tomorrow`}>Tmrw</button>
+        <PlanActions label={item.title} onPlan={(placement) => void google.planTask(item, placement)}>
           {item.due && item.due > addDays(view.today, 1) && <button onClick={() => void google.planTask(item, { kind: 'day', date: item.due! })} aria-label={`Plan ${item.title} on its due date`}>{monthDay(item.due)}</button>}
-          <button onClick={() => void google.planTask(item, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${item.title} in the backlog`}>Later</button>
-        </span>
+        </PlanActions>
       )}
     </li>
   );
@@ -103,11 +101,7 @@ const MailRow = ({ item }: { item: MailItem }) => {
       {linked ? (
         <button class="link issue-planned" onClick={() => setUi({ openTaskId: linked.id })} aria-label={`Open the task for ${item.subject} (${plannedLabel(linked, view.today)})`}>{plannedLabel(linked, view.today)}</button>
       ) : (
-        <span class="issue-actions">
-          <button onClick={() => void google.planMail(item, { kind: 'day', date: view.today })} aria-label={`Plan ${item.subject} today`}>Today</button>
-          <button onClick={() => void google.planMail(item, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${item.subject} tomorrow`}>Tmrw</button>
-          <button onClick={() => void google.planMail(item, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${item.subject} in the backlog`}>Later</button>
-        </span>
+        <PlanActions label={item.subject} onPlan={(placement) => void google.planMail(item, placement)} />
       )}
     </li>
   );

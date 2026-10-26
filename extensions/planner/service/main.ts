@@ -14,6 +14,7 @@ import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { addDays, daysBetween, instantAt, isDateKey } from '../src/domain/dates.ts';
+import { CommandFiles, OpenCodeInfo, agentRoute, opencodeConfigDir } from './agents.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -43,6 +44,12 @@ const googleData = new GoogleData(google);
 const googleCalendars = new GoogleCalendars(googleData);
 const googleDueTasks = new GoogleDueTasks(googleData);
 const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleCalendars.forget() });
+// Agents to assign tasks to: one OpenCode command per preset, in OpenCode's own config folder.
+const opencodeConfig = opencodeConfigDir();
+const opencodeInfo = new OpenCodeInfo();
+const agentCommands = new CommandFiles(opencodeConfig, log);
+const syncAgentCommands = () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? []);
+syncAgentCommands();
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -51,12 +58,13 @@ const json = (res: http.ServerResponse, status: number, body: unknown): void => 
 
 const PULL_LOOKUPS_PER_REQUEST = 4;
 
-/** A run's pull request to look up, as the panel sends it. */
-const isLookup = (value: unknown): value is { runId: string; branch: string; directories: string[] } => {
-  const lookup = value as { runId?: unknown; branch?: unknown; directories?: unknown } | null;
+/** A run's pull request to look up, as the panel sends it: by its URL once known, else by the run's branch. */
+const isLookup = (value: unknown): value is { runId: string; branch: string | null; directories: string[]; url?: string } => {
+  const lookup = value as { runId?: unknown; branch?: unknown; directories?: unknown; url?: unknown } | null;
   return (
     typeof lookup?.runId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) &&
-    typeof lookup.branch === 'string' && lookup.branch.length <= 200 &&
+    (lookup.branch === null || (typeof lookup.branch === 'string' && lookup.branch.length <= 200)) &&
+    (lookup.url === undefined || (typeof lookup.url === 'string' && lookup.url.length <= 300)) &&
     Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === 'string' && item.length <= 1024)
   );
 };
@@ -250,13 +258,20 @@ const server = http.createServer(async (req, res) => {
       const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
       const results = await mapLimited(runs, 4, async (run) => {
         try {
-          return { runId: run.runId, pullRequest: await github.pullRequestFor(run.branch, run.directories) };
+          return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };
         } catch (error) {
           return { runId: run.runId, pullRequest: null, error: error instanceof Error ? error.message : String(error) };
         }
       });
       json(res, 200, { results });
       return;
+    }
+    if (url.pathname === '/agents' || url.pathname.startsWith('/agents/')) {
+      const answer = await agentRoute(req, url, { configDir: opencodeConfig, info: opencodeInfo, commands: agentCommands, readJson });
+      if (answer) {
+        json(res, answer.status, answer.body);
+        return;
+      }
     }
     if (url.pathname.startsWith('/google/')) {
       try {
@@ -331,6 +346,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') {
         const status = await sync!.run().catch((error) => ({ ...sync!.status(), lastError: error instanceof Error ? error.message : String(error) }));
         json(res, 200, { status, ...snapshot() });
+        syncAgentCommands();
         return;
       }
     }
@@ -383,6 +399,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       json(res, 200, { applied: result.applied, ...snapshot() });
+      syncAgentCommands();
       return;
     }
     json(res, 404, { error: 'not found' });

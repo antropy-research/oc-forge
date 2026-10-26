@@ -1,7 +1,7 @@
 // service/main.ts
 import http2 from "node:http";
-import { homedir } from "node:os";
-import { dirname as dirname3, join as join3 } from "node:path";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname3, join as join4 } from "node:path";
 
 // service/store.ts
 import { execFile } from "node:child_process";
@@ -18,8 +18,10 @@ var BACKLOG_BUCKETS = [
   { id: "never", label: "Never" }
 ];
 var SOURCE_NAMES = { linear: "Linear", github: "GitHub", gtask: "Google Tasks", email: "Gmail" };
-var LINEAR_GROUPS = ["status", "priority", "project", "team", "assignee", "workspace", "none"];
-var LINEAR_ORDERS = ["priority", "updated", "due", "identifier"];
+var LINEAR_GROUPS = ["status", "priority", "project", "team", "assignee", "workspace", "none", "cycle", "label"];
+var LINEAR_ORDERS = ["priority", "updated", "due", "identifier", "status", "manual", "created"];
+var LINEAR_COMPLETED = ["all", "day", "week", "month", "3months", "6months", "year", "none"];
+var LINEAR_PROPERTIES = ["id", "status", "priority", "assignee", "labels", "project", "cycle", "estimate", "due", "created", "updated"];
 var RITUALS = ["planning", "shutdown", "highlights", "weeklyPlanning", "weeklyReview"];
 var ritualKey = (ritual, date) => `${ritual}:${date}`;
 var DEFAULT_SETTINGS = {
@@ -36,6 +38,7 @@ var DEFAULT_SETTINGS = {
   linearLayout: "list",
   linearGroupBy: "status",
   linearOrderBy: "priority",
+  linearDisplay: { subGroupBy: "none", orderReverse: false, showCompleted: "none", showSubIssues: true, showEmptyGroups: false, showEmptyColumns: true, properties: ["id", "status", "priority", "labels", "project", "due", "assignee", "created"] },
   suggestFromHistory: true,
   pomodoroMinutes: 25,
   breakMinutes: 5,
@@ -43,7 +46,8 @@ var DEFAULT_SETTINGS = {
   googleTasksOnComplete: "complete",
   googleTasksImportCompletion: true,
   googleTasksDueFromPlan: true,
-  googleTasksOnCalendar: true
+  googleTasksOnCalendar: true,
+  agentPresets: []
 };
 var emptyState = () => ({
   version: 0,
@@ -750,18 +754,75 @@ ${stderr}${stdout}`)) : resolve(stdout));
   }
 }
 
+// src/domain/linearDisplay.ts
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var oneOf = (list, value) => typeof value === "string" && list.includes(value);
+var linearDisplayProblem = (value) => {
+  if (!isRecord(value))
+    return "linearDisplay must be an object";
+  if (!oneOf(LINEAR_GROUPS, value.subGroupBy))
+    return `linearDisplay.subGroupBy must be one of ${LINEAR_GROUPS.join(", ")}`;
+  if (!oneOf(LINEAR_COMPLETED, value.showCompleted))
+    return `linearDisplay.showCompleted must be one of ${LINEAR_COMPLETED.join(", ")}`;
+  for (const flag of ["orderReverse", "showSubIssues", "showEmptyGroups", "showEmptyColumns"])
+    if (typeof value[flag] !== "boolean")
+      return `linearDisplay.${flag} must be true or false`;
+  if (!Array.isArray(value.properties) || value.properties.length > LINEAR_PROPERTIES.length || !value.properties.every((item) => oneOf(LINEAR_PROPERTIES, item)))
+    return "linearDisplay.properties must list issue properties";
+  const known = new Set(["subGroupBy", "orderReverse", "showCompleted", "showSubIssues", "showEmptyGroups", "showEmptyColumns", "properties"]);
+  const extra = Object.keys(value).find((key) => !known.has(key));
+  return extra ? `unknown linearDisplay.${extra}` : null;
+};
+var VIEW_PREF_FIELDS = `layout issueGrouping issueSubGrouping viewOrdering viewOrderingDirection showCompletedIssues showSubIssues showTriageIssues
+      showEmptyGroups showEmptyGroupsBoard showEmptyGroupsList
+      fieldId fieldStatus fieldPriority fieldAssignee fieldLabels fieldProject fieldCycle fieldEstimate fieldDueDate fieldDateCreated fieldDateUpdated
+      projectLayout projectGrouping projectViewOrdering showCompletedProjects`;
+
+// src/domain/assignees.ts
+var COMMAND_PREFIX = "oc-planner-";
+var COMMAND_MARKER = "# Written by the OpenChamber Planner";
+var AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
+var MODEL_REF = /^[^\s/#]{1,64}\/[^\s#]{1,160}(?:#[^\s#]{1,40})?$/;
+var ASSIGNEE_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
+var isAgentName = (value) => typeof value === "string" && value.length <= 64 && AGENT_NAME.test(value);
+var isModelRef = (value) => typeof value === "string" && MODEL_REF.test(value);
+var isAssigneeId = (value) => typeof value === "string" && ASSIGNEE_ID.test(value);
+var isPresetName = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 60 && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(value);
+var isAgentPreset = (value) => {
+  const preset = value;
+  return typeof preset === "object" && preset !== null && isAssigneeId(preset.id) && isPresetName(preset.name) && isAgentName(preset.agent) && (preset.model === null || isModelRef(preset.model));
+};
+var isRunAssignee = (value) => {
+  const assignee = value;
+  return typeof assignee === "object" && assignee !== null && isAssigneeId(assignee.id) && isPresetName(assignee.name) && isAgentName(assignee.agent) && (assignee.model === null || isModelRef(assignee.model));
+};
+var commandName = (assignee) => `${COMMAND_PREFIX}${assignee.id}`;
+var agentLabel = (name) => name === "build" ? "Build" : name === "plan" ? "Plan" : name.charAt(0).toUpperCase() + name.slice(1);
+var presetAssignee = (preset) => ({ id: preset.id, name: preset.name, agent: preset.agent, model: preset.model });
+var commandFile = (assignee, kind) => [
+  "---",
+  `${COMMAND_MARKER} (${kind}); it rewrites and removes this file.`,
+  `description: ${JSON.stringify(`Planner: a task assigned to ${assignee.name}`)}`,
+  `agent: ${JSON.stringify(assignee.agent)}`,
+  ...assignee.model ? [`model: ${JSON.stringify(assignee.model)}`] : [],
+  "---",
+  "$ARGUMENTS",
+  ""
+].join(`
+`);
+
 // src/domain/events.ts
 var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "folderId", "objectiveId", "subtasks", "source"];
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver", "tasks.recurred"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
-var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 var isMinutes = (value) => value === null || typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 24 * 60 * 7;
 var isTitle = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= TITLE_MAX;
 var BUCKET_IDS = new Set(BACKLOG_BUCKETS.map((bucket) => bucket.id));
 var isPlacement = (value) => {
-  if (!isRecord(value))
+  if (!isRecord2(value))
     return false;
   if (value.kind === "day")
     return isDateKey(value.date);
@@ -769,15 +830,15 @@ var isPlacement = (value) => {
     return typeof value.bucket === "string" && BUCKET_IDS.has(value.bucket);
   return false;
 };
-var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
+var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
-var isSource = (value) => isRecord(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0);
+var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0);
 var PRIORITY_VALUES = new Set(["urgent", "high", "medium", "low"]);
 var isPriority = (value) => value === null || typeof value === "string" && PRIORITY_VALUES.has(value);
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
 var isChannelName = (value) => typeof value === "string" && /^[\p{L}\p{N}_-]{1,40}$/u.test(value);
 var validatePatch = (patch, channels, objectives, folders) => {
-  if (!isRecord(patch))
+  if (!isRecord2(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
     if (key === "title" && !isTitle(value))
@@ -806,7 +867,7 @@ var validatePatch = (patch, channels, objectives, folders) => {
   return null;
 };
 var validateChannelPatch = (patch) => {
-  if (!isRecord(patch))
+  if (!isRecord2(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
     if (key === "name" && !isChannelName(value))
@@ -821,10 +882,10 @@ var validateChannelPatch = (patch) => {
   return null;
 };
 var isGoogleAccount = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
-var isGoogleCalendarRef = (value) => isRecord(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && value.calendarId.length > 0;
+var isGoogleCalendarRef = (value) => isRecord2(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && value.calendarId.length > 0;
 var isGoogleEventLink = (value) => isGoogleCalendarRef(value) && isShortText(value.eventId, 1024) && value.eventId.length > 0;
 var validateSettingsPatch = (patch) => {
-  if (!isRecord(patch))
+  if (!isRecord2(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
     if (key === "timezone" && !isValidTimeZone(value))
@@ -851,7 +912,11 @@ var validateSettingsPatch = (patch) => {
       return `linearGroupBy must be one of ${LINEAR_GROUPS.join(", ")}`;
     else if (key === "linearOrderBy" && !LINEAR_ORDERS.includes(value))
       return `linearOrderBy must be one of ${LINEAR_ORDERS.join(", ")}`;
-    else if (key === "suggestFromHistory" && typeof value !== "boolean")
+    else if (key === "linearDisplay") {
+      const problem = linearDisplayProblem(value);
+      if (problem)
+        return problem;
+    } else if (key === "suggestFromHistory" && typeof value !== "boolean")
       return "suggestFromHistory must be true or false";
     else if ((key === "pomodoroMinutes" || key === "breakMinutes") && !(Number.isInteger(value) && value >= 1 && value <= 180))
       return `${key} must be 1-180`;
@@ -861,15 +926,19 @@ var validateSettingsPatch = (patch) => {
       return "googleTasksOnComplete must be ask, complete or nothing";
     else if ((key === "googleTasksImportCompletion" || key === "googleTasksDueFromPlan" || key === "googleTasksOnCalendar") && typeof value !== "boolean")
       return `${key} must be true or false`;
+    else if (key === "agentPresets" && !(Array.isArray(value) && value.length <= 30 && value.every(isAgentPreset) && new Set(value.map((preset) => preset.id)).size === value.length))
+      return "agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null";
+    else if (key === "agentPresets")
+      continue;
     else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
 };
 var isFolderName = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 60;
-var isSessionRef = (value) => value === null || isRecord(value) && isShortText(value.sessionId, 200) && value.sessionId.length > 0 && isShortText(value.title, 500) && (value.directory === null || isShortText(value.directory, 1024));
+var isSessionRef = (value) => value === null || isRecord2(value) && isShortText(value.sessionId, 200) && value.sessionId.length > 0 && isShortText(value.title, 500) && (value.directory === null || isShortText(value.directory, 1024));
 var isRunShape = (value) => {
-  if (!isRecord(value) || !isId(value.id))
+  if (!isRecord2(value) || !isId(value.id))
     return "run needs an id";
   if (!(isShortText(value.sessionId, 200) && value.sessionId.length > 0))
     return "run needs a session";
@@ -877,16 +946,18 @@ var isRunShape = (value) => {
     return "projectId is invalid";
   if (!(value.directory === null || isShortText(value.directory, 1024)))
     return "directory is invalid";
-  if (!(value.worktree === null || isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))
+  if (!(value.worktree === null || isRecord2(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))
     return "worktree is invalid";
   if (value.wantsPr !== undefined && typeof value.wantsPr !== "boolean")
     return "wantsPr must be true or false";
+  if (!(value.assignee === undefined || value.assignee === null || isRunAssignee(value.assignee)))
+    return "assignee is invalid";
   return isShortText(value.title, TITLE_MAX) ? null : "title is invalid";
 };
 var PULL_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/\d{1,9}$/;
-var isPullRequest = (value) => isRecord(value) && Number.isInteger(value.number) && value.number > 0 && typeof value.url === "string" && PULL_URL.test(value.url) && ["open", "closed", "merged"].includes(value.state) && typeof value.draft === "boolean" && isShortText(value.title, TITLE_MAX) && typeof value.repo === "string" && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
+var isPullRequest = (value) => isRecord2(value) && Number.isInteger(value.number) && value.number > 0 && typeof value.url === "string" && PULL_URL.test(value.url) && ["open", "closed", "merged"].includes(value.state) && typeof value.draft === "boolean" && isShortText(value.title, TITLE_MAX) && typeof value.repo === "string" && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
 var isRule = (value) => {
-  if (!isRecord(value))
+  if (!isRecord2(value))
     return false;
   if (!["daily", "weekly", "monthly", "yearly"].includes(value.freq))
     return false;
@@ -899,7 +970,7 @@ var isRule = (value) => {
   return true;
 };
 var validateTemplate = (template, channels, partial) => {
-  if (!isRecord(template))
+  if (!isRecord2(template))
     return "template must be an object";
   const has = (key) => (key in template);
   if ((has("title") || !partial) && !isTitle(template.title))
@@ -925,7 +996,7 @@ var RITUAL_FIELDS = {
   weeklyReview: ["completedAt", "journal"]
 };
 var validateRitualFields = (ritual, fields) => {
-  if (!isRecord(fields))
+  if (!isRecord2(fields))
     return "fields must be an object";
   for (const [key, value] of Object.entries(fields)) {
     if (!RITUAL_FIELDS[ritual].includes(key))
@@ -940,7 +1011,7 @@ var validateRitualFields = (ritual, fields) => {
       if (!Array.isArray(value) || value.length > 100)
         return "items must be a list of at most 100";
       for (const item of value) {
-        if (!isRecord(item) || !isId(item.id) || !(typeof item.text === "string" && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== "boolean" || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === "boolean"))
+        if (!isRecord2(item) || !isId(item.id) || !(typeof item.text === "string" && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== "boolean" || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === "boolean"))
           return "a highlight is invalid";
       }
     }
@@ -958,7 +1029,7 @@ var validateSpan = (start, end) => {
   return span >= 5 * 60000 && span <= MAX_ENTRY_MS ? null : "a working session lasts between 5 minutes and 24 hours";
 };
 var validateCommand = (command, context) => {
-  if (!isRecord(command))
+  if (!isRecord2(command))
     return "command must be an object";
   if (!isId(command.cmd))
     return "command needs a cmd id";
@@ -971,7 +1042,7 @@ var validateCommand = (command, context) => {
   switch (type) {
     case "task.created": {
       const task = command.task;
-      if (!isRecord(task) || !isId(task.id))
+      if (!isRecord2(task) || !isId(task.id))
         return "task needs an id";
       if (tasks[task.id])
         return "task id already exists";
@@ -1032,7 +1103,7 @@ var validateCommand = (command, context) => {
       return null;
     case "time.logged": {
       const entry = command.entry;
-      if (!isRecord(entry) || !isId(entry.id))
+      if (!isRecord2(entry) || !isId(entry.id))
         return "entry needs an id";
       if (context.entries[entry.id])
         return "entry id already exists";
@@ -1047,7 +1118,7 @@ var validateCommand = (command, context) => {
       return isId(command.entryId) && context.entries[command.entryId] ? null : "unknown entry";
     case "block.created": {
       const block = command.block;
-      if (!isRecord(block) || !isId(block.id))
+      if (!isRecord2(block) || !isId(block.id))
         return "block needs an id";
       if (context.blocks[block.id])
         return "block id already exists";
@@ -1067,7 +1138,7 @@ var validateCommand = (command, context) => {
       return command.google === null || isGoogleEventLink(command.google) ? null : "google must be an account, calendar and event, or null";
     case "calendar.added": {
       const calendar = command.calendar;
-      if (!isRecord(calendar) || !isId(calendar.id))
+      if (!isRecord2(calendar) || !isId(calendar.id))
         return "calendar needs an id";
       if (context.calendars[calendar.id])
         return "calendar id already exists";
@@ -1083,7 +1154,7 @@ var validateCommand = (command, context) => {
       if (!(isId(command.calendarId) && context.calendars[command.calendarId]))
         return "unknown calendar";
       const patch = command.patch;
-      if (!isRecord(patch))
+      if (!isRecord2(patch))
         return "patch must be an object";
       for (const [key, value] of Object.entries(patch)) {
         if (key === "name" && !(typeof value === "string" && value.trim() && value.length <= 80))
@@ -1101,7 +1172,7 @@ var validateCommand = (command, context) => {
       return isId(command.calendarId) && context.calendars[command.calendarId] ? null : "unknown calendar";
     case "objective.created": {
       const objective = command.objective;
-      if (!isRecord(objective) || !isId(objective.id))
+      if (!isRecord2(objective) || !isId(objective.id))
         return "objective needs an id";
       if (context.objectives[objective.id])
         return "objective id already exists";
@@ -1115,7 +1186,7 @@ var validateCommand = (command, context) => {
       if (!(isId(command.objectiveId) && context.objectives[command.objectiveId]))
         return "unknown objective";
       const patch = command.patch;
-      if (!isRecord(patch))
+      if (!isRecord2(patch))
         return "patch must be an object";
       for (const [key, value] of Object.entries(patch)) {
         if (key === "title" && !(typeof value === "string" && value.trim() && value.length <= 200))
@@ -1131,7 +1202,7 @@ var validateCommand = (command, context) => {
       return isId(command.objectiveId) && context.objectives[command.objectiveId] ? null : "unknown objective";
     case "series.created": {
       const series = command.series;
-      if (!isRecord(series) || !isId(series.id))
+      if (!isRecord2(series) || !isId(series.id))
         return "series needs an id";
       if (context.series[series.id])
         return "series id already exists";
@@ -1149,7 +1220,7 @@ var validateCommand = (command, context) => {
       if (!(isId(command.seriesId) && context.series[command.seriesId]))
         return "unknown series";
       const patch = command.patch;
-      if (!isRecord(patch))
+      if (!isRecord2(patch))
         return "patch must be an object";
       if (patch.rule !== undefined && !isRule(patch.rule))
         return "rule is invalid";
@@ -1163,7 +1234,7 @@ var validateCommand = (command, context) => {
       return isDateKey(command.from) ? null : "from must be a date";
     case "folder.created": {
       const folder = command.folder;
-      if (!isRecord(folder) || !isId(folder.id))
+      if (!isRecord2(folder) || !isId(folder.id))
         return "folder needs an id";
       if (context.folders[folder.id])
         return "folder id already exists";
@@ -1213,7 +1284,7 @@ var validateCommand = (command, context) => {
       return validateRitualFields(command.ritual, command.fields);
     case "channel.created": {
       const channel = command.channel;
-      if (!isRecord(channel) || !isId(channel.id))
+      if (!isRecord2(channel) || !isId(channel.id))
         return "channel needs an id";
       if (channels[channel.id])
         return "channel id already exists";
@@ -2098,6 +2169,7 @@ class SyncManager {
 // service/github.ts
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync3 } from "node:fs";
+import { hostname } from "node:os";
 import { isAbsolute } from "node:path";
 var GH_TIMEOUT_MS = 15000;
 var ghRunner = (args, options) => new Promise((resolve, reject) => {
@@ -2150,28 +2222,39 @@ var pickPull = (pulls) => {
   });
   return parsed.sort((a, b) => rank[a.pr.state] - rank[b.pr.state] || b.updatedAt.localeCompare(a.updatedAt))[0]?.pr ?? null;
 };
-var explain = (error) => {
+var diagnose = (error) => {
   const failure = error;
   if (failure.code === "ENOENT")
-    return "The GitHub CLI (gh) is not installed on the machine running OpenChamber.";
+    return { reason: "missing", message: "The GitHub CLI (gh) is not installed where OpenChamber runs. Install it there, then sign in with `gh auth login`." };
   const text = `${failure.stderr ?? ""} ${failure.message ?? ""}`;
-  if (/auth login|not logged|authentication/i.test(text))
-    return "Log in once with `gh auth login` on the machine running OpenChamber.";
-  return text.trim().split(`
-`)[0]?.slice(0, 300) || "gh failed";
+  if (/auth login|not logged|authentication|GH_TOKEN|bad credentials|HTTP 401/i.test(text)) {
+    return { reason: "signed-out", message: "The GitHub CLI (gh) is not signed in. Run `gh auth login` once where OpenChamber runs; a GH_TOKEN set for OpenChamber does not reach the Planner." };
+  }
+  return { reason: null, message: text.trim().split(`
+`)[0]?.slice(0, 300) || "gh failed" };
+};
+var explain = (error) => diagnose(error).message;
+var containerId = () => {
+  if (!existsSync3("/.dockerenv") && !existsSync3("/run/.containerenv"))
+    return null;
+  const name = hostname();
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : null;
 };
 
 class GitHubSource {
   run;
-  constructor(run = ghRunner) {
+  container;
+  constructor(run = ghRunner, container = containerId) {
     this.run = run;
+    this.container = container;
   }
   async status() {
     try {
       const login = (await this.run(["api", "user", "--jq", ".login"])).trim();
-      return { available: true, login: login || null, message: null };
+      return { available: true, login: login || null, message: null, reason: null, container: null };
     } catch (error) {
-      return { available: false, login: null, message: explain(error) };
+      const { reason, message } = diagnose(error);
+      return { available: false, login: null, message, reason, container: reason ? this.container() : null };
     }
   }
   async list(kind) {
@@ -2198,6 +2281,14 @@ class GitHubSource {
       throw new Error(explain(failure));
     return null;
   }
+  async pullRequestAt(url) {
+    if (!PULL_URL2.test(url))
+      throw new Error("pull request URL is invalid");
+    const out = await this.run(["pr", "view", url, "--json", PULL_FIELDS], { timeoutMs: 8000 }).catch((error) => {
+      throw new Error(explain(error));
+    });
+    return pickPull([JSON.parse(out)]);
+  }
   async items(ids) {
     if (ids.length === 0)
       return [];
@@ -2213,28 +2304,45 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 // src/domain/linear.ts
-var ISSUE_INPUT_KEYS = ["title", "description", "stateId", "priority", "assigneeId", "dueDate", "addedLabelIds", "removedLabelIds"];
-var ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt branchName
-    state { id name type color }
+var ISSUE_INPUT_KEYS = ["title", "description", "stateId", "priority", "assigneeId", "dueDate", "addedLabelIds", "removedLabelIds", "projectId", "cycleId", "estimate"];
+var ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrder estimate dueDate createdAt updatedAt completedAt canceledAt branchName
+    state { id name type color position }
     team { id key name }
     assignee { id name }
-    project { id name }
-    cycle { id number }
+    creator { id name }
+    project { id name color icon }
+    cycle { id number name isActive isNext }
+    parent { id identifier title }
     labels(first: 25) { nodes { id name color } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
-var OPEN_FILTER = `{ state: { type: { nin: ["completed", "canceled"] } } }`;
-var PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate updatedAt
+var PAGE = "pageInfo { hasNextPage endCursor }";
+var PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate createdAt updatedAt sortOrder
     status { id name type color }
     lead { id name }
     teams(first: 10) { nodes { id key name } }`;
-var ASSIGNED_QUERY = `query PlannerAssigned($after: String) {
+var ASSIGNED_QUERY = `query PlannerAssigned($after: String, $filter: IssueFilter) {
   viewer {
     id
     name
-    assignedIssues(first: 100, after: $after, orderBy: updatedAt, filter: ${OPEN_FILTER}) {
+    assignedIssues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
       nodes { ${ISSUE_FIELDS} }
-      pageInfo { hasNextPage endCursor }
+      ${PAGE}
     }
+  }
+}`;
+var CREATED_QUERY = `query PlannerCreated($after: String, $filter: IssueFilter) {
+  viewer {
+    id
+    createdIssues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
+      nodes { ${ISSUE_FIELDS} }
+      ${PAGE}
+    }
+  }
+}`;
+var ISSUES_QUERY = `query PlannerIssues($after: String, $filter: IssueFilter) {
+  issues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
+    nodes { ${ISSUE_FIELDS} }
+    ${PAGE}
   }
 }`;
 var VIEW_FIELDS = `id name description icon color shared modelName slugId updatedAt
@@ -2243,24 +2351,48 @@ var VIEW_FIELDS = `id name description icon color shared modelName slugId update
 var VIEWS_QUERY = `query PlannerViews($after: String) {
   customViews(first: 100, after: $after) {
     nodes { ${VIEW_FIELDS} }
-    pageInfo { hasNextPage endCursor }
+    ${PAGE}
   }
 }`;
 var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
-  favorites(first: 250) { nodes { type sortOrder customView { id } } }
-}`;
-var VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!, $after: String) {
-  customView(id: $id) {
-    id
-    viewPreferencesValues { layout issueGrouping viewOrdering }
-    issues(first: 100, after: $after, filter: ${OPEN_FILTER}) {
-      nodes { ${ISSUE_FIELDS} }
-      pageInfo { hasNextPage endCursor }
+  favorites(first: 250) {
+    nodes {
+      id type sortOrder
+      customView { id }
+      project { ${PROJECT_FIELDS} }
+      issue { id identifier title url state { id name type color } team { id key name } }
     }
   }
 }`;
-var SEARCH_QUERY = `query PlannerSearch($term: String!) {
-  searchIssues(term: $term, first: 25) { nodes { ${ISSUE_FIELDS} } }
+var VIEW_QUERY = `query PlannerView($id: String!) {
+  customView(id: $id) {
+    ${VIEW_FIELDS}
+    viewPreferencesValues { ${VIEW_PREF_FIELDS} }
+  }
+}`;
+var VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!, $after: String, $filter: IssueFilter) {
+  customView(id: $id) {
+    id
+    issues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
+      nodes { ${ISSUE_FIELDS} }
+      ${PAGE}
+    }
+  }
+}`;
+var VIEW_PROJECTS_QUERY = `query PlannerViewProjects($id: String!, $after: String, $filter: ProjectFilter) {
+  customView(id: $id) {
+    id
+    projects(first: 50, after: $after, filter: $filter) {
+      nodes { ${PROJECT_FIELDS} }
+      ${PAGE}
+    }
+  }
+}`;
+var SEARCH_QUERY = `query PlannerSearch($term: String!, $after: String, $filter: IssueFilter) {
+  searchIssues(term: $term, first: 50, after: $after, filter: $filter) {
+    nodes { ${ISSUE_FIELDS} }
+    ${PAGE}
+  }
 }`;
 var LINKED_QUERY = `query PlannerLinked($ids: [ID!]!) {
   issues(first: 100, filter: { id: { in: $ids } }) { nodes { ${ISSUE_FIELDS} } }
@@ -2282,7 +2414,7 @@ var WHOAMI_QUERY = `query PlannerWhoAmI {
 var PROJECTS_QUERY = `query PlannerProjects($after: String) {
   projects(first: 50, after: $after, orderBy: updatedAt, filter: { status: { type: { nin: ["completed", "canceled"] } } }) {
     nodes { ${PROJECT_FIELDS} }
-    pageInfo { hasNextPage endCursor }
+    ${PAGE}
   }
 }`;
 var PROJECT_QUERY = `query PlannerProject($id: String!) {
@@ -2291,22 +2423,68 @@ var PROJECT_QUERY = `query PlannerProject($id: String!) {
     content
     projectMilestones(first: 25) { nodes { id name targetDate progress sortOrder } }
     lastUpdate { id body health createdAt url user { id name } }
-    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
+  }
+}`;
+var FILTER_TEAMS_QUERY = `query PlannerFilterTeams($after: String) {
+  teams(first: 50, after: $after) {
+    nodes { id key name states(first: 50) { nodes { id name type color position } } }
+    ${PAGE}
+  }
+}`;
+var FILTER_USERS_QUERY = `query PlannerFilterUsers($after: String) {
+  users(first: 250, after: $after, filter: { active: { eq: true } }) {
+    nodes { id name displayName active isMe }
+    ${PAGE}
+  }
+}`;
+var FILTER_LABELS_QUERY = `query PlannerFilterLabels($after: String) {
+  issueLabels(first: 250, after: $after) {
+    nodes { id name color isGroup parent { id name } team { id key } }
+    ${PAGE}
+  }
+}`;
+var FILTER_PROJECTS_QUERY = `query PlannerFilterProjects($after: String) {
+  projects(first: 250, after: $after) {
+    nodes { id name color icon status { type } }
+    ${PAGE}
+  }
+}`;
+var FILTER_CYCLES_QUERY = `query PlannerFilterCycles($after: String) {
+  cycles(first: 250, after: $after, filter: { endsAt: { gt: "-P8W" } }) {
+    nodes { id number name startsAt endsAt isActive isNext team { id key } }
+    ${PAGE}
   }
 }`;
 var COMMENT_FIELDS = `id body createdAt editedAt user { id name } botActor { name } parent { id }`;
+var HISTORY_FIELDS = `id createdAt actor { id name } botActor { name }
+      fromState { name color type } toState { name color type }
+      fromAssignee { name } toAssignee { name }
+      fromPriority toPriority fromTitle toTitle
+      addedLabels { name color } removedLabels { name color }
+      fromDueDate toDueDate fromProject { name } toProject { name }
+      fromCycle { number name } toCycle { number name }
+      fromEstimate toEstimate updatedDescription`;
 var DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
-    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }`;
+    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }
+    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } }
+    attachments(first: 25) { nodes { id title subtitle url sourceType } }
+    history(first: 50) { nodes { ${HISTORY_FIELDS} } }`;
 var ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
   issue(id: $id) { ${DETAIL_FIELDS} }
 }`;
 var TEAM_OPTIONS_QUERY = `query PlannerTeamOptions($id: String!) {
   team(id: $id) {
     id
+    cyclesEnabled
+    issueEstimationType
+    issueEstimationAllowZero
+    issueEstimationExtended
     states(first: 100) { nodes { id name type color position } }
     members(first: 250) { nodes { id name displayName active } }
     labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } }
+    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } }
+    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } }
   }
   issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } }
 }`;
@@ -2324,9 +2502,13 @@ var CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueCreateInpu
 }`;
 var ALL_DOCUMENTS = [
   ASSIGNED_QUERY,
+  CREATED_QUERY,
+  ISSUES_QUERY,
   VIEWS_QUERY,
   FAVORITE_VIEWS_QUERY,
+  VIEW_QUERY,
   VIEW_ISSUES_QUERY,
+  VIEW_PROJECTS_QUERY,
   SEARCH_QUERY,
   LINKED_QUERY,
   ISSUE_QUERY,
@@ -2335,6 +2517,11 @@ var ALL_DOCUMENTS = [
   WHOAMI_QUERY,
   PROJECTS_QUERY,
   PROJECT_QUERY,
+  FILTER_TEAMS_QUERY,
+  FILTER_USERS_QUERY,
+  FILTER_LABELS_QUERY,
+  FILTER_PROJECTS_QUERY,
+  FILTER_CYCLES_QUERY,
   ISSUE_DETAIL_QUERY,
   TEAM_OPTIONS_QUERY,
   SET_STATE_MUTATION,
@@ -3336,6 +3523,464 @@ class GoogleTimeboxes {
   }
 }
 
+// service/agents.ts
+import { execFile as execFile3 } from "node:child_process";
+import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync3, readdirSync as readdirSync2, renameSync, rmSync, statSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute as isAbsolute2, join as join3, relative, sep } from "node:path";
+var opencodeConfigDir = (env = process.env) => env.XDG_CONFIG_HOME ? join3(env.XDG_CONFIG_HOME, "opencode") : join3(env.HOME || homedir(), ".config", "opencode");
+var scalar = (raw) => {
+  const text = raw.trim();
+  if (text.startsWith('"')) {
+    const end = text.lastIndexOf('"');
+    try {
+      return JSON.parse(text.slice(0, end + 1));
+    } catch {
+      return text.slice(1, end > 0 ? end : undefined);
+    }
+  }
+  if (text.startsWith("'")) {
+    const end = text.lastIndexOf("'");
+    return text.slice(1, end > 0 ? end : undefined).replace(/''/g, "'");
+  }
+  const value = text.replace(/\s+#.*$/, "").trim();
+  if (value === "" || value === "~" || value === "null" || value === "|" || value === ">" || value === "|-" || value === ">-")
+    return null;
+  if (value === "true" || value === "false")
+    return value === "true";
+  if (/^-?\d+(\.\d+)?$/.test(value))
+    return Number(value);
+  return value;
+};
+var parseFrontmatter = (text) => {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  const data = {};
+  if (!match)
+    return data;
+  for (const line of match[1].split(/\r?\n/)) {
+    if (!line.trim() || /^\s/.test(line) || line.trimStart().startsWith("#"))
+      continue;
+    const entry = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$/.exec(line);
+    if (entry)
+      data[entry[1]] = scalar(entry[2]);
+  }
+  return data;
+};
+var parseJsonc = (text) => {
+  let out = "";
+  let inString = false;
+  for (let index = 0;index < text.length; index++) {
+    const char = text[index];
+    if (inString) {
+      out += char;
+      if (char === "\\")
+        out += text[++index] ?? "";
+      else if (char === '"')
+        inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      out += char;
+    } else if (char === "/" && text[index + 1] === "/") {
+      while (index < text.length && text[index] !== `
+`)
+        index++;
+      out += `
+`;
+    } else if (char === "/" && text[index + 1] === "*") {
+      index += 2;
+      while (index < text.length && !(text[index] === "*" && text[index + 1] === "/"))
+        index++;
+      index++;
+    } else if (char === ",") {
+      let next = index + 1;
+      while (next < text.length && /\s/.test(text[next]))
+        next++;
+      if (text[next] !== "}" && text[next] !== "]")
+        out += char;
+    } else
+      out += char;
+  }
+  return JSON.parse(out);
+};
+var BUILT_IN = {
+  build: { label: "Build", description: "The default agent. Executes tools based on configured permissions.", mode: "primary", hidden: false },
+  plan: { label: "Plan", description: "Read-only agent for exploring the codebase and planning work before implementation.", mode: "primary", hidden: false },
+  general: { label: "General", description: "General-purpose agent for researching complex questions and executing multi-step tasks.", mode: "subagent", hidden: false },
+  explore: { label: "Explore", description: "Fast agent specialized for exploring codebases.", mode: "subagent", hidden: false },
+  compaction: { label: "Compaction", description: null, mode: "primary", hidden: true },
+  title: { label: "Title", description: null, mode: "primary", hidden: true },
+  summary: { label: "Summary", description: null, mode: "primary", hidden: true }
+};
+var MAX_FILES = 300;
+var MAX_FILE_BYTES = 256000;
+var readSmall = (file) => {
+  try {
+    const stat = statSync(file);
+    return stat.isFile() && stat.size <= MAX_FILE_BYTES ? readFileSync3(file, "utf8") : null;
+  } catch {
+    return null;
+  }
+};
+var markdownFiles = (dir, recursive, budget) => {
+  const found = [];
+  const walk = (current, depth) => {
+    let entries;
+    try {
+      entries = readdirSync2(current).sort();
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (budget.left <= 0)
+        return;
+      const file = join3(current, entry);
+      let stat;
+      try {
+        stat = statSync(file);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory() && recursive && depth < 4)
+        walk(file, depth + 1);
+      else if (stat.isFile() && entry.endsWith(".md")) {
+        budget.left--;
+        found.push({ name: relative(dir, file).split(sep).join("/").replace(/\.md$/, ""), file });
+      }
+    }
+  };
+  walk(dir, 0);
+  return found;
+};
+var discoverAgents = (configDir, projectDir) => {
+  const agents = new Map(Object.entries(BUILT_IN).map(([name, entry]) => [name, { ...entry, model: null, color: null, source: "built-in" }]));
+  let defaultAgent = null;
+  const budget = { left: MAX_FILES };
+  const apply = (name, def, source) => {
+    if (!isAgentName(name))
+      return;
+    if (def.disabled === true || def.disable === true) {
+      agents.delete(name);
+      return;
+    }
+    const entry = agents.get(name) ?? { label: agentLabel(name), description: null, model: null, color: null, mode: "primary", hidden: false, source };
+    if (def.mode === "primary" || def.mode === "subagent" || def.mode === "all")
+      entry.mode = def.mode;
+    if (typeof def.hidden === "boolean")
+      entry.hidden = def.hidden;
+    if (typeof def.description === "string" && def.description.trim())
+      entry.description = def.description.trim().slice(0, 300);
+    if (typeof def.color === "string" && /^#[0-9a-fA-F]{6}$/.test(def.color))
+      entry.color = def.color;
+    if (typeof def.model === "string") {
+      const model = !def.model.includes("#") && typeof def.variant === "string" ? `${def.model}#${def.variant}` : def.model;
+      if (isModelRef(model))
+        entry.model = model;
+    }
+    agents.set(name, entry);
+  };
+  const fromJson = (file, source) => {
+    const text = readSmall(file);
+    if (text === null)
+      return;
+    let data;
+    try {
+      data = parseJsonc(text);
+    } catch {
+      return;
+    }
+    const config = data;
+    if (!config || typeof config !== "object")
+      return;
+    for (const key of ["agent", "agents"]) {
+      const block = config[key];
+      if (!block || typeof block !== "object" || Array.isArray(block))
+        continue;
+      for (const [name, def] of Object.entries(block)) {
+        if (def && typeof def === "object" && !Array.isArray(def))
+          apply(name, def, source);
+      }
+    }
+    if (typeof config.default_agent === "string" && isAgentName(config.default_agent))
+      defaultAgent = config.default_agent;
+  };
+  const fromFolder = (dir, source) => {
+    for (const sub of ["agent", "agents"]) {
+      for (const { name, file } of markdownFiles(join3(dir, sub), true, budget)) {
+        const text = readSmall(file);
+        if (text !== null)
+          apply(name, parseFrontmatter(text), source);
+      }
+    }
+    for (const sub of ["mode", "modes"]) {
+      for (const { name, file } of markdownFiles(join3(dir, sub), false, budget)) {
+        const text = readSmall(file);
+        if (text !== null)
+          apply(name, { ...parseFrontmatter(text), mode: "primary" }, source);
+      }
+    }
+  };
+  fromJson(join3(configDir, "opencode.json"), "global");
+  fromJson(join3(configDir, "opencode.jsonc"), "global");
+  fromFolder(configDir, "global");
+  if (projectDir && isAbsolute2(projectDir) && existsSync4(projectDir)) {
+    fromJson(join3(projectDir, "opencode.json"), "project");
+    fromJson(join3(projectDir, "opencode.jsonc"), "project");
+    fromJson(join3(projectDir, ".opencode", "opencode.json"), "project");
+    fromJson(join3(projectDir, ".opencode", "opencode.jsonc"), "project");
+    fromFolder(join3(projectDir, ".opencode"), "project");
+  }
+  return { agents: orderAgents([...agents].filter(([, entry]) => entry.mode !== "subagent" && !entry.hidden).map(([name, entry]) => toAgent(name, entry))), defaultAgent };
+};
+var toAgent = (name, entry) => ({ name, label: entry.label, description: entry.description, model: entry.model, color: entry.color, source: entry.source });
+var orderAgents = (agents) => {
+  const rank = (name) => name === "build" ? 0 : name === "plan" ? 1 : 2;
+  return agents.sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
+};
+var parseModels = (out) => [...new Set(out.split(/\r?\n/).map((line) => line.trim()).filter((line) => isModelRef(line) && !line.includes("#")))].sort((a, b) => a.localeCompare(b));
+var dataOf = (json) => {
+  const data = json?.data;
+  return Array.isArray(data) ? data : [];
+};
+var parseModelDetails = (json) => {
+  const details = new Map;
+  for (const item of dataOf(json)) {
+    const model = item;
+    if (typeof model.id !== "string" || typeof model.providerID !== "string")
+      continue;
+    const id = `${model.providerID}/${model.id}`;
+    if (!isModelRef(id))
+      continue;
+    const variants = Array.isArray(model.variants) ? model.variants.flatMap((variant) => {
+      const value = typeof variant === "string" ? variant : variant?.id ?? variant?.name;
+      return typeof value === "string" && /^[^\s#]{1,40}$/.test(value) ? [value] : [];
+    }) : [];
+    details.set(id, { name: typeof model.name === "string" && model.name.trim() ? model.name.trim().slice(0, 80) : null, variants });
+  }
+  return details;
+};
+var parseLiveAgents = (json) => dataOf(json).flatMap((item) => {
+  const agent = item;
+  if (!isAgentName(agent.id) || agent.mode === "subagent" || agent.hidden === true)
+    return [];
+  const ref = agent.model;
+  const model = ref && typeof ref.providerID === "string" && typeof ref.id === "string" ? `${ref.providerID}/${ref.id}${typeof ref.variant === "string" && ref.variant ? `#${ref.variant}` : ""}` : null;
+  return [{
+    name: agent.id,
+    label: typeof agent.name === "string" && agent.name.trim() ? agent.name.trim().slice(0, 60) : agentLabel(agent.id),
+    description: typeof agent.description === "string" && agent.description.trim() ? agent.description.trim().slice(0, 300) : null,
+    model: model && isModelRef(model) ? model : null,
+    color: typeof agent.color === "string" && /^#[0-9a-fA-F]{6}$/.test(agent.color) ? agent.color : null,
+    source: "global"
+  }];
+});
+var parseCommandNames = (json) => dataOf(json).flatMap((item) => {
+  const name = item?.name;
+  return typeof name === "string" ? [name] : [];
+});
+var opencodeRunner = (args, options) => new Promise((resolve, reject) => {
+  execFile3("opencode", args, { timeout: options?.timeoutMs ?? 1e4, maxBuffer: 16000000, ...options?.cwd ? { cwd: options.cwd } : {}, env: { ...process.env, NO_COLOR: "1" } }, (error, stdout, stderr) => {
+    if (error)
+      reject(Object.assign(new Error(`${error.message}
+${stderr}`), { code: error.code, stderr: String(stderr) }));
+    else
+      resolve(stdout);
+  });
+});
+var MODELS_TTL_MS = 10 * 60000;
+var AGENTS_TTL_MS = 60000;
+var STATUS_TTL_MS = 30000;
+var MODELS_WAIT_MS = 3000;
+var LISTED_WAIT_MS = 6000;
+var LISTED_POLL_MS = 300;
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var messageOf2 = (error) => {
+  const failure = error;
+  if (failure.code === "ENOENT")
+    return "The OpenCode CLI (opencode) is not on the PATH where OpenChamber runs.";
+  return `${failure.stderr || failure.message || String(error)}`.trim().split(`
+`)[0].slice(0, 300);
+};
+var locationQuery = (directory) => `location%5Bdirectory%5D=${encodeURIComponent(directory)}`;
+
+class OpenCodeInfo {
+  run;
+  now;
+  status = null;
+  models = null;
+  loadingModels = null;
+  live = new Map;
+  constructor(run = opencodeRunner, now = Date.now) {
+    this.run = run;
+    this.now = now;
+  }
+  async server() {
+    if (this.status && this.now() - this.status.at < STATUS_TTL_MS)
+      return this.status.url;
+    let url = null;
+    try {
+      const out = (await this.run(["service", "status"], { timeoutMs: 5000 })).trim();
+      url = /^https?:\/\//.test(out) ? out : null;
+    } catch {
+      url = null;
+    }
+    this.status = { url, at: this.now() };
+    return url;
+  }
+  async api(path) {
+    return JSON.parse(await this.run(["api", "GET", path], { timeoutMs: 6000 }));
+  }
+  async modelList(directory, refresh = false) {
+    const stale = !this.models || refresh || this.now() - this.models.at > MODELS_TTL_MS;
+    if (stale && !this.loadingModels) {
+      this.loadingModels = this.loadModels(directory).finally(() => {
+        this.loadingModels = null;
+      });
+    }
+    if (this.models && !refresh)
+      return { models: this.models.list, error: this.models.error };
+    const done = await Promise.race([this.loadingModels.then(() => true), sleep(MODELS_WAIT_MS).then(() => false)]);
+    if (!done || !this.models)
+      return { models: this.models?.list ?? [], error: null, pending: true };
+    return { models: this.models.list, error: this.models.error };
+  }
+  async loadModels(directory) {
+    const cwd = directory && isAbsolute2(directory) && existsSync4(directory) ? directory : undefined;
+    try {
+      const running = await this.server();
+      const ids = parseModels(await this.run(running ? ["models"] : ["models", "--standalone"], { cwd, timeoutMs: running ? 1e4 : 15000 }));
+      const details = running ? await this.api(`/api/model?${locationQuery(cwd ?? homedir())}`).then(parseModelDetails).catch(() => new Map) : new Map;
+      this.models = { at: this.now(), list: ids.map((id) => ({ id, name: details.get(id)?.name ?? null, variants: details.get(id)?.variants ?? [] })), error: ids.length ? null : "OpenCode lists no models; connect a provider in OpenChamber." };
+    } catch (error) {
+      this.models = { at: this.now(), list: this.models?.list ?? [], error: messageOf2(error) };
+    }
+  }
+  async liveAgents(directory) {
+    const cached = this.live.get(directory);
+    if (cached && this.now() - cached.at < AGENTS_TTL_MS)
+      return cached.agents;
+    let agents = null;
+    if (await this.server())
+      agents = await this.api(`/api/agent?${locationQuery(directory)}`).then(parseLiveAgents).catch(() => null);
+    this.live.set(directory, { at: this.now(), agents });
+    return agents;
+  }
+  async commands(directory) {
+    if (!await this.server())
+      return null;
+    return this.api(`/api/command?${locationQuery(directory)}`).then(parseCommandNames).catch(() => null);
+  }
+  async waitListed(names, directory) {
+    const until = this.now() + LISTED_WAIT_MS;
+    for (;; ) {
+      const listed = await this.commands(directory);
+      if (listed === null)
+        return null;
+      if (names.every((name) => listed.includes(name)))
+        return true;
+      if (this.now() >= until)
+        return false;
+      await sleep(LISTED_POLL_MS);
+    }
+  }
+}
+var mergeAgents = (fromConfig, live) => {
+  if (!live)
+    return [...fromConfig];
+  const known = new Map(fromConfig.map((agent) => [agent.name, agent]));
+  return orderAgents(live.map((agent) => ({ ...agent, source: known.get(agent.name)?.source ?? agent.source, description: agent.description ?? known.get(agent.name)?.description ?? null })));
+};
+
+class CommandFiles {
+  configDir;
+  log;
+  lastPresets = null;
+  constructor(configDir, log = () => {}) {
+    this.configDir = configDir;
+    this.log = log;
+  }
+  get dir() {
+    return join3(this.configDir, "command");
+  }
+  ensure(entries) {
+    if (entries.length === 0)
+      return [];
+    mkdirSync3(this.dir, { recursive: true });
+    return entries.map(({ assignee, kind }) => {
+      const name = commandName(assignee);
+      const file = join3(this.dir, `${name}.md`);
+      const content = commandFile(assignee, kind);
+      const current = readSmall(file);
+      if (current === content)
+        return { id: assignee.id, name, changed: false };
+      if (current !== null && !current.includes(COMMAND_MARKER))
+        throw new Error(`${file} exists and was not written by the Planner`);
+      const temporary = `${file}.${process.pid}.tmp`;
+      writeFileSync3(temporary, content, { mode: 420 });
+      renameSync(temporary, file);
+      return { id: assignee.id, name, changed: true };
+    });
+  }
+  syncPresets(presets) {
+    const key = JSON.stringify(presets);
+    if (key === this.lastPresets)
+      return;
+    try {
+      this.ensure(presets.map((preset) => ({ assignee: presetAssignee(preset), kind: "preset" })));
+      const wanted = new Set(presets.map((preset) => `${commandName(preset)}.md`));
+      let files = [];
+      try {
+        files = readdirSync2(this.dir);
+      } catch {
+        files = [];
+      }
+      for (const file of files) {
+        if (!file.startsWith(COMMAND_PREFIX) || !file.endsWith(".md") || wanted.has(file))
+          continue;
+        if (readSmall(join3(this.dir, file))?.startsWith(`---
+${COMMAND_MARKER} (preset)`))
+          rmSync(join3(this.dir, file), { force: true });
+      }
+      this.lastPresets = key;
+    } catch (error) {
+      this.log(`agent commands: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+var isDirectory = (value) => typeof value === "string" && value.length <= 1024 && isAbsolute2(value);
+var agentCatalog = async (deps, directory, refresh) => {
+  const fromConfig = discoverAgents(deps.configDir, directory);
+  const [live, models] = await Promise.all([deps.info.liveAgents(directory ?? homedir()), deps.info.modelList(directory, refresh)]);
+  return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...models.pending ? { modelsPending: true } : {}, configDir: deps.configDir };
+};
+var agentRoute = async (req, url, deps) => {
+  if (url.pathname === "/agents" && req.method === "GET") {
+    const directory = url.searchParams.get("directory");
+    if (directory !== null && !isDirectory(directory))
+      return { status: 400, body: { error: "directory must be an absolute path" } };
+    return { status: 200, body: await agentCatalog(deps, directory, url.searchParams.get("refresh") === "1") };
+  }
+  if (url.pathname === "/agents/commands" && req.method === "POST") {
+    const body = await deps.readJson(req);
+    const entries = Array.isArray(body.entries) ? body.entries : [];
+    if (entries.length > 40 || !entries.every((entry) => isRunAssignee(entry?.assignee) && ["preset", "agent"].includes(entry.kind))) {
+      return { status: 400, body: { error: "entries must be at most 40 of { assignee, kind: preset | agent }" } };
+    }
+    if (body.directory !== undefined && body.directory !== null && !isDirectory(body.directory))
+      return { status: 400, body: { error: "directory must be an absolute path" } };
+    let commands;
+    try {
+      commands = deps.commands.ensure(entries);
+    } catch (error) {
+      return { status: 409, body: { error: `Could not write the agent command in ${deps.commands.dir}: ${error instanceof Error ? error.message : String(error)}` } };
+    }
+    const listed = body.wait === true && commands.length ? await deps.info.waitListed(commands.map((command) => command.name), body.directory ?? homedir()) : null;
+    return { status: 200, body: { commands, listed, dir: deps.commands.dir } };
+  }
+  return null;
+};
+
 // service/main.ts
 var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -3344,7 +3989,7 @@ if (!port || !token) {
   process.exit(1);
 }
 var BODY_LIMIT = 1e6;
-var dir = process.env.PLANNER_DATA_DIR || join3(homedir(), ".local", "share", "openchamber-planner", "data");
+var dir = process.env.PLANNER_DATA_DIR || join4(homedir2(), ".local", "share", "openchamber-planner", "data");
 var log = (message) => console.error(`[planner] ${message}`);
 var sync = null;
 var store = new EventStore({ dir, log, onCommit: () => sync?.schedule() });
@@ -3354,13 +3999,18 @@ sync = new SyncManager(store, planner, log);
 await sync.init();
 var snapshot = () => ({ ...planner.snapshot(), sync: sync.status() });
 var github = new GitHubSource;
-var feeds = new CalendarFeeds(join3(dirname3(dir), "cache"));
-var linearWorkspaces = new LinearWorkspaces(join3(dirname3(dir), "linear-workspaces.json"), undefined, log);
-var google = new GoogleAccounts(join3(dirname3(dir), "google-accounts.json"), undefined, undefined, log);
+var feeds = new CalendarFeeds(join4(dirname3(dir), "cache"));
+var linearWorkspaces = new LinearWorkspaces(join4(dirname3(dir), "linear-workspaces.json"), undefined, log);
+var google = new GoogleAccounts(join4(dirname3(dir), "google-accounts.json"), undefined, undefined, log);
 var googleData = new GoogleData(google);
 var googleCalendars = new GoogleCalendars(googleData);
 var googleDueTasks = new GoogleDueTasks(googleData);
 var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
+var opencodeConfig = opencodeConfigDir();
+var opencodeInfo = new OpenCodeInfo;
+var agentCommands = new CommandFiles(opencodeConfig, log);
+var syncAgentCommands = () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? []);
+syncAgentCommands();
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -3368,7 +4018,7 @@ var json = (res, status, body) => {
 var PULL_LOOKUPS_PER_REQUEST = 4;
 var isLookup = (value) => {
   const lookup = value;
-  return typeof lookup?.runId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) && typeof lookup.branch === "string" && lookup.branch.length <= 200 && Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === "string" && item.length <= 1024);
+  return typeof lookup?.runId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) && (lookup.branch === null || typeof lookup.branch === "string" && lookup.branch.length <= 200) && (lookup.url === undefined || typeof lookup.url === "string" && lookup.url.length <= 300) && Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === "string" && item.length <= 1024);
 };
 var mapLimited2 = async (items, limit, fn) => {
   const results = new Array(items.length);
@@ -3553,13 +4203,20 @@ var server = http2.createServer(async (req, res) => {
       const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
       const results = await mapLimited2(runs, 4, async (run) => {
         try {
-          return { runId: run.runId, pullRequest: await github.pullRequestFor(run.branch, run.directories) };
+          return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };
         } catch (error) {
           return { runId: run.runId, pullRequest: null, error: error instanceof Error ? error.message : String(error) };
         }
       });
       json(res, 200, { results });
       return;
+    }
+    if (url.pathname === "/agents" || url.pathname.startsWith("/agents/")) {
+      const answer = await agentRoute(req, url, { configDir: opencodeConfig, info: opencodeInfo, commands: agentCommands, readJson });
+      if (answer) {
+        json(res, answer.status, answer.body);
+        return;
+      }
     }
     if (url.pathname.startsWith("/google/")) {
       try {
@@ -3634,6 +4291,7 @@ var server = http2.createServer(async (req, res) => {
       if (req.method === "POST") {
         const status = await sync.run().catch((error) => ({ ...sync.status(), lastError: error instanceof Error ? error.message : String(error) }));
         json(res, 200, { status, ...snapshot() });
+        syncAgentCommands();
         return;
       }
     }
@@ -3683,6 +4341,7 @@ var server = http2.createServer(async (req, res) => {
         return;
       }
       json(res, 200, { applied: result.applied, ...snapshot() });
+      syncAgentCommands();
       return;
     }
     json(res, 404, { error: "not found" });

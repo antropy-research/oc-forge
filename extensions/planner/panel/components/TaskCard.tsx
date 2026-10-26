@@ -13,6 +13,7 @@ import { setHoveredTask } from '../lib/hover.ts';
 import { isClosedType } from '../../src/domain/linear.ts';
 import { shortKey } from '../../src/domain/github.ts';
 import { AgentChip } from './Agents.tsx';
+import { AssignPopover } from './AssigneePicker.tsx';
 import type { PlaylistEntry } from '../../src/domain/schedule.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
@@ -56,10 +57,9 @@ export const InlineInput = ({ value, className, onCommit, onCancel }: InlineInpu
   );
 };
 
-const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
+const TaskMenu = ({ task, onClose, onAssign }: { task: Task; onClose: () => void; onAssign: () => void }) => {
   const { client } = usePlanner();
   const view = useView();
-  const { setUi } = useUi();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -114,14 +114,8 @@ const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
         Duplicate
       </button>
       {!task.completedAt && (
-        <button
-          role="menuitem"
-          onClick={() => {
-            onClose();
-            setUi({ openTaskId: task.id, agentForm: 'assign' });
-          }}
-        >
-          Assign to an agent
+        <button role="menuitem" aria-haspopup="dialog" onClick={onAssign}>
+          Assign to an agent…
         </button>
       )}
       <hr />
@@ -137,6 +131,8 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
   const { setUi } = useUi();
   const [editingTime, setEditingTime] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // "Assign to an agent…" from the menu: the assignee picker, in place.
+  const [assigning, setAssigning] = useState(false);
   const channel = task.channelId ? view.state.channels[task.channelId] : null;
   const done = Boolean(task.completedAt);
   const subtasksDone = task.subtasks.filter((subtask) => subtask.done).length;
@@ -159,7 +155,7 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
   return (
     <li
       data-task={task.id}
-      class={`task-card${done ? ' is-done' : ''}${menuOpen ? ' has-menu' : ''}${running ? ' is-running' : ''}`}
+      class={`task-card${done ? ' is-done' : ''}${menuOpen || assigning ? ' has-menu' : ''}${running ? ' is-running' : ''}`}
       draggable={!editingTime}
       onMouseEnter={() => setHoveredTask(task.id)}
       onMouseLeave={() => setHoveredTask(null)}
@@ -227,8 +223,18 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
         </span>
       )}
       <div class="menu-anchor">
-        <button class="more" aria-label="Task actions" aria-haspopup="menu" onClick={() => setMenuOpen((open) => !open)}>⋯</button>
-        {menuOpen && <TaskMenu task={task} onClose={() => setMenuOpen(false)} />}
+        <button class="more" aria-label="Task actions" aria-haspopup="menu" onClick={() => (assigning ? setAssigning(false) : setMenuOpen((open) => !open))}>⋯</button>
+        {menuOpen && (
+          <TaskMenu
+            task={task}
+            onClose={() => setMenuOpen(false)}
+            onAssign={() => {
+              setMenuOpen(false);
+              setAssigning(true);
+            }}
+          />
+        )}
+        {assigning && <AssignPopover taskId={task.id} onClose={() => setAssigning(false)} />}
       </div>
     </li>
   );
