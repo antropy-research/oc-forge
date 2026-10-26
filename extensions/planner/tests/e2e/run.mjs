@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
+import { makeFilters, page as linearPage } from './linearFake.mjs';
 
 const base = process.argv[2] ?? 'http://127.0.0.1:35310';
 const out = process.argv[3] ?? '/tmp/opencode/planner-e2e';
@@ -549,7 +550,7 @@ try {
   });
   const linearIssues = [makeIssue(1, 'linear first', 'st-todo'), makeIssue(2, 'linear second', 'st-prog'), makeIssue(3, 'linear third', 'st-backlog'), makeIssue(5, 'linear by url', 'st-todo', false)];
   // Saved views (phase 11): a favorite team view saved as a board grouped by priority, another team
-  // view, a workspace view, one of my own, and a view of projects that the picker leaves out.
+  // view, a workspace view, one of my own, and a view of projects (listed as a list of projects).
   const savedView = (id, name, extra) => ({ id, name: `${run} ${name}`, description: null, icon: null, color: null, shared: true, modelName: 'Issue', slugId: `slug-${id}`, updatedAt: new Date().toISOString(), team: null, owner: { id: 'u-e2e', name: 'E2E Linear' }, ...extra });
   const viewOnlyIssue = { ...makeIssue(31, 'view only bug', 'st-todo', false), priority: 1, labels: { nodes: [{ id: 'lbl-bug', name: 'Bug', color: '#eb5757' }] } };
   const sideStates = makeStates('st-side-');
@@ -589,22 +590,41 @@ try {
   const linearCalls = [];
   const strip = ({ assigned, ...issue }) => issue;
   const isOpenIssue = (issue) => !['completed', 'canceled'].includes(issue.state.type);
+  // The Planner sends its filters to Linear; the fake answers them the way Linear does.
+  const filtersOf = (o) => makeFilters({ viewerId: o.viewer.id });
   const answerFor = (o, op, variables) => {
     const find = (id) => o.issues.find((issue) => issue.id === id || issue.identifier === id);
+    const where = (list) => filtersOf(o).issuesWhere(list, variables.filter ?? null).map(strip);
+    const viewMeta = (item) => ({ ...item, viewPreferencesValues: o.viewIssues?.[item.id]?.prefs ?? null });
     if (op === 'PlannerWhoAmI') return { viewer: o.viewer, organization: o.org };
-    if (op === 'PlannerAssigned') return { viewer: { ...o.viewer, assignedIssues: { nodes: o.issues.filter((issue) => issue.assigned && isOpenIssue(issue)).map(strip), pageInfo: { hasNextPage: false, endCursor: null } } } };
+    if (op === 'PlannerAssigned') return { viewer: { ...o.viewer, assignedIssues: linearPage(where(o.issues.filter((issue) => issue.assigned)), 100, variables.after) } };
+    if (op === 'PlannerCreated') return { viewer: { id: o.viewer.id, createdIssues: linearPage([], 100, variables.after) } };
+    if (op === 'PlannerIssues') return { issues: linearPage(where(o.issues), 100, variables.after) };
     if (op === 'PlannerViews') return { customViews: { nodes: o.views ?? [], pageInfo: { hasNextPage: false, endCursor: null } } };
     if (op === 'PlannerFavoriteViews') return { favorites: { nodes: o.favorites ?? [] } };
+    if (op === 'PlannerView') {
+      const found = (o.views ?? []).find((item) => item.id === variables.id);
+      return { customView: found ? viewMeta(found) : null };
+    }
     if (op === 'PlannerViewIssues') {
       const saved = o.viewIssues?.[variables.id];
-      const nodes = (saved?.issues() ?? []).filter(isOpenIssue).map(strip);
-      return { customView: (o.views ?? []).some((item) => item.id === variables.id) ? { id: variables.id, viewPreferencesValues: saved?.prefs ?? null, issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } : null };
+      const nodes = where((saved?.issues() ?? []).filter(isOpenIssue));
+      return { customView: (o.views ?? []).some((item) => item.id === variables.id) ? { id: variables.id, issues: linearPage(nodes, 100, variables.after) } : null };
     }
+    if (op === 'PlannerViewProjects') {
+      const found = (o.views ?? []).find((item) => item.id === variables.id);
+      return { customView: found ? { id: found.id, projects: linearPage(found.modelName === 'Project' ? o.projects : [], 50, variables.after) } : null };
+    }
+    if (op === 'PlannerFilterTeams') return { teams: linearPage(o.teams.map((item) => ({ ...item, states: { nodes: o.states } })), 50, variables.after) };
+    if (op === 'PlannerFilterUsers') return { users: linearPage(o.members.filter((member) => member.active).map((member) => ({ ...member, isMe: member.id === o.viewer.id })), 250, variables.after) };
+    if (op === 'PlannerFilterLabels') return { issueLabels: linearPage([...o.labels.map((label) => ({ ...label, isGroup: false, parent: null, team: { id: o.teams[0].id, key: o.teams[0].key } })), ...o.workspaceLabels.map((label) => ({ ...label, isGroup: false, parent: null, team: null }))], 250, variables.after) };
+    if (op === 'PlannerFilterProjects') return { projects: linearPage(o.projects.map((item) => ({ id: item.id, name: item.name, color: item.color, icon: null, status: { type: item.status.type } })), 250, variables.after) };
+    if (op === 'PlannerFilterCycles') return { cycles: linearPage([], 250, variables.after) };
     if (op === 'PlannerLinked') return { issues: { nodes: o.issues.filter((issue) => variables.ids.includes(issue.id)).map(strip) } };
     if (op === 'PlannerIssue') return { issue: find(variables.id) ? strip(find(variables.id)) : null };
     if (op === 'PlannerTeamStates') return { team: { id: variables.id, states: { nodes: o.states } } };
     if (op === 'PlannerTeams') return { viewer: { id: o.viewer.id }, teams: { nodes: o.teams } };
-    if (op === 'PlannerSearch') return { searchIssues: { nodes: o.issues.filter((issue) => issue.title.includes(variables.term)).map(strip) } };
+    if (op === 'PlannerSearch') return { searchIssues: linearPage(where(o.issues.filter((issue) => issue.title.includes(variables.term))), 50, variables.after) };
     if (op === 'PlannerProjects') return { projects: { nodes: o.projects, pageInfo: { hasNextPage: false, endCursor: null } } };
     if (op === 'PlannerProject') {
       const found = o.projects.find((item) => item.id === variables.id);
@@ -613,7 +633,6 @@ try {
           ...found, content: `${found.name} long description`,
           projectMilestones: { nodes: [{ id: 'm1', name: `${found.name} beta`, targetDate: '2026-11-15', progress: 0.5, sortOrder: 1 }] },
           lastUpdate: { id: 'u1', body: `${found.name} is slipping a little`, health: found.health ?? 'onTrack', createdAt: new Date().toISOString(), url: `${found.url}/updates`, user: o.viewer },
-          issues: { nodes: o.issues.filter((issue) => issue.project?.id === found.id && isOpenIssue(issue)).map(strip) },
         } : null,
       };
     }
@@ -673,10 +692,23 @@ try {
 
   frame = await openPlanner();
   await nav('Linear').click();
-  const issueRow = (n) => frame.locator('li.issue-row', { hasText: `E2E-${n}` }).first();
+  // The Linear page lays issues out as Linear does: one line per issue, in groups of exact workflow states.
+  const issueRow = (n) => frame.locator('.linear-page li.lin-row, .linear-page li.lin-card', { hasText: new RegExp(`E2E-${n}(?!\\d)`) }).first();
+  const linearNav = () => frame.getByRole('navigation', { name: 'Linear sections' });
+  const openDisplay = async () => {
+    await frame.locator('.linear-page').getByRole('button', { name: 'Display', exact: true }).click();
+    const menu = frame.getByRole('dialog', { name: 'Display options' });
+    await menu.waitFor({ timeout: 5000 });
+    return menu;
+  };
+  const closeDisplay = () => frame.locator('.linear-page').getByRole('button', { name: 'Display', exact: true }).click();
+  const chooseIn = async (menu, name, option) => {
+    await menu.getByRole('button', { name: new RegExp(`^${name}: `) }).click();
+    await menu.getByRole('dialog', { name }).getByRole('option', { name: option, exact: true }).click();
+  };
   await issueRow(1).waitFor({ timeout: 15_000 });
-  const groups = await frame.locator('.linear-page .issue-group h3').allInnerTexts();
-  check('My issues lists assigned open issues grouped by state', groups.join('|').includes('In progress') && groups.join('|').includes('Todo') && groups.join('|').includes('Backlog'), groups.join(' | '));
+  const groups = await frame.locator('.linear-page .lin-group-head .lin-group-name').allInnerTexts();
+  check('My issues lists assigned open issues grouped by state', groups.join('|').includes('In Progress') && groups.join('|').includes('Todo') && groups.join('|').includes('Backlog'), groups.join(' | '));
   await shot('17-linear');
 
   await frame.getByRole('button', { name: 'Plan E2E-1 today' }).click();
@@ -774,29 +806,40 @@ try {
   check('a second workspace can be added with an API key', (await workspaceList.innerText()).includes('E2E Org'), (await workspaceList.innerText()).replace(/\s+/g, ' '));
 
   await nav('Linear').click();
-  const sideRow = (n) => frame.locator('.linear-page li.issue-row', { hasText: new RegExp(`SIDE-${n}(?!\\d)`) }).first();
+  const sideRow = (n) => frame.locator('.linear-page li.lin-row, .linear-page li.lin-card', { hasText: new RegExp(`SIDE-${n}(?!\\d)`) }).first();
   await sideRow(1).waitFor({ timeout: 15_000 });
   check('All workspaces merges the issues of both, each marked with its workspace', (await issueRow(3).count()) === 1 && (await sideRow(1).locator('.ws-badge').innerText()) === 'Side Org');
-  await frame.getByRole('combobox', { name: 'Group issues by' }).selectOption('workspace');
-  await frame.locator('.linear-page .issue-group h3', { hasText: 'Side Org' }).waitFor({ timeout: 10_000 });
-  const workspaceGroups = (await frame.locator('.linear-page .issue-group h3').allInnerTexts()).map((text) => text.replace(/\s+\d+$/, ''));
+  let displayMenu = await openDisplay();
+  await chooseIn(displayMenu, 'Grouping', 'Workspace');
+  await closeDisplay();
+  await frame.locator('.linear-page .lin-group-head', { hasText: 'Side Org' }).waitFor({ timeout: 10_000 });
+  const workspaceGroups = await frame.locator('.linear-page .lin-group-head .lin-group-name').allInnerTexts();
   check('issues group by workspace', workspaceGroups.join('|') === 'E2E Org|Side Org', workspaceGroups.join(' | '));
-  await frame.getByRole('combobox', { name: 'Linear workspace' }).selectOption({ label: 'Side Org' });
-  await frame.locator('.linear-page li.issue-row', { hasText: /E2E-\d/ }).first().waitFor({ state: 'detached', timeout: 10_000 });
+  const chooseWorkspace = async (option) => {
+    await frame.getByRole('button', { name: /^Linear workspace: / }).click();
+    await frame.getByRole('dialog', { name: 'Linear workspace' }).getByRole('option', { name: option }).click();
+  };
+  await chooseWorkspace(/^Side Org/);
+  await frame.locator('.linear-page li.lin-row', { hasText: /E2E-\d/ }).first().waitFor({ state: 'detached', timeout: 10_000 });
   check('one workspace can be shown on its own', (await sideRow(2).count()) === 1);
-  await frame.getByRole('combobox', { name: 'Linear workspace' }).selectOption('all');
-  await frame.getByRole('combobox', { name: 'Group issues by' }).selectOption('status');
-  await frame.getByRole('radio', { name: 'Board' }).click();
-  const column = (label) => frame.locator(`.issue-board section.board-column[aria-label="${label}"]`);
-  await column('Todo').locator('li.issue-row', { hasText: /SIDE-1(?!\d)/ }).waitFor({ timeout: 10_000 });
-  check('the board shows status columns in workflow order', (await frame.locator('.issue-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')))).join('|') === 'Backlog|Todo|In progress|Done');
+  await chooseWorkspace('All workspaces');
+  displayMenu = await openDisplay();
+  await chooseIn(displayMenu, 'Grouping', 'Status');
+  await displayMenu.getByRole('radio', { name: 'Board' }).click();
+  await closeDisplay();
+  const column = (label) => frame.locator(`.lin-board section.board-column[aria-label="${label}"]`);
+  await column('Todo').locator('li.lin-card', { hasText: /SIDE-1(?!\d)/ }).waitFor({ timeout: 10_000 });
+  // Both workspaces' teams have the same four states, one column each, in workflow order.
+  check('the board shows status columns in workflow order', (await frame.locator('.lin-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')))).join('|') === 'Backlog|Todo|In Progress|Done');
   await shot('26-linear-board');
-  await column('Todo').locator('li.issue-row', { hasText: /SIDE-1(?!\d)/ }).dragTo(column('In progress'));
-  await column('In progress').locator('li.issue-row', { hasText: /SIDE-1(?!\d)/ }).waitFor({ timeout: 10_000 });
+  // A drag cannot scroll the board on its way: the source column goes to the left edge first.
+  await column('Todo').evaluate((element) => element.scrollIntoView({ inline: 'start', block: 'nearest' }));
+  await column('Todo').locator('li.lin-card', { hasText: /SIDE-1(?!\d)/ }).dragTo(column('In Progress'));
+  await column('In Progress').locator('li.lin-card', { hasText: /SIDE-1(?!\d)/ }).waitFor({ timeout: 10_000 });
   const boardMove = sideCalls.find((call) => call.op === 'PlannerSetState' && call.variables.id === `side-${run}-1`);
   check('dropping a card on a column moves the issue in its own workspace', boardMove?.workspaceId === 'org-side' && boardMove.variables.stateId === 'st-side-prog', JSON.stringify(boardMove ?? null));
 
-  await frame.getByRole('tab', { name: 'Projects' }).click();
+  await linearNav().getByRole('button', { name: 'All projects', exact: true }).click();
   await frame.getByRole('button', { name: 'Open project Side Project' }).waitFor({ timeout: 10_000 });
   check('Projects lists the open projects of every workspace', (await frame.getByRole('button', { name: 'Open project Planner' }).count()) === 1);
   await frame.getByRole('button', { name: 'Open project Side Project' }).click();
@@ -815,7 +858,7 @@ try {
   await shot('27-linear-project');
   await projectView.getByRole('button', { name: '← All projects' }).click();
 
-  await frame.getByRole('tab', { name: 'Planned' }).click();
+  await linearNav().getByRole('button', { name: 'Planned', exact: true }).click();
   const plannedToday = frame.locator('section.issue-group[aria-label="Planned Today"]');
   await plannedToday.locator('li', { hasText: /SIDE-2(?!\d)/ }).waitFor({ timeout: 10_000 });
   check('Planned lists the Linear issues already in the plan', (await plannedToday.locator('li', { hasText: /SIDE-2(?!\d)/ }).locator('.ws-badge').innerText()) === 'Side Org');
@@ -830,7 +873,7 @@ try {
   check('completing it moves the issue to Done in its own workspace, not through OpenChamber', sideDone?.variables.stateId === 'st-side-done' && !linearCalls.some((call) => call.variables?.id === `side-${run}-2`), JSON.stringify(sideDone ?? null));
 
   await nav('Linear').click();
-  await frame.getByRole('tab', { name: 'Issues' }).click();
+  await linearNav().getByRole('button', { name: 'Assigned', exact: true }).click();
   await frame.getByRole('button', { name: 'Plan SIDE-1 today' }).click();
   await nav('Today').click();
   await linearCard('side first').getByRole('button', { name: new RegExp(`Open ${run} side first`) }).click();
@@ -848,8 +891,10 @@ try {
   await workspaceList.locator('li', { hasText: 'Side Org' }).waitFor({ state: 'detached', timeout: 10_000 });
   await nav('Linear').click();
   await issueRow(3).waitFor({ timeout: 10_000 });
-  check('removing a workspace takes its issues away', (await frame.locator('.linear-page li.issue-row', { hasText: /SIDE-\d/ }).count()) === 0);
-  await frame.getByRole('radio', { name: 'List' }).click();
+  check('removing a workspace takes its issues away', (await frame.locator('.linear-page li.lin-card, .linear-page li.lin-row', { hasText: /SIDE-\d/ }).count()) === 0);
+  displayMenu = await openDisplay();
+  await displayMenu.getByRole('radio', { name: 'List' }).click();
+  await closeDisplay();
   await context.unroute(isServiceRoute);
 
   // Phase 10: edit a Linear issue in the Planner, in Markdown.
@@ -912,18 +957,28 @@ try {
   check('…and goes through once I choose to replace it', Boolean(await until(() => edited.description === 'My version')));
   await issueEditor.getByRole('button', { name: 'Edit title and description' }).waitFor({ timeout: 10_000 });
 
-  const assignee = issueEditor.getByRole('combobox', { name: 'Assignee' });
-  const formerListed = await assignee.locator('option', { hasText: 'Former' }).count();
-  await issueEditor.getByRole('combobox', { name: 'Issue priority' }).selectOption({ label: 'Urgent' });
+  // The properties sidebar: each property opens a searchable menu.
+  const property = (name) => issueEditor.getByRole('complementary', { name: 'Properties' }).getByRole('button', { name: new RegExp(`^${name}: `) });
+  const pickIn = async (name, menu, option) => {
+    await property(name).click();
+    await issueEditor.getByRole('dialog', { name: menu }).getByRole('option', { name: option }).first().click();
+  };
+  await property('Assignee').click();
+  await issueEditor.getByRole('dialog', { name: 'Assign to' }).waitFor({ timeout: 10_000 });
+  const formerListed = await issueEditor.getByRole('dialog', { name: 'Assign to' }).getByRole('option', { name: /Former/ }).count();
+  await page.keyboard.press('Escape');
+  await pickIn('Priority', 'Change priority', 'Urgent');
   await until(() => updates().find((call) => call.variables.input.priority === 1));
-  await assignee.selectOption({ label: 'Teammate' });
+  await pickIn('Assignee', 'Assign to', /^Teammate/);
   await until(() => updates().find((call) => call.variables.input.assigneeId === 'u-mate'));
-  await issueEditor.getByRole('combobox', { name: 'Status' }).selectOption({ label: 'In Progress' });
+  await pickIn('Status', 'Change status', 'In Progress');
   await until(() => updates().find((call) => call.variables.input.stateId === 'st-prog'));
-  await issueEditor.locator('summary[aria-label="Edit labels"]').click();
-  await issueEditor.getByRole('checkbox', { name: 'Bug' }).check();
+  await pickIn('Labels', 'Change labels', 'Bug');
   await until(() => updates().find((call) => call.variables.input.addedLabelIds?.includes('lbl-bug')));
-  await issueEditor.locator('input[aria-label="Issue due date"]').fill('2026-11-02');
+  await page.keyboard.press('Escape');
+  await property('Due date').click();
+  await issueEditor.getByRole('dialog', { name: 'Change due date' }).locator('input[aria-label="Issue due date"]').fill('2026-11-02');
+  await issueEditor.getByRole('dialog', { name: 'Change due date' }).getByRole('button', { name: 'Set' }).click();
   await until(() => updates().find((call) => call.variables.input.dueDate === '2026-11-02'));
   const fieldInputs = updates().map((call) => Object.keys(call.variables.input).join('+'));
   check(
@@ -964,53 +1019,54 @@ try {
 
   // Phase 11: the views saved in Linear, opened as saved, and Linear's temporary filters.
   await nav('Linear').click();
-  await frame.getByRole('tab', { name: 'Issues' }).click();
-  const sourcePicker = frame.locator('.linear-page').getByRole('combobox', { name: 'Linear issues to show' });
-  await sourcePicker.locator('optgroup[label="Favorites"]').waitFor({ state: 'attached', timeout: 15_000 });
-  const pickerGroups = await sourcePicker.locator('optgroup').evaluateAll((items) => items.map((item) => `${item.getAttribute('label')}: ${[...item.querySelectorAll('option')].map((option) => option.textContent).join(', ')}`));
+  await linearNav().getByRole('button', { name: 'Assigned', exact: true }).click();
+  const favoritesGroup = linearNav().getByRole('group', { name: 'Favorites' });
+  await favoritesGroup.waitFor({ timeout: 15_000 });
+  const favoriteNames = await favoritesGroup.locator('.lin-nav-label').allInnerTexts();
+  const pickerGroups = await linearNav().getByRole('group', { name: 'Views' }).getByRole('group').evaluateAll((items) => items.map((item) => `${item.getAttribute('aria-label')}: ${[...item.querySelectorAll('.lin-nav-label')].map((label) => label.textContent).join(', ')}`));
   check(
-    'the view picker lists favorites, then team, workspace and my views, without views of projects',
-    pickerGroups.join(' | ') === `Favorites: ${run} Favorite board | E2E · E2E Team: ${run} Team triage | Workspace views: ${run} Company view | My views: ${run} Mine`,
-    pickerGroups.join(' | '),
+    'the sidebar lists favorites, then every view by team, workspace and mine, views of projects too',
+    favoriteNames.join(', ') === `${run} Favorite board` && pickerGroups.join(' | ') === `E2E · E2E Team: ${run} Favorite board, ${run} Team triage | Workspace views: ${run} Company view, ${run} Projects view | My views: ${run} Mine`,
+    `${favoriteNames.join(', ')} · ${pickerGroups.join(' | ')}`,
   );
-  await sourcePicker.selectOption({ label: `${run} Favorite board` });
-  const viewRow = frame.locator('.linear-page li.issue-row', { hasText: 'E2E-31' });
+  await favoritesGroup.getByRole('button', { name: `${run} Favorite board`, exact: true }).click();
+  const viewRow = frame.locator('.linear-page li.lin-card, .linear-page li.lin-row', { hasText: 'E2E-31' });
   await viewRow.waitFor({ timeout: 15_000 });
-  const boardColumns = await frame.locator('.issue-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')));
-  const priorityNames = { 1: 'Urgent', 2: 'High', 3: 'Medium', 4: 'Low', 0: 'No priority' };
-  const viewPriorities = new Set(linearOrgs.host.viewIssues['v-fav'].issues().filter(isOpenIssue).map((issue) => issue.priority));
-  const expectedColumns = [1, 2, 3, 4, 0].filter((priority) => viewPriorities.has(priority)).map((priority) => priorityNames[priority]);
-  check('a saved view opens with its own layout and grouping (a board by priority)', boardColumns.join('|') === expectedColumns.join('|'), `${boardColumns.join('|')} (want ${expectedColumns.join('|')})`);
+  const boardColumns = await frame.locator('.lin-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')));
+  // A board shows every priority as a column, as Linear's boards show empty columns.
+  check('a saved view opens with its own layout and grouping (a board by priority)', boardColumns.join('|') === 'Urgent|High|Medium|Low|No priority', boardColumns.join('|'));
   check("opening a view does not change the Planner's own display settings", (await serviceState()).state.settings.linearLayout === 'list');
   await shot('31-linear-view');
 
-  const filterBar = frame.locator('.linear-page .linear-filters').first();
-  const shownRows = () => frame.locator('.linear-page li.issue-row').count();
+  const filterBar = frame.locator('.linear-page .lin-filters').first();
+  const shownRows = () => frame.locator('.linear-page li.lin-card, .linear-page li.lin-row').count();
   // What the fake view holds now (earlier phases moved and labelled some of its issues).
   const inView = () => linearOrgs.host.viewIssues['v-fav'].issues().filter(isOpenIssue);
-  const shownKeys = async () => (await frame.locator('.linear-page li.issue-row').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label') ?? ''))).map((label) => /^E2E-\d+/.exec(label)?.[0]).sort();
+  const shownKeys = async () => (await frame.locator('.linear-page li.lin-card, .linear-page li.lin-row').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label') ?? ''))).map((label) => /^E2E-\d+/.exec(label)?.[0]).sort();
   const keysWhere = (test) => inView().filter(test).map((issue) => issue.identifier).sort();
   const allInView = await shownRows();
-  await filterBar.getByRole('button', { name: '+ Filter' }).click();
-  await frame.getByRole('menuitem', { name: 'Status' }).click();
+  // Filters go to Linear as an IssueFilter; the fake Linear answers them as Linear does.
+  await filterBar.getByRole('button', { name: 'Filter', exact: true }).click();
+  await frame.getByRole('dialog', { name: 'Filter' }).getByRole('option', { name: 'Status' }).click();
   const statusMenu = frame.getByRole('dialog', { name: 'Filter by Status' });
-  await statusMenu.getByRole('checkbox', { name: /Todo/ }).check();
+  await statusMenu.getByRole('option', { name: 'Todo' }).click();
   await filterBar.getByRole('button', { name: 'Edit filter: Status is Todo' }).waitFor({ timeout: 5000 });
-  await statusMenu.getByRole('button', { name: 'Done' }).click();
-  const todoOnly = await shownKeys();
+  await page.keyboard.press('Escape');
+  await statusMenu.waitFor({ state: 'detached', timeout: 5000 });
   const expectedTodo = keysWhere((issue) => issue.state.name === 'Todo');
-  check('a status filter keeps only those issues, and says how many it hides', todoOnly.join() === expectedTodo.join() && todoOnly.length < allInView && (await frame.locator('.linear-page .filter-count').innerText()).includes(`of ${allInView} issues`), `${todoOnly.join(', ')} (want ${expectedTodo.join(', ')}) of ${allInView}`);
-  await filterBar.getByRole('button', { name: 'Edit filter: Status is Todo' }).click();
-  await frame.getByRole('dialog', { name: 'Filter by Status' }).getByRole('radio', { name: 'is not' }).click();
+  const todoOnly = (await until(async () => ((await shownKeys()).join() === expectedTodo.join() ? shownKeys() : null))) ?? (await shownKeys());
+  check('a status filter keeps only those issues, and says how many', todoOnly.join() === expectedTodo.join() && todoOnly.length < allInView && (await frame.locator('.linear-page .lin-count').innerText()).startsWith(`${todoOnly.length} issue`), `${todoOnly.join(', ')} (want ${expectedTodo.join(', ')}) of ${allInView}`);
+  await filterBar.getByRole('button', { name: 'Operator of Status: is' }).click();
+  await frame.getByRole('dialog', { name: 'Status filter operator' }).getByRole('option', { name: 'is not' }).click();
   await filterBar.getByRole('button', { name: 'Edit filter: Status is not Todo' }).waitFor({ timeout: 5000 });
-  await frame.getByRole('dialog', { name: 'Filter by Status' }).getByRole('button', { name: 'Done' }).click();
-  check('"is not" turns the filter around', (await frame.locator('.linear-page li.issue-row', { hasText: /E2E-31(?!\d)/ }).count()) === 0 && (await shownRows()) === allInView - todoOnly.length);
+  await until(async () => (await shownRows()) === allInView - todoOnly.length);
+  check('"is not" turns the filter around', (await frame.locator('.linear-page li.lin-card, .linear-page li.lin-row', { hasText: /E2E-31(?!\d)/ }).count()) === 0 && (await shownRows()) === allInView - todoOnly.length);
   await filterBar.getByRole('button', { name: 'Remove filter: Status is not Todo' }).click();
-  await filterBar.getByRole('button', { name: '+ Filter' }).click();
-  await frame.getByRole('menuitem', { name: 'Label' }).click();
-  await frame.getByRole('dialog', { name: 'Filter by Label' }).getByRole('checkbox', { name: /Bug/ }).check();
-  await frame.getByRole('dialog', { name: 'Filter by Label' }).getByRole('button', { name: 'Done' }).click();
-  await page.waitForTimeout(300);
+  await filterBar.getByRole('button', { name: 'Filter', exact: true }).click();
+  await frame.getByRole('dialog', { name: 'Filter' }).getByRole('option', { name: 'Labels' }).click();
+  await frame.getByRole('dialog', { name: 'Filter by Labels' }).getByRole('option', { name: 'Bug' }).click();
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(600);
   const expectedBug = keysWhere((issue) => issue.labels.nodes.some((label) => label.name === 'Bug'));
   check('a label filter keeps the issues that have it', (await shownKeys()).join() === expectedBug.join() && expectedBug.includes('E2E-31'), `${(await shownKeys()).join(', ')} (want ${expectedBug.join(', ')})`);
   await shot('32-linear-filters');
@@ -1025,9 +1081,9 @@ try {
   await assignFromRow.getByRole('button', { name: 'Cancel' }).click();
   await frame.getByRole('dialog', { name: 'Task details' }).getByRole('button', { name: 'Close' }).click();
 
-  await sourcePicker.selectOption('assigned');
+  await linearNav().getByRole('button', { name: 'Assigned', exact: true }).click();
   await issueRow(3).waitFor({ timeout: 10_000 });
-  check("another list starts without filters, in the Planner's own display", (await filterBar.locator('.filter-chip').count()) === 0 && (await frame.locator('.issue-board').count()) === 0);
+  check("another list starts without filters, in the Planner's own display", (await filterBar.locator('.lin-chip').count()) === 0 && (await frame.locator('.lin-board').count()) === 0);
 
   await context.unroute(isRequestRoute);
   await context.unroute(isStatusRoute);
