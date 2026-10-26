@@ -1,0 +1,192 @@
+// The compiled workbench the frame loads, taken from the user's own VS Code
+// Server (the same commit, which the remote connection requires) and prepared
+// for an OpenChamber frame: only the files a browser loads, under names
+// OpenChamber serves, with `patch.ts` applied. It is written inside this
+// extension's folder (`vscode-web/<commit>/`), because an extension frame can
+// load files from its own package and from nowhere else.
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join, relative } from 'node:path';
+import { clientFileName, REQUIRED_SOURCE_FILES, WEB_NODE_MODULES } from '../src/clientFiles.ts';
+import { patchExtensionHostIframe, patchScript, patchStylesheet, patchWorkbench, PatchError } from '../src/patch.ts';
+import type { ServerPage, VscodeServer } from './server.ts';
+
+/** Bumped when the cache's layout or patches change, so older caches are rebuilt. */
+export const CACHE_FORMAT = 1;
+const MARKER = 'ready.json';
+const KEEP = 2;
+const DOWNLOADS_AT_ONCE = 8;
+
+export type AssetState =
+  | { state: 'idle' }
+  | { state: 'preparing'; source: 'local' | 'download'; done: number; total: number }
+  | { state: 'ready'; path: string; files: number; source: 'local' | 'download' }
+  | { state: 'failed'; error: string };
+
+/** Where a VS Code Server is usually installed on the machine running OpenChamber. */
+export const localInstallCandidates = (commit: string, home = homedir()): string[] => [
+  '/opt/vscode-server',
+  join(home, '.vscode-server', 'cli', 'servers', `Stable-${commit}`, 'server'),
+  join(home, '.vscode-server', 'bin', commit),
+  join(home, '.vscode', 'cli', 'serve-web', commit),
+  join(home, '.vscode-cli', 'serve-web', commit),
+  join(home, '.vscode-server', 'cli', 'serve-web', commit),
+];
+
+const walk = async (root: string, dir: string, out: string[]): Promise<void> => {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) await walk(root, path, out);
+    else if (entry.isFile()) out.push(relative(root, path));
+  }
+};
+
+export class WorkbenchAssets {
+  private readonly jobs = new Map<string, AssetState>();
+
+  constructor(
+    /** `<package>/vscode-web`. */
+    private readonly cacheRoot: string,
+    /** Install-relative paths the browser loads, for a server reached only over HTTP (`web-files.json`). */
+    private readonly downloadList: () => Promise<string[]>,
+    private readonly log: (message: string) => void,
+    private readonly candidates: (commit: string) => string[] = localInstallCandidates,
+  ) {}
+
+  /** The cache folder of a commit, relative to the package (what the frame loads from). */
+  static folder(commit: string): string {
+    return `vscode-web/${commit}`;
+  }
+
+  status(commit: string): AssetState {
+    const job = this.jobs.get(commit);
+    if (job && job.state !== 'ready') return job;
+    const marker = join(this.cacheRoot, commit, MARKER);
+    if (existsSync(marker)) {
+      try {
+        const ready = JSON.parse(readFileSync(marker, 'utf8')) as { format?: number; files?: number; source?: 'local' | 'download' };
+        if (ready.format === CACHE_FORMAT) return { state: 'ready', path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? 'local' };
+      } catch {
+        // A broken marker: prepare again.
+      }
+    }
+    return job ?? { state: 'idle' };
+  }
+
+  /** Start preparing (once per commit) and answer at once with the state. */
+  prepare(server: VscodeServer, page: ServerPage): AssetState {
+    const current = this.status(page.commit);
+    if (current.state === 'ready' || current.state === 'preparing') return current;
+    const job: AssetState = { state: 'preparing', source: 'local', done: 0, total: 0 };
+    this.jobs.set(page.commit, job);
+    void this.build(server, page, job).then(
+      (done) => this.jobs.set(page.commit, done),
+      (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log(`preparing VS Code ${page.commit.slice(0, 8)} failed: ${message}`);
+        this.jobs.set(page.commit, { state: 'failed', error: message });
+      },
+    );
+    return job;
+  }
+
+  private async localInstall(commit: string): Promise<string | null> {
+    for (const dir of this.candidates(commit)) {
+      try {
+        const product = JSON.parse(await readFile(join(dir, 'product.json'), 'utf8')) as { commit?: unknown };
+        if (product.commit === commit && REQUIRED_SOURCE_FILES.every((file) => existsSync(join(dir, file)))) return dir;
+      } catch {
+        // Not there, or another build.
+      }
+    }
+    return null;
+  }
+
+  private async build(server: VscodeServer, page: ServerPage, job: Extract<AssetState, { state: 'preparing' }>): Promise<AssetState> {
+    const local = await this.localInstall(page.commit);
+    job.source = local ? 'local' : 'download';
+    let sources: string[];
+    if (local) {
+      sources = [];
+      await walk(local, join(local, 'out'), sources);
+      for (const module of WEB_NODE_MODULES) await walk(local, join(local, 'node_modules', module), sources);
+    } else {
+      sources = await this.downloadList();
+    }
+    const wanted = sources.filter((path) => clientFileName(path) !== null);
+    const read = async (path: string): Promise<Buffer | null> => (local ? readFile(join(local, path)).catch(() => null) : server.staticFile(page.base, path));
+    const codicon = await read('out/media/codicon.ttf');
+    if (!codicon) throw new Error('the VS Code Server has no out/media/codicon.ttf');
+    job.total = wanted.length;
+    const tmp = join(this.cacheRoot, `${page.commit}.tmp-${process.pid}-${Date.now()}`);
+    await mkdir(tmp, { recursive: true });
+    try {
+      let next = 0;
+      let files = 0;
+      const worker = async (): Promise<void> => {
+        while (next < wanted.length) {
+          const path = wanted[next++]!;
+          const body = await read(path);
+          job.done += 1;
+          if (!body) continue;
+          const target = join(tmp, clientFileName(path)!);
+          await mkdir(dirname(target), { recursive: true });
+          await writeFile(target, transform(path, body, codicon));
+          files += 1;
+        }
+      };
+      await Promise.all(Array.from({ length: local ? 1 : DOWNLOADS_AT_ONCE }, worker));
+      for (const file of ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js']) {
+        if (!existsSync(join(tmp, file))) throw new Error(`${file} is missing from the VS Code Server`);
+      }
+      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, at: new Date().toISOString() }));
+      const final = join(this.cacheRoot, page.commit);
+      await rm(final, { recursive: true, force: true });
+      await rename(tmp, final);
+      await this.prune(page.commit);
+      this.log(`VS Code ${page.commit.slice(0, 8)} ready from ${local ?? 'the server'} (${files} files)`);
+      return { state: 'ready', path: WorkbenchAssets.folder(page.commit), files, source: job.source };
+    } catch (error) {
+      await rm(tmp, { recursive: true, force: true });
+      throw error instanceof PatchError ? new Error(`This VS Code release cannot run inside OpenChamber yet: ${error.message}`) : error;
+    }
+  }
+
+  /** Keep the newest caches only; leftovers of interrupted builds go too. */
+  private async prune(keep: string): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.cacheRoot);
+    } catch {
+      return;
+    }
+    const caches: { name: string; at: number }[] = [];
+    for (const name of entries) {
+      const path = join(this.cacheRoot, name);
+      if (name.includes('.tmp-') && !name.endsWith(`.tmp-${process.pid}`)) {
+        await rm(path, { recursive: true, force: true });
+        continue;
+      }
+      if (name === keep || !/^[0-9a-f]{40}$/.test(name)) continue;
+      caches.push({ name, at: (await stat(path).catch(() => null))?.mtimeMs ?? 0 });
+    }
+    caches.sort((a, b) => b.at - a.at);
+    for (const old of caches.slice(KEEP - 1)) await rm(join(this.cacheRoot, old.name), { recursive: true, force: true });
+  }
+}
+
+/** A file as the cache stores it. */
+export const transform = (path: string, body: Buffer, codicon: Buffer): Buffer | string => {
+  if (path === 'out/vs/code/browser/workbench/workbench.js') return patchWorkbench(body.toString('utf8'));
+  if (path === 'out/vs/code/browser/workbench/workbench.css') return patchStylesheet(body.toString('utf8'), codicon.toString('base64'));
+  if (path === 'out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html') return patchExtensionHostIframe(body.toString('utf8'));
+  if (path.endsWith('.js') && path.startsWith('out/')) return patchScript(body.toString('utf8'));
+  return body;
+};

@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>VS Code</title>
+    <style>
+      /* Only the boot screen; once VS Code runs, its own stylesheet styles the page. */
+      html { scrollbar-gutter: auto; }
+      html, body { margin: 0; height: 100%; }
+      #oc-boot { box-sizing: border-box; height: 100%; padding: 16px 18px; overflow: auto; background: var(--oc-bg); color: var(--oc-fg); font-family: var(--oc-font, system-ui); font-size: 13px; }
+      #oc-boot h1 { font-size: 16px; margin: 0 0 6px; }
+      #oc-boot .hint { color: var(--oc-muted); margin: 6px 0; line-height: 1.45; max-width: 640px; }
+      #oc-boot .problem { color: var(--oc-error, #c92a2a); margin: 6px 0; max-width: 640px; }
+      #oc-boot .problem:empty { display: none; }
+      #oc-boot .settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; max-width: 520px; }
+      #oc-boot .settings label.inline { flex-direction: row; align-items: center; gap: 6px; }
+      #oc-boot input[type="url"], #oc-boot input[type="password"] { font: inherit; color: inherit; background: var(--oc-elevated, var(--oc-bg)); border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 6px); padding: 5px 8px; }
+      #oc-boot button { font: inherit; color: inherit; background: var(--oc-elevated, var(--oc-bg)); border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 6px); padding: 5px 12px; cursor: pointer; }
+      #oc-boot .row { display: flex; gap: 8px; margin: 10px 0; }
+      #oc-boot .status { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; text-align: center; gap: 4px; }
+      #oc-boot .bar { width: min(320px, 80%); height: 4px; border-radius: 2px; background: var(--oc-border); overflow: hidden; margin-top: 8px; }
+      #oc-boot .fill { height: 100%; background: var(--oc-primary, #4c6ef5); transition: width 300ms ease-out; }
+    </style>
+  </head>
+  <body>
+    <div id="oc-boot"></div>
+    <script src="main.js"></script>
+  </body>
+</html>

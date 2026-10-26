@@ -1,71 +1,82 @@
 # VS Code extension
 
-Puts compiled VS Code into OpenChamber (manifest `apiVersion` 1, OpenChamber 2.5.1 or newer; web and desktop):
+Renders compiled VS Code inside OpenChamber (manifest `apiVersion` 1, OpenChamber 2.5.1 or newer, tested on
+2.5.2; web and desktop): the workbench of your own VS Code Server for the web, the same commit, in OpenChamber's
+**VS Code** rail panel (beside the chat, expandable) and as a full **VS Code** page (Extension pages → VS Code).
+Nothing opens in another tab or window. Explorer, editor (VS Code's own grammars, themes and IntelliSense from the
+server's extensions), Search, Source Control with its diff editor, the integrated terminal, Run and Debug,
+extensions and the command palette are VS Code itself, running on the server's files.
 
-- **Code rendering:** code files open in OpenChamber's Files view in VS Code's editor (Monaco), colored by the
-  TextMate grammars and default themes of VS Code itself, taken from a compiled VS Code (1.140.0, the release
-  `vendors.json` pins) and run by vscode-textmate on vscode-oniguruma, the libraries VS Code uses. Saving,
-  autosave and unsaved changes stay OpenChamber's.
-- **The whole VS Code:** the VS Code panel opens the folder at hand in the VS Code Server for the web (the dev
-  container runs one on port 35311), in OpenChamber's built-in browser on desktop or a browser tab; every chat
-  has "Open in VS Code" in its menu, and the editor's status bar opens the file there at its line.
+- **Open in VS Code** in a chat's menu shows that chat's folder (or worktree) in the VS Code panel.
+- VS Code follows OpenChamber's light or dark look when it starts, and switches when OpenChamber's does.
+- When OpenChamber moves to another folder, VS Code offers to open it; *OpenChamber: Open OpenChamber's Folder* and
+  *OpenChamber: VS Code Server Connection…* are in VS Code's command palette.
+- VS Code keeps its settings, keybindings, open editors and layout across reloads.
 
-## Why this shape
+## How it fits in an extension frame
 
-OpenChamber 2.5.1 runs an extension's pages in `sandbox="allow-scripts"` frames whose CSP allows frames only from
-OpenChamber itself, so no extension can host VS Code's whole workbench inside its own page. What it does allow,
-and what this extension uses:
+OpenChamber runs an extension's pages in `sandbox="allow-scripts"` frames: an opaque origin with a CSP that lets
+them load files from their own package and connect nowhere else. VS Code's web workbench expects a normal page on
+its server's origin. The extension's intermediate components close that gap:
 
-| Need | Mechanism | Limit |
+| VS Code needs | In an extension frame | What this extension does |
 |---|---|---|
-| Code rendering | `contributes.fileEditors` with a bundled Monaco | Files view only (not diffs or chat); files up to 20,000,000 characters |
-| VS Code's colors | Grammars, language configurations and themes collected into `editor/vscode/` | Languages VS Code ships a grammar for (75, 85 grammars) |
-| The full VS Code | `host.openUrl` to the VS Code Server, `openSurface('browser')` | Desktop opens it in the built-in browser when "Open links in the built-in browser" is on; the web UI opens a tab |
+| Its compiled files (`out/`, a few `node_modules`) | Only its own package's `.html .js .css .svg .json .png` load | `service/assets.ts` copies the browser's files of the server's own commit into `vscode-web/<commit>/` (from the install on this machine, or over HTTP from the server's static route by `service/web-files.json`), WebAssembly renamed `.json` |
+| Its embedder (`create(document.body, options)`) | | `src/patch.ts` routes the compiled embedder's options through the frame, which adds the folder, the web socket factory, the workspace provider and OpenChamber's defaults; each patch fails loudly if a release moved its code |
+| A web socket to the server | `connect-src` is the package only | The workbench's `webSocketFactory` tunnels through the host's service channel: the service opens the socket, the frame sends batches and long-polls (`workbench/tunnel.ts`, `service/tunnel.ts`) |
+| vsda to sign the handshake | Needs `crypto.subtle`, which plain HTTP lacks | The client sends its connection token, which the VS Code Server accepts in place of the signature |
+| Remote resources (themes, grammars, icon fonts, extension icons) and the gallery | Blocked by the CSP | `fetch`, `<img>`, `<style>` and CSSOM rules that name the server or the gallery are fetched by the service (`workbench/shims.ts`) |
+| Module workers from `blob:` URLs | An opaque origin cannot start them | The bootstrap's text starts the worker from a `data:` URL |
+| IndexedDB, localStorage, cookies | They throw | An in-memory IndexedDB (`fake-indexeddb`) filled from, and saved to, the service (`~/.local/share/openchamber-vscode/state/`, one file per server, mode 0600); memory storage for the rest |
+| Codicon font | Fonts are not served to the frame | Inlined into the stylesheet |
+
+Limits: VS Code's webviews (Markdown preview, release notes, extension detail pages, extensions' own webview
+panels) need service workers and same-origin nested frames, which an opaque-origin frame cannot have; they show
+VS Code's own error. OpenChamber's Files view has its own Markdown preview. VS Code's chat and its GitHub sign-in
+are turned off (`chat.disableAIFeatures`): OpenChamber is where agents run. Copy and paste with the keyboard work;
+the clipboard from VS Code's context menus may not.
+
+The extension no longer replaces OpenChamber's own file editor (`contributes.fileEditors`): the host can't hand a
+line to an extension editor, so search results and file links lost their line. Code renders in the VS Code view.
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `src/` | Pure code: VS Code's extension manifests to languages and grammars (`vscodeData.ts`), language configurations and themes for Monaco (`monacoConfig.ts`), settings and VS Code Server addresses (`settings.ts`), the files the editor claims (`fileTypes.ts`) |
-| `editor/` | The file editor: `main.ts` (Monaco and the host's file contract), `textmate.ts` (TextMate coloring), `worker.ts` (Monaco's helper worker), `vscode/` (collected from VS Code, with `NOTICE.md`), `build/` (built) |
-| `panel/` | The VS Code panel and, as the background frame, the "Open in VS Code" chat action |
-| `scripts/collect-vscode.ts` | Copies grammars, language configurations and themes from a compiled VS Code |
-| `scripts/build.ts` | Builds `panel/main.js` and `editor/build/` |
+| `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`) |
+| `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`) |
+| `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB |
+| `panel/` | The background frame: "Open in VS Code" on a chat |
+| `scripts/web-files.ts` | Lists the browser's files of a VS Code Server install for `service/web-files.json` |
 
 ## Build
 
 ```sh
 bun install
 bun run check                      # tsc, strict
-bun test tests/                    # including a line of TypeScript in Dark Modern's colors
-bun run build                      # panel/main.js, editor/build/main.{js,css}
+bun test tests/                    # VSCODE_SERVER_DIR=<install> also patches a real compiled workbench
+bun run build                      # workbench/main.js, panel/main.js, service/main.js
 node tests/e2e/run.mjs http://<bind>:35310   # on the host, against the dev container
 ```
 
-The E2E check opens a scratch `.ts` file in the Files view (VS Code's grammar and theme colors), saves an edit
-with Ctrl+S, and opens the project in the VS Code Server from the panel; it removes the file and puts the
-extension's settings back afterwards.
+The E2E check connects the panel to the dev container's VS Code Server, checks the Explorer, file icons, the
+editor's grammar colors, a save with Ctrl+S, Source Control and its diff editor, Search, the terminal, state kept
+across a reload, the page, and "Open in VS Code" on a chat, and that no other page or tab opened. It puts the
+demo project's README, the extension's settings and its chats back afterwards.
 
-To collect the VS Code data again (after the VS Code pin moves), copy a compiled VS Code's `extensions/`,
-`package.json`, `product.json` and `LICENSE` to a folder and run the collector on it, for example from the dev
-container:
+After the VS Code pin moves, refresh `service/web-files.json` from a server of that release:
 
 ```sh
-mkdir -p /tmp/vscode-compiled
-for item in extensions package.json product.json LICENSE; do docker cp oc-forge-vscode-dev:/opt/vscode-server/$item /tmp/vscode-compiled/$item; done
-bun run collect /tmp/vscode-compiled          # writes editor/vscode/
+docker cp oc-forge-vscode-dev:/opt/vscode-server /tmp/vscode-server
+bun run web-files /tmp/vscode-server
+VSCODE_SERVER_DIR=/tmp/vscode-server bun test tests/patch.test.ts
 ```
-
-The build works around three things a sandboxed frame cannot do: it starts Monaco's worker from a blob of its
-inlined source, carries vscode-oniguruma's WASM and the codicon font inside the script and the CSS (OpenChamber
-serves neither `.wasm` nor fonts with the CORS headers an opaque origin needs), and replaces `import.meta.url`,
-which a classic script cannot read.
 
 ## Install
 
-In OpenChamber: Settings → Extensions, add the folder (`/extensions/vscode` in the dev container). It asks for no
-capabilities. Open the VS Code panel to set the VS Code Server address and connection token
-(`VSCODE_CONNECTION_TOKEN` in the dev container's secrets file), the editor theme, the minimap and wrapping.
-
-VS Code's webviews (Markdown preview, extension views) need a secure context; over plain HTTP on an address other
-than localhost they may not work. Serving both apps over HTTPS on their own host names fixes that.
+In OpenChamber: Settings → Extensions, add the folder (`/extensions/vscode` in the dev container) and approve its
+local service. Open the VS Code panel and give the VS Code Server's address as the machine running OpenChamber
+reaches it, and its connection token: in the dev container `http://vscode:8000` and `VSCODE_CONNECTION_TOKEN` from
+the secrets file; with `code serve-web --connection-token <token>` on the same machine, `http://127.0.0.1:8000`.
+The first start prepares about 40 MB of that VS Code release inside the extension's folder (`vscode-web/`,
+ignored by git); later starts take a second or two.

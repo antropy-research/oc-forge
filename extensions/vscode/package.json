@@ -1,9 +1,9 @@
 {
   "name": "@oc-forge/openchamber-vscode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "VS Code inside OpenChamber: VS Code's editor and highlighting for code files, and the VS Code Server for the folder at hand.",
+  "description": "VS Code inside OpenChamber: the compiled workbench of your own VS Code Server, rendered in OpenChamber's panel and page.",
   "openchamber": {
     "apiVersion": 1,
     "engines": {
@@ -14,7 +14,11 @@
         "id": "oc-forge-vscode",
         "name": "VS Code",
         "icon": "code-box",
-        "entry": "panel/index.html"
+        "entry": "workbench/index.html"
+      },
+      "page": {
+        "entry": "workbench/index.html",
+        "title": "VS Code"
       },
       "background": {
         "entry": "panel/index.html"
@@ -28,138 +32,28 @@
           "mode": "background"
         }
       ],
-      "fileEditors": [
-        {
-          "id": "web",
-          "title": "VS Code",
-          "match": [
-            "*.ts",
-            "*.tsx",
-            "*.mts",
-            "*.cts",
-            "*.js",
-            "*.jsx",
-            "*.mjs",
-            "*.cjs",
-            "*.css",
-            "*.scss",
-            "*.less",
-            "*.hbs",
-            "*.handlebars",
-            "*.pug"
-          ],
-          "entry": "editor/index.html"
-        },
-        {
-          "id": "systems",
-          "title": "VS Code",
-          "match": [
-            "*.c",
-            "*.h",
-            "*.cc",
-            "*.cpp",
-            "*.cxx",
-            "*.hpp",
-            "*.hh",
-            "*.cs",
-            "*.go",
-            "*.rs",
-            "*.java",
-            "*.swift",
-            "*.m",
-            "*.mm",
-            "*.cu",
-            "*.dart"
-          ],
-          "entry": "editor/index.html"
-        },
-        {
-          "id": "scripts",
-          "title": "VS Code",
-          "match": [
-            "*.py",
-            "*.pyi",
-            "*.rb",
-            "*.php",
-            "*.pl",
-            "*.pm",
-            "*.lua",
-            "*.r",
-            "*.jl",
-            "*.ps1",
-            "*.psm1",
-            "*.sh",
-            "*.bash",
-            "*.zsh",
-            "*.groovy",
-            "*.gradle"
-          ],
-          "entry": "editor/index.html"
-        },
-        {
-          "id": "more",
-          "title": "VS Code",
-          "match": [
-            "*.fs",
-            "*.fsx",
-            "*.clj",
-            "*.cljs",
-            "*.coffee",
-            "*.vb",
-            "*.sql",
-            "*.bat",
-            "*.cmd",
-            "*.raku",
-            "*.hlsl",
-            "*.shader",
-            "*.tex",
-            "*.bib",
-            "*.rst",
-            "*.wat"
-          ],
-          "entry": "editor/index.html"
-        },
-        {
-          "id": "config",
-          "title": "VS Code",
-          "match": [
-            "*.yaml",
-            "*.yml",
-            "*.xml",
-            "*.xsl",
-            "*.ini",
-            "*.properties",
-            "*.cfg",
-            ".env",
-            "*.env",
-            "Dockerfile",
-            "*.dockerfile",
-            "Makefile",
-            "*.mk",
-            "*.diff",
-            "*.patch",
-            ".gitignore"
-          ],
-          "entry": "editor/index.html"
-        }
-      ]
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host"
+      }
     }
   },
   "scripts": {
     "check": "tsc -p .",
-    "build": "bun scripts/build.ts",
-    "collect": "bun scripts/collect-vscode.ts",
     "test": "bun test tests/",
+    "build": "bun run build:workbench && bun run build:panel && bun run build:service",
+    "build:workbench": "openchamber-guest-bundle workbench/main.ts workbench/main.js",
+    "build:panel": "openchamber-guest-bundle panel/main.ts panel/main.js",
+    "build:service": "openchamber-guest-bundle --node service/main.ts service/main.js",
+    "web-files": "bun scripts/web-files.ts",
     "e2e": "node tests/e2e/run.mjs"
   },
   "devDependencies": {
     "@openchamber/sdk": "2.5.2",
     "@types/bun": "^1.4.4",
     "@types/node": "^26.6.5",
-    "monaco-editor": "0.57.0",
+    "fake-indexeddb": "6.2.6",
     "playwright-core": "1.63.0",
-    "typescript": "^7.0.2",
-    "vscode-oniguruma": "2.0.1",
-    "vscode-textmate": "9.3.2"
+    "typescript": "^7.0.2"
   }
 }
