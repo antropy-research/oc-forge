@@ -1,8 +1,8 @@
 // Linear as a task source: GraphQL documents, issue → task mapping, and the
 // rules for keeping a linked task in step with its issue.
-import type { DateKey, LinearGroupBy, LinearOrderBy, Placement, PlannerState, Priority, Settings, Task, TaskSourceRef } from './types.ts';
+import type { DateKey, LinearGroupBy, LinearOrderBy, Placement, PlannerState, Priority, Task, TaskSourceRef } from './types.ts';
 import type { EventBody, NewTask } from './events.ts';
-import { addDays, isDateKey } from './dates.ts';
+import { isDateKey } from './dates.ts';
 
 export interface LinearState {
   id: string;
@@ -29,8 +29,6 @@ export interface LinearIssue {
   assignee?: { id: string; name: string } | null;
   project: { id: string; name: string } | null;
   cycle: { id: string; number: number } | null;
-  /** Its labels, for filtering; absent on issues read before lists carried them. */
-  labels?: { nodes: LinearLabel[] };
   /** External items Linear keeps in sync with this issue (its GitHub Issues sync). */
   syncedWith?: { service: string; metadata?: { owner?: string | null; repo?: string | null; number?: number | null } | null }[] | null;
   /** The workspace the Planner read it from; the Planner sets this, Linear does not. */
@@ -134,7 +132,6 @@ const ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt branchN
     assignee { id name }
     project { id name }
     cycle { id number }
-    labels(first: 25) { nodes { id name color } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 
 const OPEN_FILTER = `{ state: { type: { nin: ["completed", "canceled"] } } }`;
@@ -155,32 +152,14 @@ export const ASSIGNED_QUERY = `query PlannerAssigned($after: String) {
   }
 }`;
 
-const VIEW_FIELDS = `id name description icon color shared modelName slugId updatedAt
-    team { id key name }
-    owner { id name }`;
-
-/** The views saved in the workspace that I can see: mine, my teams' and the workspace's. */
-export const VIEWS_QUERY = `query PlannerViews($after: String) {
-  customViews(first: 100, after: $after) {
-    nodes { ${VIEW_FIELDS} }
-    pageInfo { hasNextPage endCursor }
-  }
+export const VIEWS_QUERY = `query PlannerViews {
+  customViews(first: 50) { nodes { id name } }
 }`;
 
-/** My favorites in Linear's sidebar; the views among them come first in the picker. */
-export const FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
-  favorites(first: 250) { nodes { type sortOrder customView { id } } }
-}`;
-
-/** A saved view's open issues, with the layout, grouping and ordering saved with it. */
-export const VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!, $after: String) {
+export const VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!) {
   customView(id: $id) {
     id
-    viewPreferencesValues { layout issueGrouping viewOrdering }
-    issues(first: 100, after: $after, filter: ${OPEN_FILTER}) {
-      nodes { ${ISSUE_FIELDS} }
-      pageInfo { hasNextPage endCursor }
-    }
+    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
   }
 }`;
 
@@ -233,9 +212,9 @@ export const PROJECT_QUERY = `query PlannerProject($id: String!) {
 
 const COMMENT_FIELDS = `id body createdAt editedAt user { id name } botActor { name } parent { id }`;
 
-// ISSUE_FIELDS carries the labels already.
 const DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
+    labels(first: 50) { nodes { id name color } }
     comments(first: 100) { nodes { ${COMMENT_FIELDS} } }`;
 
 /** One issue with its description, labels and comments, for the editor. */
@@ -274,7 +253,6 @@ export const CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueC
 export const ALL_DOCUMENTS = [
   ASSIGNED_QUERY,
   VIEWS_QUERY,
-  FAVORITE_VIEWS_QUERY,
   VIEW_ISSUES_QUERY,
   SEARCH_QUERY,
   LINKED_QUERY,
@@ -584,248 +562,6 @@ export const groupProjects = (projects: readonly LinearProject[]): { type: strin
   groups.push({ type: 'other', label: 'Other', projects: sorted.filter((project) => !known.has(project.status.type)) });
   return groups.filter((group) => group.projects.length > 0);
 };
-
-// ── Saved views ──────────────────────────────────────────────────────────────
-
-/** A view saved in Linear (a custom view), as the source picker lists it. */
-export interface LinearSavedView {
-  id: string;
-  name: string;
-  description: string | null;
-  icon: string | null;
-  color: string | null;
-  /** Shared with its team or the workspace; otherwise only its owner sees it. */
-  shared: boolean;
-  /** What the view lists, such as issues or projects. */
-  modelName: string;
-  slugId: string;
-  updatedAt: string;
-  team: { id: string; key: string; name: string } | null;
-  owner: { id: string; name: string } | null;
-  /** The workspace the Planner read it from. */
-  workspaceId?: string;
-  /** Its place among my favorites in Linear's sidebar, when I favorited it. */
-  favoriteOrder?: number;
-}
-
-/** The part of the Planner's display a saved view sets. */
-export type ViewDisplay = Partial<Pick<Settings, 'linearLayout' | 'linearGroupBy' | 'linearOrderBy'>>;
-
-const NON_ISSUE_MODELS = new Set(['project', 'projects', 'initiative', 'initiatives', 'feeditem', 'feeditems', 'customer', 'customers', 'document', 'documents', 'release', 'releases']);
-
-/** Views that list issues; Linear also saves views of projects, initiatives and the like. */
-export const isIssueView = (view: Pick<LinearSavedView, 'modelName'>): boolean => !NON_ISSUE_MODELS.has(view.modelName.replace(/[^a-z]/gi, '').toLowerCase());
-
-/** My favorites' order, by view id, from Linear's favorites. */
-export const favoriteOrder = (favorites: readonly { type: string; sortOrder: number; customView: { id: string } | null }[]): Map<string, number> =>
-  new Map(favorites.flatMap((favorite) => (favorite.customView ? [[favorite.customView.id, favorite.sortOrder] as const] : [])));
-
-export interface ViewGroup {
-  key: string;
-  label: string;
-  views: LinearSavedView[];
-}
-
-/**
- * Saved views as the picker groups them: my favorites first, in Linear's order;
- * then, per workspace, each team's views, the workspace's shared views and my
- * own; by name within a group. `workspaceNames`, given while several workspaces
- * are shown, names the workspace in each group's label.
- */
-export const groupViews = (views: readonly LinearSavedView[], workspaceNames?: ReadonlyMap<string, string>): ViewGroup[] => {
-  const byName = (a: LinearSavedView, b: LinearSavedView) => a.name.localeCompare(b.name);
-  const prefix = (workspaceId: string | undefined) => {
-    const name = workspaceNames && workspaceNames.size > 1 ? workspaceNames.get(workspaceId ?? '') : undefined;
-    return name ? `${name} · ` : '';
-  };
-  const favorites = views.filter((view) => view.favoriteOrder !== undefined).sort((a, b) => a.favoriteOrder! - b.favoriteOrder! || byName(a, b));
-  const groups: ViewGroup[] = favorites.length ? [{ key: 'favorites', label: 'Favorites', views: favorites }] : [];
-  const rest = views.filter((view) => view.favoriteOrder === undefined);
-  const workspaceOrder = [...new Set([...(workspaceNames?.keys() ?? []), ...rest.map((view) => view.workspaceId ?? '')])];
-  for (const workspaceId of workspaceOrder) {
-    const inWorkspaceViews = rest.filter((view) => (view.workspaceId ?? '') === workspaceId);
-    const teams = new Map<string, { key: string; name: string; views: LinearSavedView[] }>();
-    for (const view of inWorkspaceViews.filter((item) => item.team)) {
-      const team = teams.get(view.team!.id) ?? { key: view.team!.key, name: view.team!.name, views: [] };
-      team.views.push(view);
-      teams.set(view.team!.id, team);
-    }
-    for (const [teamId, team] of [...teams].sort((a, b) => a[1].key.localeCompare(b[1].key))) {
-      groups.push({ key: `${workspaceId}:team:${teamId}`, label: `${prefix(workspaceId)}${team.key} · ${team.name}`, views: team.views.sort(byName) });
-    }
-    const shared = inWorkspaceViews.filter((view) => !view.team && view.shared).sort(byName);
-    if (shared.length) groups.push({ key: `${workspaceId}:workspace`, label: `${prefix(workspaceId)}Workspace views`, views: shared });
-    const mine = inWorkspaceViews.filter((view) => !view.team && !view.shared).sort(byName);
-    if (mine.length) groups.push({ key: `${workspaceId}:mine`, label: `${prefix(workspaceId)}My views`, views: mine });
-  }
-  return groups;
-};
-
-const VIEW_LAYOUTS: Record<string, 'list' | 'board'> = { list: 'list', board: 'board' };
-const VIEW_GROUPINGS: Record<string, LinearGroupBy> = {
-  workflowstate: 'status',
-  status: 'status',
-  state: 'status',
-  priority: 'priority',
-  project: 'project',
-  team: 'team',
-  assignee: 'assignee',
-  nogrouping: 'none',
-  none: 'none',
-};
-const VIEW_ORDERINGS: Record<string, LinearOrderBy> = {
-  priority: 'priority',
-  updatedat: 'updated',
-  updated: 'updated',
-  duedate: 'due',
-  due: 'due',
-  number: 'identifier',
-  identifier: 'identifier',
-};
-
-/**
- * The layout, grouping and ordering saved with a view, where the Planner has
- * the same one; anything else leaves the current display as it is.
- */
-export const viewDisplay = (values: { layout?: string | null; issueGrouping?: string | null; viewOrdering?: string | null } | null | undefined): ViewDisplay => {
-  const key = (value: string | null | undefined) => (value ?? '').replace(/[^a-z]/gi, '').toLowerCase();
-  const display: ViewDisplay = {};
-  const layout = VIEW_LAYOUTS[key(values?.layout)];
-  if (layout) display.linearLayout = layout;
-  const groupBy = VIEW_GROUPINGS[key(values?.issueGrouping)];
-  if (groupBy) display.linearGroupBy = groupBy;
-  const orderBy = VIEW_ORDERINGS[key(values?.viewOrdering)];
-  if (orderBy) display.linearOrderBy = orderBy;
-  return display;
-};
-
-// ── Filters ──────────────────────────────────────────────────────────────────
-
-export const LINEAR_FILTER_FIELDS = ['status', 'assignee', 'priority', 'label', 'project', 'team', 'cycle', 'due', 'workspace'] as const;
-export type LinearFilterField = (typeof LINEAR_FILTER_FIELDS)[number];
-
-export const FILTER_FIELD_LABELS: Record<LinearFilterField, string> = {
-  status: 'Status',
-  assignee: 'Assignee',
-  priority: 'Priority',
-  label: 'Label',
-  project: 'Project',
-  team: 'Team',
-  cycle: 'Cycle',
-  due: 'Due date',
-  workspace: 'Workspace',
-};
-
-/**
- * One temporary filter, as in Linear: the field is any of the values, or with
- * `negate` none of them. Each value keeps its label so the chip still reads
- * well once no shown issue has it.
- */
-export interface LinearFilterRule {
-  field: LinearFilterField;
-  negate: boolean;
-  values: { value: string; label: string }[];
-}
-
-export interface FilterOption {
-  value: string;
-  label: string;
-  color?: string;
-  /** Issues among those given that have this value. */
-  count: number;
-}
-
-export interface FilterContext {
-  today: DateKey;
-  workspaceNames?: ReadonlyMap<string, string>;
-}
-
-const DUE_BUCKETS = [
-  { value: 'overdue', label: 'Overdue' },
-  { value: 'today', label: 'Due today' },
-  { value: 'week', label: 'Due within a week' },
-  { value: 'later', label: 'Due later' },
-  { value: 'none', label: 'No due date' },
-];
-
-const dueBucket = (dueDate: string | null, today: DateKey): string => {
-  if (!dueDate) return 'none';
-  if (dueDate < today) return 'overdue';
-  if (dueDate === today) return 'today';
-  return dueDate <= addDays(today, 7) ? 'week' : 'later';
-};
-
-interface FieldValue {
-  value: string;
-  label: string;
-  color?: string;
-  /** Sort position among the options; '' (none) always sorts last. */
-  rank: number;
-}
-
-const fieldValues = (issue: LinearIssue, field: LinearFilterField, context: FilterContext): FieldValue[] => {
-  switch (field) {
-    case 'status': {
-      const rank = STATE_ORDER.indexOf(issue.state.type);
-      return [{ value: issue.state.name, label: issue.state.name, color: issue.state.color, rank: rank < 0 ? STATE_ORDER.length : rank }];
-    }
-    case 'assignee':
-      return [issue.assignee ? { value: issue.assignee.id, label: issue.assignee.name, rank: 0 } : { value: '', label: 'No assignee', rank: 0 }];
-    case 'priority':
-      return [{ value: String(issue.priority), label: PRIORITY_LABELS[issue.priority] ?? 'No priority', rank: priorityRank(issue.priority) }];
-    case 'label': {
-      const labels = issue.labels?.nodes ?? [];
-      return labels.length ? labels.map((label) => ({ value: label.name, label: label.name, color: label.color, rank: 0 })) : [{ value: '', label: 'No labels', rank: 0 }];
-    }
-    case 'project':
-      return [issue.project ? { value: issue.project.id, label: issue.project.name, rank: 0 } : { value: '', label: 'No project', rank: 0 }];
-    case 'team':
-      return [{ value: issue.team.id, label: `${issue.team.key} · ${issue.team.name}`, rank: 0 }];
-    case 'cycle':
-      return [issue.cycle ? { value: issue.cycle.id, label: `Cycle ${issue.cycle.number}`, rank: issue.cycle.number } : { value: '', label: 'No cycle', rank: 0 }];
-    case 'due': {
-      const bucket = dueBucket(issue.dueDate, context.today);
-      const index = DUE_BUCKETS.findIndex((item) => item.value === bucket);
-      return [{ value: bucket === 'none' ? '' : bucket, label: DUE_BUCKETS[index]!.label, rank: index }];
-    }
-    case 'workspace': {
-      const id = issue.workspaceId ?? '';
-      return [{ value: id, label: context.workspaceNames?.get(id) ?? 'Linear', rank: [...(context.workspaceNames?.keys() ?? [])].indexOf(id) }];
-    }
-  }
-};
-
-/** What `field` can be filtered on among `issues`, with how many have each value; "none" last. */
-export const filterOptions = (issues: readonly LinearIssue[], field: LinearFilterField, context: FilterContext): FilterOption[] => {
-  const options = new Map<string, FilterOption & { rank: number }>();
-  for (const issue of issues) {
-    for (const item of fieldValues(issue, field, context)) {
-      const option = options.get(item.value) ?? { value: item.value, label: item.label, ...(item.color ? { color: item.color } : {}), count: 0, rank: item.rank };
-      option.count += 1;
-      options.set(item.value, option);
-    }
-  }
-  return [...options.values()]
-    .sort((a, b) => Number(a.value === '') - Number(b.value === '') || a.rank - b.rank || a.label.localeCompare(b.label))
-    .map(({ rank: _rank, ...option }) => option);
-};
-
-/** Issues that pass every rule: some value among the rule's, or with `negate` none of them. */
-export const filterIssues = (issues: readonly LinearIssue[], rules: readonly LinearFilterRule[], context: FilterContext): LinearIssue[] => {
-  const active = rules.filter((rule) => rule.values.length > 0);
-  if (active.length === 0) return [...issues];
-  return issues.filter((issue) =>
-    active.every((rule) => {
-      const wanted = new Set(rule.values.map((item) => item.value));
-      const hit = fieldValues(issue, rule.field, context).some((item) => wanted.has(item.value));
-      return rule.negate ? !hit : hit;
-    }),
-  );
-};
-
-/** A rule as its chip reads, such as "Status is Todo, In Progress". */
-export const describeRule = (rule: LinearFilterRule): string =>
-  `${FILTER_FIELD_LABELS[rule.field]} ${rule.negate ? 'is not' : 'is'} ${rule.values.map((item) => item.label).join(', ')}`;
 
 // ── Editing ──────────────────────────────────────────────────────────────────
 

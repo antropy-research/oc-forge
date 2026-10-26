@@ -48,7 +48,6 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
     go('backlog', 'Backlog', ''),
     go('linear', 'Linear', ''),
     go('github', 'GitHub', ''),
-    go('google', 'Google', ''),
     go('agents', 'Agents', ''),
     go('archive', 'Archive', ''),
     go('stats', 'Stats', ''),

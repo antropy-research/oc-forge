@@ -9,7 +9,7 @@
         "preact": "^11.0.2",
       },
       "devDependencies": {
-        "@openchamber/sdk": "2.5.1",
+        "@openchamber/sdk": "2.4.0",
         "@types/bun": "^1.4.4",
         "@types/node": "^26.6.5",
         "graphql": "16",
@@ -19,7 +19,7 @@
     },
   },
   "packages": {
-    "@openchamber/sdk": ["@openchamber/sdk@2.5.1", "", { "dependencies": { "zod": "^4.3.6" }, "bin": { "openchamber-guest-bundle": "scripts/bundle-guest.ts" } }, "sha512-U2u+JMfqAOnr8JM8apAOdgt21leze3nCxxPqtda9wrflBKOOxGJ4nkvzzIrwRpVy38OcZapEIjgmLrvnuzHZeg=="],
+    "@openchamber/sdk": ["@openchamber/sdk@2.4.0", "", { "dependencies": { "zod": "^4.3.6" }, "bin": { "openchamber-guest-bundle": "scripts/bundle-guest.ts" } }, "sha512-TSL0DI5o4+pOHSpJ8fMP/fU4E/LTRd3hWHIIiaBHoSjpFNYzxaC91d2SCEUq4uj+OYRk/SMe6KiUPtr5Q0rwHA=="],
 
     "@types/bun": ["@types/bun@1.4.4", "", { "dependencies": { "bun-types": "1.4.4" } }, "sha512-9wkRDXUXK124pEnAutE6n/l18j+i9GC5IAHK8TmX/2nlySETmky0OU6yL5U8pW1AoKh++AN9auDCr647BfurjQ=="],
 

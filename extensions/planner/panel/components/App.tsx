@@ -20,7 +20,6 @@ import { LinearPage, LinearPromptBar } from './LinearPanel.tsx';
 import { IssueEditor } from './IssueEditor.tsx';
 import { AgentsView } from './Agents.tsx';
 import { GitHubPage } from './GitHubPanel.tsx';
-import { GooglePage, GooglePromptBar } from './GooglePanel.tsx';
 import { isGuestAttachItem } from '@openchamber/sdk';
 import { CommandPalette, QuickAddModal } from './CommandPalette.tsx';
 import { AssistantModal } from './Assistant.tsx';
@@ -29,10 +28,10 @@ import { moveTo } from '../lib/commands.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 
 export const App = ({ surface }: { surface: string }) => {
-  const { client, host, linear, agents, github, google } = usePlanner();
+  const { client, host, linear, agents, github } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
-  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null, agentForm: null });
+  const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | 'ask' | null>(null);
   const [askText, setAskText] = useState('');
@@ -44,9 +43,8 @@ export const App = ({ surface }: { surface: string }) => {
       linear.start();
       void agents.start();
       void github.start();
-      void google.start();
     });
-  }, [client, linear, agents, github, google]);
+  }, [client, linear, agents, github]);
 
   // Clicking a task's chip in a chat opens that task here.
   useEffect(
@@ -131,7 +129,6 @@ export const App = ({ surface }: { surface: string }) => {
             {route === 'linear' && <LinearPage />}
             {route === 'agents' && <AgentsView />}
             {route === 'github' && <GitHubPage />}
-            {route === 'google' && <GooglePage />}
             {route === 'archive' && <ArchiveView />}
             {route === 'stats' && <StatsView />}
             {route === 'settings' && <Settings />}
@@ -155,7 +152,6 @@ export const App = ({ surface }: { surface: string }) => {
 
       {overlay === 'quickadd' && <QuickAddModal onClose={() => setOverlay(null)} />}
       <LinearPromptBar />
-      <GooglePromptBar />
       <Toasts />
     </UiContext.Provider>
   );

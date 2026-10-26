@@ -167,13 +167,6 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       syncTaskToBlocks(state, block.taskId, event.at, event.start);
       return;
     }
-    case 'block.linked': {
-      const block = state.blocks[event.blockId];
-      if (!block) return;
-      const { google: _old, ...rest } = block;
-      state.blocks[event.blockId] = event.google ? { ...rest, google: event.google } : rest;
-      return;
-    }
     case 'block.deleted': {
       const block = state.blocks[event.blockId];
       if (!block) return;
@@ -248,11 +241,6 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
     case 'run.removed':
       delete state.runs[event.runId];
       return;
-    case 'run.pullRequest': {
-      const run = state.runs[event.runId];
-      if (run) state.runs[event.runId] = { ...run, pullRequest: { ...event.pullRequest, seenAt: event.at } };
-      return;
-    }
     case 'calendar.added':
       if (!state.calendars[event.calendar.id]) state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
       return;

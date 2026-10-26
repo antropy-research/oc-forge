@@ -3,7 +3,7 @@ import { clockLabel, monthDay, weekdayName, zonedDateMinutes } from '../../src/d
 import { ritualRecord } from '../../src/domain/rituals.ts';
 import { useNow } from '../lib/time.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
-import { useGoogle, usePlanner, useView } from '../lib/context.ts';
+import { useView } from '../lib/context.ts';
 import { BacklogBuckets } from './Backlog.tsx';
 import { DayColumn } from './DayColumn.tsx';
 import { AddTask } from './AddTask.tsx';
@@ -12,10 +12,6 @@ import { ChannelFilter } from './ChannelFilter.tsx';
 import { DayCalendar } from './TimeGrid.tsx';
 import { LinearIssues } from './LinearPanel.tsx';
 import { GitHubItems } from './GitHubPanel.tsx';
-import { GmailItems, GoogleTasksItems } from './GooglePanel.tsx';
-
-type Side = 'calendar' | 'backlog' | 'linear' | 'github' | 'tasks' | 'mail';
-const SIDE_LABELS: Record<Side, string> = { calendar: 'Calendar', backlog: 'Backlog', linear: 'Linear', github: 'GitHub', tasks: 'Google Tasks', mail: 'Gmail' };
 
 
 /** Today: only today's work, with the calendar or the backlog beside it. */
@@ -25,12 +21,7 @@ export const TodayView = ({ onShutdown }: { onShutdown?: () => void }) => {
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const shutdownAt = ritualRecord(view.state, 'planning', view.today).shutdownTime ?? view.state.settings.workdayEnd;
   const pastShutdown = zonedDateMinutes(now, zone).minutes >= shutdownAt && !ritualRecord(view.state, 'shutdown', view.today).completedAt;
-  const { google } = usePlanner();
-  useGoogle();
-  const [chosen, setSide] = useState<Side>('calendar');
-  // Google Tasks and Gmail show once an account allows them.
-  const sides: Side[] = ['calendar', 'backlog', 'linear', 'github', ...(google.accountsWith('tasks').length ? (['tasks'] as const) : []), ...(google.accountsWith('mail').length ? (['mail'] as const) : [])];
-  const side = sides.includes(chosen) ? chosen : 'calendar';
+  const [side, setSide] = useState<'calendar' | 'backlog' | 'linear' | 'github'>('calendar');
   return (
     <section class="view">
       <header class="view-header">
@@ -48,16 +39,17 @@ export const TodayView = ({ onShutdown }: { onShutdown?: () => void }) => {
       )}
       <div class="today-layout">
         <DayColumn date={view.today} wide />
-        <aside class={`side-panel${side === 'calendar' ? ' is-calendar' : ''}`} aria-label={SIDE_LABELS[side]}>
+        <aside class={`side-panel${side === 'calendar' ? ' is-calendar' : ''}`} aria-label={side === 'calendar' ? 'Calendar' : side === 'backlog' ? 'Backlog' : side === 'linear' ? 'Linear' : 'GitHub'}>
           <div class="tabs side-tabs" role="tablist">
-            {sides.map((item) => <button key={item} role="tab" aria-selected={side === item} onClick={() => setSide(item)}>{SIDE_LABELS[item]}</button>)}
+            <button role="tab" aria-selected={side === 'calendar'} onClick={() => setSide('calendar')}>Calendar</button>
+            <button role="tab" aria-selected={side === 'backlog'} onClick={() => setSide('backlog')}>Backlog</button>
+            <button role="tab" aria-selected={side === 'linear'} onClick={() => setSide('linear')}>Linear</button>
+            <button role="tab" aria-selected={side === 'github'} onClick={() => setSide('github')}>GitHub</button>
           </div>
           {side === 'calendar' && <DayCalendar date={view.today} />}
           {side === 'backlog' && <BacklogBuckets compact />}
           {side === 'linear' && <LinearIssues />}
           {side === 'github' && <GitHubItems />}
-          {side === 'tasks' && <GoogleTasksItems />}
-          {side === 'mail' && <GmailItems />}
         </aside>
       </div>
     </section>

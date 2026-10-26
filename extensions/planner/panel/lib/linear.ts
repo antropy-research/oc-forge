@@ -8,7 +8,6 @@ import {
   ADD_COMMENT_MUTATION,
   ASSIGNED_QUERY,
   CREATE_ISSUE_MUTATION,
-  FAVORITE_VIEWS_QUERY,
   ISSUE_DETAIL_QUERY,
   ISSUE_QUERY,
   LINKED_QUERY,
@@ -23,11 +22,9 @@ import {
   VIEWS_QUERY,
   VIEW_ISSUES_QUERY,
   WHOAMI_QUERY,
-  favoriteOrder,
   githubMirrors,
   inWorkspace,
   isClosedType,
-  isIssueView,
   issueSource,
   linkedIssueIdsByWorkspace,
   linkedTask,
@@ -37,22 +34,18 @@ import {
   readGraphql,
   stateOfType,
   taskFromIssue,
-  viewDisplay,
   workflowOrder,
   type IssueInput,
   type IssueText,
   type LinearComment,
-  type LinearFilterRule,
   type LinearIssue,
   type LinearIssueDetail,
   type LinearLabel,
   type LinearProject,
   type LinearProjectDetail,
-  type LinearSavedView,
   type LinearState,
   type LinearWorkspace,
   type TeamOptions,
-  type ViewDisplay,
 } from '../../src/domain/linear.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
@@ -106,15 +99,7 @@ export interface LinearView {
   scope: string;
   mode: LinearMode;
   source: LinearSource;
-  /** Saved views of issues, from every connected workspace. */
-  views: LinearSavedView[];
-  /** Temporary filters on the issue list, as in Linear; a new source starts without any. */
-  filters: LinearFilterRule[];
-  /**
-   * The open view's own layout, grouping and ordering, then any change made
-   * while it is open; neither is saved. Null while no view is open.
-   */
-  viewDisplay: ViewDisplay | null;
+  views: { id: string; name: string; workspaceId: string }[];
   issues: LinearIssue[];
   /** Current issues behind open linked tasks, by issue id. */
   linked: Record<string, LinearIssue>;
@@ -132,16 +117,9 @@ export interface LinearView {
 
 type Display = Partial<Pick<Settings, 'linearLayout' | 'linearGroupBy' | 'linearOrderBy'>>;
 
-/** The display issue lists use: the settings, or the open view's own. */
-export const issueDisplay = (lv: Pick<LinearView, 'mode' | 'source' | 'viewDisplay'>, settings: Settings): Required<Display> => {
-  const own = lv.mode === 'issues' && lv.source.kind === 'view' ? lv.viewDisplay ?? {} : {};
-  return { linearLayout: settings.linearLayout, linearGroupBy: settings.linearGroupBy, linearOrderBy: settings.linearOrderBy, ...own };
-};
-
 const REFRESH_MS = 5 * 60_000;
 const MAX_PAGES = 5;
 const MAX_PROJECT_PAGES = 4;
-const MAX_VIEW_PAGES = 3;
 const STATE_WORDS: Record<string, string> = { completed: 'Done', started: 'In Progress', unstarted: 'Todo', backlog: 'Backlog', triage: 'Triage' };
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -155,8 +133,6 @@ export class LinearStore {
     mode: 'issues',
     source: { kind: 'assigned' },
     views: [],
-    filters: [],
-    viewDisplay: null,
     issues: [],
     linked: {},
     projects: [],
@@ -181,8 +157,6 @@ export class LinearStore {
   private loadSeq = 0;
   private projectSeq = 0;
   private started = false;
-  /** The view whose saved display `viewDisplay` was set from; a refresh keeps changes made since. */
-  private viewDisplayFor: string | null = null;
 
   constructor(private readonly host: HostClient, private readonly client: PlannerClient, private readonly surface: string) {}
 
@@ -230,15 +204,9 @@ export class LinearStore {
     return this.host.oauthStart();
   }
 
-  /** Show another list; like opening another view in Linear, it starts without temporary filters. */
   setSource(source: LinearSource): void {
-    this.viewDisplayFor = null;
-    this.set({ source, issues: [], filters: [], viewDisplay: null });
+    this.set({ source, issues: [] });
     void this.refresh();
-  }
-
-  setFilters(filters: LinearFilterRule[]): void {
-    this.set({ filters: filters.filter((rule) => rule.values.length > 0) });
   }
 
   setMode(mode: LinearMode): void {
@@ -254,12 +222,7 @@ export class LinearStore {
     if (this.view.mode === 'projects') void this.loadProjects();
   }
 
-  /** Change the display: of the open view only, for now, as in Linear; otherwise in the settings. */
   setDisplay(patch: Display): Promise<void> {
-    if (this.view.mode === 'issues' && this.view.source.kind === 'view') {
-      this.set({ viewDisplay: { ...this.view.viewDisplay, ...patch } });
-      return Promise.resolve();
-    }
     return this.client.dispatch([{ type: 'settings.updated', patch }]);
   }
 
@@ -277,11 +240,7 @@ export class LinearStore {
     // A request may have found OpenChamber's connection gone meanwhile; that shows as Connect, not an error.
     const present = targets.filter((workspace) => this.workspace(workspace.id));
     const allFailed = present.length > 0 && present.every((workspace) => list.errors.has(workspace.id));
-    // A view opens the way it was saved in Linear; later refreshes keep what was changed since.
-    const viewKey = source.kind === 'view' ? `${source.workspaceId}:${source.id}` : null;
-    const display = viewKey && list.display && this.viewDisplayFor !== viewKey ? { viewDisplay: list.display } : {};
-    if (viewKey && list.display) this.viewDisplayFor = viewKey;
-    this.set({ issues: list.issues, linked: linked.issues, loading: false, syncedAt: Date.now(), error: allFailed ? list.errors.get(present[0]!.id) ?? null : null, ...display });
+    this.set({ issues: list.issues, linked: linked.issues, loading: false, syncedAt: Date.now(), error: allFailed ? list.errors.get(present[0]!.id) ?? null : null });
     if (withViews) void this.loadViews();
     // The Work Status frame is a compact control; the page and rail panel keep tasks in sync.
     if (this.surface !== 'status') await this.sync(linked.issues);
@@ -556,7 +515,7 @@ export class LinearStore {
   /** An edit made here: show it everywhere and bring linked tasks along (not sent back). */
   private async issueChanged(issue: LinearIssueDetail): Promise<void> {
     // Lists keep the light shape (they travel as drag data); the editor keeps the full one.
-    const { description: _description, comments: _comments, ...listed } = issue;
+    const { description: _description, labels: _labels, comments: _comments, ...listed } = issue;
     this.replaceIssue(listed);
     if (this.surface !== 'status') await this.sync({ [issue.id]: listed });
   }
@@ -665,69 +624,33 @@ export class LinearStore {
     return this.view.workspaces.filter((workspace) => workspace.id === this.view.scope);
   }
 
-  /** Saved views of issues in every workspace, with my favorites marked; optional, My issues works without. */
   private async loadViews(): Promise<void> {
     const workspaces = this.view.workspaces;
-    const settled = await Promise.allSettled(workspaces.map((workspace) => this.fetchViewsIn(workspace.id)));
-    this.set({ views: settled.flatMap((result, index) => (result.status === 'fulfilled' ? result.value.map((item) => inWorkspace(item, workspaces[index]!.id)) : [])) });
+    const settled = await Promise.allSettled(workspaces.map((workspace) => this.graphqlIn<{ customViews: { nodes: { id: string; name: string }[] } }>(workspace.id, VIEWS_QUERY)));
+    // Views are optional; My issues still works.
+    this.set({ views: settled.flatMap((result, index) => (result.status === 'fulfilled' ? result.value.customViews.nodes.map((item) => ({ ...item, workspaceId: workspaces[index]!.id })) : [])) });
   }
 
-  private async fetchViewsIn(workspaceId: string): Promise<LinearSavedView[]> {
-    const favorites = this.graphqlIn<{ favorites: { nodes: { type: string; sortOrder: number; customView: { id: string } | null }[] } }>(workspaceId, FAVORITE_VIEWS_QUERY)
-      .then((data) => favoriteOrder(data.favorites.nodes))
-      .catch(() => new Map<string, number>());
-    const views: LinearSavedView[] = [];
-    let after: string | null = null;
-    for (let page = 0; page < MAX_VIEW_PAGES; page++) {
-      type Page = { customViews: { nodes: LinearSavedView[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } };
-      const data: Page = await this.graphqlIn<Page>(workspaceId, VIEWS_QUERY, { after });
-      views.push(...data.customViews.nodes);
-      if (!data.customViews.pageInfo.hasNextPage) break;
-      after = data.customViews.pageInfo.endCursor;
-    }
-    const order = await favorites;
-    return views.filter(isIssueView).map((view) => (order.has(view.id) ? { ...view, favoriteOrder: order.get(view.id)! } : view));
-  }
-
-  private async fetchList(source: LinearSource, targets: readonly WorkspaceView[]): Promise<{ issues: LinearIssue[]; errors: Map<string, string>; display: ViewDisplay | null }> {
+  private async fetchList(source: LinearSource, targets: readonly WorkspaceView[]): Promise<{ issues: LinearIssue[]; errors: Map<string, string> }> {
     const settled = await Promise.allSettled(targets.map((workspace) => this.fetchListIn(workspace.id, source)));
     const issues: LinearIssue[] = [];
     const errors = new Map<string, string>();
-    let display: ViewDisplay | null = null;
     settled.forEach((result, index) => {
       const workspaceId = targets[index]!.id;
-      if (result.status === 'fulfilled') {
-        issues.push(...result.value.issues.map((issue) => inWorkspace(issue, workspaceId)));
-        display ??= result.value.display ?? null;
-      } else errors.set(workspaceId, messageOf(result.reason));
+      if (result.status === 'fulfilled') issues.push(...result.value.map((issue) => inWorkspace(issue, workspaceId)));
+      else errors.set(workspaceId, messageOf(result.reason));
     });
-    return { issues, errors, display };
+    return { issues, errors };
   }
 
-  private async fetchListIn(workspaceId: string, source: LinearSource): Promise<{ issues: LinearIssue[]; display?: ViewDisplay }> {
+  private async fetchListIn(workspaceId: string, source: LinearSource): Promise<LinearIssue[]> {
     if (source.kind === 'view') {
-      const issues: LinearIssue[] = [];
-      let display: ViewDisplay = {};
-      let after: string | null = null;
-      for (let page = 0; page < MAX_PAGES; page++) {
-        type Page = {
-          customView: {
-            viewPreferencesValues: { layout: string | null; issueGrouping: string | null; viewOrdering: string | null } | null;
-            issues: { nodes: LinearIssue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-          } | null;
-        };
-        const data: Page = await this.graphqlIn<Page>(workspaceId, VIEW_ISSUES_QUERY, { id: source.id, after });
-        if (!data.customView) throw new Error('Linear no longer has this view');
-        if (page === 0) display = viewDisplay(data.customView.viewPreferencesValues);
-        issues.push(...data.customView.issues.nodes);
-        if (!data.customView.issues.pageInfo.hasNextPage) break;
-        after = data.customView.issues.pageInfo.endCursor;
-      }
-      return { issues, display };
+      const data = await this.graphqlIn<{ customView: { issues: { nodes: LinearIssue[] } } | null }>(workspaceId, VIEW_ISSUES_QUERY, { id: source.id });
+      return data.customView?.issues.nodes ?? [];
     }
     if (source.kind === 'search') {
       const data = await this.graphqlIn<{ searchIssues: { nodes: LinearIssue[] } }>(workspaceId, SEARCH_QUERY, { term: source.term });
-      return { issues: data.searchIssues.nodes };
+      return data.searchIssues.nodes;
     }
     const issues: LinearIssue[] = [];
     let after: string | null = null;
@@ -739,7 +662,7 @@ export class LinearStore {
       if (!data.viewer.assignedIssues.pageInfo.hasNextPage) break;
       after = data.viewer.assignedIssues.pageInfo.endCursor;
     }
-    return { issues };
+    return issues;
   }
 
   private async fetchProjectsIn(workspaceId: string): Promise<LinearProject[]> {

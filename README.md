@@ -25,8 +25,6 @@ OpenChamber, Orca, and VS Code are source-pinned for future joint packaging.
 | `adapters/` | Per-vendor changes: `opencode/`, `openchamber/`, `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added. |
 | `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `upstream.py`, `verify.py`. |
 | `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`. |
-| `extensions/` | OpenChamber extensions, installed on the latest OpenChamber release: `planner/` (Sunsama-style planning with Linear, GitHub, Google Calendar, Google Tasks, Gmail and agents) and `vscode/` (VS Code's editor and colors in the Files view, and the VS Code Server for the folder at hand). |
-| `containers/` | `openchamber-dev/`: OpenChamber, OpenCode and VS Code Server for developing the extensions. |
 
 How it works:
 
