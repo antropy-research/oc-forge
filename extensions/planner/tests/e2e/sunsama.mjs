@@ -9,7 +9,7 @@
 // to the container (oc-planner-harness-plan.md) and removes, with the chats and
 // their worktrees, at the end.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startHarness } from './harness.mjs';
 
@@ -41,8 +41,11 @@ const mail = (n) => ({ account: ACCOUNT, id: `m-${run}-${n}`, threadId: `t-${n}`
 const fixtures = { github: [githubItem(1), githubItem(2), githubItem(3), githubItem(4, 'pull')], tasks: [1, 2, 3, 4].map(gtask), mail: [1, 2, 3, 4].map(mail) };
 
 /** GitHub and Google answer from the fixtures; everything else reaches the private service. */
-const serviceOverride = ({ method, path, body }) => {
+let realGitHubStatus = false;
+const serviceOverride = async ({ method, path, body }) => {
   const url = new URL(path, 'http://x');
+  // The private service's own answer, from the harness's gh that is not signed in.
+  if (url.pathname === '/github/status' && realGitHubStatus) return (await h.call('GET', '/github/status')).json;
   if (url.pathname === '/github/list') return { items: url.searchParams.get('kind') === 'mine' ? fixtures.github.filter((item) => item.kind === 'pull') : fixtures.github.filter((item) => item.kind === 'issue') };
   if (url.pathname === '/github/items') return { items: fixtures.github.filter((item) => (body?.ids ?? []).includes(item.id)) };
   if (url.pathname === '/google/status') return { client: { id: 'harness-client' }, accounts: [{ email: ACCOUNT, features: ['tasks', 'mail'], addedAt: new Date().toISOString() }], timeboxError: null };
@@ -56,7 +59,8 @@ const serviceOverride = ({ method, path, body }) => {
 };
 
 mkdirSync(out, { recursive: true });
-const h = await startHarness({ out, serviceOverride });
+let h = null;
+h = await startHarness({ out, serviceOverride });
 const { page, frame } = h;
 
 // `opencode` where the private service runs: OpenCode's background server is "stopped", three models.
@@ -72,6 +76,15 @@ mkdirSync(join(h.home, '.config', 'opencode', 'agent'), { recursive: true });
 writeFileSync(join(h.home, '.config', 'opencode', 'agent', 'harness-reviewer.md'), '---\ndescription: Reviews pull requests for the harness\ncolor: "#aa3355"\n---\nYou review pull requests.\n');
 
 const state = async () => (await h.call('GET', '/state')).json.state;
+/** A file's text once it is there (or '' once it is gone), within ten seconds. */
+const waitForFile = async (file, present) => {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
+    if (Boolean(text) === present) return text;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return existsSync(file) ? readFileSync(file, 'utf8') : '';
+};
 const commands = (list) => h.call('POST', '/commands', { commands: list.map((body, index) => ({ cmd: `${run}-${Date.now().toString(36)}-${index}`, ...body })) });
 const waitFor = async (test, timeout = 15_000) => {
   const until = Date.now() + timeout;
@@ -98,14 +111,15 @@ const commandDirExisted = docker('test -d /home/node/.config/opencode/command &&
 execFileSync('docker', ['exec', '-i', CONTAINER, 'sh', '-c', `mkdir -p /home/node/.config/opencode/command && cat > ${COMMAND_FILE}`], {
   input: '---\n# Written by the OpenChamber Planner (preset); it rewrites and removes this file.\ndescription: "Planner: a task assigned to Harness plan"\nagent: "plan"\n---\n$ARGUMENTS\n',
 });
-/** Wait until the container's OpenCode lists the command for the demo project (it reloads 100 ms after a change). */
+/**
+ * The command file is in place; OpenChamber's OpenCode reloads commands 100 ms after a change.
+ * (Asking OpenCode with the `opencode` CLI would start its background server in the container,
+ * which is not OpenChamber's, so the journey only waits; the chats' own messages are the check.)
+ */
 const commandListed = () => {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const listed = docker(`cd /tmp && opencode api GET "/api/command?location%5Bdirectory%5D=${DEMO}" 2>/dev/null || true`);
-    if (listed.includes('"oc-planner-harness-plan"')) return true;
-    execFileSync('sleep', ['0.5']);
-  }
-  return false;
+  const there = docker(`test -f ${COMMAND_FILE} && grep -c '^agent: "plan"$' ${COMMAND_FILE} || echo 0`).trim() === '1';
+  execFileSync('sleep', ['1']);
+  return there;
 };
 
 /** What OpenCode recorded for a run's chat: the agents its turns ran as, and the first user text. */
@@ -168,15 +182,6 @@ const cleanUp = async () => {
   console.log(`INFO command file removed: ${docker(`test -e ${COMMAND_FILE} && echo still there || echo yes`).trim()}`);
 };
 
-/** The Planner page; when the shared UI was left elsewhere, through the host's "Extension pages" menu. */
-const openPlanner = async () => {
-  await page.goto(`${'http://100.116.120.66:35310'}/`, { waitUntil: 'load' });
-  const home = frame.getByRole('heading', { name: 'Home' });
-  if (await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false)) return;
-  await page.getByRole('button', { name: 'Extension pages' }).click({ timeout: 20_000 });
-  await page.getByRole('menuitem', { name: 'Planner' }).click();
-  await home.waitFor({ timeout: 30_000 });
-};
 
 try {
   // The preset "Harness plan" names the command written into the container for the agent phases.
@@ -184,8 +189,8 @@ try {
     { type: 'settings.updated', patch: { agentPresets: [{ id: 'harness-plan', name: 'Harness plan', agent: 'plan', model: null }, { id: 'build-claude-h1', name: 'Build · Claude', agent: 'build', model: 'anthropic/claude-sonnet-5-5' }] } },
     ...['assign', 'menu', 'hello'].map((name, index) => ({ type: 'task.created', task: { id: `${run.replace(/[^a-z0-9]/g, '')}${index}`, title: `${run} ${name}`, placement: { kind: 'day', date: today }, position: 100 + index } })),
   ]);
-  check('the container\'s OpenCode lists /oc-planner-harness-plan', commandListed());
-  await openPlanner();
+  check('the container has /oc-planner-harness-plan, naming the plan agent', commandListed());
+  await h.openPlanner();
 
   // Phase 1: Home has the day columns, the panel and its icon rail.
   const tabs = await rail().getByRole('tab').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')));
@@ -241,12 +246,14 @@ try {
   latest = await waitFor((s) => placedOn(bySource(s, 'HAR-3')) === after);
   check("a row's day menu lists the visible days and plans on the one picked", menuDays.length >= 8 && placedOn(bySource(latest, 'HAR-3')) === after, `${menuDays.length} items; HAR-3 on ${placedOn(bySource(latest, 'HAR-3'))}`);
 
-  // The panel folds down to the rail and comes back.
+  // The panel folds down to the rail and comes back; the open source's tab keeps it open.
   await railTab('Linear').click();
-  const folded = (await panel().count()) === 0 && (await rail().isVisible());
+  const kept = (await panel().getAttribute('aria-label')) === 'Linear';
+  await panel().getByRole('button', { name: 'Close the panel' }).click();
+  const folded = kept && (await panel().count()) === 0 && (await rail().isVisible());
   await shot('05-home-folded');
   await rail().getByRole('button', { name: 'Show the panel' }).click();
-  check('clicking the open source folds the panel to its rail; the rail brings it back', folded && (await panel().getAttribute('aria-label')) === 'Linear');
+  check('the panel folds to its rail and the rail brings it back', folded && (await panel().getAttribute('aria-label')) === 'Linear');
 
   // The calendar under the list: an issue dropped on a time is planned and timeboxed.
   await panel().getByRole('button', { name: 'Calendar below' }).click();
@@ -284,7 +291,6 @@ try {
   await shot('09-planning-tasks');
 
   // Phase 4: the assignee picker in the task detail, as GitHub's and Linear's.
-  commandListed();
   const sent = [];
   // Every request that starts a command, or names one: the host's requests to OpenCode, whatever the frame.
   const capture = (request) => {
@@ -398,6 +404,34 @@ try {
   const filter = frame.getByRole('combobox', { name: 'Show runs of' });
   check('the Agents page shows each run\'s assignee, and filters by it', (await frame.locator('li.agent-task', { hasText: `${run} hello` }).locator('.assignee-chip').innerText()).includes('Harness plan') && (await filter.locator('option').count()) >= 2);
   await shot('18-agents-page');
+
+  // Phase 7: Settings → Agents names presets; the service keeps one command file per preset.
+  await h.nav('Settings').click();
+  const agentSettings = frame.getByRole('group', { name: 'Agents' });
+  await agentSettings.scrollIntoViewIfNeeded();
+  const newPreset = agentSettings.getByRole('group', { name: 'New agent preset' });
+  await newPreset.getByRole('combobox', { name: 'Preset agent' }).selectOption('plan');
+  await newPreset.getByRole('combobox', { name: 'Preset model' }).selectOption('openai/gpt-6');
+  await newPreset.getByRole('button', { name: 'Add preset' }).click();
+  latest = await waitFor((s) => s.settings.agentPresets.some((preset) => preset.name === 'Plan · gpt-6'));
+  const added = latest.settings.agentPresets.find((preset) => preset.name === 'Plan · gpt-6');
+  const commandPath = (id) => join(h.home, '.config', 'opencode', 'command', `oc-planner-${id}.md`);
+  const written = added ? await waitForFile(commandPath(added.id), true) : '';
+  check('a preset made in Settings → Agents becomes an OpenCode command naming its agent and model', /^agent: "plan"$/m.test(written) && /^model: "openai\/gpt-6"$/m.test(written) && written.trim().endsWith('$ARGUMENTS'), added ? `oc-planner-${added.id}` : 'no preset');
+  await shot('19-settings-agents');
+  await agentSettings.getByRole('button', { name: 'Remove the preset Plan · gpt-6' }).click();
+  check('removing the preset removes its command', added ? (await waitForFile(commandPath(added.id), false)) === '' : false);
+
+  // Phase 8: gh not signed in: the GitHub source says how to sign in, not an empty list.
+  realGitHubStatus = true;
+  await h.openPlanner();
+  await railTab('GitHub').click();
+  const signIn = panel().getByRole('status', { name: 'GitHub sign-in' });
+  await signIn.waitFor();
+  const said = await signIn.innerText();
+  check('with gh signed out, the GitHub source shows where to run gh auth login', said.includes('Sign in to GitHub') && said.includes('gh auth login') && (await signIn.getByRole('button', { name: 'Copy' }).count()) === 1, said.replace(/\s+/g, ' ').slice(0, 140));
+  await shot('20-github-signin');
+  realGitHubStatus = false;
   console.log(`problems: ${h.problems.slice(0, 5).join(' | ') || 'none'}`);
 } finally {
   await cleanUp();

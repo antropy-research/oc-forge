@@ -318,8 +318,8 @@ export const opencodeRunner: OpenCodeRunner = (args, options) =>
 const MODELS_TTL_MS = 10 * 60_000;
 const AGENTS_TTL_MS = 60_000;
 const STATUS_TTL_MS = 30_000;
-/** A service request must end well within the host's 20 seconds. */
-const MODELS_WAIT_MS = 11_000;
+/** How long a request waits for the first model list; the agents answer without it, and the panel asks again. */
+const MODELS_WAIT_MS = 3_000;
 const LISTED_WAIT_MS = 6_000;
 const LISTED_POLL_MS = 300;
 
@@ -364,8 +364,8 @@ export class OpenCodeInfo {
     return JSON.parse(await this.run(['api', 'GET', path], { timeoutMs: 6_000 }));
   }
 
-  /** The models, from a cache refreshed every ten minutes; waits at most 11 s for the first list. */
-  async modelList(directory: string | null, refresh = false): Promise<{ models: ModelInfo[]; error: string | null }> {
+  /** The models, from a cache refreshed every ten minutes; waits at most 3 s for the first list, then says it is pending. */
+  async modelList(directory: string | null, refresh = false): Promise<{ models: ModelInfo[]; error: string | null; pending?: boolean }> {
     const stale = !this.models || refresh || this.now() - this.models.at > MODELS_TTL_MS;
     if (stale && !this.loadingModels) {
       this.loadingModels = this.loadModels(directory).finally(() => {
@@ -374,7 +374,7 @@ export class OpenCodeInfo {
     }
     if (this.models && !refresh) return { models: this.models.list, error: this.models.error };
     const done = await Promise.race([this.loadingModels!.then(() => true), sleep(MODELS_WAIT_MS).then(() => false)]);
-    if (!done || !this.models) return { models: [], error: 'OpenCode is still listing its models; try again in a moment.' };
+    if (!done || !this.models) return { models: this.models?.list ?? [], error: null, pending: true };
     return { models: this.models.list, error: this.models.error };
   }
 
@@ -498,7 +498,7 @@ const isDirectory = (value: unknown): value is string => typeof value === 'strin
 export const agentCatalog = async (deps: Pick<AgentDeps, 'configDir' | 'info'>, directory: string | null, refresh: boolean): Promise<AgentCatalog> => {
   const fromConfig = discoverAgents(deps.configDir, directory);
   const [live, models] = await Promise.all([deps.info.liveAgents(directory ?? homedir()), deps.info.modelList(directory, refresh)]);
-  return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, configDir: deps.configDir };
+  return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...(models.pending ? { modelsPending: true } : {}), configDir: deps.configDir };
 };
 
 /** The agent routes; null when the path is not one of them. */

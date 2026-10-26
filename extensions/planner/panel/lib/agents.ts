@@ -202,14 +202,16 @@ export class AgentStore {
    * The agents and models to assign to, from the service (which asks OpenCode),
    * with the project folder's own agents. Kept until another folder or a refresh is asked for.
    */
-  async loadCatalog(directory: string | null = null, refresh = false): Promise<void> {
-    if (!refresh && this.catalogFor === directory && (this.view.catalog || this.view.catalogLoading)) return;
+  async loadCatalog(directory: string | null = null, refresh = false, again = false): Promise<void> {
+    if (!refresh && !again && this.catalogFor === directory && (this.view.catalog || this.view.catalogLoading)) return;
     this.catalogFor = directory;
     this.set({ catalogLoading: true });
     try {
       const query = [directory ? `directory=${encodeURIComponent(directory)}` : '', refresh ? 'refresh=1' : ''].filter(Boolean).join('&');
       const catalog = await this.client.call<AgentCatalog>('GET', `/agents${query ? `?${query}` : ''}`);
       if (this.catalogFor === directory) this.set({ catalog, catalogLoading: false, catalogError: null });
+      // The agents are here; the models follow once OpenCode has listed them.
+      if (catalog.modelsPending && this.catalogFor === directory) setTimeout(() => void this.loadCatalog(directory, false, true), 2500);
     } catch (error) {
       if (this.catalogFor === directory) this.set({ catalogLoading: false, catalogError: messageOf(error) });
     }

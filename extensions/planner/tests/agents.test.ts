@@ -176,6 +176,17 @@ describe('the opencode CLI', () => {
     expect(cli.calls.some((call) => call.args[0] === 'api')).toBe(false);
   });
 
+  test('a slow first list answers at once as pending, and comes from the cache once there', async () => {
+    let release: (out: string) => void = () => {};
+    const slow = new OpenCodeInfo(async (args) => (args[0] === 'service' ? 'stopped\n' : new Promise<string>((resolve) => (release = resolve))));
+    const started = Date.now();
+    expect(await slow.modelList(null)).toEqual({ models: [], error: null, pending: true });
+    expect(Date.now() - started).toBeLessThan(4_000);
+    release('openai/gpt-6\n');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect((await slow.modelList(null)).models.map((model) => model.id)).toEqual(['openai/gpt-6']);
+  });
+
   test('a missing CLI says so', async () => {
     const info = new OpenCodeInfo(async () => {
       throw Object.assign(new Error('spawn opencode ENOENT'), { code: 'ENOENT' });

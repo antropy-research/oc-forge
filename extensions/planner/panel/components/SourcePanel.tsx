@@ -107,8 +107,8 @@ const CalendarDay = ({ date, onDate }: { date: DateKey; onDate: (date: DateKey) 
  * Sunsama's right-hand panel: a vertical rail of sources (Calendar, Backlog,
  * Linear, GitHub, Gmail, Google Tasks) and the chosen one's list beside it.
  * Its items drag onto any day column on screen (and onto the calendar), and
- * their quick actions plan on `days`, `primary` first. Clicking the open
- * source again folds the panel down to the rail.
+ * their quick actions plan on `days`, `primary` first. The » buttons fold the
+ * panel down to the rail; any source opens it again.
  */
 export const SourcePanel = ({ days, primary }: { days: DateKey[]; primary: DateKey }) => {
   const panel = usePanel();
@@ -162,8 +162,8 @@ export const SourcePanel = ({ days, primary }: { days: DateKey[]; primary: DateK
               aria-selected={panel.open === item.id}
               aria-controls={panel.open === item.id ? 'planner-source-panel' : undefined}
               aria-label={item.label}
-              title={panel.open === item.id ? `${item.label} (click to hide)` : item.label}
-              onClick={() => setShared({ open: panel.open === item.id ? null : item.id })}
+              title={item.label}
+              onClick={() => setShared({ open: item.id })}
             >
               <item.Icon />
             </button>

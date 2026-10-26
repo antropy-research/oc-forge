@@ -15,9 +15,9 @@ Plan and progress live in the zmemory project: `.tasks/1024-planner-sunsama-feat
 | Part | Path | Role |
 |---|---|---|
 | Domain | `src/domain/` | Types, events and validation, reducer, rollover, recurrence, scheduling (free slots, lanes, playlist), ICS parsing, Linear/GitHub mapping, agent runs, rituals, suggestions, Braindump and assistant parsing. Pure; shared by service and panel. |
-| Service | `service/` → `service/main.js` | Local Node service the host starts on the first `serviceRequest`: validates commands, appends events, folds state, commits history, syncs with a git remote, fetches ICS feeds, reads GitHub through `gh` (issues, and the pull requests agents open), keeps the API keys of extra Linear workspaces and runs the Planner's Linear queries with them, signs in Google accounts and talks to Google Calendar, Google Tasks and Gmail, and writes working sessions to Google Calendar. |
+| Service | `service/` → `service/main.js` | Local Node service the host starts on the first `serviceRequest`: validates commands, appends events, folds state, commits history, syncs with a git remote, fetches ICS feeds, reads GitHub through `gh` (issues, and the pull requests agents open), keeps the API keys of extra Linear workspaces and runs the Planner's Linear queries with them, signs in Google accounts and talks to Google Calendar, Google Tasks and Gmail, writes working sessions to Google Calendar, finds OpenCode's agents (its config folders, and its running server when it is up) and models (`opencode models`), and writes one OpenCode command per agent a task can be assigned to. |
 | Panel | `panel/` → `panel/main.js` | Preact UI bundled as a classic IIFE. One bundle serves the full page, the rail panel, the Work Status section and a hidden background frame (message actions and slash commands). Markdown is parsed with `marked`'s lexer and drawn as plain elements (`panel/lib/markdown.ts`): raw HTML stays text, only http(s) and mailto links, images become links, never `innerHTML`. |
-| Tests | `tests/*.test.ts`, `tests/e2e/run.mjs` | `bun test` for domain and service; a Playwright journey against the dev container (`containers/openchamber-dev`). |
+| Tests | `tests/*.test.ts`, `tests/e2e/` | `bun test` for domain, service and panel helpers; Playwright journeys against the dev container (`containers/openchamber-dev`): `run.mjs` on the installed extension, and `harness.mjs` journeys (`smoke.mjs`, `sunsama.mjs`) on this checkout's build. |
 
 **Data.** An append-only event log, `events/YYYY-MM.jsonl`, in a git repository at
 `~/.local/share/openchamber-planner/data` on the machine running OpenChamber. State is
@@ -54,7 +54,7 @@ URL names.
 
 | Area | In the Planner |
 |---|---|
-| Home / Today / Focus | Multi-day board with a date jump; Today with Calendar, Backlog, Linear, GitHub, Google Tasks and Gmail beside it; Focus with timer, subtasks, notes, up/down, Pomodoro, Done for the day; rail-panel Today. |
+| Home / Today / Focus | Multi-day board with a date jump and Sunsama's right-hand panel: a vertical rail of sources (Calendar, Backlog, Linear, GitHub, Gmail, Google Tasks) beside the chosen one's list, folding down to the rail. A source's items drag onto any day column on screen, or onto the calendar shown under the list; each row plans with a click on the first days on screen, or on any visible day, the backlog or a date from its menu. Today has the same panel beside today's list. Focus with timer, subtasks, notes, up/down, Pomodoro, Done for the day; rail-panel Today. |
 | Tasks | Title, notes, subtasks (a subtask can become a task), planned and actual time, channel, priority, start (day or backlog bucket), due date, objective, folder, repeat, activity log, duplicate, archive, trash, undo. |
 | Add Task syntax | `~30m`, `@tomorrow` / `@fri` / `@oct 30` / `@backlog` / `@someday`, `#channel`, `!high`, `$objective`; a pasted Linear issue URL links the issue; `A` opens the Add task window. |
 | Backlog | Six time buckets, folders, search, channel and context filters, Braindump (line by line, or organized by the Small Model and reviewed before adding). |
@@ -62,16 +62,16 @@ URL names.
 | Workload | Planned time per day against a threshold; history-based estimate and channel suggestions; auto-sort; playlist times (when each open task would run in order). |
 | Calendar | Day/week grid; drop tasks to timebox; drag, resize, remove working sessions; moving a session moves its task, moving a card drops the sessions of the day it left; auto-schedule into free time; Google calendars read through their accounts (declined and cancelled events left out, all-day events block no time); working sessions written to a chosen Google calendar as events that move, rename and go with them, and an event moved or deleted in Google moves or deletes its session; Google tasks due that day in the all-day row, as Google Calendar shows them, until one click plans them; any event becomes a task on its day with its length as planned time; read-only ICS subscriptions (RRULE, EXDATE, overrides, time zones). |
 | Time | One running timer, manual entries, actual vs planned, planned counts as actual (setting); a running-timer bar. |
-| Rituals | Daily planning (5 steps, plans tomorrow after 3 PM), daily shutdown, daily highlights (stars, custom items, AI summary, publish), weekly objectives, weekly planning (carry over), weekly review (progress, body of work, time by channel). |
+| Rituals | Daily planning (5 steps, plans tomorrow after 3 PM; collects from the backlog, Linear, GitHub, Gmail, Google Tasks, meetings and objectives, and every add lands on the day being planned), daily shutdown, daily highlights (stars, custom items, AI summary, publish), weekly objectives, weekly planning (carry over), weekly review (progress, body of work, time by channel). |
 | Rollover | At local midnight, with catch-up after downtime; rollover count; archive after N rollovers. |
 | Recurrence | Daily, weekdays, every n weeks on chosen days, monthly (end-of-month aware), yearly; instances a week ahead; untouched instances give way to the next one; apply edits to upcoming; stop. |
 | Stats | Completed tasks, actual time, actual vs planned, days planned, streak, work per day, time by channel. |
 | Search & keys | Ctrl/Cmd+K palette (navigate, act, find any task, ask the assistant); `A`, `T`, `F`, `P`, `O`, and `C` / `Z` / `X` on the hovered card. |
 | Linear | Several workspaces, shown merged or one at a time; Issues (My issues, every saved view, search: views grouped with favorites first, opened with the layout, grouping and ordering saved with them), Linear-style temporary filters (status, assignee, priority, label, project, team, cycle, due date, workspace; is / is not; chips to edit or remove), Projects (status, health, progress, lead, dates, teams; a project's open issues, milestones, latest update and description) and Planned (issues already in the plan, by day); group by status, priority, project, team, assignee or workspace, order by priority, update, due date or number; list or board, where dropping a card on a status column moves the issue in Linear; plan by click or drag (also onto the calendar); keys and states on cards; completing asks (or always / never) to move the issue to Done; optional move to In Progress when planned; optional completion import; create an issue from a task in any workspace's team; an agent's new worktree defaults to Linear's branch name for the issue. Edit an issue in the Planner (click its title, or Edit issue on a linked task): status, priority, assignee, labels and due date apply at once; title and Markdown description (Write / Preview, a formatting bar, Ctrl+B / Ctrl+I / Ctrl+Enter) save together, and a save that would overwrite a change made in Linear meanwhile asks first; tick checklist items in place; read and post Markdown comments; links to issues open in the same editor. |
-| GitHub | Assigned issues, review requests, my open PRs (read-only, like Sunsama); plan and drag like Linear; linked items keep their state and title. |
+| GitHub | Assigned issues, review requests, my open PRs (read-only, like Sunsama); plan and drag like Linear; linked items keep their state and title. When `gh` is missing or not signed in, the source says so and where to run `gh auth login` (inside the container when OpenChamber runs in one). |
 | Google Tasks | A list's open tasks with due dates; plan today, tomorrow, on the due date or later, or drag onto a day or the calendar; a linked task follows renames and (setting) completion in Google; completing or reopening it here does the same there (complete, ask or leave it); planning it on a day makes it due that day, so Google Calendar shows it there; add any task to Google Tasks from its detail. |
 | Gmail | Inbox, unread, starred or any Gmail search; a message becomes a task with its sender and snippet, linked back to the thread (read-only). |
-| Agents | Assign a task to an agent, as in GitHub or Linear (task detail, card menu, or Agent on a Linear or GitHub issue row): a new worktree on Linear's branch name or `planner/<title>`, and instructions to commit, push and open a pull request with `gh pr create` that links the issue; the run follows that pull request (Open, Draft, Merged, Closed) and a merged one offers to complete the task. OpenChamber does not let an extension pick the agent or model, so its defaults take the task. Or send a task to an agent in a project folder or a new or existing worktree; the task travels as a chip; runs show working, has a question, needs permission, ready for review, failed; Accept and complete is the user's call; Agents page; Work Status line; rail badge. From a chat: "Add to Planner" on a message, "Track chat in Planner", `/task`, `/today`. |
+| Agents | Assign a task to an agent, as in GitHub or Linear: "Assign to…" (task detail's Assignee, a card's menu, Agent on a Linear or GitHub issue row) with a search box, presets and OpenCode's agents in sections with avatars, the current assignees checked, arrows and Enter; typing a model's name offers an agent on that model, kept as a preset. The agents are OpenCode's primary agents (build, plan, and custom ones from its global config folder or the project's `.opencode/`), each on its own model, and the presets named in Settings → Agents (an agent and a model, such as "Build · Claude"). Each assignee is an OpenCode command, `oc-planner-<id>.md` in OpenCode's global `command/` folder, whose frontmatter names the agent and model and whose template is the arguments; the chat starts with `/oc-planner-<id> <instructions>`, so OpenCode switches to that agent and model (`` !` `` in the instructions is defused, as OpenCode runs it as shell). The assignee works in a new worktree on Linear's branch name or `planner/<title>` (made first, with an empty "Worktree for …" chat, so OpenCode has loaded the commands there before the first message) and is told to commit, push and open a pull request with `gh pr create` that links the issue; the run follows that pull request through gh and through the pull requests linked to the chat (Open, Draft, Merged, Closed), and a merged one offers to complete the task. The run keeps its assignee, shown on the card, in the task detail and on the Agents page, which filters by it. Or send a task to an agent (any assignee, or OpenChamber's default) in a project folder or a new or existing worktree; the task travels as a chip; runs show working, has a question, needs permission, ready for review, failed; Accept and complete is the user's call; Agents page; Work Status line; rail badge. From a chat: "Add to Planner" on a message, "Track chat in Planner", `/task`, `/today`. |
 | Assistant | Ask Planner: the request and a compact plan go to the Small Model; known operations on known tasks only; preview, apply, undo. |
 | Sync | Git remote for the data repository (a private GitHub repo or any git URL); sync after changes and every 5 minutes; Sync now. |
 
@@ -79,7 +79,7 @@ URL names.
 
 1. Install the folder in OpenChamber and approve its access in Settings → Extensions:
    `sessions` and `prompt` (agents), `model` (summaries, Braindump, assistant), `service`
-   (the local service; it may run `git` and `gh`), `network` (Linear).
+   (the local service; it may run `git`, `gh` and `opencode`), `network` (Linear).
 2. Linear: Settings → Integrations → Linear in OpenChamber (or Connect in the Planner).
    The Planner never disconnects OpenChamber's Linear connection. Further workspaces:
    Planner → Settings → Linear → paste a personal API key (Linear → Settings → Security &
@@ -87,22 +87,34 @@ URL names.
    create or edit issues and to comment.
 3. Sync (optional): Settings → Sync → a remote such as `git@github.com:you/planner-data.git`.
    The service uses that machine's git credentials.
-4. GitHub (optional): install `gh` on the machine running OpenChamber and `gh auth login`.
-   Assigned agents open their pull requests with the same `gh`.
-5. Google (optional): in a Google Cloud project, enable the Google Calendar, Google Tasks
+4. GitHub (optional): install `gh` on the machine running OpenChamber and `gh auth login`
+   there (the dev container has `gh`: `docker exec -it oc-forge-openchamber-dev gh auth login`).
+   A `GH_TOKEN` in OpenChamber's environment does not reach the service. Assigned agents
+   open their pull requests with the same `gh`.
+5. Agents (optional): Settings → Agents names presets of an OpenCode agent and a model. The
+   service writes their commands into OpenCode's global config folder, `$XDG_CONFIG_HOME/opencode`
+   or `~/.config/opencode` of the user running OpenChamber (the host passes the service only
+   PATH and HOME); an OpenCode started with another config folder will not see them.
+6. Google (optional): in a Google Cloud project, enable the Google Calendar, Google Tasks
    and Gmail APIs, set up the OAuth consent screen (yourself as a test user), and create an
    OAuth client ID of type Desktop app. Planner → Settings → Google: paste its ID and
    secret, then Connect a Google account with Calendar, Tasks and Gmail as wanted. Tick the
    calendars to show, and choose the one working sessions are written to.
-6. AI features need a Small Model (a provider key, or Settings → Sessions → Small Model);
+7. AI features need a Small Model (a provider key, or Settings → Sessions → Small Model);
    without one they say so and the rest works.
 
 ## Limits of an OpenChamber extension
 
 No mobile or VS Code surface, no tray, menu bar or global shortcut, no notifications when
 no Planner surface is open, one integration slot (Linear; further Linear workspaces use API
-keys, Google signs in through the service), no choice of agent or model for an agent run
-(OpenChamber's defaults), no Outlook, Slack or Teams, Gmail read-only, no team sharing.
+keys, Google signs in through the service), no Outlook, Slack or Teams, Gmail read-only, no
+team sharing. An extension cannot choose a chat's agent or model, so the Planner does it
+through OpenCode commands; OpenChamber 2.5.2 sends a new chat's first message before
+OpenCode has loaded the commands of a folder it has just started, so an assignment's new
+worktree is made first, with an empty "Worktree for …" chat that the extension cannot
+delete. The service cannot reach OpenChamber's own OpenCode server (it has a password), so
+it can only ask OpenCode's background server, when one runs, whether a new command is
+listed; otherwise it waits a moment.
 
 ## Develop
 

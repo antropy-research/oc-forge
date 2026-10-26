@@ -97,6 +97,8 @@ export const AgentSettings = () => {
     setProblem(null);
     save([...presets, preset]);
     setName('');
+    setModel('');
+    setVariant('');
   };
   return (
     <fieldset aria-label="Agents">

@@ -31,6 +31,8 @@ export interface AgentCatalog {
   defaultAgent: string | null;
   models: ModelInfo[];
   modelsError: string | null;
+  /** OpenCode is still listing the models; ask again shortly. */
+  modelsPending?: boolean;
   /** OpenCode's global config folder, where the commands go. */
   configDir: string;
 }
