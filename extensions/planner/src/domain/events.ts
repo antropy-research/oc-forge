@@ -1,6 +1,7 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
 import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
+import { linearDisplayProblem } from './linearDisplay.ts';
 
 export interface NewTask {
   id: string;
@@ -185,6 +186,7 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'linearLayout' && value !== 'list' && value !== 'board') return 'linearLayout must be list or board';
     else if (key === 'linearGroupBy' && !(LINEAR_GROUPS as readonly unknown[]).includes(value)) return `linearGroupBy must be one of ${LINEAR_GROUPS.join(', ')}`;
     else if (key === 'linearOrderBy' && !(LINEAR_ORDERS as readonly unknown[]).includes(value)) return `linearOrderBy must be one of ${LINEAR_ORDERS.join(', ')}`;
+    else if (key === 'linearDisplay') { const problem = linearDisplayProblem(value); if (problem) return problem; }
     else if (key === 'suggestFromHistory' && typeof value !== 'boolean') return 'suggestFromHistory must be true or false';
     else if ((key === 'pomodoroMinutes' || key === 'breakMinutes') && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 180)) return `${key} must be 1-180`;
     else if (key === 'googleTimebox' && !(value === null || isGoogleCalendarRef(value))) return 'googleTimebox must be a Google account and calendar, or null';

@@ -53,10 +53,27 @@ export interface TaskSourceRef {
 }
 
 /** How the Linear page groups and orders issues. */
-export const LINEAR_GROUPS = ['status', 'priority', 'project', 'team', 'assignee', 'workspace', 'none'] as const;
+export const LINEAR_GROUPS = ['status', 'priority', 'project', 'team', 'assignee', 'workspace', 'none', 'cycle', 'label'] as const;
 export type LinearGroupBy = (typeof LINEAR_GROUPS)[number];
-export const LINEAR_ORDERS = ['priority', 'updated', 'due', 'identifier'] as const;
+export const LINEAR_ORDERS = ['priority', 'updated', 'due', 'identifier', 'status', 'manual', 'created'] as const;
 export type LinearOrderBy = (typeof LINEAR_ORDERS)[number];
+/** Which completed and canceled issues a Linear list shows, as Linear's Display menu offers. */
+export const LINEAR_COMPLETED = ['all', 'day', 'week', 'month', '3months', '6months', 'year', 'none'] as const;
+export type LinearCompletedWindow = (typeof LINEAR_COMPLETED)[number];
+/** Issue properties a Linear row or card can show. */
+export const LINEAR_PROPERTIES = ['id', 'status', 'priority', 'assignee', 'labels', 'project', 'cycle', 'estimate', 'due', 'created', 'updated'] as const;
+export type LinearProperty = (typeof LINEAR_PROPERTIES)[number];
+/** The rest of Linear's Display menu for the Planner's own lists (saved views keep theirs). */
+export interface LinearDisplayPrefs {
+  subGroupBy: LinearGroupBy;
+  orderReverse: boolean;
+  showCompleted: LinearCompletedWindow;
+  showSubIssues: boolean;
+  /** Empty groups in a list, and empty columns on a board. */
+  showEmptyGroups: boolean;
+  showEmptyColumns: boolean;
+  properties: LinearProperty[];
+}
 
 export type Priority = 'urgent' | 'high' | 'medium' | 'low';
 
@@ -288,6 +305,8 @@ export interface Settings {
   linearLayout: 'list' | 'board';
   linearGroupBy: LinearGroupBy;
   linearOrderBy: LinearOrderBy;
+  /** Sub-grouping, completed issues, sub-issues, empty groups and row properties of the Linear page. */
+  linearDisplay: LinearDisplayPrefs;
   /** Suggest planned time and channel for new tasks from similar past tasks. */
   suggestFromHistory: boolean;
   /** Focus mode's Pomodoro lengths, in minutes. */
@@ -339,6 +358,7 @@ export const DEFAULT_SETTINGS: Settings = {
   linearLayout: 'list',
   linearGroupBy: 'status',
   linearOrderBy: 'priority',
+  linearDisplay: { subGroupBy: 'none', orderReverse: false, showCompleted: 'none', showSubIssues: true, showEmptyGroups: false, showEmptyColumns: true, properties: ['id', 'status', 'priority', 'labels', 'project', 'due', 'assignee', 'created'] },
   suggestFromHistory: true,
   pomodoroMinutes: 25,
   breakMinutes: 5,
