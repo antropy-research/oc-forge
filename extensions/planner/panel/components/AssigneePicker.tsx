@@ -84,7 +84,6 @@ export const AssigneePicker = ({ taskId, directory, onPick, onClose, chosen, tit
     void agents.loadCatalog(directory);
   }, [agents, directory]);
   useEffect(() => {
-    input.current?.focus();
     // The button that opened it toggles it; a press anywhere else closes it.
     const close = (event: MouseEvent) => {
       const anchor = ref.current?.closest('.menu-anchor') ?? ref.current;
@@ -148,6 +147,11 @@ export const AssigneePicker = ({ taskId, directory, onPick, onClose, chosen, tit
 
   // Placed in the window, beside its button: a scrolling list it opens from does not cut it off.
   const placement = useFixedPlace(ref, align, `${flat.length}:${Boolean(catalog)}`);
+  // The search box takes the focus once the picker is placed: hidden until then, it cannot be focused.
+  const placed = placement.visibility !== 'hidden';
+  useEffect(() => {
+    if (placed) input.current?.focus({ preventScroll: true });
+  }, [placed]);
   let at = -1;
   return (
     <div class={`assignee-menu${align === 'left' ? ' is-left' : ''}`} role="dialog" aria-label={title} ref={ref} style={placement} onKeyDown={(event) => event.key === 'Escape' && event.stopPropagation()}>
@@ -191,7 +195,12 @@ export const AssigneePicker = ({ taskId, directory, onPick, onClose, chosen, tit
                   class={`assignee-option${position === index ? ' is-active' : ''}${option.pick === 'assignee' && option.missing ? ' is-missing' : ''}`}
                   onMouseMove={() => position !== index && setActive(position)}
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => onPick(option)}
+                  // The picker's clicks are its own: a row or card holding it must not act on them (picking can
+                  // re-render the picker away before the click bubbles, so it is stopped here, where it starts).
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onPick(option);
+                  }}
                 >
                   {option.pick === 'default' ? <span class="avatar is-default" aria-hidden="true">OC</span> : <Avatar name={option.name} id={option.pick === 'model' ? option.agent : option.id} color={color} />}
                   <span class="assignee-text">
@@ -238,7 +247,20 @@ export const AssignButton = ({
   const trigger = useRef<HTMLButtonElement>(null);
   return (
     <span class="menu-anchor assign-anchor">
-      <button ref={trigger} class={className} aria-label={label} aria-haspopup="dialog" aria-expanded={open} title={label} onClick={() => setOpen(!open)}>{children}</button>
+      <button
+        ref={trigger}
+        class={className}
+        aria-label={label}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={label}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen(!open);
+        }}
+      >
+        {children}
+      </button>
       {open && (
         <AssignPopover
           taskId={taskId}
@@ -300,7 +322,8 @@ export const AssignPopover = ({ taskId, prepare, align, onClose }: { taskId: str
           <span class="muted">a new worktree, then a pull request</span>
           <button
             class="link"
-            onClick={() => {
+            onClick={(event) => {
+              event.stopPropagation();
               onClose();
               void target().then((id) => id && setUi({ openTaskId: id, agentForm: 'assign' }));
             }}

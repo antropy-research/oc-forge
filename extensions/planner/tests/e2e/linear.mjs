@@ -370,6 +370,26 @@ try {
   await frame.getByRole('button', { name: 'Clear filters' }).click();
   await until(async () => (await rowKeys()).length === 6);
 
+  // A row's own buttons act on the row only: planning re-renders its plan bar away mid-click, and the click must not
+  // then reach the row and open the issue; the row's Agent opens the assignee picker beside it, inside the window.
+  const issueViews = () => frame.getByRole('dialog', { name: /^Linear issue / }).count();
+  await rows().filter({ hasText: 'HAR-4' }).first().getByRole('button', { name: 'Plan HAR-4 today' }).click();
+  const plannedPill = await rows().filter({ hasText: 'HAR-4' }).first().getByRole('button', { name: 'Open the task for HAR-4 (Today)' }).waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  check('Today on a row plans the issue without opening it', plannedPill && (await issueViews()) === 0, `planned ${plannedPill}, issue views ${await issueViews()}`);
+  const agentButton = rows().filter({ hasText: 'HAR-3' }).first().getByRole('button', { name: 'Assign HAR-3 to an agent' });
+  await agentButton.click();
+  const rowPicker = frame.getByRole('dialog', { name: 'Assign to an agent' });
+  await rowPicker.getByRole('group', { name: 'Agents' }).waitFor({ timeout: 15_000 });
+  const pickerBox = await rowPicker.boundingBox();
+  const agentBox = await agentButton.boundingBox();
+  const frameBox = await browserPage.locator('.inset-0 > iframe[title="Planner"]').boundingBox();
+  const beside = Boolean(pickerBox && agentBox && frameBox) && (Math.abs(pickerBox.y - (agentBox.y + agentBox.height)) <= 8 || Math.abs(pickerBox.y + pickerBox.height - agentBox.y) <= 8);
+  const inside = Boolean(pickerBox && frameBox) && pickerBox.y >= frameBox.y && pickerBox.y + pickerBox.height <= frameBox.y + frameBox.height && pickerBox.x >= frameBox.x && pickerBox.x + pickerBox.width <= frameBox.x + frameBox.width;
+  check("a row's Agent opens the assignee picker beside the button, inside the window, and the issue stays closed", beside && inside && (await issueViews()) === 0, JSON.stringify({ pickerBox, agentBox }));
+  await h.shot('06b-linear-row-agent-picker');
+  await browserPage.keyboard.press('Escape');
+  await rowPicker.waitFor({ state: 'detached', timeout: 5000 });
+
   // 6. Display options: sub-grouping, and the view's own display stays the view's.
   await browserPage.keyboard.press('Shift+V');
   const displayMenu = frame.getByRole('dialog', { name: 'Display options' });

@@ -35,6 +35,8 @@ export const PlanActions = ({ issue, compact = false }: { issue: LinearIssue; co
   const view = useView();
   const { setUi } = useUi();
   const linked = linkedTask(view.state, issue.id, githubMirrors(issue));
+  // Each button stops its own click: planning re-renders this bar away (Preact renders in a microtask, which runs
+  // between the listeners of one click), and a bar no longer there cannot stop the click from opening the issue.
   const stop = (event: Event) => event.stopPropagation();
   if (linked) {
     return (
@@ -51,9 +53,9 @@ export const PlanActions = ({ issue, compact = false }: { issue: LinearIssue; co
   };
   return (
     <span class={`lin-plan${compact ? ' is-compact' : ''}`} onClick={stop} onKeyDown={stop}>
-      <button type="button" onClick={() => void linear.plan(issue, { kind: 'day', date: view.today })} aria-label={`Plan ${issue.identifier} today`} title="Plan today">Today</button>
-      <button type="button" onClick={() => void linear.plan(issue, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${issue.identifier} tomorrow`} title="Plan tomorrow">Tmrw</button>
-      <button type="button" onClick={() => void linear.plan(issue, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${issue.identifier} in the backlog`} title="Put it in the backlog">Later</button>
+      <button type="button" onClick={(event) => { stop(event); void linear.plan(issue, { kind: 'day', date: view.today }); }} aria-label={`Plan ${issue.identifier} today`} title="Plan today">Today</button>
+      <button type="button" onClick={(event) => { stop(event); void linear.plan(issue, { kind: 'day', date: addDays(view.today, 1) }); }} aria-label={`Plan ${issue.identifier} tomorrow`} title="Plan tomorrow">Tmrw</button>
+      <button type="button" onClick={(event) => { stop(event); void linear.plan(issue, { kind: 'backlog', bucket: 'next-weeks' }); }} aria-label={`Put ${issue.identifier} in the backlog`} title="Put it in the backlog">Later</button>
       <AssignButton taskId={null} prepare={assign} label={`Assign ${issue.identifier} to an agent`}>Agent</AssignButton>
     </span>
   );
