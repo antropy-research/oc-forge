@@ -70,7 +70,8 @@
         "permissions": {
           "exec": [
             "git",
-            "gh"
+            "gh",
+            "opencode"
           ]
         }
       }

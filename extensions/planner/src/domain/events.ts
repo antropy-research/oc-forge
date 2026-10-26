@@ -1,6 +1,7 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
 import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
+import { isAgentPreset, isRunAssignee } from './assignees.ts';
 
 export interface NewTask {
   id: string;
@@ -20,7 +21,7 @@ export interface NewTask {
   sessionRef?: Task['sessionRef'];
 }
 
-export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title' | 'wantsPr'>;
+export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title' | 'wantsPr' | 'assignee'>;
 
 /** A pull request as gh shows it; the log adds when the Planner saw it. */
 export type SeenPullRequest = Omit<RunPullRequest, 'seenAt'>;
@@ -190,6 +191,8 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'googleTimebox' && !(value === null || isGoogleCalendarRef(value))) return 'googleTimebox must be a Google account and calendar, or null';
     else if (key === 'googleTasksOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'googleTasksOnComplete must be ask, complete or nothing';
     else if ((key === 'googleTasksImportCompletion' || key === 'googleTasksDueFromPlan' || key === 'googleTasksOnCalendar') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if (key === 'agentPresets' && !(Array.isArray(value) && value.length <= 30 && value.every(isAgentPreset) && new Set(value.map((preset: { id: string }) => preset.id)).size === value.length)) return 'agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null';
+    else if (key === 'agentPresets') continue;
     else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
@@ -221,6 +224,7 @@ const isRunShape = (value: unknown): string | null => {
   if (!(value.directory === null || isShortText(value.directory, 1024))) return 'directory is invalid';
   if (!(value.worktree === null || (isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))) return 'worktree is invalid';
   if (value.wantsPr !== undefined && typeof value.wantsPr !== 'boolean') return 'wantsPr must be true or false';
+  if (!(value.assignee === undefined || value.assignee === null || isRunAssignee(value.assignee))) return 'assignee is invalid';
   return isShortText(value.title, TITLE_MAX) ? null : 'title is invalid';
 };
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { GitHubSource, LISTS, NODES_QUERY, parseNodes, pickPull, type Runner } from '../service/github.ts';
+import { GitHubSource, LISTS, NODES_QUERY, diagnose, parseNodes, pickPull, type Runner } from '../service/github.ts';
 import { githubSource, githubStatus, isGitHubItem, planGitHubSync, shortKey, taskFromGitHub, type GitHubItem } from '../src/domain/github.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import type { EventBody, PlannerEvent } from '../src/domain/events.ts';
@@ -10,11 +10,17 @@ const node = (patch: Record<string, unknown> = {}) => ({
 const item = (patch: Partial<GitHubItem> = {}): GitHubItem => ({ ...parseNodes([node()])[0]!, ...patch });
 
 describe('gh', () => {
-  test('missing CLI and logged-out CLI are explained', async () => {
+  test('missing CLI and logged-out CLI are told apart, with how to sign in and where', async () => {
     const missing: Runner = async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); };
-    expect(await new GitHubSource(missing).status()).toEqual({ available: false, login: null, message: 'The GitHub CLI (gh) is not installed on the machine running OpenChamber.' });
-    const loggedOut: Runner = async () => { throw Object.assign(new Error('exit 4'), { code: 4, stderr: 'To get started with GitHub CLI, please run:  gh auth login' }); };
-    expect((await new GitHubSource(loggedOut).status()).message).toContain('gh auth login');
+    expect(await new GitHubSource(missing, () => null).status()).toEqual({ available: false, login: null, message: 'The GitHub CLI (gh) is not installed where OpenChamber runs. Install it there, then sign in with `gh auth login`.', reason: 'missing', container: null });
+    // gh 2.103.2 in the dev container, never signed in.
+    const loggedOut: Runner = async () => { throw Object.assign(new Error('Command failed: gh api user --jq .login'), { code: 4, stderr: 'To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n' }); };
+    const signedOut = await new GitHubSource(loggedOut, () => '7fd513237c0c').status();
+    expect(signedOut).toMatchObject({ available: false, reason: 'signed-out', container: '7fd513237c0c' });
+    expect(signedOut.message).toContain('gh auth login');
+    expect(diagnose(Object.assign(new Error('HTTP 401: Bad credentials (https://api.github.com/user)'), { code: 1 })).reason).toBe('signed-out');
+    expect(diagnose(Object.assign(new Error('rate limited'), { code: 1, stderr: 'API rate limit exceeded' }))).toEqual({ reason: null, message: 'API rate limit exceeded rate limited' });
+    expect(await new GitHubSource(async () => 'octo\n', () => 'abc').status()).toEqual({ available: true, login: 'octo', message: null, reason: null, container: null });
   });
   test('lists and node reads pass the right arguments', async () => {
     const calls: string[][] = [];
@@ -24,7 +30,7 @@ describe('gh', () => {
       return JSON.stringify(args.some((arg) => arg.startsWith('ids[]')) ? { data: { nodes: [node({ state: 'CLOSED' }), null] } } : { data: { search: { nodes: [node(), node({ __typename: 'PullRequest', id: 'PR_1', number: 7, isDraft: true, url: 'https://github.com/acme/app/pull/7' })] } } });
     };
     const source = new GitHubSource(runner);
-    expect(await source.status()).toEqual({ available: true, login: 'qihang-zhang', message: null });
+    expect(await source.status()).toEqual({ available: true, login: 'qihang-zhang', message: null, reason: null, container: null });
     const review = await source.list('review');
     expect(calls[1]).toContain(`q=${LISTS.review}`);
     expect(review.map((entry) => [entry.kind, entry.key, entry.draft])).toEqual([['issue', 'acme/app#42', false], ['pull', 'acme/app#7', true]]);
@@ -80,6 +86,17 @@ describe('pull requests from agent branches', () => {
     expect(calls).toEqual([{ args: ['pr', 'list', '--head', 'planner/write-tests', '--state', 'all', '--limit', '10', '--json', 'number,url,state,isDraft,title,updatedAt'], cwd: process.cwd(), timeoutMs: 8000 }]);
     expect(await source.pullRequestFor('planner/x', ['/no/such/worktree', 'relative/dir'])).toBeNull();
     for (const bad of ['--help', '-x', 'a..b', 'a//b', 'trailing/', 'sp ace', '']) await expect(source.pullRequestFor(bad, [process.cwd()])).rejects.toThrow('branch name is invalid');
+    expect(calls).toHaveLength(1);
+  });
+  test('a known pull request is followed by its URL, without a checkout', async () => {
+    const calls: { args: string[]; cwd?: string }[] = [];
+    const source = new GitHubSource(async (args, options) => {
+      calls.push({ args, cwd: options?.cwd });
+      return JSON.stringify(pull({ state: 'MERGED' }));
+    });
+    expect(await source.pullRequestAt('https://github.com/acme/app/pull/12')).toMatchObject({ number: 12, state: 'merged', repo: 'acme/app' });
+    expect(calls).toEqual([{ args: ['pr', 'view', 'https://github.com/acme/app/pull/12', '--json', 'number,url,state,isDraft,title,updatedAt'], cwd: undefined }]);
+    for (const bad of ['https://evil.example/acme/app/pull/12', 'https://github.com/acme/app/pull/12 --web', '--web']) await expect(source.pullRequestAt(bad)).rejects.toThrow('pull request URL is invalid');
     expect(calls).toHaveLength(1);
   });
   test('gh failing everywhere is explained', async () => {
