@@ -12,6 +12,7 @@ import { LinearWorkspaces, WorkspaceError } from './linear.ts';
 import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from './google.ts';
 import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
+import { googleWriteRoute } from './googleRoutes.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { addDays, daysBetween, instantAt, isDateKey } from '../src/domain/dates.ts';
 
@@ -100,6 +101,9 @@ const perAccount = async <T>(feature: GoogleFeature, ask: (account: string) => P
 const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ status: number; body: unknown } | null> => {
   const path = url.pathname;
   const ok = (body: unknown) => ({ status: 200, body });
+  // Google Calendar events and Google Tasks lists, as the calendar and Tasks views change them.
+  const written = await googleWriteRoute(req, url, { data: googleData, readJson, zone: () => planner.state.settings.timezone ?? 'UTC', changed: (what) => (what === 'calendar' ? googleCalendars : googleDueTasks).forget() });
+  if (written) return written;
   if (path === '/google/status' && req.method === 'GET') return ok({ ...(await google.status()), timeboxError: timeboxes.lastError });
   if (path === '/google/client' && req.method === 'PUT') {
     const body = (await readJson(req)) as { id?: unknown; secret?: unknown };
@@ -139,8 +143,9 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     // The tasks behind linked Planner tasks, to bring those up to date.
     const body = (await readJson(req)) as { groups?: unknown };
     const groups = (Array.isArray(body.groups) ? body.groups : [])
-      .filter((group): group is { account: string; listId: string; ids: string[] } => isEmail(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId))
-      .slice(0, 10);
+      .filter((group): group is { account: string; listId: string; ids: string[] } => isEmail(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId));
+    // The panel sends them in parts this size, so the request ends in time; more is refused, not cut.
+    if (groups.length > 10 || groups.some((group) => group.ids.length > 50)) return { status: 400, body: { error: 'at most 10 lists of 50 tasks per request' } };
     const tasks: unknown[] = [];
     const errors: { account: string; message: string }[] = [];
     await Promise.all(
@@ -155,24 +160,32 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     return ok({ tasks, errors });
   }
   if (path === '/google/tasks' && (req.method === 'PATCH' || req.method === 'POST')) {
-    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown };
+    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown; parent?: unknown; previous?: unknown };
     if (!isEmail(body.account) || !isGoogleId(body.listId)) return { status: 400, body: { error: 'account and listId are required' } };
     if (body.due !== undefined && body.due !== null && !isDateKey(body.due)) return { status: 400, body: { error: 'due must be a date or null' } };
+    if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8000)) return { status: 400, body: { error: 'notes must be text' } };
+    if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 1024)) return { status: 400, body: { error: 'title must be 1 to 1024 characters' } };
     if (req.method === 'PATCH') {
       if (!isGoogleId(body.id)) return { status: 400, body: { error: 'id is required' } };
       if (body.completed !== undefined && typeof body.completed !== 'boolean') return { status: 400, body: { error: 'completed must be true or false' } };
-      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}) };
-      return ok({ task: await googleData.updateTask(body.account, body.listId, body.id, patch) });
+      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}), ...(body.title !== undefined ? { title: (body.title as string).trim() } : {}), ...(body.notes !== undefined ? { notes: body.notes as string } : {}) };
+      const task = await googleData.updateTask(body.account, body.listId, body.id, patch);
+      // Due dates and completion show on the calendar: read them again next time.
+      googleDueTasks.forget();
+      return ok({ task });
     }
-    if (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 1024) return { status: 400, body: { error: 'title is required' } };
-    if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8000)) return { status: 400, body: { error: 'notes must be text' } };
-    return ok({ task: await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...(body.notes ? { notes: body.notes as string } : {}), ...(body.due ? { due: body.due as string } : {}) }) });
+    if (typeof body.title !== 'string') return { status: 400, body: { error: 'title is required' } };
+    if ((body.parent !== undefined && body.parent !== null && !isGoogleId(body.parent)) || (body.previous !== undefined && body.previous !== null && !isGoogleId(body.previous))) return { status: 400, body: { error: 'parent and previous must be task ids' } };
+    const task = await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...(body.notes ? { notes: body.notes as string } : {}), ...(body.due ? { due: body.due as string } : {}), parent: (body.parent as string | null | undefined) ?? null, previous: (body.previous as string | null | undefined) ?? null });
+    googleDueTasks.forget();
+    return ok({ task });
   }
   if (path === '/google/mail' && req.method === 'GET') {
     const email = url.searchParams.get('account');
     const query = url.searchParams.get('q') ?? 'in:inbox';
-    if (!isEmail(email) || query.length > 500) return { status: 400, body: { error: 'account is required, and the search must be shorter' } };
-    return ok({ messages: await googleData.mail(email, query) });
+    const pageToken = url.searchParams.get('pageToken') ?? undefined;
+    if (!isEmail(email) || query.length > 500 || (pageToken !== undefined && pageToken.length > 500)) return { status: 400, body: { error: 'account is required, and the search must be shorter' } };
+    return ok(await googleData.mail(email, query, pageToken));
   }
   return null;
 };
@@ -347,15 +360,14 @@ const server = http.createServer(async (req, res) => {
       // Google calendars are read through their accounts; the rest are ICS feeds.
       const timeMin = instantAt(from, 0, zone);
       const timeMax = instantAt(addDays(to, 1), 0, zone);
-      // Google tasks due in the range show on their day, as in Google Calendar, until they are planned.
+      // Google tasks due in the range show on their day, as in Google Calendar, planned or not (the panel shows the link).
       const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes('tasks')).map((account) => account.email) : [];
       const [feed, fromGoogle, due] = await Promise.all([
         feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
         googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
         googleDueTasks.read(taskAccounts, from, to, refresh),
       ]);
-      const planned = new Set(Object.values(planner.state.tasks).flatMap((task) => (task.source?.kind === 'gtask' && !task.deletedAt && !task.archivedAt ? [task.source.id] : [])));
-      const dueEvents = due.items.flatMap((item) => (item.due && !planned.has(item.id) ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []));
+      const dueEvents = due.items.flatMap((item) => (item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []));
       json(res, 200, {
         events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
         errors: [...feed.errors, ...fromGoogle.errors, ...due.errors.map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))],

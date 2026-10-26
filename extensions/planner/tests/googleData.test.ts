@@ -33,8 +33,22 @@ describe('Google Calendar events', () => {
     expect(googleEvent({ id: 'b', summary: 'Offsite', start: { date: '2026-10-27' }, end: { date: '2026-10-29' } }, 'cal', zone)).toMatchObject({ start: '2026-10-27T07:00:00.000Z', end: '2026-10-29T07:00:00.000Z', allDay: true, busy: false });
     expect(googleEvent({ id: 'c', transparency: 'transparent', start: { dateTime: '2026-10-26T10:00:00Z' }, end: { dateTime: '2026-10-26T11:00:00Z' } }, 'cal', zone)).toMatchObject({ title: '(No title)', busy: false });
     expect(googleEvent({ id: 'd', status: 'cancelled', start: { dateTime: '2026-10-26T10:00:00Z' } }, 'cal', zone)).toBeNull();
-    expect(googleEvent({ id: 'e', attendees: [{ self: true, responseStatus: 'declined' }], start: { dateTime: '2026-10-26T10:00:00Z' } }, 'cal', zone)).toBeNull();
+    // Declined stays on the calendar, as Google Calendar shows it, but blocks no time.
+    const declined = googleEvent({ id: 'e', attendees: [{ self: true, responseStatus: 'declined' }], organizer: { email: 'ann@x.com' }, start: { dateTime: '2026-10-26T10:00:00Z' }, end: { dateTime: '2026-10-26T11:00:00Z' } }, 'cal', zone, { account: 'me@x.com', calendarId: 'primary', accessRole: 'owner' });
+    expect(declined).toMatchObject({ busy: false, google: { account: 'me@x.com', calendarId: 'primary', eventId: 'e', response: 'declined', editable: false } });
     expect(googleEvent({ id: 'f', extendedProperties: { private: { plannerBlockId: 'blk' } }, start: { dateTime: '2026-10-26T10:00:00Z' } }, 'cal', zone)).toBeNull();
+  });
+
+  test('what may be done with an event: its calendar, its organizer, its kind', () => {
+    const at = { start: { dateTime: '2026-10-26T10:00:00Z' }, end: { dateTime: '2026-10-26T11:00:00Z' } };
+    const ref = (raw: Parameters<typeof googleEvent>[0], accessRole: string) => googleEvent({ ...at, ...raw }, 'cal', zone, { account: 'me@x.com', calendarId: 'primary', accessRole })?.google;
+    expect(ref({ id: 'mine', organizer: { email: 'me@x.com', self: true } }, 'owner')).toMatchObject({ editable: true, response: null, guests: false });
+    expect(ref({ id: 'ro', organizer: { email: 'me@x.com', self: true } }, 'reader')?.editable).toBe(false);
+    expect(ref({ id: 'invite', organizer: { email: 'ann@x.com' }, attendees: [{ email: 'me@x.com', self: true, responseStatus: 'needsAction' }, { email: 'ann@x.com', organizer: true, responseStatus: 'accepted' }] }, 'owner')).toMatchObject({ editable: false, response: 'needsAction', guests: true });
+    expect(ref({ id: 'open', organizer: { email: 'ann@x.com' }, guestsCanModify: true }, 'owner')?.editable).toBe(true);
+    expect(ref({ id: 'bday', eventType: 'birthday' }, 'owner')?.editable).toBe(false);
+    expect(ref({ id: 'colored', colorId: '11', hangoutLink: 'https://meet.google.com/abc-defg-hij', htmlLink: 'https://www.google.com/calendar/event?eid=x' }, 'owner')).toMatchObject({ color: '#d50000', meet: 'https://meet.google.com/abc-defg-hij', htmlLink: 'https://www.google.com/calendar/event?eid=x' });
+    expect(ref({ id: 'series_20261026T100000Z', recurringEventId: 'series' }, 'writer')).toMatchObject({ recurringEventId: 'series', editable: true });
   });
   test('reading a calendar keeps events and the Planner sessions apart; sessions are written as events', async () => {
     const { data, calls } = fakeAccounts((method, url) => {
@@ -81,16 +95,19 @@ describe('Google Tasks', () => {
     await data.updateTask('me@x.com', 'L1', 'gt1', { completed: false, due: null });
     expect(calls.at(-1)!.body).toEqual({ status: 'needsAction', completed: null, due: null });
   });
-  test('tasks due in a range come from every list, and show on their day all day long', async () => {
+  test('tasks due in a range come from every list, completed ones too, and show on their day all day long', async () => {
     const { data, calls } = fakeAccounts((_method, url) => {
-      if (url.endsWith('/users/@me/lists?maxResults=100')) return { items: [{ id: 'L1', title: 'My Tasks' }, { id: 'L2', title: 'Work' }] };
+      if (url.includes('/users/@me/lists/%40default')) return { id: 'L1' };
+      if (url.includes('/users/@me/lists?')) return { items: [{ id: 'L1', title: 'My Tasks' }, { id: 'L2', title: 'Work' }] };
       if (url.includes('/lists/L1/')) return { items: [{ ...raw, id: 'in', due: '2026-10-28T00:00:00.000Z' }, { ...raw, id: 'late', due: '2026-11-09T00:00:00.000Z' }] };
-      return { items: [{ ...raw, id: 'done', status: 'completed', due: '2026-10-27T00:00:00.000Z' }, { ...raw, id: 'nodate', due: undefined }] };
+      return { items: [{ ...raw, id: 'done', status: 'completed', completed: '2026-10-27T18:00:00.000Z', due: '2026-10-27T00:00:00.000Z' }, { ...raw, id: 'nodate', due: undefined }] };
     });
     const due = await data.dueTasks('me@x.com', '2026-10-26', '2026-11-01');
-    expect(due.map((task) => task.id)).toEqual(['in']);
+    expect(due.map((task) => [task.id, task.completed])).toEqual([['in', false], ['done', true]]);
+    expect(due[1]!.completedAt).toBe('2026-10-27T18:00:00.000Z');
     const query = new URL(calls.find((call) => call.url.includes('/lists/L1/'))!.url).searchParams;
-    expect([query.get('dueMin'), query.get('dueMax'), query.get('showCompleted')]).toEqual(['2026-10-26T00:00:00.000Z', '2026-11-01T23:59:59.999Z', 'false']);
+    // Tasks completed in Google's own apps are hidden ones: those are asked for too.
+    expect([query.get('dueMin'), query.get('dueMax'), query.get('showCompleted'), query.get('showHidden')]).toEqual(['2026-10-26T00:00:00.000Z', '2026-11-01T23:59:59.999Z', 'true', 'true']);
     const event = dueTaskEvent({ ...due[0]!, due: '2026-10-28' }, 'America/Los_Angeles');
     expect(event).toMatchObject({ calendarId: GOOGLE_TASKS_CALENDAR, title: 'Buy milk', start: '2026-10-28T07:00:00.000Z', end: '2026-10-29T07:00:00.000Z', allDay: true, busy: false, googleTask: { id: 'in' } });
   });
@@ -138,8 +155,18 @@ describe('Gmail', () => {
       const id = /messages\/(\w+)\?/.exec(url)![1]!;
       return { ...raw, id, internalDate: String(id === 'new' ? Date.parse('2026-10-25T09:00:00Z') : Date.parse('2026-10-24T09:00:00Z')) };
     });
-    expect((await data.mail('me@x.com', 'in:inbox')).map((item) => item.id)).toEqual(['new', 'old']);
+    const page = await data.mail('me@x.com', 'in:inbox');
+    expect(page.messages.map((item) => item.id)).toEqual(['new', 'old']);
+    expect(page.nextPageToken).toBeNull();
     expect(new URL(calls[0]!.url).searchParams.get('q')).toBe('in:inbox');
     expect(calls[1]!.url).toContain('format=metadata');
+  });
+
+  test('a search goes on from where the last page ended', async () => {
+    const { data, calls } = fakeAccounts((_method, url) => (url.includes('/messages?') ? { messages: [{ id: 'a' }], nextPageToken: url.includes('pageToken=p2') ? undefined : 'p2' } : { ...raw, id: 'a' }));
+    expect((await data.mail('me@x.com', 'in:inbox')).nextPageToken).toBe('p2');
+    const second = await data.mail('me@x.com', 'in:inbox', 'p2');
+    expect(new URL(calls.at(-2)!.url).searchParams.get('pageToken')).toBe('p2');
+    expect(second.nextPageToken).toBeNull();
   });
 });
