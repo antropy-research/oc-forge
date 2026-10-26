@@ -1,7 +1,8 @@
 // Agents on tasks: start OpenChamber sessions for tasks, follow their live state,
 // and keep the run facts (adopted runs, settled outcomes) in the Planner's log.
 import type { GuestProject, GuestSessionRecord, GuestSessionsSnapshot, GuestWorktree, HostClient } from '@openchamber/sdk';
-import { needsYou, planAdoptions, planRunOutcomes, runStatus, taskChipId, taskUrl, type LiveSession } from '../../src/domain/runs.ts';
+import { needsYou, planAdoptions, planPullRequests, planRunOutcomes, pullRequestLookups, runStatus, taskChipId, taskUrl, type LiveSession } from '../../src/domain/runs.ts';
+import type { SeenPullRequest } from '../../src/domain/events.ts';
 import { newId } from '../../src/domain/ids.ts';
 import type { PlannerState, TaskRun } from '../../src/domain/types.ts';
 import type { PlannerClient } from './client.ts';
@@ -10,6 +11,9 @@ export const PANEL_ID = 'oc-forge-planner';
 /** The host allows 32 subscriptions per frame; projects and their sessions share them. */
 const MAX_WATCHED_PROJECTS = 24;
 const ATTACH_TEXT_MAX = 16_000;
+const PR_REFRESH_MS = 2 * 60_000;
+/** The service answers four lookups per request, so each request stays short. */
+const PR_BATCH = 4;
 
 export type WorkspaceChoice = { kind: 'project' } | { kind: 'new'; branch: string } | { kind: 'existing'; directory: string };
 
@@ -19,6 +23,8 @@ export interface DispatchChoice {
   prompt: string;
   /** Open the new chat; otherwise stay in the Planner. */
   open: boolean;
+  /** Assigned, as in GitHub or Linear: the agent is to open a pull request, which the Planner then follows. */
+  wantsPr?: boolean;
 }
 
 export interface AgentView {
@@ -31,6 +37,8 @@ export interface AgentView {
   dispatching: ReadonlySet<string>;
   /** Tasks whose agents wait on the user. */
   attention: number;
+  /** Why the last pull request lookup failed (no gh, not logged in), until one works. */
+  prError: string | null;
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -55,7 +63,8 @@ export const branchFor = (title: string, taskId: string): string => {
 };
 
 export class AgentStore {
-  private view: AgentView = { available: null, projects: [], sessions: new Map(), dispatching: new Set(), attention: 0 };
+  private view: AgentView = { available: null, projects: [], sessions: new Map(), dispatching: new Set(), attention: 0, prError: null };
+  private lookingUp = false;
   private readonly listeners = new Set<() => void>();
   private readonly watched = new Map<string, () => void>();
   private readonly byProject = new Map<string, LiveSession[]>();
@@ -92,6 +101,42 @@ export class AgentStore {
     } catch (error) {
       console.warn(`[planner] project list unavailable: ${messageOf(error)}`);
       this.set({ available: false });
+    }
+    // Pull requests open, merge and close on GitHub; look again now and then.
+    setTimeout(() => void this.refreshPullRequests(), 3000);
+    setInterval(() => {
+      if (!document.hidden) void this.refreshPullRequests();
+    }, PR_REFRESH_MS);
+  }
+
+  /**
+   * Look up the pull requests of runs that have a worktree branch, through gh on
+   * the machine running OpenChamber, and write down the ones that changed.
+   */
+  async refreshPullRequests(): Promise<void> {
+    if (this.lookingUp || !this.client.getView().loaded) return;
+    const lookups = pullRequestLookups(this.client.getView().state);
+    if (lookups.length === 0) return;
+    this.lookingUp = true;
+    try {
+      const found = new Map<string, SeenPullRequest>();
+      let error: string | null = null;
+      for (let index = 0; index < lookups.length; index += PR_BATCH) {
+        type Answer = { results: { runId: string; pullRequest: SeenPullRequest | null; error?: string }[] };
+        const answer = await this.client.call<Answer>('POST', '/github/pulls', { runs: lookups.slice(index, index + PR_BATCH) });
+        for (const result of answer.results) {
+          if (result.pullRequest) found.set(result.runId, result.pullRequest);
+          else if (result.error) error = result.error;
+        }
+      }
+      this.set({ prError: error });
+      // Another surface may have written the same change meanwhile; compare with the latest state.
+      const bodies = planPullRequests(this.client.getView().state, found);
+      if (bodies.length) await this.client.dispatch(bodies, { origin: 'agent' });
+    } catch (error) {
+      this.set({ prError: messageOf(error) });
+    } finally {
+      this.lookingUp = false;
     }
   }
 
@@ -142,7 +187,8 @@ export class AgentStore {
         title: task.title.slice(0, 200),
         url: taskUrl(state, task.id),
         text: (choice.prompt.trim() || task.title).slice(0, ATTACH_TEXT_MAX),
-        data: { taskId: task.id, runId },
+        // The chip carries what an adoption needs to write the same run, should it win the race.
+        data: { taskId: task.id, runId, ...(choice.wantsPr ? { wantsPr: true } : {}) },
         projectId: choice.projectId,
         navigation: choice.open ? 'open' : 'preserve',
         worktree: workspace.kind === 'project' ? false : workspace.kind === 'new' ? { kind: 'new', ...(workspace.branch.trim() ? { name: workspace.branch.trim() } : {}) } : { kind: 'existing', directory: workspace.directory },
@@ -152,24 +198,32 @@ export class AgentStore {
         return false;
       }
       const project = this.view.projects.find((item) => item.id === choice.projectId);
-      await this.client.dispatch([
-        {
-          type: 'run.started',
-          run: {
-            id: runId,
-            taskId: task.id,
-            sessionId: result.sessionId,
-            projectId: choice.projectId,
-            directory: result.directory ?? project?.directory ?? null,
-            worktree: result.worktree ? { directory: result.worktree.directory, branch: result.worktree.branch } : null,
-            title: task.title,
-          },
-        },
-      ]);
+      // The session list may have shown the new chat first and adopted it as this very run.
+      if (!this.client.getView().state.runs[runId]) {
+        await this.client
+          .dispatch([
+            {
+              type: 'run.started',
+              run: {
+                id: runId,
+                taskId: task.id,
+                sessionId: result.sessionId,
+                projectId: choice.projectId,
+                directory: result.directory ?? project?.directory ?? null,
+                worktree: result.worktree ? { directory: result.worktree.directory, branch: result.worktree.branch } : null,
+                title: task.title,
+                ...(choice.wantsPr ? { wantsPr: true } : {}),
+              },
+            },
+          ])
+          .catch((error) => {
+            if (!this.client.getView().state.runs[runId]) throw error;
+          });
+      }
       void this.watch(choice.projectId);
       if (result.sent === 'no-model') this.client.notify('The chat was created, but no model is set up to answer it. Open the chat to pick one.');
       else if (result.sent === 'failed') this.client.notify('The chat was created, but the first message did not send. Open the chat to send it again.');
-      else this.client.notify(`Agent started on "${task.title}"`);
+      else this.client.notify(choice.wantsPr ? `Assigned "${task.title}" to an agent; it will open a pull request` : `Agent started on "${task.title}"`);
       return true;
     } catch (error) {
       this.client.notify(`Could not start the agent: ${messageOf(error)}`);
@@ -229,6 +283,8 @@ export class AgentStore {
     } finally {
       this.recording = false;
     }
+    // An agent that just finished a turn has likely just opened its pull request.
+    if (bodies.some((body) => body.type === 'run.outcome' && body.outcome === 'completed')) void this.refreshPullRequests();
   }
 
   private refreshAttention(): void {

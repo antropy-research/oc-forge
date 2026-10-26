@@ -1,7 +1,7 @@
 // service/main.ts
-import http from "node:http";
+import http2 from "node:http";
 import { homedir } from "node:os";
-import { dirname as dirname2, join as join3 } from "node:path";
+import { dirname as dirname3, join as join3 } from "node:path";
 
 // service/store.ts
 import { execFile } from "node:child_process";
@@ -17,6 +17,7 @@ var BACKLOG_BUCKETS = [
   { id: "someday", label: "Someday" },
   { id: "never", label: "Never" }
 ];
+var SOURCE_NAMES = { linear: "Linear", github: "GitHub", gtask: "Google Tasks", email: "Gmail" };
 var LINEAR_GROUPS = ["status", "priority", "project", "team", "assignee", "workspace", "none"];
 var LINEAR_ORDERS = ["priority", "updated", "due", "identifier"];
 var RITUALS = ["planning", "shutdown", "highlights", "weeklyPlanning", "weeklyReview"];
@@ -37,7 +38,12 @@ var DEFAULT_SETTINGS = {
   linearOrderBy: "priority",
   suggestFromHistory: true,
   pomodoroMinutes: 25,
-  breakMinutes: 5
+  breakMinutes: 5,
+  googleTimebox: null,
+  googleTasksOnComplete: "complete",
+  googleTasksImportCompletion: true,
+  googleTasksDueFromPlan: true,
+  googleTasksOnCalendar: true
 };
 var emptyState = () => ({
   version: 0,
@@ -323,6 +329,14 @@ var applyInto = (state, event) => {
       syncTaskToBlocks(state, block.taskId, event.at, event.start);
       return;
     }
+    case "block.linked": {
+      const block = state.blocks[event.blockId];
+      if (!block)
+        return;
+      const { google: _old, ...rest } = block;
+      state.blocks[event.blockId] = event.google ? { ...rest, google: event.google } : rest;
+      return;
+    }
     case "block.deleted": {
       const block = state.blocks[event.blockId];
       if (!block)
@@ -405,6 +419,12 @@ var applyInto = (state, event) => {
     case "run.removed":
       delete state.runs[event.runId];
       return;
+    case "run.pullRequest": {
+      const run = state.runs[event.runId];
+      if (run)
+        state.runs[event.runId] = { ...run, pullRequest: { ...event.pullRequest, seenAt: event.at } };
+      return;
+    }
     case "calendar.added":
       if (!state.calendars[event.calendar.id])
         state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
@@ -751,7 +771,7 @@ var isPlacement = (value) => {
 };
 var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
-var isSource = (value) => isRecord(value) && (value.kind === "linear" || value.kind === "github") && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200));
+var isSource = (value) => isRecord(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0);
 var PRIORITY_VALUES = new Set(["urgent", "high", "medium", "low"]);
 var isPriority = (value) => value === null || typeof value === "string" && PRIORITY_VALUES.has(value);
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
@@ -800,6 +820,9 @@ var validateChannelPatch = (patch) => {
   }
   return null;
 };
+var isGoogleAccount = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+var isGoogleCalendarRef = (value) => isRecord(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && value.calendarId.length > 0;
+var isGoogleEventLink = (value) => isGoogleCalendarRef(value) && isShortText(value.eventId, 1024) && value.eventId.length > 0;
 var validateSettingsPatch = (patch) => {
   if (!isRecord(patch))
     return "patch must be an object";
@@ -832,7 +855,13 @@ var validateSettingsPatch = (patch) => {
       return "suggestFromHistory must be true or false";
     else if ((key === "pomodoroMinutes" || key === "breakMinutes") && !(Number.isInteger(value) && value >= 1 && value <= 180))
       return `${key} must be 1-180`;
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes"].includes(key))
+    else if (key === "googleTimebox" && !(value === null || isGoogleCalendarRef(value)))
+      return "googleTimebox must be a Google account and calendar, or null";
+    else if (key === "googleTasksOnComplete" && !["ask", "complete", "nothing"].includes(value))
+      return "googleTasksOnComplete must be ask, complete or nothing";
+    else if ((key === "googleTasksImportCompletion" || key === "googleTasksDueFromPlan" || key === "googleTasksOnCalendar") && typeof value !== "boolean")
+      return `${key} must be true or false`;
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
@@ -850,8 +879,12 @@ var isRunShape = (value) => {
     return "directory is invalid";
   if (!(value.worktree === null || isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))
     return "worktree is invalid";
+  if (value.wantsPr !== undefined && typeof value.wantsPr !== "boolean")
+    return "wantsPr must be true or false";
   return isShortText(value.title, TITLE_MAX) ? null : "title is invalid";
 };
+var PULL_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/\d{1,9}$/;
+var isPullRequest = (value) => isRecord(value) && Number.isInteger(value.number) && value.number > 0 && typeof value.url === "string" && PULL_URL.test(value.url) && ["open", "closed", "merged"].includes(value.state) && typeof value.draft === "boolean" && isShortText(value.title, TITLE_MAX) && typeof value.repo === "string" && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
 var isRule = (value) => {
   if (!isRecord(value))
     return false;
@@ -1028,6 +1061,10 @@ var validateCommand = (command, context) => {
       return validateSpan(command.start, command.end);
     case "block.deleted":
       return isId(command.blockId) && context.blocks[command.blockId] ? null : "unknown block";
+    case "block.linked":
+      if (!(isId(command.blockId) && context.blocks[command.blockId]))
+        return "unknown block";
+      return command.google === null || isGoogleEventLink(command.google) ? null : "google must be an account, calendar and event, or null";
     case "calendar.added": {
       const calendar = command.calendar;
       if (!isRecord(calendar) || !isId(calendar.id))
@@ -1038,6 +1075,8 @@ var validateCommand = (command, context) => {
         return "calendar name must be 1-80 characters";
       if (!isFeedUrl(calendar.url))
         return "calendar URL must be http(s), webcal or file";
+      if (calendar.google !== undefined && !isGoogleCalendarRef(calendar.google))
+        return "google must be an account and a calendar";
       return isColor(calendar.color) ? null : "color must be #rrggbb";
     }
     case "calendar.updated": {
@@ -1158,6 +1197,14 @@ var validateCommand = (command, context) => {
       return command.note === undefined || isShortText(command.note, 4000) ? null : "note is too long";
     case "run.removed":
       return isId(command.runId) && context.runs[command.runId] ? null : "unknown run";
+    case "run.pullRequest": {
+      const run = isId(command.runId) ? context.runs[command.runId] : undefined;
+      if (!run)
+        return "unknown run";
+      if (command.taskId !== run.taskId)
+        return "taskId must be the run's task";
+      return isPullRequest(command.pullRequest) ? null : "pullRequest is invalid";
+    }
     case "ritual.saved":
       if (!RITUALS.includes(command.ritual))
         return "unknown ritual";
@@ -1359,6 +1406,8 @@ var summarize = (events, titleOf) => {
       return "Move working session";
     case "block.deleted":
       return "Remove working session";
+    case "block.linked":
+      return event.google ? "Write a working session to Google Calendar" : "Unlink a working session from Google Calendar";
     case "objective.created":
       return `Add objective: ${event.objective.title}`;
     case "objective.updated":
@@ -1380,13 +1429,15 @@ var summarize = (events, titleOf) => {
     case "folder.deleted":
       return "Delete folder";
     case "run.started":
-      return `Start agent: ${titleOf(event.run.taskId)}`;
+      return `${event.run.wantsPr ? "Assign to agent" : "Start agent"}: ${titleOf(event.run.taskId)}`;
     case "run.outcome":
       return `Agent run ${event.outcome}`;
     case "run.reviewed":
       return `Review agent run: ${event.verdict}`;
     case "run.removed":
       return "Unlink agent run";
+    case "run.pullRequest":
+      return `Pull request ${event.pullRequest.repo}#${event.pullRequest.number} ${event.pullRequest.state}: ${titleOf(event.taskId)}`;
     case "channel.created":
       return `Add channel: ${event.channel.name}`;
     case "channel.updated":
@@ -1409,6 +1460,8 @@ class Planner {
   applied = new Set;
   log;
   lastAt = 0;
+  persistListeners = new Set;
+  reloadedAt = 0;
   constructor(store, now = () => new Date) {
     this.store = store;
     this.now = now;
@@ -1487,6 +1540,11 @@ class Planner {
       this.lastAt = Math.max(this.lastAt, Date.parse(event.at) || 0);
     }
     this.state = foldEvents(events);
+    this.reloadedAt = Date.now();
+  }
+  onPersist(listener) {
+    this.persistListeners.add(listener);
+    return () => this.persistListeners.delete(listener);
   }
   activity(taskId, limit = 200) {
     return this.log.filter((event) => touchesTask(event, taskId)).slice(-limit);
@@ -1499,6 +1557,13 @@ class Planner {
     for (const event of events)
       if (event.cmd)
         this.applied.add(event.cmd);
+    for (const listener of this.persistListeners) {
+      try {
+        listener(events, before, this.state);
+      } catch (error) {
+        console.error(`[planner] after a write: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
   toEvent(body, cmd) {
     const at = Math.max(this.now().getTime(), this.lastAt + 1);
@@ -2032,8 +2097,11 @@ class SyncManager {
 
 // service/github.ts
 import { execFile as execFile2 } from "node:child_process";
-var ghRunner = (args) => new Promise((resolve, reject) => {
-  execFile2("gh", args, { timeout: 20000, maxBuffer: 8000000 }, (error, stdout, stderr) => {
+import { existsSync as existsSync3 } from "node:fs";
+import { isAbsolute } from "node:path";
+var GH_TIMEOUT_MS = 15000;
+var ghRunner = (args, options) => new Promise((resolve, reject) => {
+  execFile2("gh", args, { timeout: options?.timeoutMs ?? GH_TIMEOUT_MS, maxBuffer: 8000000, ...options?.cwd ? { cwd: options.cwd } : {} }, (error, stdout, stderr) => {
     if (error)
       reject(Object.assign(new Error(`${error.message}
 ${stderr}`), { code: error.code, stderr: String(stderr) }));
@@ -2068,6 +2136,20 @@ var parseNodes = (nodes) => nodes.flatMap((node) => {
     updatedAt: node.updatedAt ?? ""
   }];
 });
+var PULL_FIELDS = "number,url,state,isDraft,title,updatedAt";
+var PULL_URL2 = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})\/pull\/\d{1,9}$/;
+var BRANCH = /^(?![-/.])(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._/-]{1,200}(?<![/.])$/;
+var pickPull = (pulls) => {
+  const rank = { open: 0, merged: 1, closed: 2 };
+  const parsed = pulls.flatMap((pull) => {
+    const match = PULL_URL2.exec(pull.url ?? "");
+    const state = pull.state?.toLowerCase();
+    if (!match || !pull.number || !pull.title || !(state === "open" || state === "merged" || state === "closed"))
+      return [];
+    return [{ pr: { number: pull.number, url: pull.url, state, draft: Boolean(pull.isDraft), title: pull.title.slice(0, 500), repo: match[1] }, updatedAt: pull.updatedAt ?? "" }];
+  });
+  return parsed.sort((a, b) => rank[a.pr.state] - rank[b.pr.state] || b.updatedAt.localeCompare(a.updatedAt))[0]?.pr ?? null;
+};
 var explain = (error) => {
   const failure = error;
   if (failure.code === "ENOENT")
@@ -2098,6 +2180,24 @@ class GitHubSource {
     });
     return parseNodes(JSON.parse(out).data?.search?.nodes ?? []);
   }
+  async pullRequestFor(branch, directories) {
+    if (!BRANCH.test(branch))
+      throw new Error("branch name is invalid");
+    let failure = null;
+    for (const directory of directories) {
+      if (!isAbsolute(directory) || !existsSync3(directory))
+        continue;
+      try {
+        const out = await this.run(["pr", "list", "--head", branch, "--state", "all", "--limit", "10", "--json", PULL_FIELDS], { cwd: directory, timeoutMs: 8000 });
+        return pickPull(JSON.parse(out));
+      } catch (error) {
+        failure = error;
+      }
+    }
+    if (failure)
+      throw new Error(explain(failure));
+    return null;
+  }
   async items(ids) {
     if (ids.length === 0)
       return [];
@@ -2120,6 +2220,7 @@ var ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt branchNam
     assignee { id name }
     project { id name }
     cycle { id number }
+    labels(first: 25) { nodes { id name color } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 var OPEN_FILTER = `{ state: { type: { nin: ["completed", "canceled"] } } }`;
 var PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate updatedAt
@@ -2136,13 +2237,26 @@ var ASSIGNED_QUERY = `query PlannerAssigned($after: String) {
     }
   }
 }`;
-var VIEWS_QUERY = `query PlannerViews {
-  customViews(first: 50) { nodes { id name } }
+var VIEW_FIELDS = `id name description icon color shared modelName slugId updatedAt
+    team { id key name }
+    owner { id name }`;
+var VIEWS_QUERY = `query PlannerViews($after: String) {
+  customViews(first: 100, after: $after) {
+    nodes { ${VIEW_FIELDS} }
+    pageInfo { hasNextPage endCursor }
+  }
 }`;
-var VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!) {
+var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
+  favorites(first: 250) { nodes { type sortOrder customView { id } } }
+}`;
+var VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!, $after: String) {
   customView(id: $id) {
     id
-    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
+    viewPreferencesValues { layout issueGrouping viewOrdering }
+    issues(first: 100, after: $after, filter: ${OPEN_FILTER}) {
+      nodes { ${ISSUE_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
   }
 }`;
 var SEARCH_QUERY = `query PlannerSearch($term: String!) {
@@ -2183,7 +2297,6 @@ var PROJECT_QUERY = `query PlannerProject($id: String!) {
 var COMMENT_FIELDS = `id body createdAt editedAt user { id name } botActor { name } parent { id }`;
 var DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
-    labels(first: 50) { nodes { id name color } }
     comments(first: 100) { nodes { ${COMMENT_FIELDS} } }`;
 var ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
   issue(id: $id) { ${DETAIL_FIELDS} }
@@ -2212,6 +2325,7 @@ var CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueCreateInpu
 var ALL_DOCUMENTS = [
   ASSIGNED_QUERY,
   VIEWS_QUERY,
+  FAVORITE_VIEWS_QUERY,
   VIEW_ISSUES_QUERY,
   SEARCH_QUERY,
   LINKED_QUERY,
@@ -2243,6 +2357,7 @@ var readGraphql = (body) => {
     throw new Error("Linear returned no data");
   return parsed.data;
 };
+var NON_ISSUE_MODELS = new Set(["project", "projects", "initiative", "initiatives", "feeditem", "feeditems", "customer", "customers", "document", "documents", "release", "releases"]);
 
 // service/linear.ts
 var LINEAR_API = "https://api.linear.app/graphql";
@@ -2380,6 +2495,847 @@ class LinearWorkspaces {
   }
 }
 
+// service/google.ts
+import { createHash, randomBytes } from "node:crypto";
+import { chmod as chmod2, mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import http from "node:http";
+import { dirname as dirname2 } from "node:path";
+var GOOGLE_FEATURES = ["calendar", "tasks", "mail"];
+var FEATURE_SCOPES = {
+  calendar: ["https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events"],
+  tasks: ["https://www.googleapis.com/auth/tasks"],
+  mail: ["https://www.googleapis.com/auth/gmail.readonly"]
+};
+var IDENTITY_SCOPES = ["openid", "email"];
+var AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+var TOKEN_URL = "https://oauth2.googleapis.com/token";
+var REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+var API_ORIGINS = ["https://www.googleapis.com/", "https://tasks.googleapis.com/", "https://gmail.googleapis.com/"];
+var TIMEOUT_MS3 = 12000;
+var SIGN_IN_MS = 10 * 60000;
+var MAX_ACCOUNTS = 10;
+var CLIENT_ID = /^[0-9]{6,30}-[a-z0-9]{10,64}\.apps\.googleusercontent\.com$/;
+
+class GoogleError extends Error {
+  status;
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+var loopbackListen = (onRequest) => new Promise((resolve, reject) => {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname !== "/") {
+      res.writeHead(404).end();
+      return;
+    }
+    onRequest(url).then((page) => res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }).end(page));
+  });
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port, close: () => server.close() }));
+});
+var base64url = (bytes) => bytes.toString("base64url");
+var page = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font:15px system-ui;margin:3em;max-width:36em"><h1 style="font-size:20px">${title}</h1><p>${text}</p>`;
+var featuresOf = (scopes) => GOOGLE_FEATURES.filter((feature) => FEATURE_SCOPES[feature].every((scope) => scopes.includes(scope)));
+var emailFromIdToken = (idToken) => {
+  const payload = idToken?.split(".")[1];
+  if (!payload)
+    return null;
+  try {
+    const email = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).email;
+    return typeof email === "string" && /^[^\s@]+@[^\s@]+$/.test(email) ? email.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+};
+var googleMessage = (body, status) => {
+  try {
+    const parsed = JSON.parse(body);
+    if (typeof parsed.error === "object" && parsed.error?.message)
+      return parsed.error.message;
+    if (parsed.error_description)
+      return parsed.error_description;
+    if (typeof parsed.error === "string")
+      return parsed.error;
+  } catch {}
+  return `Google answered HTTP ${status}`;
+};
+var isStoredAccount = (value) => {
+  const item = value;
+  return Boolean(item) && typeof item.email === "string" && typeof item.refreshToken === "string" && typeof item.addedAt === "string" && Array.isArray(item.scopes) && item.scopes.every((scope) => typeof scope === "string");
+};
+var publicInfo2 = (account) => ({ email: account.email, features: featuresOf(account.scopes), addedAt: account.addedAt });
+
+class GoogleAccounts {
+  file;
+  fetcher;
+  listen;
+  log;
+  client = null;
+  accounts = [];
+  loaded = null;
+  writes = Promise.resolve();
+  signIns = new Map;
+  tokens = new Map;
+  constructor(file, fetcher = fetch, listen = loopbackListen, log = () => {}) {
+    this.file = file;
+    this.fetcher = fetcher;
+    this.listen = listen;
+    this.log = log;
+  }
+  async status() {
+    await this.load();
+    return { client: this.client ? { id: this.client.id } : null, accounts: this.accounts.map(publicInfo2) };
+  }
+  setClient(rawId, rawSecret) {
+    return this.serial(async () => {
+      const id = rawId.trim();
+      const secret = rawSecret.trim();
+      if (!CLIENT_ID.test(id))
+        throw new GoogleError(400, "That is not an OAuth client ID (it ends in .apps.googleusercontent.com)");
+      if (!/^[A-Za-z0-9_-]{10,100}$/.test(secret))
+        throw new GoogleError(400, "That does not look like the client secret Google shows with the client ID");
+      await this.load();
+      if (this.client && this.client.id !== id) {
+        this.accounts = [];
+        this.tokens.clear();
+      }
+      this.client = { id, secret };
+      await this.save();
+      return this.status();
+    });
+  }
+  clearClient() {
+    return this.serial(async () => {
+      await this.load();
+      for (const account of this.accounts)
+        await this.revoke(account.refreshToken);
+      this.client = null;
+      this.accounts = [];
+      this.tokens.clear();
+      await this.save();
+      return this.status();
+    });
+  }
+  async startSignIn(features) {
+    await this.load();
+    if (!this.client)
+      throw new GoogleError(400, "Add the OAuth client first");
+    if (features.length === 0)
+      throw new GoogleError(400, "Choose at least one of Calendar, Tasks and Gmail");
+    this.expireSignIns();
+    const id = base64url(randomBytes(12));
+    const state = base64url(randomBytes(24));
+    const verifier = base64url(randomBytes(48));
+    const challenge = base64url(createHash("sha256").update(verifier).digest());
+    const listener = await this.listen((url) => this.callback(id, url));
+    const redirectUri = `http://127.0.0.1:${listener.port}/`;
+    const signIn = { state, verifier, redirectUri, expires: Date.now() + SIGN_IN_MS, result: { status: "pending" }, close: listener.close };
+    this.signIns.set(id, signIn);
+    setTimeout(() => this.endSignIn(id, { status: "failed", message: "The sign-in took too long; start it again" }), SIGN_IN_MS).unref?.();
+    const scopes = [...IDENTITY_SCOPES, ...new Set(features.flatMap((feature) => FEATURE_SCOPES[feature]))];
+    const query = new URLSearchParams({
+      client_id: this.client.id,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: scopes.join(" "),
+      state,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      access_type: "offline",
+      prompt: "consent",
+      include_granted_scopes: "true"
+    });
+    return { id, authUrl: `${AUTH_URL}?${query}`, redirectUri };
+  }
+  signIn(id) {
+    return this.signIns.get(id)?.result ?? { status: "failed", message: "That sign-in is over; start it again" };
+  }
+  async finishSignIn(id, pasted) {
+    const signIn = this.signIns.get(id);
+    if (!signIn || signIn.result.status !== "pending")
+      return this.signIn(id);
+    let url;
+    try {
+      url = new URL(pasted.trim());
+    } catch {
+      throw new GoogleError(400, "Paste the whole address from the browser, starting with http://127.0.0.1");
+    }
+    if (`${url.protocol}//${url.host}/` !== signIn.redirectUri)
+      throw new GoogleError(400, `That address is not the one this sign-in waits for (${signIn.redirectUri})`);
+    await this.callback(id, url);
+    return this.signIn(id);
+  }
+  remove(email) {
+    return this.serial(async () => {
+      await this.load();
+      const account = this.accounts.find((item) => item.email === email.toLowerCase());
+      if (!account)
+        return false;
+      this.accounts = this.accounts.filter((item) => item !== account);
+      this.tokens.delete(account.email);
+      await this.save();
+      await this.revoke(account.refreshToken);
+      return true;
+    });
+  }
+  async request(email, method, url, body) {
+    if (!API_ORIGINS.some((origin) => url.startsWith(origin)))
+      throw new GoogleError(400, "That is not a Google API the Planner uses");
+    const send = async (token) => {
+      try {
+        return await this.fetcher(url, {
+          method,
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/json", ...body === undefined ? {} : { "Content-Type": "application/json" } },
+          ...body === undefined ? {} : { body: JSON.stringify(body) },
+          signal: AbortSignal.timeout(TIMEOUT_MS3)
+        });
+      } catch (error) {
+        throw new GoogleError(502, `Could not reach Google: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    let response = await send(await this.accessToken(email));
+    if (response.status === 401) {
+      this.tokens.delete(email.toLowerCase());
+      response = await send(await this.accessToken(email));
+    }
+    const text = await response.text();
+    if (response.status >= 400) {
+      const message = googleMessage(text, response.status);
+      if (response.status === 403 && /insufficient|scope/i.test(message))
+        throw new GoogleError(403, `${email} has not allowed this; connect it again with that feature turned on`);
+      throw new GoogleError(response.status === 404 || response.status === 410 ? 404 : 502, message);
+    }
+    return text ? JSON.parse(text) : null;
+  }
+  async callback(id, url) {
+    const signIn = this.signIns.get(id);
+    if (!signIn || signIn.result.status !== "pending")
+      return page("Planner", "This sign-in is already over. You can close this tab.");
+    if (url.searchParams.get("state") !== signIn.state) {
+      return page("Planner", "This page does not belong to the sign-in the Planner is waiting for.");
+    }
+    const error = url.searchParams.get("error");
+    const code = url.searchParams.get("code");
+    if (error || !code) {
+      this.endSignIn(id, { status: "failed", message: error === "access_denied" ? "Access was not allowed" : `Google said: ${error ?? "no code"}` });
+      return page("Not connected", "Google did not let the Planner in. You can close this tab and try again.");
+    }
+    try {
+      const account = await this.exchange(code, signIn);
+      this.endSignIn(id, { status: "connected", email: account.email, features: featuresOf(account.scopes) });
+      return page("Connected", `The Planner can now use ${account.email}. You can close this tab.`);
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      this.endSignIn(id, { status: "failed", message });
+      return page("Not connected", `${message.replace(/[<>&]/g, "")}. You can close this tab.`);
+    }
+  }
+  async exchange(code, signIn) {
+    const client = this.client;
+    if (!client)
+      throw new GoogleError(400, "The OAuth client was removed");
+    const answer = await this.token({ grant_type: "authorization_code", code, code_verifier: signIn.verifier, redirect_uri: signIn.redirectUri, client_id: client.id, client_secret: client.secret });
+    if (!answer.refresh_token)
+      throw new GoogleError(400, "Google sent no refresh token; remove the Planner at myaccount.google.com/permissions and connect again");
+    const email = emailFromIdToken(answer.id_token);
+    if (!email)
+      throw new GoogleError(400, "Google did not say which account this is (the 'email' scope was not granted)");
+    const account = { email, refreshToken: answer.refresh_token, scopes: (answer.scope ?? "").split(" ").filter(Boolean), addedAt: new Date().toISOString() };
+    await this.serial(async () => {
+      const index = this.accounts.findIndex((item) => item.email === email);
+      if (index < 0 && this.accounts.length >= MAX_ACCOUNTS)
+        throw new GoogleError(400, `At most ${MAX_ACCOUNTS} Google accounts`);
+      this.accounts = index < 0 ? [...this.accounts, account] : this.accounts.map((item, at) => at === index ? { ...account, addedAt: item.addedAt } : item);
+      await this.save();
+    });
+    if (answer.access_token)
+      this.tokens.set(email, { token: answer.access_token, expires: Date.now() + (answer.expires_in ?? 3600) * 1000 });
+    return account;
+  }
+  async accessToken(rawEmail) {
+    const email = rawEmail.toLowerCase();
+    const cached = this.tokens.get(email);
+    if (cached && cached.expires - 60000 > Date.now())
+      return cached.token;
+    await this.load();
+    const account = this.accounts.find((item) => item.email === email);
+    if (!account)
+      throw new GoogleError(404, `${email} is not connected`);
+    if (!this.client)
+      throw new GoogleError(400, "Add the OAuth client again");
+    let answer;
+    try {
+      answer = await this.token({ grant_type: "refresh_token", refresh_token: account.refreshToken, client_id: this.client.id, client_secret: this.client.secret });
+    } catch (error) {
+      if (error instanceof GoogleError && /invalid_grant|expired|revoked/i.test(error.message))
+        throw new GoogleError(401, `Google no longer accepts the Planner's access to ${email}; connect it again`);
+      throw error;
+    }
+    if (!answer.access_token)
+      throw new GoogleError(502, "Google sent no access token");
+    this.tokens.set(email, { token: answer.access_token, expires: Date.now() + (answer.expires_in ?? 3600) * 1000 });
+    return answer.access_token;
+  }
+  async token(fields) {
+    let response;
+    try {
+      response = await this.fetcher(TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+        body: new URLSearchParams(fields).toString(),
+        signal: AbortSignal.timeout(TIMEOUT_MS3)
+      });
+    } catch (error) {
+      throw new GoogleError(502, `Could not reach Google: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const text = await response.text();
+    if (response.status >= 400)
+      throw new GoogleError(response.status === 400 || response.status === 401 ? 400 : 502, googleMessage(text, response.status));
+    return JSON.parse(text);
+  }
+  async revoke(token) {
+    try {
+      await this.fetcher(REVOKE_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }).toString(), signal: AbortSignal.timeout(TIMEOUT_MS3) });
+    } catch (error) {
+      this.log(`could not revoke a Google token: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  endSignIn(id, result) {
+    const signIn = this.signIns.get(id);
+    if (!signIn || signIn.result.status !== "pending")
+      return;
+    signIn.result = result;
+    signIn.close();
+    setTimeout(() => this.signIns.delete(id), 5 * 60000).unref?.();
+  }
+  expireSignIns() {
+    for (const [id, signIn] of this.signIns)
+      if (signIn.expires < Date.now())
+        this.endSignIn(id, { status: "failed", message: "The sign-in took too long; start it again" });
+  }
+  load() {
+    this.loaded ??= (async () => {
+      let text;
+      try {
+        text = await readFile2(this.file, "utf8");
+      } catch (error) {
+        if (error.code === "ENOENT")
+          return;
+        throw error;
+      }
+      try {
+        const parsed = JSON.parse(text);
+        const client = parsed.client;
+        this.client = client && typeof client.id === "string" && typeof client.secret === "string" ? { id: client.id, secret: client.secret } : null;
+        this.accounts = Array.isArray(parsed.accounts) ? parsed.accounts.filter(isStoredAccount) : [];
+      } catch {
+        this.log(`${this.file} is not readable JSON; Google needs to be connected again`);
+      }
+    })();
+    return this.loaded;
+  }
+  async save() {
+    await mkdir2(dirname2(this.file), { recursive: true, mode: 448 });
+    const temp = `${this.file}.${process.pid}.tmp`;
+    await writeFile2(temp, `${JSON.stringify({ version: 1, client: this.client, accounts: this.accounts }, null, 2)}
+`, { mode: 384 });
+    await chmod2(temp, 384);
+    await rename2(temp, this.file);
+  }
+  serial(work) {
+    const next = this.writes.then(work, work);
+    this.writes = next.catch(() => {});
+    return next;
+  }
+}
+
+// src/domain/google.ts
+var PLANNER_BLOCK_KEY = "plannerBlockId";
+var googleEvent = (event, calendarId, zone) => {
+  if (!event.id || event.status === "cancelled")
+    return null;
+  if (event.extendedProperties?.private?.[PLANNER_BLOCK_KEY])
+    return null;
+  if (event.attendees?.some((attendee) => attendee.self && attendee.responseStatus === "declined"))
+    return null;
+  const base = { id: `${calendarId}:${event.id}`, calendarId, title: event.summary?.trim() || "(No title)", location: event.location ?? "" };
+  if (event.start?.date && isDateKey(event.start.date)) {
+    const endDate = event.end?.date && isDateKey(event.end.date) && event.end.date > event.start.date ? event.end.date : null;
+    const start = instantAt(event.start.date, 0, zone);
+    const end = endDate ? instantAt(endDate, 0, zone) : new Date(Date.parse(start) + 86400000).toISOString();
+    return { ...base, start, end, allDay: true, busy: false };
+  }
+  const startMs = Date.parse(event.start?.dateTime ?? "");
+  const endMs = Date.parse(event.end?.dateTime ?? "");
+  if (Number.isNaN(startMs))
+    return null;
+  return { ...base, start: new Date(startMs).toISOString(), end: new Date(Number.isNaN(endMs) ? startMs : Math.max(endMs, startMs)).toISOString(), allDay: false, busy: event.transparency !== "transparent" };
+};
+var plannerBlockOf = (event) => event.extendedProperties?.private?.[PLANNER_BLOCK_KEY] ?? null;
+var GOOGLE_TASKS_CALENDAR = "google-tasks";
+var dueTaskEvent = (item, zone) => ({
+  id: `gtask:${item.listId}:${item.id}`,
+  calendarId: GOOGLE_TASKS_CALENDAR,
+  title: item.title,
+  location: "",
+  start: instantAt(item.due, 0, zone),
+  end: instantAt(addDays(item.due, 1), 0, zone),
+  allDay: true,
+  busy: false,
+  googleTask: item
+});
+var gmailUrl = (account, threadId) => `https://mail.google.com/mail/u/${encodeURIComponent(account)}/#all/${encodeURIComponent(threadId)}`;
+
+// service/googleData.ts
+var CALENDAR = "https://www.googleapis.com/calendar/v3";
+var TASKS = "https://tasks.googleapis.com/tasks/v1";
+var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+var EVENT_FIELDS = "items(id,status,summary,location,transparency,start,end,attendees(self,responseStatus),extendedProperties,htmlLink),nextPageToken";
+var MAX_EVENT_PAGES = 2;
+var MAIL_MAX = 25;
+var enc = encodeURIComponent;
+var mapLimited = async (items, limit, fn) => {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  }));
+  return results;
+};
+var isGone = (error) => error instanceof GoogleError && error.status === 404;
+var color = (value) => value && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : "#4285f4";
+var dueDate = (due) => due && isDateKey(due.slice(0, 10)) ? due.slice(0, 10) : null;
+var toTaskItem = (raw, account, listId) => {
+  if (!raw.id || raw.deleted)
+    return null;
+  return {
+    account,
+    listId,
+    id: raw.id,
+    title: raw.title?.trim() || "(No title)",
+    notes: raw.notes ?? "",
+    due: dueDate(raw.due),
+    completed: raw.status === "completed",
+    parent: raw.parent ?? null,
+    position: raw.position ?? "",
+    url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc(raw.id)}`,
+    updated: raw.updated ?? ""
+  };
+};
+var plain = (text) => text.replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code))).replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+var toMailItem = (raw, account) => {
+  if (!raw.id || !raw.threadId)
+    return null;
+  const header = (name) => raw.payload?.headers?.find((item) => item.name?.toLowerCase() === name)?.value ?? "";
+  const internal = Number(raw.internalDate);
+  return {
+    account,
+    id: raw.id,
+    threadId: raw.threadId,
+    subject: header("subject").trim() || "(No subject)",
+    from: header("from").trim(),
+    date: Number.isFinite(internal) && internal > 0 ? new Date(internal).toISOString() : "",
+    snippet: plain(raw.snippet ?? ""),
+    unread: Boolean(raw.labelIds?.includes("UNREAD")),
+    url: gmailUrl(account, raw.threadId)
+  };
+};
+
+class GoogleData {
+  accounts;
+  constructor(accounts) {
+    this.accounts = accounts;
+  }
+  async calendars(account) {
+    const data = await this.accounts.request(account, "GET", `${CALENDAR}/users/me/calendarList?minAccessRole=reader&maxResults=250`);
+    return (data?.items ?? []).flatMap((item) => item.id ? [{ account, id: item.id, name: item.summaryOverride ?? item.summary ?? item.id, color: color(item.backgroundColor), primary: Boolean(item.primary), writable: item.accessRole === "owner" || item.accessRole === "writer" }] : []);
+  }
+  async events(account, calendarId, timeMin, timeMax, zone, subscriptionId) {
+    const events = [];
+    const sessions = [];
+    let pageToken;
+    for (let page = 0;page < MAX_EVENT_PAGES; page++) {
+      const query = new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: EVENT_FIELDS, ...pageToken ? { pageToken } : {} });
+      const data = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/${enc(calendarId)}/events?${query}`);
+      for (const raw of data?.items ?? []) {
+        const blockId = plannerBlockOf(raw);
+        if (blockId && raw.id && raw.status !== "cancelled" && raw.start?.dateTime && raw.end?.dateTime) {
+          sessions.push({ blockId, eventId: raw.id, start: new Date(raw.start.dateTime).toISOString(), end: new Date(raw.end.dateTime).toISOString() });
+        }
+        const event = googleEvent(raw, subscriptionId, zone);
+        if (event)
+          events.push(event);
+      }
+      pageToken = data?.nextPageToken;
+      if (!pageToken)
+        break;
+    }
+    return { events, sessions };
+  }
+  async putTimebox(account, calendarId, timebox, eventId) {
+    const body = {
+      summary: timebox.title,
+      start: { dateTime: timebox.start },
+      end: { dateTime: timebox.end },
+      transparency: "opaque",
+      extendedProperties: { private: { [PLANNER_BLOCK_KEY]: timebox.blockId, plannerTaskId: timebox.taskId } }
+    };
+    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
+    const data = eventId ? await this.accounts.request(account, "PATCH", `${base}/${enc(eventId)}`, body) : await this.accounts.request(account, "POST", base, { ...body, reminders: { useDefault: false } });
+    if (!data?.id)
+      throw new Error("Google did not return the event");
+    return data.id;
+  }
+  async deleteTimebox(account, calendarId, eventId) {
+    try {
+      await this.accounts.request(account, "DELETE", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(eventId)}`);
+    } catch (error) {
+      if (!isGone(error))
+        throw error;
+    }
+  }
+  async event(account, calendarId, eventId) {
+    try {
+      const raw = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(eventId)}`);
+      return raw && raw.status !== "cancelled" ? raw : null;
+    } catch (error) {
+      if (isGone(error))
+        return null;
+      throw error;
+    }
+  }
+  async taskLists(account) {
+    const data = await this.accounts.request(account, "GET", `${TASKS}/users/@me/lists?maxResults=100`);
+    return (data?.items ?? []).flatMap((item) => item.id ? [{ account, id: item.id, title: item.title?.trim() || "Tasks" }] : []);
+  }
+  async tasks(account, listId) {
+    const data = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(listId)}/tasks?showCompleted=false&showHidden=false&maxResults=100`);
+    return (data?.items ?? []).map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item)).sort((a, b) => a.position.localeCompare(b.position));
+  }
+  async dueTasks(account, from, to) {
+    const lists = await this.taskLists(account);
+    const query = new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` });
+    const perList = await mapLimited(lists, 4, async (list) => {
+      const data = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(list.id)}/tasks?${query}`);
+      return (data?.items ?? []).map((raw) => toTaskItem(raw, account, list.id)).filter((item) => Boolean(item && item.due && !item.completed && item.due >= from && item.due <= to));
+    });
+    return perList.flat();
+  }
+  async tasksById(account, listId, ids) {
+    const found = await mapLimited(ids.slice(0, 50), 5, async (id) => {
+      try {
+        const raw = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`);
+        return raw ? toTaskItem(raw, account, listId) : null;
+      } catch (error) {
+        if (isGone(error))
+          return null;
+        throw error;
+      }
+    });
+    return found.filter((item) => Boolean(item));
+  }
+  async updateTask(account, listId, id, patch) {
+    const body = {};
+    if (patch.completed !== undefined)
+      Object.assign(body, patch.completed ? { status: "completed" } : { status: "needsAction", completed: null });
+    if (patch.due !== undefined)
+      body.due = patch.due ? `${patch.due}T00:00:00.000Z` : null;
+    const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`, body);
+    return raw ? toTaskItem(raw, account, listId) : null;
+  }
+  async createTask(account, listId, task) {
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks`, {
+      title: task.title,
+      ...task.notes ? { notes: task.notes } : {},
+      ...task.due ? { due: `${task.due}T00:00:00.000Z` } : {}
+    });
+    return raw ? toTaskItem(raw, account, listId) : null;
+  }
+  async mail(account, query) {
+    const list = await this.accounts.request(account, "GET", `${GMAIL}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX) })}`);
+    const ids = (list?.messages ?? []).flatMap((message) => message.id ? [message.id] : []);
+    const metadata = "format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date";
+    const messages = await mapLimited(ids, 5, (id) => this.accounts.request(account, "GET", `${GMAIL}/messages/${enc(id)}?${metadata}`));
+    return messages.map((raw) => raw ? toMailItem(raw, account) : null).filter((item) => Boolean(item)).sort((a, b) => b.date.localeCompare(a.date));
+  }
+}
+
+// service/googleTimeboxes.ts
+var calendarKey = (account, calendarId) => `${account}
+${calendarId}`;
+var messageOf = (error) => error instanceof Error ? error.message : String(error);
+var isGone2 = (error) => error instanceof GoogleError && error.status === 404;
+var READ_DEADLINE_MS = 14000;
+var SLACK_MS = 1e4;
+var MAX_LOOKUPS = 10;
+var withDeadline = (work, ms, what) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error(`${what} took too long to answer`)), ms);
+  work.then((value) => {
+    clearTimeout(timer);
+    resolve(value);
+  }, (error) => {
+    clearTimeout(timer);
+    reject(error);
+  });
+});
+
+class GoogleCalendars {
+  data;
+  ttlMs;
+  cache = new Map;
+  constructor(data, ttlMs = 90000) {
+    this.data = data;
+    this.ttlMs = ttlMs;
+  }
+  async read(subscriptions, alsoRead, timeMin, timeMax, zone, refresh) {
+    const targets = new Map;
+    for (const subscription of subscriptions) {
+      if (!subscription.visible || !subscription.google)
+        continue;
+      const key = calendarKey(subscription.google.account, subscription.google.calendarId);
+      if (!targets.has(key))
+        targets.set(key, { ...subscription.google, subscriptionId: subscription.id });
+    }
+    for (const extra of alsoRead) {
+      const key = calendarKey(extra.account, extra.calendarId);
+      if (!targets.has(key))
+        targets.set(key, { ...extra, subscriptionId: null });
+    }
+    const events = [];
+    const errors = [];
+    const reads = new Map;
+    await Promise.all([...targets].map(async ([key, target]) => {
+      const cacheKey = `${key}
+${target.subscriptionId ?? ""}
+${timeMin}
+${timeMax}
+${zone}`;
+      let hit = this.cache.get(cacheKey);
+      if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
+        const at = Date.now();
+        try {
+          const read = await withDeadline(this.data.events(target.account, target.calendarId, timeMin, timeMax, zone, target.subscriptionId ?? key), READ_DEADLINE_MS, "Google Calendar");
+          hit = { at, ...read };
+          this.cache.set(cacheKey, hit);
+        } catch (error) {
+          if (target.subscriptionId)
+            errors.push({ calendarId: target.subscriptionId, message: messageOf(error) });
+          return;
+        }
+      }
+      reads.set(key, { sessions: hit.sessions, readAt: hit.at });
+      if (target.subscriptionId)
+        events.push(...hit.events);
+    }));
+    return { events, errors, reads };
+  }
+  forget() {
+    this.cache.clear();
+  }
+}
+
+class GoogleDueTasks {
+  data;
+  ttlMs;
+  cache = new Map;
+  constructor(data, ttlMs = 90000) {
+    this.data = data;
+    this.ttlMs = ttlMs;
+  }
+  async read(accounts, from, to, refresh) {
+    const items = [];
+    const errors = [];
+    await Promise.all(accounts.map(async (account) => {
+      const key = `${account}
+${from}
+${to}`;
+      let hit = this.cache.get(key);
+      if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
+        try {
+          hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to), READ_DEADLINE_MS, "Google Tasks") };
+          this.cache.set(key, hit);
+        } catch (error) {
+          errors.push(`${account}: ${messageOf(error)}`);
+          return;
+        }
+      }
+      items.push(...hit.items);
+    }));
+    return { items, errors };
+  }
+  forget() {
+    this.cache.clear();
+  }
+}
+
+class GoogleTimeboxes {
+  planner;
+  data;
+  options;
+  queues = new Map;
+  written = new Map;
+  created = new Map;
+  internal = false;
+  lastError = null;
+  constructor(planner, data, options = {}) {
+    this.planner = planner;
+    this.data = data;
+    this.options = options;
+    planner.onPersist((_events, before, after) => {
+      if (!this.internal)
+        this.observe(before, after);
+    });
+  }
+  async settled() {
+    while (this.queues.size)
+      await Promise.all([...this.queues.values()]);
+  }
+  calendarsFor(state, timeMin, timeMax) {
+    const found = new Map;
+    const target = state.settings.googleTimebox;
+    if (target)
+      found.set(calendarKey(target.account, target.calendarId), target);
+    for (const block of Object.values(state.blocks)) {
+      if (!block.google || block.start < timeMin || block.start >= timeMax)
+        continue;
+      found.set(calendarKey(block.google.account, block.google.calendarId), { account: block.google.account, calendarId: block.google.calendarId });
+    }
+    return [...found.values()];
+  }
+  async reconcile(reads, timeMin, timeMax) {
+    const state = this.planner.state;
+    const bodies = [];
+    const missing = [];
+    for (const block of Object.values(state.blocks)) {
+      const link = block.google;
+      if (!link || block.start < timeMin || block.start >= timeMax)
+        continue;
+      const read = reads.get(calendarKey(link.account, link.calendarId));
+      if (!read || this.busy(block.id, read.readAt))
+        continue;
+      const session = read.sessions.find((item) => item.eventId === link.eventId);
+      if (!session)
+        missing.push({ blockId: block.id, link, readAt: read.readAt });
+      else if (session.start !== block.start || session.end !== block.end)
+        bodies.push({ type: "block.updated", blockId: block.id, start: session.start, end: session.end });
+    }
+    await Promise.all(missing.slice(0, MAX_LOOKUPS).map(async ({ blockId, link }) => {
+      let event;
+      try {
+        event = await withDeadline(this.data.event(link.account, link.calendarId, link.eventId), READ_DEADLINE_MS, "Google Calendar");
+      } catch {
+        return;
+      }
+      if (!event)
+        bodies.push({ type: "block.deleted", blockId });
+      else if (event.start?.dateTime && event.end?.dateTime) {
+        const start = new Date(event.start.dateTime).toISOString();
+        const end = new Date(event.end.dateTime).toISOString();
+        const block = this.planner.state.blocks[blockId];
+        if (block && (block.start !== start || block.end !== end))
+          bodies.push({ type: "block.updated", blockId, start, end });
+      }
+    }));
+    const readAt = new Map([...reads].map(([key, read]) => [key, read.readAt]));
+    let applied = 0;
+    for (const body of bodies) {
+      const blockId = body.blockId;
+      const block = this.planner.state.blocks[blockId];
+      if (!block?.google || this.busy(blockId, readAt.get(calendarKey(block.google.account, block.google.calendarId)) ?? 0))
+        continue;
+      if (await this.apply(body))
+        applied++;
+    }
+    return applied;
+  }
+  busy(blockId, readAt) {
+    return this.queues.has(blockId) || (this.written.get(blockId) ?? 0) >= readAt - SLACK_MS || this.planner.reloadedAt >= readAt - SLACK_MS;
+  }
+  observe(before, after) {
+    const target = after.settings.googleTimebox;
+    const renamed = new Set(Object.values(after.tasks).filter((task) => before.tasks[task.id] && before.tasks[task.id].title !== task.title).map((task) => task.id));
+    for (const block of Object.values(after.blocks)) {
+      const previous = before.blocks[block.id];
+      const moved = !previous || previous.start !== block.start || previous.end !== block.end;
+      const linked = Boolean(block.google ?? this.created.get(block.id));
+      if (linked ? moved || renamed.has(block.taskId) : Boolean(target) && moved)
+        this.enqueue(block.id, () => this.write(block.id));
+    }
+    for (const previous of Object.values(before.blocks)) {
+      if (after.blocks[previous.id])
+        continue;
+      if (previous.google || this.created.has(previous.id) || this.queues.has(previous.id))
+        this.enqueue(previous.id, () => this.remove(previous.id, previous.google ?? null));
+    }
+  }
+  enqueue(blockId, job) {
+    const next = (this.queues.get(blockId) ?? Promise.resolve()).then(job).then(() => {
+      this.lastError = null;
+    }, (error) => {
+      this.lastError = messageOf(error);
+      this.options.log?.(`Google Calendar: ${this.lastError}`);
+    });
+    this.queues.set(blockId, next);
+    next.then(() => {
+      if (this.queues.get(blockId) === next)
+        this.queues.delete(blockId);
+    });
+  }
+  async write(blockId) {
+    const state = this.planner.state;
+    const block = state.blocks[blockId];
+    if (!block)
+      return;
+    const link = block.google ?? this.created.get(blockId) ?? null;
+    const target = link ?? state.settings.googleTimebox;
+    if (!target)
+      return;
+    const timebox = { blockId, taskId: block.taskId, title: state.tasks[block.taskId]?.title ?? "Planner", start: block.start, end: block.end };
+    let eventId;
+    try {
+      eventId = await this.data.putTimebox(target.account, target.calendarId, timebox, link?.eventId ?? null);
+    } catch (error) {
+      if (!(link && isGone2(error)))
+        throw error;
+      eventId = await this.data.putTimebox(target.account, target.calendarId, timebox, null);
+    }
+    this.written.set(blockId, Date.now());
+    this.options.onWrite?.();
+    if (link?.eventId === eventId)
+      return;
+    const fresh = { account: target.account, calendarId: target.calendarId, eventId };
+    this.created.set(blockId, fresh);
+    if (this.planner.state.blocks[blockId] && await this.apply({ type: "block.linked", blockId, google: fresh }))
+      this.created.delete(blockId);
+  }
+  async remove(blockId, link) {
+    const target = link ?? this.created.get(blockId);
+    this.created.delete(blockId);
+    this.written.delete(blockId);
+    if (!target)
+      return;
+    await this.data.deleteTimebox(target.account, target.calendarId, target.eventId);
+    this.options.onWrite?.();
+  }
+  async apply(body) {
+    await this.options.idle?.();
+    this.internal = true;
+    try {
+      const result = this.planner.execute([{ cmd: newId(), ...body }]);
+      if (!result.ok)
+        this.options.log?.(`Google Calendar: could not record ${body.type}: ${result.error}`);
+      return result.ok;
+    } finally {
+      this.internal = false;
+    }
+  }
+}
+
 // service/main.ts
 var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -2398,11 +3354,135 @@ sync = new SyncManager(store, planner, log);
 await sync.init();
 var snapshot = () => ({ ...planner.snapshot(), sync: sync.status() });
 var github = new GitHubSource;
-var feeds = new CalendarFeeds(join3(dirname2(dir), "cache"));
-var linearWorkspaces = new LinearWorkspaces(join3(dirname2(dir), "linear-workspaces.json"), undefined, log);
+var feeds = new CalendarFeeds(join3(dirname3(dir), "cache"));
+var linearWorkspaces = new LinearWorkspaces(join3(dirname3(dir), "linear-workspaces.json"), undefined, log);
+var google = new GoogleAccounts(join3(dirname3(dir), "google-accounts.json"), undefined, undefined, log);
+var googleData = new GoogleData(google);
+var googleCalendars = new GoogleCalendars(googleData);
+var googleDueTasks = new GoogleDueTasks(googleData);
+var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
+};
+var PULL_LOOKUPS_PER_REQUEST = 4;
+var isLookup = (value) => {
+  const lookup = value;
+  return typeof lookup?.runId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) && typeof lookup.branch === "string" && lookup.branch.length <= 200 && Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === "string" && item.length <= 1024);
+};
+var mapLimited2 = async (items, limit, fn) => {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  }));
+  return results;
+};
+var isEmail = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+var isGoogleId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
+var perAccount = async (feature, ask) => {
+  const accounts = (await google.status()).accounts.filter((account) => account.features.includes(feature));
+  const items = [];
+  const errors = [];
+  await Promise.all(accounts.map(async (account) => {
+    try {
+      items.push(...await ask(account.email));
+    } catch (error) {
+      errors.push({ account: account.email, message: error instanceof Error ? error.message : String(error) });
+    }
+  }));
+  return { items, errors };
+};
+var googleRoute = async (req, url) => {
+  const path = url.pathname;
+  const ok = (body) => ({ status: 200, body });
+  if (path === "/google/status" && req.method === "GET")
+    return ok({ ...await google.status(), timeboxError: timeboxes.lastError });
+  if (path === "/google/client" && req.method === "PUT") {
+    const body = await readJson(req);
+    if (typeof body.id !== "string" || typeof body.secret !== "string")
+      return { status: 400, body: { error: "id and secret must be strings" } };
+    return ok(await google.setClient(body.id, body.secret));
+  }
+  if (path === "/google/client" && req.method === "DELETE")
+    return ok(await google.clearClient());
+  if (path === "/google/connect" && req.method === "POST") {
+    const body = await readJson(req);
+    const features = Array.isArray(body.features) ? GOOGLE_FEATURES.filter((feature) => body.features.includes(feature)) : [];
+    return ok(await google.startSignIn(features));
+  }
+  const signIn = /^\/google\/connect\/([A-Za-z0-9_-]{8,40})(\/finish)?$/.exec(path);
+  if (signIn && !signIn[2] && req.method === "GET")
+    return ok(google.signIn(signIn[1]));
+  if (signIn && signIn[2] && req.method === "POST") {
+    const body = await readJson(req);
+    if (typeof body.url !== "string" || body.url.length > 4000)
+      return { status: 400, body: { error: "url must be the address the browser was sent to" } };
+    return ok(await google.finishSignIn(signIn[1], body.url));
+  }
+  const account = /^\/google\/accounts\/([^/]+)$/.exec(path);
+  if (account && req.method === "DELETE")
+    return ok({ removed: await google.remove(decodeURIComponent(account[1])) });
+  if (path === "/google/calendars" && req.method === "GET") {
+    const { items, errors } = await perAccount("calendar", (email) => googleData.calendars(email));
+    return ok({ calendars: items, errors });
+  }
+  if (path === "/google/tasklists" && req.method === "GET") {
+    const { items, errors } = await perAccount("tasks", (email) => googleData.taskLists(email));
+    return ok({ lists: items, errors });
+  }
+  if (path === "/google/tasks" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    const list = url.searchParams.get("list");
+    if (!isEmail(email) || !isGoogleId(list))
+      return { status: 400, body: { error: "account and list are required" } };
+    return ok({ tasks: await googleData.tasks(email, list) });
+  }
+  if (path === "/google/tasks/linked" && req.method === "POST") {
+    const body = await readJson(req);
+    const groups = (Array.isArray(body.groups) ? body.groups : []).filter((group) => isEmail(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId)).slice(0, 10);
+    const tasks = [];
+    const errors = [];
+    await Promise.all(groups.map(async (group) => {
+      try {
+        tasks.push(...await googleData.tasksById(group.account, group.listId, group.ids));
+      } catch (error) {
+        errors.push({ account: group.account, message: error instanceof Error ? error.message : String(error) });
+      }
+    }));
+    return ok({ tasks, errors });
+  }
+  if (path === "/google/tasks" && (req.method === "PATCH" || req.method === "POST")) {
+    const body = await readJson(req);
+    if (!isEmail(body.account) || !isGoogleId(body.listId))
+      return { status: 400, body: { error: "account and listId are required" } };
+    if (body.due !== undefined && body.due !== null && !isDateKey(body.due))
+      return { status: 400, body: { error: "due must be a date or null" } };
+    if (req.method === "PATCH") {
+      if (!isGoogleId(body.id))
+        return { status: 400, body: { error: "id is required" } };
+      if (body.completed !== undefined && typeof body.completed !== "boolean")
+        return { status: 400, body: { error: "completed must be true or false" } };
+      const patch = { ...body.completed !== undefined ? { completed: body.completed } : {}, ...body.due !== undefined ? { due: body.due } : {} };
+      return ok({ task: await googleData.updateTask(body.account, body.listId, body.id, patch) });
+    }
+    if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 1024)
+      return { status: 400, body: { error: "title is required" } };
+    if (body.notes !== undefined && (typeof body.notes !== "string" || body.notes.length > 8000))
+      return { status: 400, body: { error: "notes must be text" } };
+    return ok({ task: await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...body.notes ? { notes: body.notes } : {}, ...body.due ? { due: body.due } : {} }) });
+  }
+  if (path === "/google/mail" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    const query = url.searchParams.get("q") ?? "in:inbox";
+    if (!isEmail(email) || query.length > 500)
+      return { status: 400, body: { error: "account is required, and the search must be shorter" } };
+    return ok({ messages: await googleData.mail(email, query) });
+  }
+  return null;
 };
 var readJson = (req) => new Promise((resolve, reject) => {
   let size = 0;
@@ -2426,7 +3506,7 @@ var readJson = (req) => new Promise((resolve, reject) => {
   });
   req.on("error", reject);
 });
-var server = http.createServer(async (req, res) => {
+var server = http2.createServer(async (req, res) => {
   if (req.headers.authorization !== `Bearer ${token}`) {
     json(res, 401, { error: "unauthorized" });
     return;
@@ -2467,6 +3547,34 @@ var server = http.createServer(async (req, res) => {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
       return;
+    }
+    if (url.pathname === "/github/pulls" && req.method === "POST") {
+      const body = await readJson(req);
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
+      const results = await mapLimited2(runs, 4, async (run) => {
+        try {
+          return { runId: run.runId, pullRequest: await github.pullRequestFor(run.branch, run.directories) };
+        } catch (error) {
+          return { runId: run.runId, pullRequest: null, error: error instanceof Error ? error.message : String(error) };
+        }
+      });
+      json(res, 200, { results });
+      return;
+    }
+    if (url.pathname.startsWith("/google/")) {
+      try {
+        const answer = await googleRoute(req, url);
+        if (answer) {
+          json(res, answer.status, answer.body);
+          return;
+        }
+      } catch (error) {
+        if (error instanceof GoogleError) {
+          json(res, error.status, { error: error.message });
+          return;
+        }
+        throw error;
+      }
     }
     if (url.pathname.startsWith("/linear/")) {
       try {
@@ -2537,7 +3645,24 @@ var server = http.createServer(async (req, res) => {
         return;
       }
       const zone = planner.state.settings.timezone ?? "UTC";
-      json(res, 200, await feeds.eventsFor(Object.values(planner.state.calendars), from, to, zone, url.searchParams.get("refresh") === "1"));
+      const refresh = url.searchParams.get("refresh") === "1";
+      const calendars = Object.values(planner.state.calendars);
+      const timeMin = instantAt(from, 0, zone);
+      const timeMax = instantAt(addDays(to, 1), 0, zone);
+      const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email) : [];
+      const [feed, fromGoogle, due] = await Promise.all([
+        feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
+        googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
+        googleDueTasks.read(taskAccounts, from, to, refresh)
+      ]);
+      const planned = new Set(Object.values(planner.state.tasks).flatMap((task) => task.source?.kind === "gtask" && !task.deletedAt && !task.archivedAt ? [task.source.id] : []));
+      const dueEvents = due.items.flatMap((item) => item.due && !planned.has(item.id) ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
+      json(res, 200, {
+        events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
+        errors: [...feed.errors, ...fromGoogle.errors, ...due.errors.map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]
+      });
+      if (fromGoogle.reads.size)
+        timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
       return;
     }
     if (url.pathname === "/activity" && req.method === "GET") {
@@ -2567,6 +3692,7 @@ var server = http.createServer(async (req, res) => {
 });
 var shutdown = async () => {
   server.close();
+  await Promise.race([timeboxes.settled(), new Promise((resolve) => setTimeout(resolve, 3000))]);
   await store.flush();
   process.exit(0);
 };

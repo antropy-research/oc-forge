@@ -25,8 +25,11 @@ export interface Subtask {
 }
 
 /** An external object the task plans; the source stays authoritative for its state. */
+/** Where a linked task comes from, by name. */
+export const SOURCE_NAMES = { linear: 'Linear', github: 'GitHub', gtask: 'Google Tasks', email: 'Gmail' } as const;
+
 export interface TaskSourceRef {
-  kind: 'linear' | 'github';
+  kind: keyof typeof SOURCE_NAMES;
   id: string;
   /** Short label at the source, such as NEX-110. */
   key: string;
@@ -43,6 +46,10 @@ export interface TaskSourceRef {
   workspaceId?: string;
   /** Git branch Linear suggests for the issue; an agent's worktree uses it so its pull request links back. */
   branch?: string;
+  /** Google account (email) a Google task or message belongs to. */
+  account?: string;
+  /** Google task list the task is in. */
+  listId?: string;
 }
 
 /** How the Linear page groups and orders issues. */
@@ -118,6 +125,15 @@ export interface WorkBlock {
   taskId: string;
   start: string;
   end: string;
+  /** The Google Calendar event the Planner wrote for this session, when it writes sessions there. */
+  google?: GoogleEventLink;
+}
+
+/** A Google Calendar event, by the account and calendar it is in. */
+export interface GoogleEventLink {
+  account: string;
+  calendarId: string;
+  eventId: string;
 }
 
 /** A backlog folder (Sunsama: folders exist only in the backlog). */
@@ -218,6 +234,23 @@ export interface TaskRun {
   outcomeAt: string | null;
   /** A finished turn is not an accepted task: the user reviews it. */
   review: { verdict: 'accepted' | 'changes'; at: string; note: string } | null;
+  /** Assigned to the agent, as in GitHub or Linear: it was asked to open a pull request from its branch. */
+  wantsPr?: boolean;
+  /** The pull request opened from the run's branch, as gh last showed it. */
+  pullRequest?: RunPullRequest | null;
+}
+
+/** A pull request on GitHub, opened from a run's worktree branch. */
+export interface RunPullRequest {
+  number: number;
+  url: string;
+  state: 'open' | 'closed' | 'merged';
+  draft: boolean;
+  title: string;
+  /** owner/repo */
+  repo: string;
+  /** When the Planner last saw it change. */
+  seenAt: string;
 }
 
 /** A read-only calendar the service fetches (an ICS feed or file). */
@@ -227,6 +260,8 @@ export interface CalendarSubscription {
   url: string;
   color: string;
   visible: boolean;
+  /** A Google calendar, read through its connected account rather than from `url`. */
+  google?: { account: string; calendarId: string };
 }
 
 export interface Settings {
@@ -258,6 +293,16 @@ export interface Settings {
   /** Focus mode's Pomodoro lengths, in minutes. */
   pomodoroMinutes: number;
   breakMinutes: number;
+  /** Google calendar the Planner writes working sessions to, as events; null writes none. */
+  googleTimebox: { account: string; calendarId: string } | null;
+  /** Completing a task linked to a Google task: complete it there too, ask first, or leave it. */
+  googleTasksOnComplete: 'ask' | 'complete' | 'nothing';
+  /** Complete a task when its Google task is completed. */
+  googleTasksImportCompletion: boolean;
+  /** Planning a Google task on a day sets its due date there, so Google Calendar shows it that day. */
+  googleTasksDueFromPlan: boolean;
+  /** Show Google tasks that are due on the calendar, as Google Calendar does, until they are planned. */
+  googleTasksOnCalendar: boolean;
 }
 
 export interface PlannerState {
@@ -297,6 +342,11 @@ export const DEFAULT_SETTINGS: Settings = {
   suggestFromHistory: true,
   pomodoroMinutes: 25,
   breakMinutes: 5,
+  googleTimebox: null,
+  googleTasksOnComplete: 'complete',
+  googleTasksImportCompletion: true,
+  googleTasksDueFromPlan: true,
+  googleTasksOnCalendar: true,
 };
 
 export const emptyState = (): PlannerState => ({

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { GitHubSource, LISTS, NODES_QUERY, parseNodes, type Runner } from '../service/github.ts';
+import { GitHubSource, LISTS, NODES_QUERY, parseNodes, pickPull, type Runner } from '../service/github.ts';
 import { githubSource, githubStatus, isGitHubItem, planGitHubSync, shortKey, taskFromGitHub, type GitHubItem } from '../src/domain/github.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import type { EventBody, PlannerEvent } from '../src/domain/events.ts';
@@ -56,5 +56,34 @@ describe('mapping and sync', () => {
     expect(bodies).toEqual([{ type: 'task.sourceSynced', taskId: 't', source: githubSource(merged), title: 'Add retries to sync' }]);
     state = applyEvents(state, [ev({ type: 'task.updated', taskId: 't', patch: { title: 'Review retries PR' } })]);
     expect(planGitHubSync(state, new Map([['PR_1', merged]]))).toEqual([{ type: 'task.sourceSynced', taskId: 't', source: githubSource(merged) }]);
+  });
+});
+
+describe('pull requests from agent branches', () => {
+  const pull = (patch: Record<string, unknown> = {}) => ({ number: 12, url: 'https://github.com/acme/app/pull/12', state: 'OPEN', isDraft: false, title: 'Write tests', updatedAt: '2026-10-25T10:00:00Z', ...patch });
+  test('an open pull request first, then a merged one, then the latest', () => {
+    expect(pickPull([])).toBeNull();
+    expect(pickPull([pull({ number: 3, url: 'https://github.com/acme/app/pull/3', state: 'CLOSED' }), pull({ number: 4, url: 'https://github.com/acme/app/pull/4', state: 'MERGED' })])).toMatchObject({ number: 4, state: 'merged', repo: 'acme/app' });
+    expect(pickPull([pull({ state: 'MERGED' }), pull({ number: 13, url: 'https://github.com/acme/app/pull/13', isDraft: true })])).toEqual({ number: 13, url: 'https://github.com/acme/app/pull/13', state: 'open', draft: true, title: 'Write tests', repo: 'acme/app' });
+    // Anything that is not a GitHub pull request URL is dropped.
+    expect(pickPull([pull({ url: 'https://evil.example/acme/app/pull/12' })])).toBeNull();
+  });
+  test('asked with gh in the first checkout that exists, for that branch only', async () => {
+    const calls: { args: string[]; cwd?: string; timeoutMs?: number }[] = [];
+    const runner: Runner = async (args, options) => {
+      calls.push({ args, cwd: options?.cwd, timeoutMs: options?.timeoutMs });
+      return JSON.stringify([pull()]);
+    };
+    const source = new GitHubSource(runner);
+    const found = await source.pullRequestFor('planner/write-tests', ['/no/such/worktree', process.cwd()]);
+    expect(found).toMatchObject({ number: 12, state: 'open' });
+    expect(calls).toEqual([{ args: ['pr', 'list', '--head', 'planner/write-tests', '--state', 'all', '--limit', '10', '--json', 'number,url,state,isDraft,title,updatedAt'], cwd: process.cwd(), timeoutMs: 8000 }]);
+    expect(await source.pullRequestFor('planner/x', ['/no/such/worktree', 'relative/dir'])).toBeNull();
+    for (const bad of ['--help', '-x', 'a..b', 'a//b', 'trailing/', 'sp ace', '']) await expect(source.pullRequestFor(bad, [process.cwd()])).rejects.toThrow('branch name is invalid');
+    expect(calls).toHaveLength(1);
+  });
+  test('gh failing everywhere is explained', async () => {
+    const loggedOut: Runner = async () => { throw Object.assign(new Error('exit 4'), { code: 4, stderr: 'To get started with GitHub CLI, please run:  gh auth login' }); };
+    await expect(new GitHubSource(loggedOut).pullRequestFor('planner/x', [process.cwd()])).rejects.toThrow('gh auth login');
   });
 });

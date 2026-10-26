@@ -58,10 +58,13 @@ const cleanUp = async (final) => {
       console.log(`INFO worktree cleanup: ${String(error).split('\n')[0]}`);
     }
     const display = { linearLayout: 'list', linearGroupBy: 'status', linearOrderBy: 'priority', linearImportCompletion: false };
+    // The Google phase's fake account must not stay the calendar sessions are written to.
+    const googleLeft = state.settings.googleTimebox?.account === 'e2e@example.com';
     const displayChanged = Object.entries(display).some(([key, value]) => state.settings[key] !== undefined && state.settings[key] !== value);
     const commands = [
       // The Linear page's layout is a setting; put it back so the next run starts from the list.
       ...(displayChanged ? [{ cmd: `cleanup-display-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: display }] : []),
+      ...(googleLeft ? [{ cmd: `cleanup-google-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: { googleTimebox: null } }] : []),
       ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
       ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
       ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
@@ -103,10 +106,16 @@ page.on('console', (message) => {
 
 const openPlanner = async () => {
   await page.goto(`${base}/`, { waitUntil: 'load' });
-  await page.getByRole('button', { name: 'Planner', exact: true }).first().click({ timeout: 20_000 });
   // The full page sits in the host's inset overlay; the Work Status section is a separate frame.
-  const frame = page.frameLocator('.inset-0 > iframe[src*="oc-forge-planner"]');
-  await frame.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 30_000 });
+  // OpenChamber 2.5 serves extension frames from /api/guest-files/<grant>/; their title is the panel name.
+  const frame = page.frameLocator('.inset-0 > iframe[title="Planner"]');
+  const home = frame.getByRole('heading', { name: 'Home' });
+  // OpenChamber 2.5 reopens the page it showed before a reload, and the sidebar's Planner button
+  // toggles it; the rail's button (a panel surface) and the Work Status heading share the name.
+  if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
+    await page.locator('button[aria-label="Planner"]:not([data-context-surface])').first().click({ timeout: 20_000 });
+    await home.waitFor({ timeout: 30_000 });
+  }
   return frame;
 };
 
@@ -526,6 +535,10 @@ try {
     project: { id: 'p1', name: 'Planner' }, cycle: null, assigned, description: null, labels: { nodes: [] }, comments: { nodes: [] },
   });
   const linearIssues = [makeIssue(1, 'linear first', 'st-todo'), makeIssue(2, 'linear second', 'st-prog'), makeIssue(3, 'linear third', 'st-backlog'), makeIssue(5, 'linear by url', 'st-todo', false)];
+  // Saved views (phase 11): a favorite team view saved as a board grouped by priority, another team
+  // view, a workspace view, one of my own, and a view of projects that the picker leaves out.
+  const savedView = (id, name, extra) => ({ id, name: `${run} ${name}`, description: null, icon: null, color: null, shared: true, modelName: 'Issue', slugId: `slug-${id}`, updatedAt: new Date().toISOString(), team: null, owner: { id: 'u-e2e', name: 'E2E Linear' }, ...extra });
+  const viewOnlyIssue = { ...makeIssue(31, 'view only bug', 'st-todo', false), priority: 1, labels: { nodes: [{ id: 'lbl-bug', name: 'Bug', color: '#eb5757' }] } };
   const sideStates = makeStates('st-side-');
   const sideTeam = { id: 'team-side', key: 'SIDE', name: 'Side Team' };
   const sideIssue = (n, title, stateId) => ({
@@ -544,6 +557,15 @@ try {
       members: [{ id: 'u-e2e', name: 'E2E Linear', displayName: 'e2e', active: true }, { id: 'u-mate', name: 'Teammate', displayName: 'mate', active: true }, { id: 'u-gone', name: 'Former', displayName: 'former', active: false }],
       labels: [{ id: 'lbl-bug', name: 'Bug', color: '#eb5757' }, { id: 'lbl-feat', name: 'Feature', color: '#bb87fc' }],
       workspaceLabels: [{ id: 'lbl-cust', name: 'Customer', color: '#4ea7fc' }],
+      views: [
+        savedView('v-fav', 'Favorite board', { team }),
+        savedView('v-team', 'Team triage', { team }),
+        savedView('v-ws', 'Company view'),
+        savedView('v-mine', 'Mine', { shared: false }),
+        savedView('v-proj', 'Projects view', { modelName: 'Project' }),
+      ],
+      favorites: [{ type: 'customView', sortOrder: 1, customView: { id: 'v-fav' } }, { type: 'project', sortOrder: 0, customView: null }],
+      viewIssues: { 'v-fav': { prefs: { layout: 'board', issueGrouping: 'priority', viewOrdering: 'priority' }, issues: () => [...linearIssues.filter((issue) => issue.identifier !== 'E2E-5'), viewOnlyIssue] } },
     },
     side: {
       org: { id: 'org-side', name: 'Side Org', urlKey: 'side' }, viewer: { id: 'u-side', name: 'Side Me' }, states: sideStates, teams: [sideTeam], issues: [sideIssue(1, 'side first', 'st-side-todo'), sideIssue(2, 'side second', 'st-side-todo')],
@@ -558,7 +580,13 @@ try {
     const find = (id) => o.issues.find((issue) => issue.id === id || issue.identifier === id);
     if (op === 'PlannerWhoAmI') return { viewer: o.viewer, organization: o.org };
     if (op === 'PlannerAssigned') return { viewer: { ...o.viewer, assignedIssues: { nodes: o.issues.filter((issue) => issue.assigned && isOpenIssue(issue)).map(strip), pageInfo: { hasNextPage: false, endCursor: null } } } };
-    if (op === 'PlannerViews') return { customViews: { nodes: [] } };
+    if (op === 'PlannerViews') return { customViews: { nodes: o.views ?? [], pageInfo: { hasNextPage: false, endCursor: null } } };
+    if (op === 'PlannerFavoriteViews') return { favorites: { nodes: o.favorites ?? [] } };
+    if (op === 'PlannerViewIssues') {
+      const saved = o.viewIssues?.[variables.id];
+      const nodes = (saved?.issues() ?? []).filter(isOpenIssue).map(strip);
+      return { customView: (o.views ?? []).some((item) => item.id === variables.id) ? { id: variables.id, viewPreferencesValues: saved?.prefs ?? null, issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } : null };
+    }
     if (op === 'PlannerLinked') return { issues: { nodes: o.issues.filter((issue) => variables.ids.includes(issue.id)).map(strip) } };
     if (op === 'PlannerIssue') return { issue: find(variables.id) ? strip(find(variables.id)) : null };
     if (op === 'PlannerTeamStates') return { team: { id: variables.id, states: { nodes: o.states } } };
@@ -921,6 +949,73 @@ try {
   check('from a task, Escape closes the issue editor and leaves the task open', await thirdTask.isVisible());
   await thirdTask.getByRole('button', { name: 'Close' }).click();
 
+  // Phase 11: the views saved in Linear, opened as saved, and Linear's temporary filters.
+  await nav('Linear').click();
+  await frame.getByRole('tab', { name: 'Issues' }).click();
+  const sourcePicker = frame.locator('.linear-page').getByRole('combobox', { name: 'Linear issues to show' });
+  await sourcePicker.locator('optgroup[label="Favorites"]').waitFor({ state: 'attached', timeout: 15_000 });
+  const pickerGroups = await sourcePicker.locator('optgroup').evaluateAll((items) => items.map((item) => `${item.getAttribute('label')}: ${[...item.querySelectorAll('option')].map((option) => option.textContent).join(', ')}`));
+  check(
+    'the view picker lists favorites, then team, workspace and my views, without views of projects',
+    pickerGroups.join(' | ') === `Favorites: ${run} Favorite board | E2E · E2E Team: ${run} Team triage | Workspace views: ${run} Company view | My views: ${run} Mine`,
+    pickerGroups.join(' | '),
+  );
+  await sourcePicker.selectOption({ label: `${run} Favorite board` });
+  const viewRow = frame.locator('.linear-page li.issue-row', { hasText: 'E2E-31' });
+  await viewRow.waitFor({ timeout: 15_000 });
+  const boardColumns = await frame.locator('.issue-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')));
+  const priorityNames = { 1: 'Urgent', 2: 'High', 3: 'Medium', 4: 'Low', 0: 'No priority' };
+  const viewPriorities = new Set(linearOrgs.host.viewIssues['v-fav'].issues().filter(isOpenIssue).map((issue) => issue.priority));
+  const expectedColumns = [1, 2, 3, 4, 0].filter((priority) => viewPriorities.has(priority)).map((priority) => priorityNames[priority]);
+  check('a saved view opens with its own layout and grouping (a board by priority)', boardColumns.join('|') === expectedColumns.join('|'), `${boardColumns.join('|')} (want ${expectedColumns.join('|')})`);
+  check("opening a view does not change the Planner's own display settings", (await serviceState()).state.settings.linearLayout === 'list');
+  await shot('31-linear-view');
+
+  const filterBar = frame.locator('.linear-page .linear-filters').first();
+  const shownRows = () => frame.locator('.linear-page li.issue-row').count();
+  // What the fake view holds now (earlier phases moved and labelled some of its issues).
+  const inView = () => linearOrgs.host.viewIssues['v-fav'].issues().filter(isOpenIssue);
+  const shownKeys = async () => (await frame.locator('.linear-page li.issue-row').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label') ?? ''))).map((label) => /^E2E-\d+/.exec(label)?.[0]).sort();
+  const keysWhere = (test) => inView().filter(test).map((issue) => issue.identifier).sort();
+  const allInView = await shownRows();
+  await filterBar.getByRole('button', { name: '+ Filter' }).click();
+  await frame.getByRole('menuitem', { name: 'Status' }).click();
+  const statusMenu = frame.getByRole('dialog', { name: 'Filter by Status' });
+  await statusMenu.getByRole('checkbox', { name: /Todo/ }).check();
+  await filterBar.getByRole('button', { name: 'Edit filter: Status is Todo' }).waitFor({ timeout: 5000 });
+  await statusMenu.getByRole('button', { name: 'Done' }).click();
+  const todoOnly = await shownKeys();
+  const expectedTodo = keysWhere((issue) => issue.state.name === 'Todo');
+  check('a status filter keeps only those issues, and says how many it hides', todoOnly.join() === expectedTodo.join() && todoOnly.length < allInView && (await frame.locator('.linear-page .filter-count').innerText()).includes(`of ${allInView} issues`), `${todoOnly.join(', ')} (want ${expectedTodo.join(', ')}) of ${allInView}`);
+  await filterBar.getByRole('button', { name: 'Edit filter: Status is Todo' }).click();
+  await frame.getByRole('dialog', { name: 'Filter by Status' }).getByRole('radio', { name: 'is not' }).click();
+  await filterBar.getByRole('button', { name: 'Edit filter: Status is not Todo' }).waitFor({ timeout: 5000 });
+  await frame.getByRole('dialog', { name: 'Filter by Status' }).getByRole('button', { name: 'Done' }).click();
+  check('"is not" turns the filter around', (await frame.locator('.linear-page li.issue-row', { hasText: /E2E-31(?!\d)/ }).count()) === 0 && (await shownRows()) === allInView - todoOnly.length);
+  await filterBar.getByRole('button', { name: 'Remove filter: Status is not Todo' }).click();
+  await filterBar.getByRole('button', { name: '+ Filter' }).click();
+  await frame.getByRole('menuitem', { name: 'Label' }).click();
+  await frame.getByRole('dialog', { name: 'Filter by Label' }).getByRole('checkbox', { name: /Bug/ }).check();
+  await frame.getByRole('dialog', { name: 'Filter by Label' }).getByRole('button', { name: 'Done' }).click();
+  await page.waitForTimeout(300);
+  const expectedBug = keysWhere((issue) => issue.labels.nodes.some((label) => label.name === 'Bug'));
+  check('a label filter keeps the issues that have it', (await shownKeys()).join() === expectedBug.join() && expectedBug.includes('E2E-31'), `${(await shownKeys()).join(', ')} (want ${expectedBug.join(', ')})`);
+  await shot('32-linear-filters');
+
+  // Assign an issue to an agent from its row: planned today, the task opens on "Assign to an agent".
+  await viewRow.getByRole('button', { name: 'Assign E2E-31 to an agent' }).click();
+  const assignFromRow = frame.getByRole('dialog', { name: 'Task details' }).getByRole('group', { name: 'Assign to an agent' });
+  await assignFromRow.waitFor({ timeout: 10_000 });
+  const rowBranch = await assignFromRow.getByRole('textbox', { name: 'Worktree branch' }).inputValue();
+  const rowTask = Object.values((await serviceState()).state.tasks).find((task) => task.title === `${run} view only bug` && !task.deletedAt);
+  check("an issue row's Agent plans it today and opens the assignment on Linear's branch name", rowBranch === 'e2e/e2e-31' && rowTask?.placement.kind === 'day' && rowTask.source?.key === 'E2E-31', `${rowBranch} · ${JSON.stringify(rowTask?.placement ?? null)}`);
+  await assignFromRow.getByRole('button', { name: 'Cancel' }).click();
+  await frame.getByRole('dialog', { name: 'Task details' }).getByRole('button', { name: 'Close' }).click();
+
+  await sourcePicker.selectOption('assigned');
+  await issueRow(3).waitFor({ timeout: 10_000 });
+  check("another list starts without filters, in the Planner's own display", (await filterBar.locator('.filter-chip').count()) === 0 && (await frame.locator('.issue-board').count()) === 0);
+
   await context.unroute(isRequestRoute);
   await context.unroute(isStatusRoute);
 
@@ -950,15 +1045,27 @@ try {
   check('starting twice quickly makes one run (no duplicate dispatch)', runsOf(afterStart, agentTitle).length === 1, `${runsOf(afterStart, agentTitle).length} runs`);
   const agentRun = runsOf(afterStart, agentTitle)[0];
   check('the run keeps project, directory and session', Boolean(agentRun?.sessionId && agentRun.projectId && agentRun.directory?.endsWith('planner-demo-a')), JSON.stringify(agentRun ?? null).slice(0, 160));
-  const reviewed = await firstAgent.dialog.locator('li.run-row', { hasText: 'Ready for review' }).waitFor({ timeout: 180_000 }).then(() => true).catch(() => false);
+  // A turn ends ready for review, or failed when the model could not answer.
+  const settledRow = firstAgent.dialog.locator('li.run-row', { hasText: /Ready for review|Agent run failed/ }).first();
+  const settled = await settledRow.waitFor({ timeout: 180_000 }).then(() => settledRow.innerText()).catch(() => '');
+  const reviewed = settled.includes('Ready for review');
   if (reviewed) {
     check('a finished turn shows as Ready for review', true);
   } else {
-    // Tell a slow free model apart from a stale Planner: ask OpenCode whether the turn finished.
+    // Tell a slow or failing model apart from a stale Planner: ask OpenCode how the turn ended.
     const messages = await (await context.request.get(`${base}/api/session/${agentRun.sessionId}/message?directory=${encodeURIComponent(agentRun.directory)}`)).json().catch(() => []);
-    const finished = (Array.isArray(messages) ? messages : messages.data ?? []).some((message) => (message.info ?? message).time?.completed && (message.info ?? message).finish);
-    if (finished) check('a finished turn shows as Ready for review', false, 'OpenCode finished the turn but the Planner still shows it running');
-    else console.log('INFO the dev container\'s free model did not finish within 3 minutes; skipped the review checks');
+    // OpenCode v2 names a message's author `type`; v1 said `role`.
+    const ended = (Array.isArray(messages) ? messages : messages.data ?? []).map((message) => message.info ?? message).filter((info) => (info.role ?? info.type) === 'assistant' && info.time?.completed);
+    const failure = ended.map((info) => info.error).find(Boolean);
+    const shown = await firstAgent.dialog.locator('li.run-row').first().innerText().catch(() => '');
+    if (failure) {
+      // The dev container's free model has a usage limit; its error ends the turn. OpenChamber reports
+      // a failed turn only when OpenCode sends session.error; otherwise the run just goes idle.
+      const said = String(failure.data?.message ?? failure.message ?? failure.name ?? 'an error').slice(0, 160);
+      check('a turn the model could not finish is not shown as running or ready for review', /Agent run failed|Agent idle/.test(shown) && !/Agent working|Ready for review/.test(shown), `${shown.split('\n')[0]} · the model said: ${said}`);
+      console.log(`INFO the dev container's model did not answer (${said}); skipped the review checks`);
+    } else if (ended.some((info) => info.finish)) check('a finished turn shows as Ready for review', false, `OpenCode finished the turn but the Planner shows: ${shown.split('\n')[0]}`);
+    else console.log("INFO the dev container's free model did not finish within 3 minutes; skipped the review checks");
   }
   check('a finished turn does not complete the task', !taskTitled(await serviceState(), agentTitle)?.completedAt);
   await shot('19-agent-run');
@@ -989,6 +1096,62 @@ try {
   const worktreeRun = runsOf(await serviceState(), worktreeTitle)[0];
   check('an agent can work in a new worktree', worktreeRun?.worktree?.branch === branchName, JSON.stringify(worktreeRun?.worktree ?? null));
   await secondAgent.dialog.getByRole('button', { name: 'Close' }).click();
+
+  // Phase 12: assign a task to an agent, as in GitHub or Linear: a new worktree, then a pull request.
+  await nav('Home').click();
+  const assignTitle = `${run} assigned task`;
+  await addInToday(assignTitle);
+  const assignCard = frame.locator('section.day-column.is-today li.task-card', { hasText: assignTitle });
+  await assignCard.hover();
+  await assignCard.getByRole('button', { name: 'Task actions' }).click();
+  await assignCard.getByRole('menuitem', { name: 'Assign to an agent' }).click();
+  const assignDialog = frame.getByRole('dialog', { name: 'Task details' });
+  const assignForm = assignDialog.getByRole('group', { name: 'Assign to an agent' });
+  check('"Assign to an agent" in the card menu opens the task on the assignment', await assignForm.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+  await assignForm.getByRole('combobox', { name: 'Agent project' }).selectOption({ label: 'planner-demo-a' });
+  const assignBranch = `planner/${run}-assign`;
+  await assignForm.getByRole('textbox', { name: 'Worktree branch' }).fill(assignBranch);
+  await assignForm.getByRole('button', { name: 'Edit the instructions' }).click();
+  const instructions = await assignForm.getByRole('textbox', { name: 'Agent prompt' }).inputValue();
+  check('the assignment asks for a pull request from its branch', instructions.includes(`branch \`${assignBranch}\``) && instructions.includes('gh pr create'), instructions.slice(-240).replace(/\s+/g, ' '));
+  // The demo project has nowhere to push to; the dev container's free model only has to answer.
+  await assignForm.getByRole('textbox', { name: 'Agent prompt' }).fill(TRIVIAL);
+  // Pull requests are looked up with gh through the service; answer for this run's branch.
+  let fakePull = null;
+  const pullLookups = [];
+  await context.route(isServiceRoute, async (route) => {
+    const outer = route.request().postDataJSON();
+    if (outer?.path !== '/github/pulls') return route.continue();
+    const { runs: asked } = JSON.parse(outer.body);
+    pullLookups.push(...asked);
+    const results = asked.map((item) => ({ runId: item.runId, pullRequest: item.branch === assignBranch ? fakePull : null }));
+    await route.fulfill({ json: { status: 200, body: JSON.stringify({ results }) } });
+  });
+  await assignForm.getByRole('button', { name: 'Assign', exact: true }).click();
+  await assignDialog.locator('li.run-row').first().waitFor({ timeout: 200_000 });
+  const assignedRun = runsOf(await serviceState(), assignTitle)[0];
+  check('an assigned run works in a new worktree on its branch and expects a pull request', assignedRun?.worktree?.branch === assignBranch && assignedRun.wantsPr === true, JSON.stringify(assignedRun ?? null).slice(0, 200));
+  await assignDialog.getByRole('button', { name: 'Close' }).click();
+  fakePull = { number: 4242, url: 'https://github.com/e2e/demo/pull/4242', state: 'open', draft: false, title: assignTitle, repo: 'e2e/demo' };
+  // A freshly opened Planner looks pull requests up within seconds.
+  frame = await openPlanner();
+  const withPull = await waitForState((latest) => runsOf(latest, assignTitle)[0]?.pullRequest?.number === 4242, 20_000);
+  check(
+    "the pull request from the run's branch is found in its worktree and logged",
+    runsOf(withPull, assignTitle)[0]?.pullRequest?.state === 'open' && pullLookups.some((item) => item.branch === assignBranch && item.directories[0] === assignedRun?.worktree?.directory),
+    JSON.stringify(pullLookups.slice(-2)).slice(0, 200),
+  );
+  await nav('Agents').click();
+  check('the run shows its pull request', await frame.locator('li.agent-task', { hasText: assignTitle }).getByRole('button', { name: 'Open pull request e2e/demo#4242 (Open)' }).waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+  await shot('33-assigned-pr');
+  fakePull = { ...fakePull, state: 'merged' };
+  frame = await openPlanner();
+  await waitForState((latest) => runsOf(latest, assignTitle)[0]?.pullRequest?.state === 'merged', 20_000);
+  await nav('Agents').click();
+  await frame.locator('li.agent-task', { hasText: assignTitle }).getByRole('button', { name: 'Merged: complete the task' }).click();
+  const completedByPr = await waitForState((latest) => Boolean(taskTitled(latest, assignTitle)?.completedAt));
+  check('a merged pull request offers to complete the task', Boolean(taskTitled(completedByPr, assignTitle)?.completedAt));
+  await context.unroute(isServiceRoute);
 
   // From the chat: a message action, /task, and the session action.
   await nav('Agents').click();
@@ -1143,7 +1306,8 @@ try {
   execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', `rm -rf ${bare} /tmp/planner-replica && git init --quiet --bare -b main ${bare}`]);
   await nav('Settings').click();
   await frame.getByRole('textbox', { name: 'Sync remote' }).fill(bare);
-  await frame.getByRole('button', { name: 'Save' }).click();
+  // Settings has more than one Save (Google's client form too); this is Sync's.
+  await frame.getByRole('group', { name: 'Sync', exact: true }).getByRole('button', { name: 'Save' }).click();
   await frame.getByRole('button', { name: 'Sync now' }).click();
   await frame.getByText(/^Last synced /).waitFor({ timeout: 60_000 });
   const pushed = execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'git', `--git-dir=${bare}`, 'log', '--oneline', '-1', 'main'], { encoding: 'utf8' }).trim();
@@ -1201,9 +1365,184 @@ try {
   check('the board jumps to a picked date', firstColumn.includes(monthDayLabel(jumpTo)), firstColumn);
   await frame.getByRole('button', { name: 'Today', exact: true }).last().click().catch(() => {});
 
+  // Phase 13: Google Calendar, Google Tasks and Gmail. The service's /google routes answer from a
+  // fake account here: the real ones would need Google and a person to sign in.
+  const GMAIL = 'e2e@example.com';
+  const gtask = (id, title, due) => ({ account: GMAIL, listId: 'L1', id, title: `${run} ${title}`, notes: id === 'gt1' ? 'at the post office' : '', due, completed: false, parent: null, position: id, url: `https://tasks.google.com/task/${id}`, updated: new Date().toISOString() });
+  const fake = {
+    client: null,
+    accounts: [],
+    signedIn: false,
+    calendars: [
+      { account: GMAIL, id: 'primary', name: `${run} Me`, color: '#4285f4', primary: true, writable: true },
+      { account: GMAIL, id: 'holidays', name: `${run} Holidays`, color: '#0b8043', primary: false, writable: false },
+    ],
+    lists: [{ account: GMAIL, id: 'L1', title: 'My Tasks' }],
+    tasks: [gtask('gt1', 'buy stamps', todayKey), gtask('gt2', 'call the bank', tomorrowKey), gtask('gt3', 'renew passport', null)],
+    calendarOn: false,
+    mail: [{ account: GMAIL, id: 'm1', threadId: 'th1', subject: `${run} review the deck`, from: 'Ann Lee <ann@example.com>', date: new Date().toISOString(), snippet: 'Could you look at slides 3 to 5?', unread: true, url: 'https://mail.google.com/mail/u/e2e%40example.com/#all/th1' }],
+    writes: [],
+  };
+  const googleAnswer = (method, path, body) => {
+    const url = new URL(path, 'http://service');
+    const status = () => ({ client: fake.client, accounts: fake.accounts, timeboxError: null });
+    if (url.pathname === '/google/status') return status();
+    if (url.pathname === '/google/client' && method === 'PUT') {
+      if (!/\.apps\.googleusercontent\.com$/.test(body.id)) return { httpStatus: 400, error: 'That is not an OAuth client ID (it ends in .apps.googleusercontent.com)' };
+      fake.client = { id: body.id };
+      return status();
+    }
+    if (url.pathname === '/google/connect' && method === 'POST') return { id: 'signin-e2e-1', authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=e2e', redirectUri: 'http://127.0.0.1:43210/' };
+    if (url.pathname === '/google/connect/signin-e2e-1') return fake.signedIn ? { status: 'connected', email: GMAIL, features: ['calendar', 'tasks', 'mail'] } : { status: 'pending' };
+    if (url.pathname === '/google/connect/signin-e2e-1/finish') {
+      if (!body.url.startsWith('http://127.0.0.1:43210/') || !body.url.includes('code=')) return { httpStatus: 400, error: 'That address is not the one this sign-in waits for' };
+      fake.signedIn = true;
+      fake.accounts = [{ email: GMAIL, features: ['calendar', 'tasks', 'mail'], addedAt: new Date().toISOString() }];
+      return { status: 'connected', email: GMAIL, features: ['calendar', 'tasks', 'mail'] };
+    }
+    if (url.pathname === '/google/calendars') return { calendars: fake.accounts.length ? fake.calendars : [], errors: [] };
+    if (url.pathname === '/google/tasklists') return { lists: fake.accounts.length ? fake.lists : [], errors: [] };
+    if (url.pathname === '/google/tasks' && method === 'GET') return { tasks: fake.tasks.filter((item) => !item.completed) };
+    if (url.pathname === '/google/tasks/linked') return { tasks: fake.tasks.filter((item) => body.groups.some((group) => group.ids.includes(item.id))) };
+    if (url.pathname === '/google/tasks' && method === 'PATCH') {
+      fake.writes.push({ method, ...body });
+      const item = fake.tasks.find((task) => task.id === body.id);
+      if (body.completed !== undefined) item.completed = body.completed;
+      if (body.due !== undefined) item.due = body.due;
+      return { task: item };
+    }
+    if (url.pathname === '/google/tasks' && method === 'POST') {
+      fake.writes.push({ method, ...body });
+      const item = { ...gtask(`gt${fake.tasks.length + 1}`, 'x', body.due ?? null), title: body.title };
+      fake.tasks.push(item);
+      return { task: item };
+    }
+    if (url.pathname === '/google/mail') return { messages: fake.mail };
+    return null;
+  };
+  // The calendar the service would read from Google: a meeting and a Google task due that day.
+  const isoAt = (minutes, dayKey) => localToUtc(minutes, dayKey).replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, '$1-$2-$3T$4:$5:$6.000Z');
+  const dayAfter = (key) => { const d = new Date(`${key}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
+  const fakeCalendar = (from) => {
+    const gcalId = Object.values(lastState?.state.calendars ?? {}).find((calendar) => calendar.google?.calendarId === 'primary')?.id ?? 'none';
+    const due = fake.tasks.find((item) => item.id === 'gt9');
+    return [
+      { id: `${gcalId}:review`, calendarId: gcalId, title: `${run} design review`, location: '', start: isoAt(15 * 60, from), end: isoAt(16 * 60, from), allDay: false, busy: true },
+      ...(due ? [{ id: 'gtask:L1:gt9', calendarId: 'google-tasks', title: due.title, location: '', start: isoAt(0, from), end: isoAt(0, dayAfter(from)), allDay: true, busy: false, googleTask: { ...due, due: from } }] : []),
+    ];
+  };
+  let lastState = null;
+  await context.route(isServiceRoute, async (route) => {
+    const outer = route.request().postDataJSON();
+    if (fake.calendarOn && String(outer?.path ?? '').startsWith('/calendar?')) {
+      const from = new URL(outer.path, 'http://service').searchParams.get('from');
+      return route.fulfill({ json: { status: 200, body: JSON.stringify({ events: fakeCalendar(from), errors: [] }) } });
+    }
+    if (!String(outer?.path ?? '').startsWith('/google/')) return route.continue();
+    const answer = googleAnswer(outer.method ?? 'GET', outer.path, outer.body ? JSON.parse(outer.body) : {});
+    if (!answer) return route.continue();
+    await route.fulfill({ json: answer.httpStatus ? { status: answer.httpStatus, body: JSON.stringify({ error: answer.error }) } : { status: 200, body: JSON.stringify(answer) } });
+  });
+  // Google's sign-in page is not visited for real.
+  await context.route('https://accounts.google.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<p>Google sign-in (e2e)</p>' }));
+  frame = await openPlanner();
+  await nav('Settings').click();
+  const googleBox = frame.getByRole('group', { name: 'Google', exact: true });
+  await googleBox.getByRole('textbox', { name: 'Google OAuth client ID' }).fill('not-a-client');
+  await googleBox.getByRole('textbox', { name: 'Google OAuth client secret' }).fill('GOCSPX-e2e-secret-value');
+  await googleBox.getByRole('button', { name: 'Save' }).click();
+  check('a client ID that is not one is refused, with the reason', await googleBox.getByRole('alert').filter({ hasText: 'OAuth client ID' }).waitFor({ timeout: 5000 }).then(() => true).catch(() => false));
+  await googleBox.getByRole('textbox', { name: 'Google OAuth client ID' }).fill('123456789012-e2eabcdefghijklmnop.apps.googleusercontent.com');
+  await googleBox.getByRole('button', { name: 'Save' }).click();
+  await googleBox.getByText('No account connected yet.').waitFor({ timeout: 5000 });
+  await googleBox.getByRole('button', { name: 'Connect a Google account' }).click();
+  const pasteBox = googleBox.getByRole('textbox', { name: 'Address Google sent the browser to' });
+  check('connecting waits for Google and offers to paste the address it ends on', await pasteBox.waitFor({ timeout: 5000 }).then(() => true).catch(() => false));
+  await pasteBox.fill('http://127.0.0.1:43210/?state=e2e&code=e2e-code&scope=x');
+  await googleBox.getByRole('button', { name: 'Finish' }).click();
+  const accountRow = googleBox.getByRole('list', { name: 'Google accounts' }).getByRole('listitem').filter({ hasText: GMAIL });
+  await accountRow.waitFor({ timeout: 8000 });
+  check('the connected account shows with what it allows', (await accountRow.innerText()).includes('Calendar, Tasks, Gmail'), (await accountRow.innerText()).replace(/\s+/g, ' '));
+  await googleBox.getByRole('checkbox', { name: `${run} Me` }).check();
+  const withCalendar = await waitForState((latest) => Object.values(latest.state.calendars).some((calendar) => calendar.google?.account === GMAIL && calendar.google.calendarId === 'primary'));
+  check('a Google calendar shows beside the plan, read through its account', Object.values(withCalendar.state.calendars).some((calendar) => calendar.google?.calendarId === 'primary' && calendar.visible));
+  await googleBox.getByRole('combobox', { name: 'Google calendar for working sessions' }).selectOption({ label: `${run} Me` });
+  const withTarget = await waitForState((latest) => latest.state.settings.googleTimebox?.calendarId === 'primary');
+  check('working sessions can be written to a Google calendar (only writable ones are offered)', withTarget.state.settings.googleTimebox?.account === GMAIL && (await googleBox.getByRole('combobox', { name: 'Google calendar for working sessions' }).locator('option', { hasText: `${run} Holidays` }).count()) === 0);
+  await shot('34-google-settings');
+
+  await nav('Today').click();
+  await frame.getByRole('tab', { name: 'Google Tasks' }).click();
+  const stamps = frame.locator('.side-panel li.issue-row', { hasText: `${run} buy stamps` });
+  await stamps.waitFor({ timeout: 8000 });
+  check('Google Tasks shows a list\'s open tasks with their due dates', (await stamps.innerText()).includes('Due today') && (await frame.locator('.side-panel li.issue-row', { hasText: `${run} renew passport` }).count()) === 1);
+  await stamps.getByRole('button', { name: `Plan ${run} buy stamps today` }).click();
+  await frame.locator('.side-panel li.issue-row', { hasText: `${run} renew passport` }).getByRole('button', { name: `Plan ${run} renew passport today` }).click();
+  const plannedGoogle = await waitForState((latest) => Boolean(taskTitled(latest, `${run} buy stamps`)) && Boolean(taskTitled(latest, `${run} renew passport`)));
+  const stampsTask = taskTitled(plannedGoogle, `${run} buy stamps`);
+  check('a Google task becomes a linked task, with its notes and due date', stampsTask?.source?.kind === 'gtask' && stampsTask.source.listId === 'L1' && stampsTask.notes === 'at the post office' && stampsTask.dueDate === todayKey, JSON.stringify(stampsTask?.source ?? null));
+  const dueWrite = await (async () => { for (let i = 0; i < 40 && !fake.writes.some((write) => write.id === 'gt3'); i++) await page.waitForTimeout(250); return fake.writes.find((write) => write.id === 'gt3'); })();
+  check('planning a Google task on a day makes it due that day in Google, unless it already was', dueWrite?.due === todayKey && !fake.writes.some((write) => write.id === 'gt1' && write.due), JSON.stringify(fake.writes));
+  const stampsCard = todayCol.locator('li.task-card', { hasText: `${run} buy stamps` });
+  await stampsCard.getByRole('button', { name: 'Mark complete' }).click();
+  const completedThere = await (async () => { for (let i = 0; i < 40 && !fake.writes.some((write) => write.id === 'gt1' && write.completed === true); i++) await page.waitForTimeout(250); return fake.writes.some((write) => write.id === 'gt1' && write.completed === true); })();
+  const syncedDone = await waitForState((latest) => taskTitled(latest, `${run} buy stamps`)?.source?.status?.type === 'completed');
+  check('completing it here completes it in Google Tasks', completedThere && taskTitled(syncedDone, `${run} buy stamps`)?.source?.status?.name === 'Completed');
+
+  await frame.getByRole('tab', { name: 'Gmail' }).click();
+  const deck = frame.locator('.side-panel li.issue-row', { hasText: `${run} review the deck` });
+  await deck.waitFor({ timeout: 8000 });
+  check('Gmail lists the inbox, sender first', (await deck.innerText()).includes('Ann Lee'));
+  await deck.getByRole('button', { name: `Plan ${run} review the deck today` }).click();
+  const mailed = await waitForState((latest) => Boolean(taskTitled(latest, `${run} review the deck`)));
+  const deckTask = taskTitled(mailed, `${run} review the deck`);
+  check('an email becomes a task linked back to Gmail, with who sent it', deckTask?.source?.kind === 'email' && deckTask.source.url === fake.mail[0].url && deckTask.notes.startsWith('From Ann Lee'), JSON.stringify(deckTask?.source ?? null));
+  await shot('35-gmail');
+
+  await addInToday(`${run} plain errand`);
+  await todayCol.locator('li.task-card', { hasText: `${run} plain errand` }).getByRole('button', { name: new RegExp(`Open ${run} plain errand`) }).click();
+  const errandDialog = frame.getByRole('dialog', { name: 'Task details' });
+  await errandDialog.getByRole('button', { name: 'Add to Google Tasks' }).click();
+  const added = await waitForState((latest) => taskTitled(latest, `${run} plain errand`)?.source?.kind === 'gtask');
+  check('a task can be added to Google Tasks, and stays linked to it', taskTitled(added, `${run} plain errand`)?.source?.listId === 'L1' && fake.writes.some((write) => write.method === 'POST' && write.title === `${run} plain errand` && write.due === todayKey));
+  check('the task detail offers to open it in Google Tasks', await errandDialog.getByRole('button', { name: 'Open in Google Tasks' }).isVisible());
+  await errandDialog.getByRole('button', { name: 'Close' }).click();
+
+  // On the calendar: a Google task due today, as Google Calendar shows it, and an event that becomes a task.
+  fake.tasks.push(gtask('gt9', 'renew library card', todayKey));
+  lastState = await serviceState();
+  fake.calendarOn = true;
+  await nav('Home').click();
+  await nav('Today').click();
+  await frame.getByRole('tab', { name: 'Calendar' }).click();
+  const dueChip = frame.getByRole('button', { name: new RegExp(`^Plan the Google task ${run} renew library card on `) });
+  check('a Google task due today shows on the calendar, as in Google Calendar', await dueChip.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
+  await dueChip.click();
+  const fromDue = await waitForState((latest) => taskTitled(latest, `${run} renew library card`)?.source?.kind === 'gtask');
+  check('one click plans it today, linked to the Google task', taskTitled(fromDue, `${run} renew library card`)?.placement.date === todayKey && taskTitled(fromDue, `${run} renew library card`)?.source?.id === 'gt9');
+  check('a planned Google task leaves the all-day row', await dueChip.waitFor({ state: 'detached', timeout: 5000 }).then(() => true).catch(() => false));
+  const reviewEvent = frame.locator('.grid-item.is-event', { hasText: `${run} design review` });
+  await reviewEvent.hover();
+  await reviewEvent.getByRole('button', { name: `Add ${run} design review as a task` }).click();
+  const fromMeeting = await waitForState((latest) => Boolean(taskTitled(latest, `${run} design review`)));
+  const meetingTask = taskTitled(fromMeeting, `${run} design review`);
+  check('a calendar event becomes a task on its day, its length as planned time', meetingTask?.placement.date === todayKey && meetingTask.plannedMinutes === 60, JSON.stringify({ placement: meetingTask?.placement, minutes: meetingTask?.plannedMinutes }));
+  await shot('36-calendar-google-tasks');
+  fake.calendarOn = false;
+
+  // Leave no Google calendar or session calendar behind for later runs (the real service has no such account).
+  await nav('Settings').click();
+  await googleBox.getByRole('checkbox', { name: `${run} Me` }).uncheck();
+  await googleBox.getByRole('combobox', { name: 'Google calendar for working sessions' }).selectOption({ label: "Don't write them" });
+  const reset = await waitForState((latest) => !latest.state.settings.googleTimebox && !Object.values(latest.state.calendars).some((calendar) => calendar.google?.account === GMAIL));
+  check('a Google calendar and the session calendar can be turned off again', !reset.state.settings.googleTimebox);
+  await context.unroute(isServiceRoute);
+  await context.unroute('https://accounts.google.com/**');
+  frame = await openPlanner();
+
   // The Work Status section sits in the chat's Work Status panel (shown on the home screen too).
   await page.goto(`${base}/`, { waitUntil: 'load' });
-  const statusSelector = '.rounded-md > iframe[src*="oc-forge-planner"]';
+  const statusSelector = '.rounded-md > iframe[title="Planner"]';
   const statusMounted = () => page.locator(statusSelector).first().waitFor({ timeout: 8000 }).then(() => true).catch(() => false);
   let mounted = await statusMounted();
   const toggle = page.getByRole('button', { name: 'Toggle work-status panel' }).first();

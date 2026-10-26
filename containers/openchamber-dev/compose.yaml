@@ -1,10 +1,11 @@
-# OpenChamber 2.4.0 + OpenCode 2.0.32 for extension development; see README.md.
+# OpenChamber 2.5.1 + OpenCode 2.1.4, and VS Code Server 1.140.0 for the web,
+# for extension development; see README.md.
 name: oc-forge-openchamber-dev
 
 services:
   openchamber:
     build: .
-    image: oc-forge/openchamber-dev:2.4.0
+    image: oc-forge/openchamber-dev:2.5.1
     container_name: oc-forge-openchamber-dev
     init: true
     restart: unless-stopped
@@ -19,6 +20,38 @@ services:
     volumes:
       - home:/home/node
       - ../../extensions:/extensions
+
+  # VS Code in the browser, on the same home volume (projects, worktrees) and extensions.
+  vscode:
+    build: .
+    image: oc-forge/openchamber-dev:2.5.1
+    container_name: oc-forge-vscode-dev
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${OC_DEV_BIND:-127.0.0.1}:${OC_VSCODE_PORT:-35311}:8000"
+    env_file:
+      # VSCODE_CONNECTION_TOKEN lives in the same secrets file as the UI password.
+      - path: ${HOME}/.local/share/oc-forge-openchamber-dev/secrets.env
+        required: true
+    volumes:
+      - home:/home/node
+      - ../../extensions:/extensions
+    # Without a token anyone who reaches the port would have a shell; refuse to start.
+    command:
+      - sh
+      - -c
+      - >-
+        test -n "$$VSCODE_CONNECTION_TOKEN" || { echo 'Set VSCODE_CONNECTION_TOKEN in secrets.env' >&2; exit 1; };
+        umask 077; printf %s "$$VSCODE_CONNECTION_TOKEN" > /tmp/vscode-token;
+        exec vscode-server --host 0.0.0.0 --port 8000 --connection-token-file /tmp/vscode-token
+        --accept-server-license-terms --server-data-dir /home/node/.vscode-server-web
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8000"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
 volumes:
   home:

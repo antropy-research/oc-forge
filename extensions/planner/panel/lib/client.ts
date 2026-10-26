@@ -60,7 +60,7 @@ export interface DispatchOptions {
   origin?: Origin;
 }
 
-export type Origin = 'user' | 'linear' | 'github' | 'agent';
+export type Origin = 'user' | 'linear' | 'github' | 'google' | 'agent';
 
 /** Called after the service accepted a batch, with the confirmed state before and after it. */
 export type CommitListener = (commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin) => void;
@@ -178,7 +178,7 @@ export class PlannerClient {
   }
 
   /** A raw call to the local service, for modules with their own endpoints. */
-  call<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
+  call<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
     return this.request<T>(method, path, body);
   }
 
@@ -276,7 +276,7 @@ export class PlannerClient {
     for (const listener of this.listeners) listener();
   }
 
-  private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
     const response = await this.host.serviceRequest({ method, path, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const data = response.body ? (JSON.parse(response.body) as T & { error?: string }) : ({} as T & { error?: string });
     if (response.status >= 400) throw new Error(data.error ?? `Planner service answered ${response.status}`);
