@@ -40,7 +40,7 @@ description = "Type-check, test and rebuild the OpenChamber extensions; their co
 run = [
   "cd extensions/planner && bun install --frozen-lockfile && bun run check && bun test tests/ && bun run build",
   "cd extensions/vscode && bun install --frozen-lockfile && bun run check && bun test tests/ && bun run build",
-  "git diff --exit-code -- extensions/planner/panel/main.js extensions/planner/service/main.js extensions/vscode/workbench/main.js extensions/vscode/panel/main.js extensions/vscode/service/main.js",
+  "git diff --exit-code -- extensions/planner/panel/main.js extensions/planner/service/main.js extensions/vscode/workbench/main.js extensions/vscode/panel/main.js extensions/vscode/service/main.js extensions/vscode/webview/host.js",
 ]
 
 [tasks.ci]

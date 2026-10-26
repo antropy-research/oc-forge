@@ -11,6 +11,8 @@ const workbench = [
   'var qxi=class{async sign(o){try{return await this.signValue(o)}catch{}return o}};',
   'kLe=class extends qxi{getValidator(){return this.vsda().then(e=>e)}signValue(e){return this.vsda().then(t=>t.sign(e))}};',
   'fetch(nj("vscode-oniguruma","release/onig.wasm"));',
+  'async function HOt(s,o){if(!crypto.subtle)throw new Error("\'crypto.subtle\' is not available so webviews will not work. This is likely because...");let e=JSON.stringify({parentOrigin:s,salt:o}),i=new TextEncoder().encode(e);return i}',
+  '_registerMessageHandler(e){let t=this._register(q(e,"message",i=>{if(!(!this._encodedWebviewOrigin||i?.data?.target!==this.id)){if(i.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)){console.log("skipped");return}}}))}',
   '(function(){axo(dt.document.body,{...e,windowIndicator:1})})();export{lxo as L};',
 ].join('\n');
 const iframe = [

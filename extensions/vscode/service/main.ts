@@ -29,6 +29,8 @@ const assets = new WorkbenchAssets(
   join(packageRoot, 'vscode-web'),
   async () => JSON.parse(await readFile(join(packageRoot, 'service', 'web-files.json'), 'utf8')) as string[],
   log,
+  undefined,
+  join(packageRoot, 'webview'),
 );
 const tunnels = new Tunnels();
 const state = new WorkbenchState(process.env.OPENCHAMBER_VSCODE_DATA_DIR || join(homedir(), '.local', 'share', 'openchamber-vscode', 'state'), log);

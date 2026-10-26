@@ -64,6 +64,22 @@ export const patchWorkbench = (source: string): string => {
     'async sign($1){try{return await this.signValue($1)}catch{}return globalThis.__ocVSCode.connectionToken??$1}',
     'the handshake signature',
   );
+  // Webviews name their origin with a SHA-256 of the parent origin, which needs crypto.subtle
+  // (absent over plain HTTP); with this extension's webview host the name is only an identifier.
+  text = replaceOnce(
+    text,
+    new RegExp(`if\\(!crypto\\.subtle\\)throw new Error\\("'crypto\\.subtle' is not available so webviews will not work\\.[^"]*"\\);let (${IDENT})=JSON\\.stringify\\(\\{parentOrigin:(${IDENT}),salt:(${IDENT})\\}\\)`),
+    'if(!crypto.subtle)return globalThis.__ocVSCode.originHash($2,$3);let $1=JSON.stringify({parentOrigin:$2,salt:$3})',
+    'the webview origin hash',
+  );
+  // A webview frame inside this frame has an opaque origin too ("null"), not its URL's:
+  // its messages are accepted when they come from that very frame.
+  text = replaceOnce(
+    text,
+    new RegExp(`if\\((${IDENT})\\.origin!==this\\._webviewContentOrigin\\(this\\._encodedWebviewOrigin\\)\\)`),
+    'if($1.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)&&!($1.origin==="null"&&$1.source===this.element?.contentWindow))',
+    "the webview origin check",
+  );
   return renameWasm(text, 'the workbench');
 };
 

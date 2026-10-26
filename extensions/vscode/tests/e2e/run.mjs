@@ -138,6 +138,13 @@ try {
   check('Ctrl+S saves the edit on the VS Code Server', Boolean(saved));
   await page.screenshot({ path: join(out, '02-editor.png') });
 
+  // A webview: Markdown's preview, rendered by this extension's webview host inside OpenChamber.
+  await command('Markdown: Open Preview to the Side');
+  const preview = panel.frameLocator('iframe.webview').first().frameLocator('#active-frame');
+  const previewHeading = await preview.locator('h1').first().innerText({ timeout: 30_000 }).catch(() => '');
+  check("Markdown's preview (a VS Code webview) renders the file", previewHeading.trim() === 'planner-demo-a', previewHeading);
+  await page.screenshot({ path: join(out, '02b-markdown-preview.png') });
+
   // Source control: the change and VS Code's diff editor.
   await page.keyboard.press('Control+Shift+g');
   const change = panel.locator('.scm-view .monaco-list-row', { hasText: 'README.md' }).first();

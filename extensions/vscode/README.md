@@ -5,7 +5,8 @@ Renders compiled VS Code inside OpenChamber (manifest `apiVersion` 1, OpenChambe
 **VS Code** rail panel (beside the chat, expandable) and as a full **VS Code** page (Extension pages → VS Code).
 Nothing opens in another tab or window. Explorer, editor (VS Code's own grammars, themes and IntelliSense from the
 server's extensions), Search, Source Control with its diff editor, the integrated terminal, Run and Debug,
-extensions and the command palette are VS Code itself, running on the server's files.
+extensions, webviews such as the Markdown preview, and the command palette are VS Code itself, running on the
+server's files.
 
 - **Open in VS Code** in a chat's menu shows that chat's folder (or worktree) in the VS Code panel.
 - VS Code follows OpenChamber's light or dark look when it starts, and switches when OpenChamber's does.
@@ -30,11 +31,12 @@ its server's origin. The extension's intermediate components close that gap:
 | IndexedDB, localStorage, cookies | They throw | An in-memory IndexedDB (`fake-indexeddb`) filled from, and saved to, the service (`~/.local/share/openchamber-vscode/state/`, one file per server, mode 0600); memory storage for the rest |
 | Codicon font | Fonts are not served to the frame | Inlined into the stylesheet |
 
-Limits: VS Code's webviews (Markdown preview, release notes, extension detail pages, extensions' own webview
-panels) need service workers and same-origin nested frames, which an opaque-origin frame cannot have; they show
-VS Code's own error. OpenChamber's Files view has its own Markdown preview. VS Code's chat and its GitHub sign-in
-are turned off (`chat.disableAIFeatures`): OpenChamber is where agents run. Copy and paste with the keyboard work;
-the clipboard from VS Code's context menus may not.
+| Webviews (Markdown preview, extension pages, Mermaid) | VS Code's webview host needs a service worker, `crypto.subtle` and same-origin access to the frame it writes into | `webview/` replaces it in the prepared workbench: the same protocol with the workbench, the content in a srcdoc frame run by an agent over a MessagePort, its files read through the workbench's `load-resource` channel and put inline (module imports through an import map of `blob:` URLs); the webview's own CSP keeps its nonce |
+
+Limits: images a webview loads from the internet (badges in an extension's README) are blocked, as the frame
+connects nowhere but its package. VS Code's chat and its GitHub sign-in are turned off (`chat.disableAIFeatures`):
+OpenChamber is where agents run. Copy and paste with the keyboard work; the clipboard from VS Code's context menus
+may not.
 
 The extension no longer replaces OpenChamber's own file editor (`contributes.fileEditors`): the host can't hand a
 line to an extension editor, so search results and file links lost their line. Code renders in the VS Code view.
@@ -47,6 +49,7 @@ line to an extension editor, so search results and file links lost their line. C
 | `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`) |
 | `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB |
 | `panel/` | The background frame: "Open in VS Code" on a chat |
+| `webview/` | The webview host page (`host.ts`, built to `host.js` with the agent inside) and the agent that runs in each webview's content (`agent.ts`); `content.ts` makes a webview's HTML self-contained |
 | `scripts/web-files.ts` | Lists the browser's files of a VS Code Server install for `service/web-files.json` |
 
 ## Build
@@ -60,7 +63,7 @@ node tests/e2e/run.mjs http://<bind>:35310   # on the host, against the dev cont
 ```
 
 The E2E check connects the panel to the dev container's VS Code Server, checks the Explorer, file icons, the
-editor's grammar colors, a save with Ctrl+S, Source Control and its diff editor, Search, the terminal, state kept
+editor's grammar colors, a save with Ctrl+S, Markdown's preview (a webview), Source Control and its diff editor, Search, the terminal, state kept
 across a reload, the page, "Open in VS Code" on a chat, that OpenChamber's own editor still opens a search hit at its line, and that no other page or tab opened. It puts the
 demo project's README, the extension's settings and its chats back afterwards.
 

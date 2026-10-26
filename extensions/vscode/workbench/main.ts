@@ -5,7 +5,7 @@
 import { connectHost, type HostReadyContext, type JsonValue } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 import { isConnectionToken, parseServerUrl, readOpenRequest, readSettings, type OpenRequest, type VscodeSettings } from '../src/settings.ts';
-import { isExternalAllowed, remoteUri, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
+import { isExternalAllowed, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
 import { persistentIndexedDB, IDBKeyRange, type StateOp, type StateSnapshot } from './storage.ts';
 import { TunnelSocket, type TunnelService } from './tunnel.ts';
@@ -193,6 +193,7 @@ const boot = async (): Promise<void> => {
   let workbench: { commands: { executeCommand: (id: string, ...args: unknown[]) => Promise<unknown> }; window: { showInformationMessage: (message: string, ...items: string[]) => Promise<string | undefined> } } | null = null;
   (globalThis as Record<string, unknown>).__ocVSCode = {
     connectionToken: settings.token ?? undefined,
+    originHash: async (parentOrigin: string, salt: string) => webviewOriginName(parentOrigin, salt),
     workbench: (handle: typeof workbench) => {
       workbench = handle;
     },
@@ -222,6 +223,8 @@ const boot = async (): Promise<void> => {
       return {
         ...options,
         webSocketFactory: { create: (url: string) => new TunnelSocket(url, service) },
+        // Webviews (Markdown preview, extension pages) load this extension's host page from the prepared workbench.
+        webviewEndpoint: `${cache}out/vs/workbench/contrib/webview/browser/pre`,
         workspaceProvider,
         windowIndicator: { label: '$(remote) OpenChamber', tooltip: `VS Code on ${settings.serverUrl}, inside OpenChamber` },
         commands: [

@@ -9,6 +9,8 @@ const workbench = [
   'var qxi=class{async sign(o){try{return await this.signValue(o)}catch{}return o}};',
   'kLe=class extends qxi{getValidator(){return this.vsda().then(e=>{let t=new e.validator;return t})}signValue(e){return this.vsda().then(t=>t.sign(e))}};',
   'let n=`${o}/release/onig.wasm`;fetch(nj("vscode-oniguruma","release/onig.wasm"));',
+  'async function HOt(s,o){if(!crypto.subtle)throw new Error("\'crypto.subtle\' is not available so webviews will not work. This is likely because...");let e=JSON.stringify({parentOrigin:s,salt:o}),i=new TextEncoder().encode(e);return i}',
+  '_registerMessageHandler(e){let t=this._register(q(e,"message",i=>{if(!(!this._encodedWebviewOrigin||i?.data?.target!==this.id)){if(i.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)){console.log("skipped");return}}}))}',
   '(function(){let s=dt.document.getElementById("vscode-workbench-web-configuration"),e=JSON.parse(s.getAttribute("data-settings"));axo(dt.document.body,{...e,windowIndicator:e.windowIndicator,workspaceProvider:uxo.create(e)})})();export{lxo as LocalStorageSecretStorageProvider};',
   '//# sourceMappingURL=https://main.vscode-cdn.net/sourcemaps/07f8/core/vs/code/browser/workbench/workbench.js.map',
 ].join('\n');
@@ -25,6 +27,8 @@ describe('the workbench bundle', () => {
     expect(patched).toContain('/release/onig.wasm.json`');
     expect(patched).toContain('"release/onig.wasm.json"');
     expect(patched).not.toContain('sourceMappingURL');
+    expect(patched).toContain('if(i.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)&&!(i.origin==="null"&&i.source===this.element?.contentWindow))');
+    expect(patched).toContain('if(!crypto.subtle)return globalThis.__ocVSCode.originHash(s,o);let e=JSON.stringify({parentOrigin:s,salt:o})');
   });
 
   test('the patched embedder really calls the frame', () => {

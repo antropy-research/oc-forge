@@ -13,7 +13,7 @@ import { patchExtensionHostIframe, patchScript, patchStylesheet, patchWorkbench,
 import type { ServerPage, VscodeServer } from './server.ts';
 
 /** Bumped when the cache's layout or patches change, so older caches are rebuilt. */
-export const CACHE_FORMAT = 1;
+export const CACHE_FORMAT = 2;
 const MARKER = 'ready.json';
 const KEEP = 2;
 const DOWNLOADS_AT_ONCE = 8;
@@ -58,6 +58,8 @@ export class WorkbenchAssets {
     private readonly downloadList: () => Promise<string[]>,
     private readonly log: (message: string) => void,
     private readonly candidates: (commit: string) => string[] = localInstallCandidates,
+    /** This extension's webview host (`webview/index.html`, `webview/host.js`), put in place of VS Code's. */
+    private readonly webviewHost: string | null = null,
   ) {}
 
   /** The cache folder of a commit, relative to the package (what the frame loads from). */
@@ -77,7 +79,8 @@ export class WorkbenchAssets {
         // A broken marker: prepare again.
       }
     }
-    return job ?? { state: 'idle' };
+    // A cache that was ready but is gone (or older) is prepared again.
+    return { state: 'idle' };
   }
 
   /** Start preparing (once per commit) and answer at once with the state. */
@@ -143,6 +146,11 @@ export class WorkbenchAssets {
         }
       };
       await Promise.all(Array.from({ length: local ? 1 : DOWNLOADS_AT_ONCE }, worker));
+      if (this.webviewHost) {
+        const pre = join(tmp, 'out/vs/workbench/contrib/webview/browser/pre');
+        await mkdir(pre, { recursive: true });
+        for (const name of ['index.html', 'host.js']) await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
+      }
       for (const file of ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js']) {
         if (!existsSync(join(tmp, file))) throw new Error(`${file} is missing from the VS Code Server`);
       }

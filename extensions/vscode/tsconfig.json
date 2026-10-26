@@ -22,6 +22,7 @@
     "panel/**/*.ts",
     "workbench/**/*.ts",
     "service/**/*.ts",
+    "webview/**/*.ts",
     "scripts/**/*.ts",
     "tests/**/*.ts"
   ]

@@ -157,6 +157,8 @@ var patchWorkbench = (source) => {
   text = replaceOnce(text, new RegExp(`signValue\\((${IDENT})\\)\\{return this\\.vsda\\(\\)\\.then\\((${IDENT})=>\\2\\.sign\\(\\1\\)\\)\\}`), 'signValue($1){return Promise.reject(new Error("vsda is not loaded inside OpenChamber"))}', "the vsda signer");
   text = replaceOnce(text, /getValidator\(\)\{return this\.vsda\(\)\.then\(/, 'getValidator(){return Promise.reject(new Error("vsda is not loaded inside OpenChamber")).then(', "the vsda validator");
   text = replaceOnce(text, new RegExp(`async sign\\((${IDENT})\\)\\{try\\{return await this\\.signValue\\(\\1\\)\\}catch\\{\\}return \\1\\}`), "async sign($1){try{return await this.signValue($1)}catch{}return globalThis.__ocVSCode.connectionToken??$1}", "the handshake signature");
+  text = replaceOnce(text, new RegExp(`if\\(!crypto\\.subtle\\)throw new Error\\("'crypto\\.subtle' is not available so webviews will not work\\.[^"]*"\\);let (${IDENT})=JSON\\.stringify\\(\\{parentOrigin:(${IDENT}),salt:(${IDENT})\\}\\)`), "if(!crypto.subtle)return globalThis.__ocVSCode.originHash($2,$3);let $1=JSON.stringify({parentOrigin:$2,salt:$3})", "the webview origin hash");
+  text = replaceOnce(text, new RegExp(`if\\((${IDENT})\\.origin!==this\\._webviewContentOrigin\\(this\\._encodedWebviewOrigin\\)\\)`), 'if($1.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)&&!($1.origin==="null"&&$1.source===this.element?.contentWindow))', "the webview origin check");
   return renameWasm(text, "the workbench");
 };
 var renameWasm = (text, what) => {
@@ -180,7 +182,7 @@ var patchExtensionHostIframe = (source) => {
 };
 
 // service/assets.ts
-var CACHE_FORMAT = 1;
+var CACHE_FORMAT = 2;
 var MARKER = "ready.json";
 var KEEP = 2;
 var DOWNLOADS_AT_ONCE = 8;
@@ -213,12 +215,14 @@ class WorkbenchAssets {
   downloadList;
   log;
   candidates;
+  webviewHost;
   jobs = new Map;
-  constructor(cacheRoot, downloadList, log, candidates = localInstallCandidates) {
+  constructor(cacheRoot, downloadList, log, candidates = localInstallCandidates, webviewHost = null) {
     this.cacheRoot = cacheRoot;
     this.downloadList = downloadList;
     this.log = log;
     this.candidates = candidates;
+    this.webviewHost = webviewHost;
   }
   static folder(commit) {
     return `vscode-web/${commit}`;
@@ -235,7 +239,7 @@ class WorkbenchAssets {
           return { state: "ready", path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? "local" };
       } catch {}
     }
-    return job ?? { state: "idle" };
+    return { state: "idle" };
   }
   prepare(server, page) {
     const current = this.status(page.commit);
@@ -297,6 +301,12 @@ class WorkbenchAssets {
         }
       };
       await Promise.all(Array.from({ length: local ? 1 : DOWNLOADS_AT_ONCE }, worker));
+      if (this.webviewHost) {
+        const pre = join(tmp, "out/vs/workbench/contrib/webview/browser/pre");
+        await mkdir(pre, { recursive: true });
+        for (const name of ["index.html", "host.js"])
+          await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
+      }
       for (const file of ["out/vs/code/browser/workbench/workbench.js", "out/vs/code/browser/workbench/workbench.css", "out/nls.messages.js"]) {
         if (!existsSync(join(tmp, file)))
           throw new Error(`${file} is missing from the VS Code Server`);
@@ -723,7 +733,7 @@ if (!port || !token) {
 var BODY_LIMIT = 200000;
 var packageRoot = resolve(dirname2(fileURLToPath(import.meta.url)), "..");
 var log = (message) => console.error(`[vscode] ${message}`);
-var assets = new WorkbenchAssets(join3(packageRoot, "vscode-web"), async () => JSON.parse(await readFile3(join3(packageRoot, "service", "web-files.json"), "utf8")), log);
+var assets = new WorkbenchAssets(join3(packageRoot, "vscode-web"), async () => JSON.parse(await readFile3(join3(packageRoot, "service", "web-files.json"), "utf8")), log, undefined, join3(packageRoot, "webview"));
 var tunnels = new Tunnels;
 var state = new WorkbenchState(process.env.OPENCHAMBER_VSCODE_DATA_DIR || join3(homedir2(), ".local", "share", "openchamber-vscode", "state"), log);
 var json = (res, status, body) => {

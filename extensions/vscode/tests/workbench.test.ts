@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { commitOfBase, isExternalAllowed, readServerPage, remoteUri, serverPathOf, workbenchConfiguration } from '../src/workbench.ts';
+import { commitOfBase, isExternalAllowed, readServerPage, remoteUri, serverPathOf, webviewOriginName, workbenchConfiguration } from '../src/workbench.ts';
 
 const server = {
   remoteAuthority: 'vscode:8000',
@@ -68,5 +68,14 @@ describe('the VS Code Server page', () => {
     expect(commitOfBase(page!.base)).toBe('07f806f999227108933c2e30515b26eecc1fda74');
     expect(readServerPage('<html>not vscode</html>')).toBeNull();
     expect(commitOfBase('/static')).toBeNull();
+  });
+});
+
+describe('webview origin names without crypto.subtle', () => {
+  test('52 base-32 characters, the same for the same input, apart for different webviews', () => {
+    const name = webviewOriginName('null', 'webview-1');
+    expect(name).toMatch(/^[0-9a-v]{52}$/);
+    expect(webviewOriginName('null', 'webview-1')).toBe(name);
+    expect(webviewOriginName('null', 'webview-2')).not.toBe(name);
   });
 });

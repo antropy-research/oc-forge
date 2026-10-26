@@ -135,3 +135,22 @@ export const readServerPage = (html: string): { config: ServerWorkbenchConfig; b
 
 /** The commit a base URL like `/stable-<commit>/static` names, or null. */
 export const commitOfBase = (base: string): string | null => /\/(?:stable|insider|exploration)-([0-9a-f]{40})\/static\/?$/.exec(base)?.[1] ?? null;
+
+/**
+ * A 52-character base-32 name for a webview origin, the shape of VS Code's
+ * SHA-256 one, for a page without crypto.subtle (plain HTTP). It names
+ * webviews apart; it guards nothing.
+ */
+export const webviewOriginName = (parentOrigin: string, salt: string): string => {
+  const text = JSON.stringify({ parentOrigin, salt });
+  let name = '';
+  for (let seed = 0; name.length < 52; seed++) {
+    let hash = (0x811c9dc5 ^ Math.imul(seed, 0x9e3779b1)) >>> 0;
+    for (let index = 0; index < text.length; index++) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    name += hash.toString(32).padStart(7, '0');
+  }
+  return name.slice(0, 52);
+};
