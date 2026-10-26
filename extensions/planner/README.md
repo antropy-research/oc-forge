@@ -3,7 +3,7 @@
 Sunsama's daily planning inside OpenChamber, with agents as part of the plan:
 collect work, plan the day, focus or hand a task to an agent, answer its questions,
 review the result, and close the day and the week. Built as an OpenChamber SDK
-extension (manifest `apiVersion` 1; SDK 2.5.1, tested on OpenChamber 2.5.1, the latest
+extension (manifest `apiVersion` 1; SDK 2.5.2, tested on OpenChamber 2.5.2, the latest
 release; web and desktop).
 
 Plan and progress live in the zmemory project: `.tasks/1024-planner-sunsama-features-plan.md`,

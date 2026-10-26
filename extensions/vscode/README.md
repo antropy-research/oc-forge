@@ -1,6 +1,6 @@
 # VS Code extension
 
-Renders compiled VS Code inside OpenChamber (manifest `apiVersion` 1, OpenChamber 2.5.1 or newer, tested on
+Renders compiled VS Code inside OpenChamber (manifest `apiVersion` 1, SDK 2.5.2, OpenChamber 2.5.1 or newer, tested on
 2.5.2; web and desktop): the workbench of your own VS Code Server for the web, the same commit, in OpenChamber's
 **VS Code** rail panel (beside the chat, expandable) and as a full **VS Code** page (Extension pages → VS Code).
 Nothing opens in another tab or window. Explorer, editor (VS Code's own grammars, themes and IntelliSense from the
