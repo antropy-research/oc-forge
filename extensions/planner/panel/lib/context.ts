@@ -36,7 +36,11 @@ export const useView = (): ClientView => {
 export const useLinear = (): LinearView => {
   const { linear } = usePlanner();
   const [view, setView] = useState(linear.getView());
-  useEffect(() => linear.subscribe(() => setView(linear.getView())), [linear]);
+  useEffect(() => {
+    // A change between the first render and this subscription would otherwise be missed.
+    setView(linear.getView());
+    return linear.subscribe(() => setView(linear.getView()));
+  }, [linear]);
   return view;
 };
 

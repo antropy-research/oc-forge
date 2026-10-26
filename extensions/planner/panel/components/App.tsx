@@ -71,7 +71,8 @@ export const App = ({ surface }: { surface: string }) => {
         setOverlay('palette');
         return;
       }
-      if (typing || overlay || ui.openTaskId || ui.openIssue || event.metaKey || event.ctrlKey || event.altKey) return;
+      // A page that took the key for itself (the Linear page's F, G then P…) has the last word.
+      if (event.defaultPrevented || typing || overlay || ui.openTaskId || ui.openIssue || event.metaKey || event.ctrlKey || event.altKey) return;
       const state = client.getView().state;
       const hovered = hoveredTask();
       const task = hovered ? state.tasks[hovered] : undefined;
