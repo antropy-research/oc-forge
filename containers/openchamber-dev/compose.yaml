@@ -1,11 +1,11 @@
-# OpenChamber 2.5.1 + OpenCode 2.1.4, and VS Code Server 1.140.0 for the web,
+# OpenChamber 2.5.2 + OpenCode 2.1.4, VS Code Server 1.140.0 for the web and the GitHub CLI,
 # for extension development; see README.md.
 name: oc-forge-openchamber-dev
 
 services:
   openchamber:
     build: .
-    image: oc-forge/openchamber-dev:2.5.1
+    image: oc-forge/openchamber-dev:2.5.2
     container_name: oc-forge-openchamber-dev
     init: true
     restart: unless-stopped
@@ -24,7 +24,7 @@ services:
   # VS Code in the browser, on the same home volume (projects, worktrees) and extensions.
   vscode:
     build: .
-    image: oc-forge/openchamber-dev:2.5.1
+    image: oc-forge/openchamber-dev:2.5.2
     container_name: oc-forge-vscode-dev
     init: true
     restart: unless-stopped

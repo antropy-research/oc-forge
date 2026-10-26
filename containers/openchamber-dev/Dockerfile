@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # OpenChamber and OpenCode from npm for extension development: the latest
 # OpenChamber release, which extensions are installed on, with an OpenCode it
-# supports (2.5.1 needs 2.1.0 or newer); VS Code Server for the web; and Bun for
+# supports (2.5.2 bundles 2.1.4); VS Code Server for the web; the GitHub CLI the
+# Planner reads GitHub with and its agents open pull requests with; and Bun for
 # the SDK's guest bundler (`bunx openchamber-guest-bundle`).
 ARG BUN_IMAGE=oven/bun:1.4.4
 ARG NODE_IMAGE=node:26.12.0-trixie-slim
@@ -9,10 +10,11 @@ ARG NODE_IMAGE=node:26.12.0-trixie-slim
 FROM ${BUN_IMAGE} AS bun
 
 FROM ${NODE_IMAGE}
-ARG OPENCHAMBER_VERSION=2.5.1
+ARG OPENCHAMBER_VERSION=2.5.2
 ARG OPENCODE_VERSION=2.1.4
 # VS Code release, as `vendors.json` pins it; its server for the web runs in the `vscode` service.
 ARG VSCODE_VERSION=1.140.0
+ARG GH_VERSION=2.103.2
 
 # git and ssh for projects and worktrees; python3, make and g++ for native
 # modules that ship no prebuilt binary.
@@ -39,6 +41,14 @@ RUN arch="$(dpkg --print-architecture)" \
   && tar -xzf /tmp/vscode-server.tar.gz -C /opt/vscode-server --strip-components=1 \
   && rm /tmp/vscode-server.tar.gz \
   && ln -s /opt/vscode-server/bin/code-server /usr/local/bin/vscode-server
+
+# GitHub CLI: `gh auth login` once in the container (the home volume keeps it).
+RUN arch="$(dpkg --print-architecture)" \
+  && case "$arch" in amd64|arm64) ;; *) echo "no gh for $arch" >&2; exit 1 ;; esac \
+  && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \
+  && tar -xzf /tmp/gh.tar.gz -C /tmp \
+  && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh \
+  && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_${arch}"
 
 ENV LANG=C.UTF-8
 # The image's `node` user is UID 1000, so files written into the bind-mounted

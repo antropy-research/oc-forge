@@ -2,25 +2,26 @@
 
 OpenChamber and OpenCode from npm, for building OpenChamber extensions in
 [`../../extensions/`](../../extensions/): the latest OpenChamber release, which the
-extensions are installed on, with an OpenCode it supports (OpenChamber 2.5.1 needs
-OpenCode 2.1.0 or newer). Not part of the release build; `vendors/` stays pristine.
+extensions are installed on, with an OpenCode it supports (OpenChamber 2.5.2 bundles
+OpenCode 2.1.4). Not part of the release build; `vendors/` stays pristine.
 
 | Component | Version | Source |
 |---|---|---|
-| OpenChamber | 2.5.1 | npm `@openchamber/web` |
+| OpenChamber | 2.5.2 | npm `@openchamber/web` |
 | OpenCode | 2.1.4 | npm `@opencode/cli`; OpenChamber starts and manages it |
 | VS Code Server | 1.140.0 | Microsoft's server for the web (`server-linux-<arch>-web`), the VS Code release `vendors.json` pins; the `vscode` service |
+| GitHub CLI | 2.103.2 | the release tarball; the Planner reads GitHub with it and agents open pull requests with it (`gh auth login` once in the container) |
 | Node | 26.12.0 | `node:26.12.0-trixie-slim` |
 | Bun | 1.4.4 | `oven/bun:1.4.4`, for `bunx openchamber-guest-bundle` |
 
 Pin other versions with the build args `OPENCHAMBER_VERSION`, `OPENCODE_VERSION`,
-`VSCODE_VERSION`, `NODE_IMAGE` and `BUN_IMAGE`.
+`VSCODE_VERSION`, `GH_VERSION`, `NODE_IMAGE` and `BUN_IMAGE`.
 
 ## Files
 
 | Path | Contents |
 |---|---|
-| `Dockerfile` | image `oc-forge/openchamber-dev:2.5.1` |
+| `Dockerfile` | image `oc-forge/openchamber-dev:2.5.2` |
 | `compose.yaml` | containers `oc-forge-openchamber-dev` (OpenChamber) and `oc-forge-vscode-dev` (VS Code Server), from the same image; both mount volume `oc-forge-openchamber-dev-home` at `/home/node` (settings, projects, sessions, OpenCode data, VS Code Server data) and `../../extensions` at `/extensions` |
 | `.env` (untracked) | optional `OC_DEV_BIND`, `OC_DEV_PORT` and `OC_VSCODE_PORT`; default `127.0.0.1:35310` and `:35311` |
 | `~/.local/share/oc-forge-openchamber-dev/secrets.env` (outside the repository, mode 0600) | `OPENCHAMBER_UI_PASSWORD`, `VSCODE_CONNECTION_TOKEN` and provider keys such as `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` |
