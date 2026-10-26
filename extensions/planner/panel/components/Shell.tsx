@@ -7,7 +7,7 @@ import { useAgents, usePlanner, useView } from '../lib/context.ts';
 import type { ServiceProblem } from '../lib/client.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 
-export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'github' | 'google' | 'agents' | 'archive' | 'stats' | 'settings';
+export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'github' | 'agents' | 'archive' | 'stats' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -104,7 +104,6 @@ export const Nav = ({ route, onRoute, onSearch, onAsk }: { route: Route; onRoute
       )}
       <NavItem route="linear" current={route} onRoute={onRoute}>Linear</NavItem>
       <NavItem route="github" current={route} onRoute={onRoute}>GitHub</NavItem>
-      <NavItem route="google" current={route} onRoute={onRoute}>Google</NavItem>
       <NavItem route="agents" current={route} onRoute={onRoute} badge={agents.attention}>Agents</NavItem>
       <NavItem route="archive" current={route} onRoute={onRoute} badge={archived}>Archive</NavItem>
       <NavItem route="stats" current={route} onRoute={onRoute}>Stats</NavItem>

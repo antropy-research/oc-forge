@@ -1,32 +1,22 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { LINEAR_GROUPS, LINEAR_ORDERS, type LinearGroupBy, type LinearOrderBy, type Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
 import {
-  FILTER_FIELD_LABELS,
   HEALTH_LABELS,
-  LINEAR_FILTER_FIELDS,
-  describeRule,
-  filterIssues,
-  filterOptions,
   githubMirrors,
   groupIssues,
   groupProjects,
-  groupViews,
   isClosedType,
   linkedTask,
   plannedLinearTasks,
   sortIssues,
-  type FilterContext,
-  type FilterOption,
-  type LinearFilterField,
-  type LinearFilterRule,
   type LinearIssue,
   type LinearProject,
   type LinearProjectDetail,
 } from '../../src/domain/linear.ts';
 import { LINEAR_DRAG_TYPE, usePlanner, useLinear, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
-import { issueDisplay, type LinearMode, type LinearTeam, type LinearView, type OpenProject } from '../lib/linear.ts';
+import type { LinearMode, LinearTeam, LinearView, OpenProject } from '../lib/linear.ts';
 
 const PRIORITY_MARK: Record<number, string> = { 1: '!!!', 2: '!!', 3: '!', 4: '·' };
 const GROUP_LABELS: Record<LinearGroupBy, string> = { status: 'Status', priority: 'Priority', project: 'Project', team: 'Team', assignee: 'Assignee', workspace: 'Workspace', none: 'Nothing' };
@@ -79,16 +69,10 @@ const Progress = ({ value }: { value: number }) => {
 };
 
 const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: boolean }) => {
-  const { linear, client } = usePlanner();
+  const { linear } = usePlanner();
   const view = useView();
   const lv = useLinear();
   const { setUi } = useUi();
-  /** Plan the issue today, then open its task's "Assign to an agent". */
-  const assign = async () => {
-    const { bodies, taskId } = linear.importCommands(issue, { kind: 'day', date: view.today });
-    await client.dispatch(bodies, { undo: `Planned ${issue.identifier}` });
-    setUi({ openTaskId: taskId, agentForm: 'assign' });
-  };
   const linked = linkedTask(view.state, issue.id, githubMirrors(issue));
   const workspace = workspaceLabel(lv, issue.workspaceId);
   return (
@@ -139,7 +123,6 @@ const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: 
           <button onClick={() => void linear.plan(issue, { kind: 'day', date: view.today })} aria-label={`Plan ${issue.identifier} today`}>Today</button>
           <button onClick={() => void linear.plan(issue, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${issue.identifier} tomorrow`}>Tmrw</button>
           <button onClick={() => void linear.plan(issue, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${issue.identifier} in the backlog`}>Later</button>
-          <button onClick={() => void assign()} aria-label={`Assign ${issue.identifier} to an agent`} title="Plan it today and assign it to an agent, which opens a pull request">Agent</button>
         </span>
       )}
     </li>
@@ -148,11 +131,11 @@ const IssueRow = ({ issue, showAssignee }: { issue: LinearIssue; showAssignee?: 
 
 const workspaceNames = (lv: LinearView): Map<string, string> => new Map(lv.workspaces.map((workspace) => [workspace.id, workspace.name]));
 
-/** Issues as a list, grouped and ordered the way the Linear page (or the open view) is set up. */
+/** Issues as a list, grouped and ordered the way the Linear page is set up. */
 const IssueGroups = ({ issues, showAssignee }: { issues: LinearIssue[]; showAssignee?: boolean }) => {
   const view = useView();
   const lv = useLinear();
-  const { linearGroupBy, linearOrderBy } = issueDisplay(lv, view.state.settings);
+  const { linearGroupBy, linearOrderBy } = view.state.settings;
   const groups = groupIssues(sortIssues(issues, linearOrderBy), linearGroupBy, { workspaceNames: workspaceNames(lv) });
   return (
     <>
@@ -175,7 +158,7 @@ const IssueBoard = ({ issues, showAssignee }: { issues: LinearIssue[]; showAssig
   const view = useView();
   const lv = useLinear();
   const [over, setOver] = useState<string | null>(null);
-  const { linearGroupBy, linearOrderBy } = issueDisplay(lv, view.state.settings);
+  const { linearGroupBy, linearOrderBy } = view.state.settings;
   const byStatus = linearGroupBy === 'status' || linearGroupBy === 'none';
   const groups = groupIssues(sortIssues(issues, linearOrderBy), byStatus ? 'status' : linearGroupBy, { board: true, workspaceNames: workspaceNames(lv) });
   return (
@@ -214,21 +197,20 @@ const IssueBoard = ({ issues, showAssignee }: { issues: LinearIssue[]; showAssig
   );
 };
 
-/** List or board, as the page (or the open view) is set up; side panels always list. */
+/** List or board, as the page is set up; side panels always list. */
 const IssueLayout = ({ issues, page, showAssignee }: { issues: LinearIssue[]; page?: boolean; showAssignee?: boolean }) => {
   const view = useView();
-  const lv = useLinear();
-  return page && issueDisplay(lv, view.state.settings).linearLayout === 'board' ? <IssueBoard issues={issues} showAssignee={showAssignee} /> : <IssueGroups issues={issues} showAssignee={showAssignee} />;
+  return page && view.state.settings.linearLayout === 'board' ? <IssueBoard issues={issues} showAssignee={showAssignee} /> : <IssueGroups issues={issues} showAssignee={showAssignee} />;
 };
 
 const DisplayControls = () => {
   const { linear } = usePlanner();
   const view = useView();
   const lv = useLinear();
-  const settings = issueDisplay(lv, view.state.settings);
+  const settings = view.state.settings;
   const groups = LINEAR_GROUPS.filter((group) => group !== 'workspace' || lv.workspaces.length > 1 || settings.linearGroupBy === 'workspace');
   return (
-    <div class="linear-display" role="group" aria-label="Display" title={lv.source.kind === 'view' ? "This view's display, as saved in Linear; changes last until you leave the view" : undefined}>
+    <div class="linear-display" role="group" aria-label="Display">
       <div class="segmented" role="radiogroup" aria-label="Layout">
         <button role="radio" aria-checked={settings.linearLayout === 'list'} onClick={() => void linear.setDisplay({ linearLayout: 'list' })}>List</button>
         <button role="radio" aria-checked={settings.linearLayout === 'board'} onClick={() => void linear.setDisplay({ linearLayout: 'board' })}>Board</button>
@@ -270,144 +252,15 @@ const LinearErrors = () => {
   return failed.length ? <p class="feed-errors" role="alert">{failed.map((workspace) => `${workspace.name}: ${workspace.error}`).join(' · ')}</p> : null;
 };
 
-/** Pick a field, then its values; a field that has a rule already opens that rule. */
-const FilterMenu = ({
-  issues,
-  filters,
-  context,
-  start,
-  onChange,
-  onClose,
-}: {
-  issues: readonly LinearIssue[];
-  filters: LinearFilterRule[];
-  context: FilterContext;
-  start: LinearFilterField | null;
-  onChange: (next: LinearFilterRule[]) => void;
-  onClose: () => void;
-}) => {
-  const lv = useLinear();
-  const ref = useRef<HTMLDivElement>(null);
-  const [field, setField] = useState<LinearFilterField | null>(start);
-  useEffect(() => {
-    const close = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) onClose();
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.stopPropagation();
-      onClose();
-    };
-    document.addEventListener('mousedown', close);
-    document.addEventListener('keydown', escape, true);
-    return () => {
-      document.removeEventListener('mousedown', close);
-      document.removeEventListener('keydown', escape, true);
-    };
-  }, [onClose]);
-  if (!field) {
-    const fields = LINEAR_FILTER_FIELDS.filter((item) => item !== 'workspace' || lv.workspaces.length > 1);
-    return (
-      <div class="menu filter-menu" ref={ref} role="menu" aria-label="Filter by">
-        {fields.map((item) => (
-          <button key={item} role="menuitem" onClick={() => setField(item)}>
-            {FILTER_FIELD_LABELS[item]}
-            {filters.some((rule) => rule.field === item) && <span class="count"> · in use</span>}
-          </button>
-        ))}
-      </div>
-    );
-  }
-  const index = filters.findIndex((rule) => rule.field === field);
-  const rule = index >= 0 ? filters[index]! : { field, negate: false, values: [] };
-  const options = filterOptions(issues, field, context);
-  // A chosen value no shown issue has any more still shows, so it can be unticked.
-  const extra: FilterOption[] = rule.values.filter((item) => !options.some((option) => option.value === item.value)).map((item) => ({ ...item, count: 0 }));
-  // A rule with no value left goes away; an existing one keeps its place; a new one goes last.
-  const save = (next: LinearFilterRule) => {
-    if (!next.values.length) onChange(filters.filter((item) => item.field !== field));
-    else if (index >= 0) onChange(filters.map((item, at) => (at === index ? next : item)));
-    else onChange([...filters, next]);
-  };
-  const toggle = (option: { value: string; label: string }, on: boolean) =>
-    save({ ...rule, values: on ? [...rule.values, { value: option.value, label: option.label }] : rule.values.filter((item) => item.value !== option.value) });
-  return (
-    <div class="menu filter-menu" ref={ref} role="dialog" aria-label={`Filter by ${FILTER_FIELD_LABELS[field]}`}>
-      <div class="filter-menu-head">
-        {!start && <button class="link" onClick={() => setField(null)} aria-label="Back to the fields">←</button>}
-        <strong>{FILTER_FIELD_LABELS[field]}</strong>
-        <div class="segmented" role="radiogroup" aria-label="Match">
-          <button role="radio" aria-checked={!rule.negate} onClick={() => rule.values.length && save({ ...rule, negate: false })}>is</button>
-          <button role="radio" aria-checked={rule.negate} onClick={() => rule.values.length && save({ ...rule, negate: true })}>is not</button>
-        </div>
-      </div>
-      {options.length + extra.length === 0 && <p class="hint">No issue here has one.</p>}
-      <ul class="filter-options">
-        {[...options, ...extra].map((option) => (
-          <li key={option.value || '(none)'}>
-            <label class="inline">
-              <input type="checkbox" checked={rule.values.some((item) => item.value === option.value)} onChange={(event) => toggle(option, event.currentTarget.checked)} />
-              {option.color && <span class="dot" style={{ '--item-color': option.color }} aria-hidden="true" />}
-              <span class="filter-option-label">{option.label}</span>
-              <span class="count">{option.count}</span>
-            </label>
-          </li>
-        ))}
-      </ul>
-      <div class="row">
-        <div class="nav-spacer" />
-        <button class="link" onClick={onClose}>Done</button>
-      </div>
-    </div>
-  );
-};
-
-/**
- * Linear's temporary filters: chips that read like "Status is Todo", to edit
- * or remove, and "+ Filter" to add one. Values come from the issues given.
- */
-const FilterBar = ({ issues, filters, onChange }: { issues: readonly LinearIssue[]; filters: LinearFilterRule[]; onChange: (next: LinearFilterRule[]) => void }) => {
-  const view = useView();
-  const lv = useLinear();
-  const [open, setOpen] = useState<{ field: LinearFilterField | null } | null>(null);
-  const context: FilterContext = { today: view.today, workspaceNames: workspaceNames(lv) };
-  const close = () => setOpen(null);
-  return (
-    <div class="linear-filters" role="group" aria-label="Filters">
-      {filters.map((rule) => {
-        const text = describeRule(rule);
-        return (
-          <span key={rule.field} class="filter-chip">
-            <button class="filter-chip-label" onClick={() => setOpen({ field: rule.field })} aria-label={`Edit filter: ${text}`} title={text}>{text}</button>
-            <button class="filter-chip-remove" onClick={() => onChange(filters.filter((item) => item.field !== rule.field))} aria-label={`Remove filter: ${text}`}>×</button>
-          </span>
-        );
-      })}
-      <span class="menu-anchor">
-        <button class="link" aria-haspopup="menu" aria-expanded={open !== null} onClick={() => setOpen(open ? null : { field: null })}>+ Filter</button>
-        {open && <FilterMenu key={open.field ?? 'fields'} issues={issues} filters={filters} context={context} start={open.field} onChange={onChange} onClose={close} />}
-      </span>
-      {filters.length > 0 && <button class="link" onClick={() => onChange([])}>Clear filters</button>}
-    </div>
-  );
-};
-
-/** "12 of 40 issues" while filters hide some. */
-const FilterCount = ({ shown, total, filtered }: { shown: number; total: number; filtered: boolean }) =>
-  filtered && total > 0 ? <p class="hint filter-count" aria-live="polite">{shown} of {total} issue{total === 1 ? '' : 's'}</p> : null;
-
-/** Sunsama's Linear panel: My issues, a saved view or a search, grouped, ready to drag or plan. */
+/** Sunsama's Linear panel: My issues, a custom view or a search, grouped, ready to drag or plan. */
 export const LinearIssues = ({ page = false }: { page?: boolean }) => {
   const { linear } = usePlanner();
   const lv = useLinear();
-  const view = useView();
   const [term, setTerm] = useState('');
   if (needsConnect(lv)) return <ConnectLinear />;
   const sourceValue = lv.source.kind === 'view' ? `view:${lv.source.workspaceId}:${lv.source.id}` : lv.source.kind;
   const views = lv.views.filter((item) => lv.scope === 'all' || item.workspaceId === lv.scope);
-  const names = lv.scope === 'all' ? workspaceNames(lv) : undefined;
-  const open = lv.issues.filter((issue) => !isClosedType(issue.state.type));
-  const visible = filterIssues(open, lv.filters, { today: view.today, workspaceNames: workspaceNames(lv) });
+  const visible = lv.issues.filter((issue) => !isClosedType(issue.state.type));
   return (
     <div class="linear-issues">
       <div class="linear-toolbar">
@@ -423,15 +276,10 @@ export const LinearIssues = ({ page = false }: { page?: boolean }) => {
         >
           <option value="assigned">My issues</option>
           {lv.source.kind === 'search' && <option value="search">Search results</option>}
-          {groupViews(views, names).map((group) => (
-            <optgroup key={group.key} label={group.label}>
-              {group.views.map((item) => {
-                // Favorites mix workspaces; the other groups name theirs already.
-                const workspace = group.key === 'favorites' && lv.scope === 'all' ? workspaceLabel(lv, item.workspaceId) : null;
-                return <option key={`${item.workspaceId}:${item.id}`} value={`view:${item.workspaceId}:${item.id}`}>{workspace ? `${item.name} · ${workspace}` : item.name}</option>;
-              })}
-            </optgroup>
-          ))}
+          {views.map((item) => {
+            const workspace = workspaceLabel(lv, item.workspaceId);
+            return <option key={`${item.workspaceId}:${item.id}`} value={`view:${item.workspaceId}:${item.id}`}>{workspace && lv.scope === 'all' ? `${item.name} · ${workspace}` : item.name}</option>;
+          })}
         </select>
         <button class="icon-button" aria-label="Refresh Linear" title={lv.syncedAt ? `Synced ${new Date(lv.syncedAt).toLocaleTimeString()}` : 'Refresh'} onClick={() => void linear.refresh()}>↻</button>
       </div>
@@ -448,11 +296,9 @@ export const LinearIssues = ({ page = false }: { page?: boolean }) => {
         }}
       />
       {page && <DisplayControls />}
-      <FilterBar issues={open} filters={lv.filters} onChange={(next) => linear.setFilters(next)} />
       <LinearErrors />
       {lv.loading && lv.issues.length === 0 && <p class="hint">Loading issues…</p>}
-      <FilterCount shown={visible.length} total={open.length} filtered={lv.filters.length > 0} />
-      {!lv.loading && visible.length === 0 && !lv.error && <p class="hint">{open.length && lv.filters.length ? 'No open issue matches these filters.' : 'No open issues here.'}</p>}
+      {!lv.loading && visible.length === 0 && !lv.error && <p class="hint">No open issues here.</p>}
       {visible.length > 0 && <IssueLayout issues={visible} page={page} showAssignee={lv.source.kind !== 'assigned'} />}
     </div>
   );
@@ -529,14 +375,10 @@ const ProjectOverview = ({ detail }: { detail: LinearProjectDetail }) => {
 const ProjectDetail = ({ open }: { open: OpenProject }) => {
   const { linear, host } = usePlanner();
   const lv = useLinear();
-  const view = useView();
   const [tab, setTab] = useState<'issues' | 'overview'>('issues');
-  // A project's issues have filters of their own, gone when the project closes.
-  const [filters, setFilters] = useState<LinearFilterRule[]>([]);
   const project = open.detail ?? open.project;
   const workspace = workspaceLabel(lv, project.workspaceId);
-  const all = (open.detail?.issues.nodes ?? []).filter((issue) => !isClosedType(issue.state.type));
-  const issues = filterIssues(all, filters, { today: view.today, workspaceNames: workspaceNames(lv) });
+  const issues = (open.detail?.issues.nodes ?? []).filter((issue) => !isClosedType(issue.state.type));
   return (
     <div class="project-detail" aria-label={`Project ${project.name}`}>
       <div class="linear-toolbar">
@@ -562,14 +404,12 @@ const ProjectDetail = ({ open }: { open: OpenProject }) => {
         {project.teams.nodes.length > 0 && (<><dt>Teams</dt><dd>{project.teams.nodes.map((team) => `${team.key} · ${team.name}`).join(', ')}</dd></>)}
       </dl>
       <div class="tabs project-tabs" role="tablist" aria-label="Project">
-        <button role="tab" aria-selected={tab === 'issues'} onClick={() => setTab('issues')}>Issues{open.detail ? ` ${all.length}` : ''}</button>
+        <button role="tab" aria-selected={tab === 'issues'} onClick={() => setTab('issues')}>Issues{open.detail ? ` ${issues.length}` : ''}</button>
         <button role="tab" aria-selected={tab === 'overview'} onClick={() => setTab('overview')}>Overview</button>
       </div>
       {open.loading && <p class="hint">Loading the project…</p>}
       {open.error && <p class="feed-errors" role="alert">{open.error}</p>}
-      {open.detail && tab === 'issues' && all.length > 0 && <FilterBar issues={all} filters={filters} onChange={setFilters} />}
-      {open.detail && tab === 'issues' && <FilterCount shown={issues.length} total={all.length} filtered={filters.length > 0} />}
-      {open.detail && tab === 'issues' && (issues.length ? <IssueLayout issues={issues} page showAssignee /> : <p class="hint">{all.length ? 'No open issue matches these filters.' : 'No open issues in this project.'}</p>)}
+      {open.detail && tab === 'issues' && (issues.length ? <IssueLayout issues={issues} page showAssignee /> : <p class="hint">No open issues in this project.</p>)}
       {open.detail && tab === 'overview' && <ProjectOverview detail={open.detail} />}
     </div>
   );
@@ -650,7 +490,7 @@ export const LinearPage = () => {
   const { linear } = usePlanner();
   const lv = useLinear();
   const view = useView();
-  const wide = issueDisplay(lv, view.state.settings).linearLayout === 'board' && (lv.mode === 'issues' || (lv.mode === 'projects' && Boolean(lv.project)));
+  const wide = view.state.settings.linearLayout === 'board' && (lv.mode === 'issues' || (lv.mode === 'projects' && Boolean(lv.project)));
   const sub =
     lv.workspaces.length > 1
       ? `${lv.workspaces.length} workspaces: ${lv.workspaces.map((workspace) => workspace.name).join(', ')}`

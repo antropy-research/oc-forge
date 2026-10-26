@@ -1,5 +1,4 @@
 import { useState } from 'preact/hooks';
-import { GOOGLE_TASKS_CALENDAR } from '../../src/domain/google.ts';
 import { addDays, monthDay, startOfWeek } from '../../src/domain/dates.ts';
 import { blocksFor, tasksForDay } from '../../src/domain/selectors.ts';
 import { zonedDateMinutes } from '../../src/domain/dates.ts';
@@ -50,7 +49,7 @@ export const CalendarView = () => {
       </header>
       {feed.errors.length > 0 && (
         <p class="feed-errors" role="alert">
-          {feed.errors.map((error) => `${error.calendarId === GOOGLE_TASKS_CALENDAR ? 'Google Tasks' : view.state.calendars[error.calendarId]?.name ?? 'Calendar'}: ${error.message}`).join(' · ')}
+          {feed.errors.map((error) => `${view.state.calendars[error.calendarId]?.name ?? 'Calendar'}: ${error.message}`).join(' · ')}
         </p>
       )}
       <div class="calendar-layout">

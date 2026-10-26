@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { EventBody } from '../../src/domain/events.ts';
-import { SOURCE_NAMES, type Task } from '../../src/domain/types.ts';
+import type { Task } from '../../src/domain/types.ts';
 import { addDays, formatMinutes, monthDay, nextWeekday } from '../../src/domain/dates.ts';
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
@@ -59,7 +59,6 @@ export const InlineInput = ({ value, className, onCommit, onCancel }: InlineInpu
 const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
   const { client } = usePlanner();
   const view = useView();
-  const { setUi } = useUi();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const close = (event: MouseEvent) => {
@@ -113,17 +112,6 @@ const TaskMenu = ({ task, onClose }: { task: Task; onClose: () => void }) => {
       >
         Duplicate
       </button>
-      {!task.completedAt && (
-        <button
-          role="menuitem"
-          onClick={() => {
-            onClose();
-            setUi({ openTaskId: task.id, agentForm: 'assign' });
-          }}
-        >
-          Assign to an agent
-        </button>
-      )}
       <hr />
       <button role="menuitem" onClick={() => run({ type: 'task.archived', taskId: task.id }, 'Task archived')}>Archive</button>
       <button role="menuitem" class="danger" onClick={() => run({ type: 'task.deleted', taskId: task.id }, 'Task deleted')}>Delete</button>
@@ -179,11 +167,11 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
               <span
                 class={`source-chip${sourceClosed && !done ? ' is-closed' : ''}`}
                 style={{ '--item-color': task.source.status?.color ?? '#5e6ad2' }}
-                title={`${task.source.key}${task.source.status ? ` · ${task.source.status.name}` : ''} in ${SOURCE_NAMES[task.source.kind]}`}
+                title={`${task.source.key}${task.source.status ? ` · ${task.source.status.name}` : ''} in ${task.source.kind === 'linear' ? 'Linear' : 'GitHub'}`}
               >
                 <span class="dot" aria-hidden="true" />
                 {task.source.kind === 'github' ? shortKey(task.source.key) : task.source.key}
-                {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in ${SOURCE_NAMES[task.source.kind]}` : ''}
+                {sourceClosed && !done ? ` · ${task.source.status?.name ?? 'Done'} in ${task.source.kind === 'linear' ? 'Linear' : 'GitHub'}` : ''}
               </span>
             )}
             {playlist && (

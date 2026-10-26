@@ -6,14 +6,6 @@ import {
   MUTATION_INPUT_KEYS,
   UPDATE_ISSUE_MUTATION,
   commentThreads,
-  describeRule,
-  favoriteOrder,
-  filterIssues,
-  filterOptions,
-  groupViews,
-  isIssueView,
-  viewDisplay,
-  type LinearSavedView,
   planTextSave,
   workflowOrder,
   groupIssues,
@@ -308,104 +300,5 @@ describe('Linear issues synced with GitHub', () => {
     const viaGitHub = foldEvents([ev({ type: 'task.created', task: { id: 'tg', title: 'Crash', placement: { kind: 'day', date: '2026-10-24' }, position: 1, source: { kind: 'github', id: 'I_12', key: 'acme/app#12', url: 'https://github.com/acme/app/issues/12' } } })]);
     expect(linkedTask(viaGitHub, synced.id, ['acme/app#12'])?.id).toBe('tg');
     expect(linkedTask(viaGitHub, synced.id)).toBeNull();
-  });
-});
-
-describe('saved views', () => {
-  const view = (id: string, patch: Partial<LinearSavedView> = {}): LinearSavedView => ({
-    id,
-    name: id,
-    description: null,
-    icon: null,
-    color: null,
-    shared: true,
-    modelName: 'Issue',
-    slugId: `slug-${id}`,
-    updatedAt: '2026-10-20T00:00:00.000Z',
-    team: null,
-    owner: { id: 'u1', name: 'Al' },
-    workspaceId: 'org-a',
-    ...patch,
-  });
-  const nex = { id: 'team-1', key: 'NEX', name: 'Nexus' };
-  const ops = { id: 'team-2', key: 'OPS', name: 'Ops' };
-  test('only views of issues are listed', () => {
-    expect(isIssueView(view('a'))).toBe(true);
-    expect(isIssueView(view('b', { modelName: 'Project' }))).toBe(false);
-    expect(isIssueView(view('c', { modelName: 'initiative' }))).toBe(false);
-    expect(isIssueView(view('d', { modelName: 'FeedItem' }))).toBe(false);
-  });
-  test('favorites first in their sidebar order, then team, workspace and my views', () => {
-    const order = favoriteOrder([
-      { type: 'customView', sortOrder: 2, customView: { id: 'bugs' } },
-      { type: 'project', sortOrder: 0, customView: null },
-      { type: 'customView', sortOrder: 1, customView: { id: 'triage' } },
-    ]);
-    expect([...order]).toEqual([['bugs', 2], ['triage', 1]]);
-    const views = [
-      view('Ops board', { team: ops }),
-      view('bugs', { team: nex, favoriteOrder: order.get('bugs') }),
-      view('Mine', { shared: false }),
-      view('Nexus sprint', { team: nex }),
-      view('triage', { favoriteOrder: order.get('triage') }),
-      view('Company', {}),
-      view('Side', { workspaceId: 'org-b', shared: false }),
-    ];
-    const one = groupViews(views);
-    expect(one.map((group) => `${group.label}: ${group.views.map((item) => item.name).join(', ')}`)).toEqual([
-      'Favorites: triage, bugs',
-      'NEX · Nexus: Nexus sprint',
-      'OPS · Ops: Ops board',
-      'Workspace views: Company',
-      'My views: Mine',
-      'My views: Side',
-    ]);
-    const names = new Map([['org-a', 'Antropy'], ['org-b', 'Side Org']]);
-    expect(groupViews(views, names).map((group) => group.label)).toEqual(['Favorites', 'Antropy · NEX · Nexus', 'Antropy · OPS · Ops', 'Antropy · Workspace views', 'Antropy · My views', 'Side Org · My views']);
-  });
-  test("a view's saved layout, grouping and ordering, where the Planner has them", () => {
-    expect(viewDisplay({ layout: 'board', issueGrouping: 'workflowState', viewOrdering: 'priority' })).toEqual({ linearLayout: 'board', linearGroupBy: 'status', linearOrderBy: 'priority' });
-    expect(viewDisplay({ layout: 'list', issueGrouping: 'noGrouping', viewOrdering: 'dueDate' })).toEqual({ linearLayout: 'list', linearGroupBy: 'none', linearOrderBy: 'due' });
-    expect(viewDisplay({ layout: 'spreadsheet', issueGrouping: 'cycle', viewOrdering: 'manual' })).toEqual({});
-    expect(viewDisplay(null)).toEqual({});
-  });
-});
-
-describe('filters', () => {
-  const today = '2026-10-24';
-  const label = (name: string) => ({ id: `l-${name}`, name, color: '#123456' });
-  const make = (n: number, patch: Partial<LinearIssue>) => issue({ id: `f${n}`, identifier: `NEX-${n}`, workspaceId: 'org-a', ...patch });
-  const issues = [
-    make(1, { state: { id: 's1', name: 'In Progress', type: 'started', color: '#f2c94c' }, priority: 1, assignee: { id: 'u1', name: 'Al' }, labels: { nodes: [label('Bug'), label('UI')] }, dueDate: '2026-10-20' }),
-    make(2, { state: { id: 's2', name: 'Todo', type: 'unstarted', color: '#e2e2e2' }, priority: 0, assignee: null, labels: { nodes: [] }, dueDate: null, project: { id: 'p1', name: 'Alpha' } }),
-    make(3, { state: { id: 's2', name: 'Todo', type: 'unstarted', color: '#e2e2e2' }, priority: 3, assignee: { id: 'u2', name: 'Bo' }, labels: { nodes: [label('UI')] }, dueDate: '2026-10-28', cycle: { id: 'c7', number: 7 } }),
-    make(4, { state: { id: 's3', name: 'Backlog', type: 'backlog', color: '#bbbbbb' }, priority: 2, assignee: { id: 'u1', name: 'Al' }, dueDate: '2026-12-01', workspaceId: 'org-b' }),
-  ];
-  const context = { today, workspaceNames: new Map([['org-a', 'Antropy'], ['org-b', 'Side Org']]) };
-  const ids = (list: LinearIssue[]) => list.map((item) => item.identifier);
-  test('options come from the shown issues, with counts, in Linear-like order, "none" last', () => {
-    expect(filterOptions(issues, 'status', context).map((option) => `${option.label}:${option.count}`)).toEqual(['Backlog:1', 'Todo:2', 'In Progress:1']);
-    expect(filterOptions(issues, 'priority', context).map((option) => option.label)).toEqual(['Urgent', 'High', 'Medium', 'No priority']);
-    expect(filterOptions(issues, 'label', context).map((option) => `${option.label}:${option.count}`)).toEqual(['Bug:1', 'UI:2', 'No labels:2']);
-    expect(filterOptions(issues, 'assignee', context).map((option) => option.label)).toEqual(['Al', 'Bo', 'No assignee']);
-    expect(filterOptions(issues, 'due', context).map((option) => option.label)).toEqual(['Overdue', 'Due within a week', 'Due later', 'No due date']);
-    expect(filterOptions(issues, 'workspace', context).map((option) => `${option.label}:${option.count}`)).toEqual(['Antropy:3', 'Side Org:1']);
-  });
-  test('values of a rule are alternatives; rules all apply; "is not" excludes', () => {
-    const todo = { field: 'status' as const, negate: false, values: [{ value: 'Todo', label: 'Todo' }] };
-    expect(ids(filterIssues(issues, [todo], context))).toEqual(['NEX-2', 'NEX-3']);
-    const ui = { field: 'label' as const, negate: false, values: [{ value: 'UI', label: 'UI' }] };
-    expect(ids(filterIssues(issues, [todo, ui], context))).toEqual(['NEX-3']);
-    const notAl = { field: 'assignee' as const, negate: true, values: [{ value: 'u1', label: 'Al' }] };
-    expect(ids(filterIssues(issues, [notAl], context))).toEqual(['NEX-2', 'NEX-3']);
-    const unlabeledOrBug = { field: 'label' as const, negate: false, values: [{ value: '', label: 'No labels' }, { value: 'Bug', label: 'Bug' }] };
-    expect(ids(filterIssues(issues, [unlabeledOrBug], context))).toEqual(['NEX-1', 'NEX-2', 'NEX-4']);
-    const overdue = { field: 'due' as const, negate: false, values: [{ value: 'overdue', label: 'Overdue' }] };
-    expect(ids(filterIssues(issues, [overdue], context))).toEqual(['NEX-1']);
-    expect(ids(filterIssues(issues, [{ field: 'cycle', negate: false, values: [] }], context))).toEqual(['NEX-1', 'NEX-2', 'NEX-3', 'NEX-4']);
-  });
-  test('a chip names the field, the sense and the values', () => {
-    expect(describeRule({ field: 'status', negate: false, values: [{ value: 'Todo', label: 'Todo' }, { value: 'In Progress', label: 'In Progress' }] })).toBe('Status is Todo, In Progress');
-    expect(describeRule({ field: 'assignee', negate: true, values: [{ value: '', label: 'No assignee' }] })).toBe('Assignee is not No assignee');
   });
 });

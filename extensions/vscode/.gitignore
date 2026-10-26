@@ -1,2 +1,0 @@
-# The repository ignores build/; the file editor ships its built script and CSS from there.
-!editor/build/
