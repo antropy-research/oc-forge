@@ -97,7 +97,11 @@ export const LinearPage = () => {
   const menus: MenuState = { filterOpen, setFilterOpen, displayOpen, setDisplayOpen };
   const listShown = lv.mode === 'issues' || (lv.mode === 'projects' && Boolean(lv.project));
 
-  useEffect(() => linear.use('page'), [linear]);
+  useEffect(() => {
+    linear.use('page');
+    // J and K follow this page's list only while it is on screen.
+    return () => linear.setOrder([]);
+  }, [linear]);
   useEffect(() => {
     if (lv.mode === 'projects' && !lv.projectsLoaded && !lv.projectsLoading) void linear.loadProjects();
   }, [lv.mode]);
