@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
+import type { GoogleTaskItem } from '../../src/domain/google.ts';
 import type { DateKey } from '../../src/domain/types.ts';
 import { addDays, instantAt } from '../../src/domain/dates.ts';
-import { withTaskTimes } from '../../src/domain/gtaskKept.ts';
+import { deadlineEvents, upcomingEvent, upcomingTasks, withTaskTimes } from '../../src/domain/gtaskKept.ts';
 import { useGoogle, usePlanner, useView } from './context.ts';
 import { calendarUi, useCalendarUi, withPending } from './gcal.ts';
 
 export interface CalendarFeedState {
   events: CalendarEvent[];
+  /** Google tasks read for a deadline in the range (their date may be outside it, or none). */
+  deadlineTasks?: GoogleTaskItem[];
   errors: { calendarId: string; message: string }[];
   loading: boolean;
 }
@@ -18,9 +21,12 @@ const REFRESH_MS = 10 * 60_000;
  * Subscribed-calendar occurrences and Google tasks due in [from, to]; refetches
  * when the range or the subscriptions change, and after the Planner changed
  * something in Google. Changes on their way to Google show at once. Events I
- * declined are left out unless asked for (the calendar views show them).
+ * declined are left out unless asked for (the calendar views show them). With
+ * `tasks`, the calendar's own views also get Google tasks as Google Calendar
+ * shows them beside their date: deadlines on their day, and the upcoming
+ * occurrences of repeating tasks, from what the Planner keeps now.
  */
-export const useCalendarEvents = (from: DateKey, to: DateKey, options: { declined?: boolean } = {}): CalendarFeedState => {
+export const useCalendarEvents = (from: DateKey, to: DateKey, options: { declined?: boolean; tasks?: boolean } = {}): CalendarFeedState => {
   const { client, google } = usePlanner();
   const view = useView();
   const ui = useCalendarUi();
@@ -58,7 +64,11 @@ export const useCalendarEvents = (from: DateKey, to: DateKey, options: { decline
   }, [client, from, to, signature, view.state.settings.timezone, ui.tick]);
 
   const zone = view.state.settings.timezone ?? 'UTC';
+  const kept = view.state.googleTasks;
   // A Google task with a time kept in the Planner shows at that time, as Google Calendar shows timed tasks.
-  const events = withPending(withTaskTimes(feed.events, view.state.googleTasks, zone), ui.pending, ui.added, instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone));
+  const timed = withTaskTimes(feed.events, kept, zone);
+  const shown = timed.flatMap((event) => (event.googleTask ? [event.googleTask] : []));
+  const beside = options.tasks && tasks ? [...deadlineEvents([...shown, ...(feed.deadlineTasks ?? [])], kept ?? {}, from, to, zone), ...upcomingTasks(kept ?? {}, shown, from, to, view.today).map((task) => upcomingEvent(task, zone))] : [];
+  const events = withPending([...timed, ...beside], ui.pending, ui.added, instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone));
   return { ...feed, events: options.declined ? events : events.filter((event) => event.google?.response !== 'declined') };
 };

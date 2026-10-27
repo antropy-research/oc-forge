@@ -12,8 +12,9 @@ import { isLinearIssue } from '../../../src/domain/linear.ts';
 import { edgePosition } from '../../../src/domain/selectors.ts';
 import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
-import { anchorOf, calendarUi, changeEventTimes, useCalendarUi } from '../../lib/gcal.ts';
-import { answerClass, calendarItems, deadlineOf, eventColor, eventLabel, GCAL_BLOCK_TYPE, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isTaskEvent, itemKey, plannedTask, startLabel, taskEventLabel, type CalItem } from './items.ts';
+import { anchorOf, calendarUi, changeEventTimes, popoverKind, useCalendarUi } from '../../lib/gcal.ts';
+import { answerClass, calendarItems, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_BLOCK_TYPE, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, itemKey, plannedTask, startLabel, taskClass, taskEventLabel, type CalItem } from './items.ts';
+import { Icon } from './Icon.tsx';
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATE_ROW = 26;
@@ -147,14 +148,15 @@ export const MonthView = ({ anchor, events, onDay }: { anchor: DateKey; events: 
     const event = item.event;
     const color = eventColor(event, view.state.calendars);
     const task = isTaskEvent(event) ? event.googleTask! : null;
+    const movable = isMovableTask(event);
     const planned = task ? plannedTask(view.state, event) : null;
     const deadline = task ? deadlineOf(event, view.state, view.today) : null;
-    const draggable = Boolean(task) || Boolean(event.google?.editable);
-    const label = task ? taskEventLabel(event, view.state, view.today) : eventLabel(event, zone);
+    const draggable = movable || Boolean(event.google?.editable);
+    const label = task || event.upcoming ? taskEventLabel(event, view.state, view.today, zone) : eventLabel(event, zone);
     return (
       <button
         key={itemKey(item)}
-        class={`month-chip${entry.bar ? ' is-bar' : ''}${task ? ' is-task' : ''}${task?.completed ? ' is-done' : ''}${answerClass(event)}${extraClass}`}
+        class={`month-chip${entry.bar ? ' is-bar' : ''}${taskClass(event)}${task?.completed ? ' is-done' : ''}${deadlinePassed(event, view.state, view.today) ? ' is-overdue' : ''}${answerClass(event)}${extraClass}`}
         style={{ ...style, '--item-color': color, '--item-ink': inkOn(color) }}
         draggable={draggable}
         aria-label={label}
@@ -167,11 +169,13 @@ export const MonthView = ({ anchor, events, onDay }: { anchor: DateKey; events: 
           } else drag.dataTransfer.setData(GCAL_EVENT_TYPE, event.id);
           drag.dataTransfer.effectAllowed = 'copyMove';
         }}
-        onClick={(click) => calendarUi.open({ kind: task ? 'task' : 'event', event, anchor: anchorOf(click.currentTarget) })}
+        onClick={(click) => calendarUi.open({ kind: popoverKind(event), event, anchor: anchorOf(click.currentTarget) })}
       >
         {!entry.bar && <span class="chip-dot" aria-hidden="true" />}
         {!entry.bar && <span class="chip-time">{startLabel(event.start, zone)}</span>}
-        {task && <span class="task-box" aria-hidden="true">{task.completed ? '☑' : '☐'}</span>}
+        {movable && <span class="task-box" aria-hidden="true">{task!.completed ? '☑' : '☐'}</span>}
+        {event.taskDeadline && <span class="task-flag" aria-hidden="true">⚑</span>}
+        {event.upcoming && <span class="task-repeat" aria-hidden="true"><Icon name="repeat" size={12} /></span>}
         <span class="chip-title">{event.title}</span>
         {deadline && <span class={`task-deadline${deadline.overdue ? ' is-overdue' : ''}`} aria-hidden="true">⚑ {deadline.label}</span>}
         {planned && <span class="bar-badge" aria-hidden="true">✓</span>}

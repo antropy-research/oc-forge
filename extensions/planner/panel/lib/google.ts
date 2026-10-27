@@ -620,6 +620,14 @@ export class GoogleStore {
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
   }
 
+  /** A Google task as Google has it now: the Tasks view's copy of its list, else read (following a move to another list). */
+  async findTask(account: string, listId: string, id: string): Promise<GoogleTaskItem | null> {
+    const known = this.view.board[listKey(account, listId)]?.items.find((item) => item.id === id);
+    if (known) return known;
+    const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('POST', '/google/tasks/linked', { groups: [{ account, listId, ids: [id] }] });
+    return answer.tasks.find((item) => item.id === id) ?? null;
+  }
+
   /** Whether a task has subtasks (open or done) in Google: from the Tasks view's copy of its list, else read. */
   private async hasSubtasks(item: GoogleTaskItem): Promise<boolean> {
     const known = this.view.board[listKey(item.account, item.listId)]?.items;

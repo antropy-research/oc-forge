@@ -6,6 +6,7 @@ import type { Command, EventBody, PlannerEvent } from '../../src/domain/events.t
 import { applyEvents } from '../../src/domain/reducer.ts';
 import { inverseOfBatch } from '../../src/domain/undo.ts';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
+import type { GoogleTaskItem } from '../../src/domain/google.ts';
 import { todayIn } from '../../src/domain/dates.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { DEFAULT_SETTINGS, emptyState, type DateKey, type PlannerState } from '../../src/domain/types.ts';
@@ -197,7 +198,8 @@ export class PlannerClient {
   }
 
   /** Occurrences from the subscribed calendars for [from, to]. */
-  async calendarEvents(from: DateKey, to: DateKey, refresh = false): Promise<{ events: CalendarEvent[]; errors: { calendarId: string; message: string }[] }> {
+  /** Events between two days, and the Google tasks read for a deadline in them. */
+  async calendarEvents(from: DateKey, to: DateKey, refresh = false): Promise<{ events: CalendarEvent[]; deadlineTasks?: GoogleTaskItem[]; errors: { calendarId: string; message: string }[] }> {
     return this.request('GET', `/calendar?from=${from}&to=${to}${refresh ? '&refresh=1' : ''}`);
   }
 

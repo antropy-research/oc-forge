@@ -7,8 +7,9 @@ import { zonedDateMinutes } from '../../../src/domain/dates.ts';
 import { compactRange, longDay, scheduleDays, shortDay, weekdayShort } from '../../../src/domain/gcalendar.ts';
 import { usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
-import { anchorOf, calendarUi, searchEvents, useCalendarUi } from '../../lib/gcal.ts';
-import { answerClass, calendarItems, eventColor, isTaskEvent, itemKey, plannedTask, taskEventLabel } from './items.ts';
+import { anchorOf, calendarUi, popoverKind, searchEvents, useCalendarUi } from '../../lib/gcal.ts';
+import { answerClass, calendarItems, deadlinePassed, eventColor, isTaskEvent, itemKey, plannedTask, taskClass, taskEventLabel } from './items.ts';
+import { Icon } from './Icon.tsx';
 
 const range = (start: string, end: string, zone: string, day: DateKey): string => {
   const from = zonedDateMinutes(start, zone);
@@ -53,14 +54,18 @@ export const ScheduleView = ({ from, to, events, onDay }: { from: DateKey; to: D
               return (
                 <li key={itemKey(item)}>
                   <button
-                    class={`schedule-item${task ? ' is-task' : ''}${task?.completed ? ' is-done' : ''}${answerClass(event)}`}
+                    class={`schedule-item${taskClass(event)}${task?.completed ? ' is-done' : ''}${deadlinePassed(event, view.state, view.today) ? ' is-overdue' : ''}${answerClass(event)}`}
                     style={{ '--item-color': eventColor(event, view.state.calendars) }}
-                    aria-label={task ? taskEventLabel(event, view.state, view.today) : `${event.title}, ${event.allDay ? 'all day' : range(event.start, event.end, zone, day.date)}`}
-                    onClick={(click) => calendarUi.open({ kind: task ? 'task' : 'event', event, anchor: anchorOf(click.currentTarget) })}
+                    aria-label={task || event.upcoming ? taskEventLabel(event, view.state, view.today, zone) : `${event.title}, ${event.allDay ? 'all day' : range(event.start, event.end, zone, day.date)}`}
+                    onClick={(click) => calendarUi.open({ kind: popoverKind(event), event, anchor: anchorOf(click.currentTarget) })}
                   >
-                    <span class="schedule-time">{event.allDay ? 'All day' : range(event.start, event.end, zone, day.date)}</span>
+                    <span class="schedule-time">{event.taskDeadline ? 'Deadline' : event.allDay ? 'All day' : range(event.start, event.end, zone, day.date)}</span>
                     <span class="chip-dot" aria-hidden="true" />
-                    <span class="schedule-title">{task ? (task.completed ? '☑ ' : '☐ ') : ''}{event.title}</span>
+                    <span class="schedule-title">
+                      {event.taskDeadline ? '⚑ ' : task ? (task.completed ? '☑ ' : '☐ ') : ''}
+                      {event.upcoming && <span class="task-repeat" aria-hidden="true"><Icon name="repeat" size={12} /></span>}
+                      {event.title}
+                    </span>
                     {event.location && <span class="schedule-where muted">{event.location}</span>}
                     {planned && <span class="bar-badge">✓ planned</span>}
                   </button>

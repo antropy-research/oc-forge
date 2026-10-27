@@ -6,7 +6,7 @@ import { EventStore } from '../service/store.ts';
 import { Planner } from '../service/planner.ts';
 import { GoogleError } from '../service/google.ts';
 import type { TimeboxEvent } from '../service/googleData.ts';
-import { GoogleCalendars, GoogleTimeboxes, calendarKey, type CalendarRead } from '../service/googleTimeboxes.ts';
+import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes, calendarKey, type CalendarRead } from '../service/googleTimeboxes.ts';
 import type { RawGoogleEvent } from '../src/domain/google.ts';
 
 const dirs: string[] = [];
@@ -200,5 +200,31 @@ describe('reading Google calendars', () => {
     expect(asked).toHaveLength(4);
     await reader.read(subscriptions, [], 'a', 'b', 'UTC', true);
     expect(asked).toHaveLength(6);
+  });
+});
+
+describe('Google tasks read for the calendar', () => {
+  test('a read begun before a write is answered but not kept, so the next read has what was written', async () => {
+    let reads = 0;
+    let release = () => {};
+    const data = {
+      dueTasks: async () => {
+        reads++;
+        if (reads === 1) await new Promise<void>((resolve) => (release = resolve));
+        return [];
+      },
+      tasksById: async () => [],
+    };
+    const due = new GoogleDueTasks(data);
+    const first = due.read([ME], '2026-10-26', '2026-11-01', false);
+    // A task is made while the first read is out (the next occurrence of a repeating one).
+    due.forget();
+    release();
+    await first;
+    await due.read([ME], '2026-10-26', '2026-11-01', false);
+    expect(reads).toBe(2);
+    // That one began after the write: it is kept a while.
+    await due.read([ME], '2026-10-26', '2026-11-01', false);
+    expect(reads).toBe(2);
   });
 });

@@ -1504,6 +1504,26 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gcal-view.is-narrow .gcal-grid .grid-item .item-title { font-weight: 500; }
 .gcal-view.is-narrow .gcal-grid .task-deadline-date { display: none; }
 
+/* ── Repeating Google tasks' series, deadlines and upcoming occurrences on the calendar, and a task's editor over it
+   (planner-google3). A deadline shows on its own day in the all-day section, as Google Calendar's flag: outlined, red
+   once passed. An upcoming occurrence is the series' item, lighter and marked with its repeat; it opens the series. ── */
+.task-flag { flex: none; font-size: 11px; line-height: 1; }
+.all-day-bar.is-deadline, .month-chip.is-bar.is-deadline, .month-chip.is-deadline { background: var(--pl-surface); color: var(--oc-fg); box-shadow: inset 0 0 0 1px var(--item-color); }
+.all-day-bar.is-deadline .task-flag, .month-chip.is-deadline .task-flag { color: var(--item-color); }
+.all-day-bar.is-deadline.is-overdue, .month-chip.is-bar.is-deadline.is-overdue { box-shadow: inset 0 0 0 1px var(--oc-error-text, #c92a2a); }
+.all-day-bar.is-deadline.is-overdue .task-flag, .month-chip.is-deadline.is-overdue .task-flag, .schedule-item.is-deadline.is-overdue .schedule-time { color: var(--oc-error-text, #c92a2a); }
+.all-day-bar.is-deadline.is-done .bar-title { text-decoration: line-through; }
+.all-day-bar.is-upcoming, .month-chip.is-bar.is-upcoming, .gcal-grid .grid-item.is-task.is-upcoming { background: color-mix(in srgb, var(--item-color) 14%, var(--pl-surface)); color: var(--oc-fg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--item-color) 60%, transparent); cursor: pointer; }
+.gcal-grid .grid-item.is-task.is-upcoming .item-time { color: var(--oc-muted); opacity: 1; }
+.task-repeat { display: inline-flex; flex: none; margin-right: 3px; vertical-align: -2px; color: var(--item-color); }
+.schedule-item.is-deadline .schedule-time { color: var(--item-color); font-weight: 600; }
+.schedule-title .task-repeat { margin-right: 4px; }
+/* A one-line task block keeps its title: the deadline shows as its flag there (the date is in its label and tooltip),
+   and a title too long for the line is cut short, not wrapped out of sight. */
+.gcal-grid .grid-item.is-inline .task-deadline-date { display: none; }
+.gcal-grid .grid-item.is-task.is-inline .item-title { word-break: break-all; }
+/* A question asked from a task's details (delete this task or the series?) shows over them, as its backdrop meant. */
+.modal-backdrop.gcal-question-backdrop { z-index: 70; }
 /* The Tasks form: why a control is unavailable (a repeating task and subtasks never go together, as in Google Tasks). */
 .gt-form-note { font-size: 12px; color: var(--oc-muted); }
 .gt-form-row select:disabled { opacity: 0.6; cursor: not-allowed; }

@@ -1,6 +1,7 @@
 // Read-only iCalendar (RFC 5545) support: parse VEVENTs and expand them into
 // concrete occurrences for a date range in the user's zone.
 import type { GoogleEventRef, GoogleTaskItem } from './google.ts';
+import type { UpcomingTask } from './gtaskKept.ts';
 import type { DateKey } from './types.ts';
 import { addDays, daysBetween, instantAt, isDateKey, isValidTimeZone, startOfWeek, weekday } from './dates.ts';
 
@@ -40,6 +41,10 @@ export interface CalendarEvent {
   busy: boolean;
   /** A Google task due that day, shown the way Google Calendar shows tasks; planning it links it. */
   googleTask?: GoogleTaskItem;
+  /** The Google task is shown on its deadline's day, not its date, as Google Calendar's flag in the all-day section. */
+  taskDeadline?: boolean;
+  /** An upcoming occurrence of a repeating Google task, which Google Tasks makes once the one before it is done. */
+  upcoming?: UpcomingTask;
   /** A Google Calendar event: where it lives, and what may be done with it. */
   google?: GoogleEventRef;
 }

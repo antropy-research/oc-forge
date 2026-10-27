@@ -26,7 +26,12 @@ export const boxAnchor = (box: DOMRect): Anchor => ({ x: box.left, y: box.top, w
 export type CalendarPopover =
   | { kind: 'event'; event: CalendarEvent; anchor: Anchor }
   | { kind: 'task'; event: CalendarEvent; anchor: Anchor }
+  /** An upcoming occurrence of a repeating Google task: its series. */
+  | { kind: 'upcoming'; event: CalendarEvent; anchor: Anchor }
   | { kind: 'day'; date: DateKey; anchor: Anchor; events: CalendarEvent[] };
+
+/** What a click on a calendar item opens: an event's details, a Google task's, or a series'. */
+export const popoverKind = (event: CalendarEvent): 'event' | 'task' | 'upcoming' => (event.upcoming ? 'upcoming' : event.googleTask ? 'task' : 'event');
 
 /** A Google task edited over the calendar, in the Tasks view's form; `series`: all of its series' tasks, without asking. */
 export interface TaskEditorTarget {

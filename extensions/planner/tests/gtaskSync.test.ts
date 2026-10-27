@@ -16,7 +16,7 @@ import { validateCommand, type EventBody, type PlannerEvent } from '../src/domai
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { emptyState, googleTaskKey, type PlannerState } from '../src/domain/types.ts';
 import { findMovedTask, GONE_STATUS, gtaskSource, linkedGoogleTasks, mergeGoogleTask, planGoogleTaskSync, plannerEditTimes, TASK_GONE, taskFromGoogleTask, type GoogleTaskItem } from '../src/domain/google.ts';
-import { dueOccurrences, firstSightOfSeries, keptFor, madeAlready, nextRepeatDate, starredKept, withTaskTimes } from '../src/domain/gtaskKept.ts';
+import { deadlineEvents, deadlineGroups, dueOccurrences, firstSightOfSeries, keptFor, madeAlready, nextRepeatDate, starredKept, upcomingEvent, upcomingTasks, withTaskTimes } from '../src/domain/gtaskKept.ts';
 import { blockText } from '../src/domain/gcalendar.ts';
 import type { CalendarEvent } from '../src/domain/ics.ts';
 
@@ -445,6 +445,66 @@ describe("a repeating task's series", () => {
     await new GoogleStore(host, fake.client, 'page').makeNextOccurrences([done]);
     expect(fake.calls.find((call) => call.method === 'POST')?.body).toMatchObject({ title: 'Water the plants', notes: 'Balcony', due: '2026-10-27' });
     expect(keptFor(fake.state(), { account: ME, id: 'gt2' })).toMatchObject({ time: 600, deadline: '2026-10-28', repeat: { index: 4, on: '2026-10-27', template: { title: 'Water the plants' } } });
+  });
+});
+
+describe('the calendar shows deadlines and upcoming occurrences, as Google Calendar does', () => {
+  const template = { title: 'Daily standup', notes: 'Agenda', time: 600, duration: null, deadline: null, start: '2026-10-27' };
+  const repeat = (patch: Record<string, unknown> = {}) => ({ rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 1, next: null, on: '2026-10-27', template, ...patch });
+  const kept = (taskId: string, patch: Record<string, unknown>) => ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId, patch } as EventBody);
+  const daily = (extra: Record<string, unknown> = {}) => foldEvents([kept('gt1', { time: 600, repeat: repeat(extra) })]).googleTasks;
+  const dates = (found: { date: string }[]) => found.map((task) => task.date);
+  const WEEK = ['2026-10-26', '2026-11-01'] as const;
+
+  test('a daily task shows its upcoming occurrences in the range, from the one open now, not before today', () => {
+    const found = upcomingTasks(daily(), [item({ id: 'gt1', due: '2026-10-27' })], ...WEEK, '2026-10-27');
+    expect(dates(found)).toEqual(['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']);
+    expect(found[0]).toMatchObject({ account: ME, listId: 'L1', taskId: 'gt1', seriesId: 's1', index: 2, template: { title: 'Daily standup', time: 600 } });
+    // An occurrence left undone a week: the ones after it from today on, as completing it goes on from its own date.
+    expect(dates(upcomingTasks(daily({ on: '2026-10-20' }), [], ...WEEK, '2026-10-27'))[0]).toBe('2026-10-27');
+    // A series that ends: after its count, or its last day.
+    expect(dates(upcomingTasks(daily({ rule: 'RRULE:FREQ=DAILY;COUNT=3' }), [], ...WEEK, '2026-10-27'))).toEqual(['2026-10-28', '2026-10-29']);
+    expect(dates(upcomingTasks(daily({ rule: 'RRULE:FREQ=DAILY;UNTIL=20261029' }), [], ...WEEK, '2026-10-27'))).toEqual(['2026-10-28', '2026-10-29']);
+    expect(dates(upcomingTasks(daily({ rule: 'RRULE:FREQ=WEEKLY;BYDAY=TU,TH' }), [], ...WEEK, '2026-10-27'))).toEqual(['2026-10-29']);
+  });
+
+  test('the real next occurrence replaces its projection, never two for one date; none past a deleted series', () => {
+    // Completed, its next made (with what is kept for it): the series goes on from the new one.
+    const made = foldEvents([kept('gt1', { time: 600, repeat: repeat({ next: 'gt2' }) }), kept('gt2', { time: 600, repeat: repeat({ index: 2, on: '2026-10-28' }) })]).googleTasks;
+    expect(dates(upcomingTasks(made, [item({ id: 'gt2', due: '2026-10-28' })], ...WEEK, '2026-10-27'))).toEqual(['2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']);
+    // Shown already on a date (one occurrence moved there, or one Google's own repeat made with the title): not projected there.
+    expect(dates(upcomingTasks(daily(), [item({ id: 'gt1', due: '2026-10-29' })], ...WEEK, '2026-10-27'))).not.toContain('2026-10-29');
+    expect(dates(upcomingTasks(daily(), [item({ id: 'g-own', title: 'Daily standup', due: '2026-10-30' })], ...WEEK, '2026-10-27'))).not.toContain('2026-10-30');
+    // Two open occurrences of one series project each date once.
+    const twice = foldEvents([kept('gt1', { repeat: repeat() }), kept('gt5', { repeat: repeat() })]).googleTasks;
+    expect(dates(upcomingTasks(twice, [], ...WEEK, '2026-10-27'))).toEqual(['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']);
+    // Deleted (all future tasks): what is kept goes, and so do its projections.
+    expect(upcomingTasks(applyEvents(foldEvents([kept('gt1', { repeat: repeat() })]), [ev({ type: 'gtask.dropped', account: ME, taskId: 'gt1' })]).googleTasks, [], ...WEEK, '2026-10-27')).toEqual([]);
+    // A series kept before templates waits for its first sight.
+    expect(upcomingTasks(foldEvents([kept('gt1', { repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 1, next: null } })]).googleTasks, [], ...WEEK, '2026-10-27')).toEqual([]);
+  });
+
+  test('an upcoming occurrence is drawn at the template’s time, or all day', () => {
+    const [first] = upcomingTasks(daily(), [], ...WEEK, '2026-10-27');
+    expect(upcomingEvent(first!, 'America/Los_Angeles')).toMatchObject({ id: 'gtask-upcoming:s1:2026-10-28', calendarId: 'google-tasks', title: 'Daily standup', allDay: false, start: '2026-10-28T17:00:00.000Z', end: '2026-10-28T17:30:00.000Z', busy: false });
+    expect(upcomingEvent({ ...first!, template: { ...template, time: null } }, 'America/Los_Angeles')).toMatchObject({ allDay: true, start: '2026-10-28T07:00:00.000Z', end: '2026-10-29T07:00:00.000Z' });
+  });
+
+  test('a deadline shows on its day in the all-day section: alone for a task without a date, beside it for one with another date', () => {
+    const state = foldEvents([kept('gt1', { deadline: '2026-10-28' }), kept('gt2', { deadline: '2026-10-30' }), kept('gt3', { deadline: '2026-10-29' }), kept('gt4', { deadline: '2026-12-01' })]).googleTasks;
+    const undated = item({ id: 'gt1', title: 'Renew the passport', due: null });
+    const dated = item({ id: 'gt2', due: '2026-10-27' });
+    const same = item({ id: 'gt3', due: '2026-10-29' });
+    const later = item({ id: 'gt4', due: null });
+    const shown = deadlineEvents([undated, dated, same, later, undated], state, ...WEEK, 'America/Los_Angeles');
+    expect(shown.map((event) => [event.id, event.start, event.allDay, event.taskDeadline])).toEqual([
+      ['gtask-deadline:L1:gt1', '2026-10-28T07:00:00.000Z', true, true],
+      ['gtask-deadline:L1:gt2', '2026-10-30T07:00:00.000Z', true, true],
+    ]);
+    expect(shown[0]!.googleTask).toEqual(undated);
+    // What the service reads for them: by account and list, in the range only.
+    expect(deadlineGroups(state, [ME], ...WEEK)).toEqual([{ account: ME, listId: 'L1', ids: ['gt1', 'gt2', 'gt3'] }]);
+    expect(deadlineGroups(state, ['other@example.com'], ...WEEK)).toEqual([]);
   });
 });
 

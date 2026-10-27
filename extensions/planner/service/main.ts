@@ -14,6 +14,7 @@ import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
 import { googleWriteRoute } from './googleRoutes.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
+import { deadlineGroups } from '../src/domain/gtaskKept.ts';
 import { addDays, daysBetween, instantAt, isDateKey, todayIn } from '../src/domain/dates.ts';
 import { CommandFiles, OpenCodeInfo, agentRoute, opencodeConfigDir } from './agents.ts';
 
@@ -383,15 +384,18 @@ const server = http.createServer(async (req, res) => {
       const timeMax = instantAt(addDays(to, 1), 0, zone);
       // Google tasks due in the range show on their day, as in Google Calendar, planned or not (the panel shows the link).
       const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes('tasks')).map((account) => account.email) : [];
-      const [feed, fromGoogle, due] = await Promise.all([
+      const [feed, fromGoogle, due, deadlines] = await Promise.all([
         feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
         googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
         googleDueTasks.read(taskAccounts, from, to, refresh),
+        // Tasks whose deadline (kept in the Planner) falls in the range show it there, as Google Calendar does, dated or not.
+        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, taskAccounts, from, to), refresh),
       ]);
       const dueEvents = due.items.flatMap((item) => (item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []));
       json(res, 200, {
         events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
-        errors: [...feed.errors, ...fromGoogle.errors, ...due.errors.map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))],
+        deadlineTasks: deadlines.items,
+        errors: [...feed.errors, ...fromGoogle.errors, ...[...due.errors, ...deadlines.errors].map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))],
       });
       // Sessions moved or deleted in Google follow, once the answer is on its way.
       if (fromGoogle.reads.size) void timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));

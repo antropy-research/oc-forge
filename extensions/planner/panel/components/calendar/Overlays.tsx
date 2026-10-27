@@ -7,7 +7,7 @@ import type { DateKey } from '../../../src/domain/types.ts';
 import { calendarUi, useCalendarUi, type Question, type Snack } from '../../lib/gcal.ts';
 import { EventEditor } from './EventEditor.tsx';
 import { Icon } from './Icon.tsx';
-import { DayPopover, EventPopover, TaskPopover } from './Popovers.tsx';
+import { DayPopover, EventPopover, TaskPopover, UpcomingPopover } from './Popovers.tsx';
 import { QuickCreate } from './QuickCreate.tsx';
 import { TaskEditor } from './TaskEditor.tsx';
 
@@ -92,6 +92,7 @@ export const CalendarOverlays = ({ onDay }: { onDay?: (date: DateKey) => void })
     <>
       {popover?.kind === 'event' && <EventPopover key={popover.event.id} event={popover.event} anchor={popover.anchor} />}
       {popover?.kind === 'task' && <TaskPopover key={popover.event.id} event={popover.event} anchor={popover.anchor} />}
+      {popover?.kind === 'upcoming' && <UpcomingPopover key={popover.event.id} event={popover.event} anchor={popover.anchor} />}
       {popover?.kind === 'day' && <DayPopover key={popover.date} date={popover.date} events={popover.events} anchor={popover.anchor} onDay={onDay} />}
       {ui.draft && <QuickCreate key={`${ui.draft.anchor.x}:${ui.draft.anchor.y}`} draft={ui.draft} />}
       {ui.editor && <EventEditor key={ui.editor.mode === 'edit' ? ui.editor.event.id : 'new'} target={ui.editor} />}
