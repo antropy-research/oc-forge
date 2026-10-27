@@ -38,7 +38,7 @@ import {
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { displayFilter, projectDisplayFilter, settingsDisplay } from '../src/domain/linearDisplay.ts';
-import { compileFilter, type LinearFilterRule } from '../src/domain/linearFilter.ts';
+import { compileFilter, readFilter, type LinearFilterNode, type LinearFilterRule } from '../src/domain/linearFilter.ts';
 import { DEFAULT_SETTINGS } from '../src/domain/types.ts';
 
 const issue = (patch: Partial<LinearIssue> = {}): LinearIssue => ({
@@ -188,8 +188,45 @@ describe.skipIf(!schemaPath || !existsSync(schemaPath))('Linear schema', () => {
       [{ field: 'due', op: 'is', values: [value('overdue'), value('today'), value('thisWeek'), value('nextWeek'), value('none')] }],
       [{ field: 'due', op: 'before', values: [value('2026-11-02')] }],
       [{ field: 'due', op: 'after', values: [value('2026-11-02')] }],
+      // Linear's further properties.
+      [{ field: 'assignee', op: 'is', values: [value('u1'), value('@me', 'Me'), value('', 'No assignee')] }],
+      [{ field: 'creator', op: 'isNot', values: [value('u1'), value('@me', 'Me')] }],
+      [{ field: 'creator', op: 'isNot', values: [value('@me', 'Me'), value('', 'No creator')] }],
+      [{ field: 'content', op: 'contains', values: [value('login')] }],
+      [{ field: 'content', op: 'notContains', values: [value('login')] }],
+      [{ field: 'subscriber', op: 'includesAny', values: [value('@me', 'Me')] }],
+      [{ field: 'subscriber', op: 'includesAny', values: [value('u2'), value('@me', 'Me')] }],
+      [{ field: 'subscriber', op: 'includesAll', values: [value('u2'), value('@me', 'Me')] }],
+      [{ field: 'subscriber', op: 'excludes', values: [value('u2'), value('@me', 'Me')] }],
+      [{ field: 'relation', op: 'includesAny', values: [value('blocked'), value('blocking'), value('related'), value('duplicate'), value('parent'), value('children')] }],
+      [{ field: 'relation', op: 'includesAll', values: [value('blocked'), value('parent'), value('children')] }],
+      [{ field: 'relation', op: 'excludes', values: [value('duplicate'), value('parent'), value('children')] }],
+      [{ field: 'created', op: 'after', values: [value('-P1W')] }],
+      [{ field: 'updated', op: 'before', values: [value('2026-10-01')] }],
+      [{ field: 'completed', op: 'after', values: [value('-P3M')] }],
+      [{ field: 'estimate', op: 'is', values: [value('3'), value('', 'No estimate')] }],
+      [{ field: 'estimate', op: 'isNot', values: [value('3')] }],
+      [{ field: 'estimate', op: 'isNot', values: [value('3'), value('', 'No estimate')] }],
+      [{ field: 'estimate', op: 'atLeast', values: [value('5')] }],
+      [{ field: 'estimate', op: 'atMost', values: [value('2')] }],
+      [{ field: 'milestone', op: 'is', values: [value('m1'), value('', 'No milestone')] }],
+      [{ field: 'milestone', op: 'isNot', values: [value('m1')] }],
+      [{ field: 'cycle', op: 'isNot', values: [value('c1'), value('@active')] }],
     ];
     for (const set of rules) expect(check('IssueFilter', compileFilter(set, context))).toEqual([]);
+    // All or any at the top, and groups nested in groups, as Linear's advanced filter builds them.
+    const urgent: LinearFilterNode = { field: 'priority', op: 'is', values: [value('1', 'Urgent')] };
+    const mine: LinearFilterNode = { field: 'assignee', op: 'is', values: [value('@me', 'Me')] };
+    const bug: LinearFilterNode = { field: 'label', op: 'includesAny', values: [value('Bug')] };
+    const nested: LinearFilterNode[] = [{ join: 'or', items: [urgent, { join: 'and', items: [mine, { join: 'or', items: [bug, rules[20]![0]!] }] }] }, bug];
+    expect(check('IssueFilter', compileFilter(nested, context))).toEqual([]);
+    expect(check('IssueFilter', compileFilter([urgent, mine, bug], context, 'or'))).toEqual([]);
+    expect(check('IssueFilter', compileFilter(rules.flat(), context, 'or'))).toEqual([]);
+    expect(check('IssueFilter', compileFilter([{ join: 'and', items: rules.flat() }], context))).toEqual([]);
+    // A saved view's filter, read back and sent again (when its filters were changed here).
+    const saved = { or: [{ priority: { eq: 1 } }, { and: [{ assignee: { isMe: { eq: true } } }, { labels: { some: { name: { in: ['Bug'] } } } }] }, { slaStatus: { eq: 'Breached' } }] };
+    expect(check('IssueFilter', saved)).toEqual([]);
+    expect(check('IssueFilter', compileFilter(readFilter(saved, [], context), context))).toEqual([]);
     const display = settingsDisplay(DEFAULT_SETTINGS);
     for (const window of ['none', 'week', '3months', 'year'] as const) {
       expect(check('IssueFilter', displayFilter({ ...display, showCompleted: window, showSubIssues: false, showTriage: false }))).toEqual([]);

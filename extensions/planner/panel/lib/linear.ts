@@ -17,6 +17,7 @@ import {
   FAVORITE_VIEWS_QUERY,
   FILTER_CYCLES_QUERY,
   FILTER_LABELS_QUERY,
+  FILTER_MILESTONES_QUERY,
   FILTER_PROJECTS_QUERY,
   FILTER_TEAMS_QUERY,
   FILTER_USERS_QUERY,
@@ -85,7 +86,18 @@ import {
   type Page,
   type ProjectDisplay,
 } from '../../src/domain/linearDisplay.ts';
-import { compileFilter, matchesRules, workspacesFor, type FilterCatalog, type FilterContext, type LinearFilterRule } from '../../src/domain/linearFilter.ts';
+import {
+  beyondSaved,
+  compileFilter,
+  matchesRules,
+  pruneFilters,
+  readFilter,
+  workspacesFor,
+  type FilterCatalog,
+  type FilterContext,
+  type FilterJoin,
+  type LinearFilterNode,
+} from '../../src/domain/linearFilter.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { DEFAULT_SETTINGS, type LinearDisplayPrefs, type Placement, type PlannerState, type Settings, type Task, type TaskSourceRef } from '../../src/domain/types.ts';
@@ -142,8 +154,16 @@ export interface OpenProject {
 
 export interface IssueList {
   source: LinearSource;
-  /** Temporary filters, as in Linear; a new source starts without any. */
-  filters: LinearFilterRule[];
+  /**
+   * The filter bar's filters, as in Linear: rules and groups. A new source
+   * starts without any; a saved view starts with its own, which can be changed
+   * here (not saved back).
+   */
+  filters: LinearFilterNode[];
+  /** Whether all or any of the top-level filters must hold. */
+  match: FilterJoin;
+  /** An open view's own filters, as saved; null for lists that are not a view. */
+  viewFilters: LinearFilterNode[] | null;
   /** The open saved view: its name, what it lists, the display saved with it. */
   view: LinearViewMeta | null;
   /** The open view's display, as saved, then as changed here (not saved back). Null: the Planner's own settings. */
@@ -218,6 +238,8 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 const emptyList = (source: LinearSource = { kind: 'assigned' }): IssueList => ({
   source,
   filters: [],
+  match: 'and',
+  viewFilters: null,
   view: null,
   display: null,
   projectDisplay: null,
@@ -250,7 +272,7 @@ export const displayOf = (list: Pick<IssueList, 'display' | 'source'>, settings:
 
 /** Whether a changed issue still belongs in a list, judged as Linear would by its filter and display. */
 const stillListed = (issue: LinearIssue, list: IssueList, display: IssueDisplay, context: FilterContext): boolean => {
-  if (!matchesRules(issue, list.filters, context)) return false;
+  if (!matchesRules(issue, list.filters, context, list.match)) return false;
   if (isClosedType(issue.state.type) && display.showCompleted === 'none') return false;
   if (!display.showSubIssues && issue.parent) return false;
   if (!display.showTriage && issue.state.type === 'triage') return false;
@@ -370,12 +392,22 @@ export class LinearStore {
     if (id === 'page') this.saveLocation();
   }
 
-  /** Temporary filters, sent to Linear with the list's own: the answer is every matching issue. */
-  setFilters(filters: LinearFilterRule[], id: ListId = 'page'): void {
-    const kept = filters.filter((rule) => rule.values.length > 0);
-    if (JSON.stringify(kept) === JSON.stringify(this.list(id).filters)) return;
-    this.patchList(id, { filters: kept });
+  /**
+   * The list's filters (rules and groups, all or any of them at the top), sent
+   * to Linear with the list's own: the answer is every matching issue.
+   */
+  setFilters(filters: LinearFilterNode[], id: ListId = 'page', match: FilterJoin = this.list(id).match): void {
+    const kept = pruneFilters(filters);
+    const list = this.list(id);
+    if (JSON.stringify(kept) === JSON.stringify(list.filters) && match === list.match) return;
+    this.patchList(id, { filters: kept, match });
     void this.loadList(id);
+  }
+
+  /** An open view's filters back as saved. */
+  resetFilters(id: ListId = 'page'): void {
+    const saved = this.list(id).viewFilters;
+    if (saved) this.setFilters(saved, id, 'and');
   }
 
   setMode(mode: LinearMode): void {
@@ -880,7 +912,7 @@ export class LinearStore {
   /** Put a changed issue everywhere it shows; a list it no longer belongs in (its filters, its display) lets it go. */
   private replaceIssue(issue: LinearIssue): void {
     const { state, today } = this.client.getView();
-    const context: FilterContext = { today, weekStartsOn: state.settings.weekStartsOn };
+    const context: FilterContext = { today, weekStartsOn: state.settings.weekStartsOn, viewerIds: this.viewerIds };
     const lists = { ...this.view.lists };
     for (const id of ['page', 'side'] as const) {
       const list = lists[id];
@@ -1010,11 +1042,18 @@ export class LinearStore {
     this.patchList(id, { loading: true, error: null });
     try {
       if (list.source.kind === 'view' && (!list.view || list.view.id !== list.source.id || refreshing)) {
-        const meta = await this.viewMeta(list.source.workspaceId, list.source.id);
+        const workspaceId = list.source.workspaceId;
+        // The view's filter is shown by name: the workspace's states, people and labels, read meanwhile.
+        const catalogs = this.loadCatalogs([workspaceId]);
+        const meta = await this.viewMeta(workspaceId, list.source.id);
+        await catalogs;
         if (seq !== this.listSeq[id]) return;
         const fallback = displayOf({ display: null, source: list.source }, this.client.getView().state.settings, id);
         const saved = viewDisplay(meta.viewPreferencesValues, fallback);
         const projects = isProjectView(meta) ? projectViewDisplay(meta.viewPreferencesValues) : null;
+        const { state, today } = this.client.getView();
+        const catalog = this.view.catalogs[workspaceId];
+        const viewFilters = projects ? [] : readFilter(meta.filterData, catalog ? [catalog] : [], { today, weekStartsOn: state.settings.weekStartsOn });
         // A view opens as saved; a refresh keeps what was changed since.
         const keep = refreshing && list.view?.id === meta.id;
         this.patchList(id, {
@@ -1022,6 +1061,8 @@ export class LinearStore {
           display: keep && list.display ? list.display : saved.display,
           projectDisplay: projects ? (keep && list.projectDisplay ? list.projectDisplay : projects.display) : null,
           unsupported: projects ? projects.unsupported : saved.unsupported,
+          viewFilters,
+          ...(keep ? {} : { filters: viewFilters, match: 'and' as const }),
         });
         list = this.list(id);
       }
@@ -1032,7 +1073,8 @@ export class LinearStore {
     }
     const targets = this.targets(list);
     const maxPages = refreshing ? Math.max(FIRST_PAGES, list.pages) : FIRST_PAGES;
-    const settled = await Promise.allSettled(targets.map((workspace) => this.readList(workspace.id, list, id, { maxPages })));
+    const live = () => seq === this.listSeq[id];
+    const settled = await Promise.allSettled(targets.map((workspace) => this.readList(workspace.id, list, id, { maxPages, live })));
     if (seq !== this.listSeq[id]) return;
     const issues: LinearIssue[] = [];
     const projects: LinearProject[] | null = list.projectDisplay ? [] : null;
@@ -1055,12 +1097,16 @@ export class LinearStore {
     this.patchList(id, { issues, projects, more, pages: maxPages, loading: false, loadingMore: false, error: allFailed ? errors.get(present[0]!.id) ?? null : null });
   }
 
-  /** One workspace's part of a list, from `after` on. */
-  private async readList(workspaceId: string, list: IssueList, id: ListId, options: { after?: string | null; maxPages: number }): Promise<{ issues: LinearIssue[]; projects: LinearProject[]; endCursor: string | null }> {
+  /** One workspace's part of a list, from `after` on; a read another one has replaced (`live` says) asks for no further page. */
+  private async readList(workspaceId: string, list: IssueList, id: ListId, options: { after?: string | null; maxPages: number; live?: () => boolean }): Promise<{ issues: LinearIssue[]; projects: LinearProject[]; endCursor: string | null }> {
     const source = list.source;
+    const wanted = () => {
+      if (options.live && !options.live()) throw new Error('replaced by a newer read');
+    };
     if (source.kind === 'view' && list.projectDisplay) {
       const filter = projectDisplayFilter(list.projectDisplay);
       const read = await readPages<LinearProject>(async (after) => {
+        wanted();
         const data = await this.graphqlIn<{ customView: { projects: Page<LinearProject> } | null }>(workspaceId, VIEW_PROJECTS_QUERY, { id: source.id, after, filter });
         if (!data.customView) throw new Error('Linear no longer has this view');
         return data.customView.projects;
@@ -1068,7 +1114,11 @@ export class LinearStore {
       return { issues: [], projects: read.nodes.map((project) => inWorkspace(project, workspaceId)), endCursor: read.hasMore ? read.endCursor : null };
     }
     const filter = this.serverFilter(list, id);
+    // A view whose own filters still hold as saved is read through the view, Linear applying them;
+    // once they were changed here, its team's issues are read with the filters as they are now.
+    const beyond = source.kind === 'view' ? beyondSaved(list.filters, list.match, list.viewFilters ?? []) : null;
     const page = (after: string | null): Promise<Page<LinearIssue>> => {
+      wanted();
       switch (source.kind) {
         case 'assigned':
           return this.graphqlIn<{ viewer: { id: string; assignedIssues: Page<LinearIssue> } }>(workspaceId, ASSIGNED_QUERY, { after, filter }).then((data) => {
@@ -1084,11 +1134,16 @@ export class LinearStore {
           return this.graphqlIn<{ issues: Page<LinearIssue> }>(workspaceId, ISSUES_QUERY, { after, filter: allOf({ subscribers: { some: { isMe: { eq: true } } } }, filter) }).then((data) => data.issues);
         case 'project':
           return this.graphqlIn<{ issues: Page<LinearIssue> }>(workspaceId, ISSUES_QUERY, { after, filter: allOf({ project: { id: { eq: source.id } } }, filter) }).then((data) => data.issues);
-        case 'view':
-          return this.graphqlIn<{ customView: { issues: Page<LinearIssue> } | null }>(workspaceId, VIEW_ISSUES_QUERY, { id: source.id, after, filter }).then((data) => {
+        case 'view': {
+          if (!beyond) {
+            const team = list.view?.team ? { team: { id: { eq: list.view.team.id } } } : null;
+            return this.graphqlIn<{ issues: Page<LinearIssue> }>(workspaceId, ISSUES_QUERY, { after, filter: allOf(team, filter) }).then((data) => data.issues);
+          }
+          return this.graphqlIn<{ customView: { issues: Page<LinearIssue> } | null }>(workspaceId, VIEW_ISSUES_QUERY, { id: source.id, after, filter: this.serverFilter(list, id, beyond) }).then((data) => {
             if (!data.customView) throw new Error('Linear no longer has this view');
             return data.customView.issues;
           });
+        }
         case 'search':
           return this.graphqlIn<{ searchIssues: Page<LinearIssue> }>(workspaceId, SEARCH_QUERY, { term: source.term, after, filter }).then((data) => data.searchIssues);
       }
@@ -1097,10 +1152,10 @@ export class LinearStore {
     return { issues: read.nodes.map((issue) => inWorkspace(issue, workspaceId)), projects: [], endCursor: read.hasMore ? read.endCursor : null };
   }
 
-  /** What a list asks Linear for beyond its own source: what its display hides, and its temporary filters. */
-  private serverFilter(list: IssueList, id: ListId): GraphFilter | null {
+  /** What a list asks Linear for beyond its own source: what its display hides, and its filters (or only `filters`). */
+  private serverFilter(list: IssueList, id: ListId, filters: { nodes: LinearFilterNode[]; match: FilterJoin } = { nodes: list.filters, match: list.match }): GraphFilter | null {
     const { state, today } = this.client.getView();
-    return allOf(displayFilter(displayOf(list, state.settings, id)), compileFilter(list.filters, { today, weekStartsOn: state.settings.weekStartsOn }));
+    return allOf(displayFilter(displayOf(list, state.settings, id)), compileFilter(filters.nodes, { today, weekStartsOn: state.settings.weekStartsOn }, filters.match));
   }
 
   private async viewMeta(workspaceId: string, id: string): Promise<LinearViewMeta> {
@@ -1142,17 +1197,32 @@ export class LinearStore {
   private async fetchCatalog(workspaceId: string): Promise<FilterCatalog> {
     const all = <T>(query: string, key: string) =>
       readPages<T>((after) => this.graphqlIn<Record<string, Page<T>>>(workspaceId, query, { after }).then((data) => data[key]!), { maxPages: MAX_CATALOG_PAGES }).then((read) => read.nodes);
-    type TeamNode = { id: string; key: string; name: string; states: { nodes: LinearState[] } };
-    const [teams, users, labels, projects, cycles] = await Promise.all([
+    type TeamNode = { id: string; key: string; name: string; issueEstimationType?: string; issueEstimationAllowZero?: boolean; issueEstimationExtended?: boolean; states: { nodes: LinearState[] } };
+    const [teams, users, labels, projects, cycles, milestones] = await Promise.all([
       all<TeamNode>(FILTER_TEAMS_QUERY, 'teams'),
       all<FilterCatalog['users'][number]>(FILTER_USERS_QUERY, 'users').catch(() => []),
       all<FilterCatalog['labels'][number]>(FILTER_LABELS_QUERY, 'issueLabels').catch(() => []),
       all<FilterCatalog['projects'][number]>(FILTER_PROJECTS_QUERY, 'projects').catch(() => []),
       all<FilterCatalog['cycles'][number]>(FILTER_CYCLES_QUERY, 'cycles').catch(() => []),
+      all<NonNullable<FilterCatalog['milestones']>[number]>(FILTER_MILESTONES_QUERY, 'projectMilestones').catch(() => []),
     ]);
     const me = users.find((user) => user.isMe);
     if (me) this.viewerIds.set(workspaceId, me.id);
-    return { workspaceId, teams: teams.map((team) => ({ id: team.id, key: team.key, name: team.name, states: team.states.nodes })), users, labels, projects, cycles };
+    return {
+      workspaceId,
+      teams: teams.map((team) => ({
+        id: team.id,
+        key: team.key,
+        name: team.name,
+        states: team.states.nodes,
+        ...(team.issueEstimationType ? { estimation: { type: team.issueEstimationType, allowZero: Boolean(team.issueEstimationAllowZero), extended: Boolean(team.issueEstimationExtended) } } : {}),
+      })),
+      users,
+      labels,
+      projects,
+      cycles,
+      milestones,
+    };
   }
 
   /** Issues behind open linked tasks, read from the workspace each lives in. */

@@ -1,8 +1,10 @@
 // The Linear page's own sidebar, as in Linear: My issues (Assigned, Created,
 // Subscribed), the issues planned here, Favorites, every saved view by team
 // and workspace (searchable), and Projects; ↑/↓ move through it, Enter opens.
+// Where the page is narrow it opens over the list and closes on Escape, on a
+// pick or on a click outside.
 import type { ComponentChildren } from 'preact';
-import { useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useState } from 'preact/hooks';
 import { groupViews, isProjectView, type LinearFavorite, type LinearSavedView } from '../../../src/domain/linear.ts';
 import { searchChoices } from '../../../src/domain/linearFilter.ts';
 import { useLinear, usePlanner } from '../../lib/context.ts';
@@ -55,12 +57,35 @@ const WorkspaceSwitcher = () => {
   );
 };
 
-export const LinearSidebar = ({ searchRef, findRef }: { searchRef: { current: HTMLInputElement | null }; findRef: { current: HTMLInputElement | null } }) => {
+export const LinearSidebar = ({
+  searchRef,
+  findRef,
+  overlay = false,
+  focus = null,
+  search,
+  onHide,
+  onPicked,
+}: {
+  searchRef: { current: HTMLInputElement | null };
+  findRef: { current: HTMLInputElement | null };
+  /** Over the list (a narrow page) rather than beside it. */
+  overlay?: boolean;
+  /** Where the focus goes as it opens: the open section, or the view finder. */
+  focus?: 'nav' | 'find' | null;
+  search: { term: string; setTerm: (term: string) => void; submit: () => void };
+  /** Fold it away (beside the list) or close it (over the list). */
+  onHide: () => void;
+  /** A section, view, project or issue was picked. */
+  onPicked: () => void;
+}) => {
   const { linear } = usePlanner();
   const lv = useLinear();
   const { setUi } = useUi();
-  const [term, setTerm] = useState('');
   const [find, setFind] = useState('');
+  useEffect(() => {
+    if (focus === 'find') findRef.current?.focus();
+    else if (focus === 'nav') (document.querySelector<HTMLElement>('#lin-sidebar .lin-nav-item.is-active') ?? document.querySelector<HTMLElement>('#lin-sidebar .lin-nav-item'))?.focus();
+  }, []);
   const page = lv.lists.page;
   const onIssues = lv.mode === 'issues';
   const is = (source: LinearSource) => onIssues && sameSource(page.source, source);
@@ -80,9 +105,23 @@ export const LinearSidebar = ({ searchRef, findRef }: { searchRef: { current: HT
           ? 'Not connected'
           : 'Checking the connection…';
   return (
-    <aside class="lin-sidebar" aria-label="Linear">
+    <aside
+      id="lin-sidebar"
+      class={`lin-sidebar${overlay ? ' is-overlay' : ''}`}
+      aria-label="Linear"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || !overlay || event.defaultPrevented) return;
+        event.preventDefault();
+        onHide();
+      }}
+    >
       <div class="lin-brand">
-        <h2>Linear</h2>
+        <div class="lin-brand-row">
+          <h2>Linear</h2>
+          <button type="button" class="lin-icon-button lin-sidebar-hide" aria-label={overlay ? 'Close the sidebar' : 'Hide the sidebar'} title={overlay ? 'Close ( Esc )' : 'Hide the sidebar ( [ )'} onClick={onHide}>
+            {overlay ? '×' : '«'}
+          </button>
+        </div>
         <span class="muted" title={lv.workspaces.map((workspace) => workspace.name).join(', ')}>{sub}</span>
       </div>
       <WorkspaceSwitcher />
@@ -91,14 +130,21 @@ export const LinearSidebar = ({ searchRef, findRef }: { searchRef: { current: HT
         role="search"
         onSubmit={(event) => {
           event.preventDefault();
-          const query = term.trim();
-          if (query) linear.setSource({ kind: 'search', term: query });
+          search.submit();
         }}
       >
-        <input ref={searchRef} type="search" value={term} placeholder="Search issues…" aria-label="Search Linear issues" onInput={(event) => setTerm(event.currentTarget.value)} />
+        <input ref={searchRef} type="search" value={search.term} placeholder="Search issues…" aria-label="Search Linear issues" onInput={(event) => search.setTerm(event.currentTarget.value)} />
         <Kbd>/</Kbd>
       </form>
-      <nav class="lin-nav" aria-label="Linear sections" onKeyDown={onNavKeys}>
+      <nav
+        class="lin-nav"
+        aria-label="Linear sections"
+        onKeyDown={onNavKeys}
+        onClick={(event) => {
+          // After the item's own click: over the list, a pick closes the sidebar.
+          if ((event.target as HTMLElement).closest('.lin-nav-item')) onPicked();
+        }}
+      >
         <div class="lin-nav-section">
           <NavItem label="My issues" icon="◎" active={false} hint={<Kbd>G I</Kbd>} title="My issues (G then I)" onClick={() => linear.setSource({ kind: 'assigned' })} />
           <NavItem sub label="Assigned" active={is({ kind: 'assigned' })} onClick={() => linear.setSource({ kind: 'assigned' })} />

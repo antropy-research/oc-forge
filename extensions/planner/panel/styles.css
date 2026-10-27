@@ -899,8 +899,7 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .iv-link-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .iv-side-meta, .iv-keys { margin: 0; font-size: 11.5px; line-height: 1.7; }
 @media (max-width: 900px) {
-  .lin-shell { grid-template-columns: 1fr; }
-  .lin-sidebar { display: none; }
+  /* The Linear page's sidebar folds by the page's own width (LinearPage), not the window's. */
   .iv-body { grid-template-columns: 1fr; }
   .iv-side { border-left: 0; border-top: 1px solid var(--pl-line); }
 }
@@ -1407,3 +1406,48 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .app.is-narrow .source-panel { width: 280px; }
 .app.is-narrow .board { gap: 12px; padding: 4px 14px 20px; }
 .app.is-narrow .sunsama-layout.is-today { gap: 14px; padding-left: 14px; }
+
+/* ==== Linear page at narrow widths, and Linear's advanced filters (planner-linear2) ==== */
+/* A narrow page: the sidebar folds behind the header's toggle and opens over the list. */
+.lin-shell.is-narrow, .lin-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
+.lin-shell.is-narrow { position: relative; }
+.lin-scrim { position: absolute; inset: 0; z-index: 44; background: color-mix(in srgb, var(--oc-fg) 16%, transparent); }
+.lin-sidebar.is-overlay { position: absolute; top: 0; bottom: 0; left: 0; z-index: 45; width: min(280px, calc(100% - 48px)); border-right: 1px solid var(--pl-line); background-color: var(--oc-bg); background-image: linear-gradient(var(--pl-softer), var(--pl-softer)); box-shadow: 8px 0 28px color-mix(in srgb, var(--oc-fg) 18%, transparent); }
+.lin-brand-row { display: flex; align-items: center; gap: 6px; }
+.lin-brand-row h2 { flex: 1; }
+.lin-sidebar-hide { min-width: 22px; height: 22px; padding: 0 4px; border-color: transparent; background: none; color: var(--oc-muted); }
+.lin-sidebar-hide:hover { background: var(--pl-soft); color: var(--oc-fg); }
+.lin-sidebar-toggle { flex: none; color: var(--oc-muted); }
+.lin-sidebar-toggle:hover { color: var(--oc-fg); }
+.lin-head-search { flex: 0 1 220px; min-width: 120px; }
+.lin-head-search-icon { color: var(--oc-muted); }
+.lin-shell.is-narrow .lin-head, .lin-shell.is-narrow .lin-bar { padding-left: 12px; padding-right: 12px; }
+.lin-shell.is-narrow .lin-description { margin-left: 12px; margin-right: 12px; }
+.lin-shell.is-narrow .lin-crumbs { flex: 0 1 auto; overflow: hidden; }
+.lin-shell.is-narrow .lin-crumb { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lin-shell.is-narrow .lin-content { padding-left: 6px; padding-right: 6px; }
+/* A row keeps room for its title; properties that do not fit move under it, to the right. */
+.lin-shell.is-narrow .lin-row { flex-wrap: wrap; row-gap: 3px; padding-top: 4px; padding-bottom: 4px; }
+.lin-shell.is-narrow .lin-row-title { flex: 1 1 160px; min-width: min(160px, 100%); }
+.lin-shell.is-narrow .lin-props { flex: 0 1 auto; max-width: 100%; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+
+/* Filters: whether all or any hold, a group's chip, a part of a saved view kept as it is. */
+.lin-match { padding: 2px 8px; font-size: 12px; color: var(--oc-muted); }
+.lin-chip.is-group .lin-chip-values { display: inline-flex; align-items: center; gap: 5px; }
+.lin-chip.is-raw .lin-chip-field { white-space: normal; }
+/* Linear's advanced filter: rows joined by and / or, groups as boxes of their own. */
+.lin-popover.lin-advanced { width: max-content; min-width: 300px; max-width: min(640px, calc(100vw - 16px)); overflow: visible; }
+.lin-advanced-body { padding: 4px 10px 10px; }
+.lin-adv-rows { display: flex; flex-direction: column; gap: 6px; }
+.lin-adv-row { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 8px; }
+.lin-adv-row > .lin-chip, .lin-adv-row > .lin-adv-add { justify-self: start; }
+.lin-adv-join { display: flex; justify-content: flex-end; padding-top: 2px; font-size: 12px; color: var(--oc-muted); }
+.lin-adv-word { padding-right: 8px; }
+.lin-adv-switch { border: 1px solid var(--pl-line); border-radius: 6px; background: var(--pl-soft); padding: 1px 7px; font-size: 12px; color: var(--oc-fg); }
+.lin-adv-switch:hover { background: color-mix(in srgb, var(--oc-fg) 9%, transparent); }
+.lin-adv-group { position: relative; min-width: 0; padding: 8px 30px 8px 6px; border: 1px solid var(--pl-line); border-radius: 8px; background: var(--pl-softer); }
+.lin-adv-remove { position: absolute; top: 5px; right: 5px; border: 0; border-radius: 5px; background: none; padding: 1px 6px; color: var(--oc-muted); font-size: 15px; line-height: 1.2; }
+.lin-adv-remove:hover { background: var(--pl-soft); color: var(--oc-fg); }
+.lin-adv-add { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.lin-adv-add-button { padding: 2px 8px; font-size: 12px; color: var(--oc-muted); }
+/* ==== end Linear page at narrow widths, and advanced filters ==== */

@@ -4,6 +4,7 @@ import { plannedLinearTasks } from '../../../src/domain/linear.ts';
 import type { Task } from '../../../src/domain/types.ts';
 import { useLinear, usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
+import { HeadSearch, SidebarToggle } from './chrome.tsx';
 import { workspaceLabel } from './common.tsx';
 import { StatusIcon } from './icons.tsx';
 
@@ -48,7 +49,10 @@ export const PlannedPane = () => {
   return (
     <>
       <header class="lin-head">
+        <SidebarToggle />
         <div class="lin-crumbs"><span class="lin-crumb">Planner</span><span class="lin-crumb-sep" aria-hidden="true">›</span><h1>Planned</h1></div>
+        <span class="grow" />
+        <HeadSearch />
       </header>
       <div class="lin-content view-scroll">
         {groups.length === 0 && <p class="hint">No Linear issues in your plan yet. Plan one from an issue list or a project.</p>}

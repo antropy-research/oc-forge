@@ -2315,6 +2315,7 @@ var ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrder
     creator { id name }
     project { id name color icon }
     cycle { id number name isActive isNext }
+    projectMilestone { id name }
     parent { id identifier title }
     labels(first: 25) { nodes { id name color } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
@@ -2370,6 +2371,7 @@ var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
 var VIEW_QUERY = `query PlannerView($id: String!) {
   customView(id: $id) {
     ${VIEW_FIELDS}
+    filterData
     viewPreferencesValues { ${VIEW_PREF_FIELDS} }
   }
 }`;
@@ -2430,7 +2432,13 @@ var PROJECT_QUERY = `query PlannerProject($id: String!) {
 }`;
 var FILTER_TEAMS_QUERY = `query PlannerFilterTeams($after: String) {
   teams(first: 50, after: $after) {
-    nodes { id key name states(first: 50) { nodes { id name type color position } } }
+    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } } }
+    ${PAGE}
+  }
+}`;
+var FILTER_MILESTONES_QUERY = `query PlannerFilterMilestones($after: String) {
+  projectMilestones(first: 250, after: $after) {
+    nodes { id name targetDate project { id name } }
     ${PAGE}
   }
 }`;
@@ -2525,6 +2533,7 @@ var ALL_DOCUMENTS = [
   FILTER_LABELS_QUERY,
   FILTER_PROJECTS_QUERY,
   FILTER_CYCLES_QUERY,
+  FILTER_MILESTONES_QUERY,
   ISSUE_DETAIL_QUERY,
   TEAM_OPTIONS_QUERY,
   SET_STATE_MUTATION,
