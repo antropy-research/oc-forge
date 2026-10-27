@@ -567,6 +567,7 @@ const tasksWorld = (start: GoogleTaskItem[] = []) => {
       return { tasks: [...tasks.values()].filter((task) => task.listId === list), complete: true };
     }
     if (method === 'POST' && path === '/google/tasks/linked') return { tasks: [...tasks.values()].filter((task) => body.groups.some((group: { ids: string[] }) => group.ids.includes(task.id))), missing: [] };
+    if (method === 'GET' && path === '/google/tasklists') return { lists: [{ account: ME, id: 'L1', title: 'My Tasks' }, { account: ME, id: 'L2', title: 'Errands' }], errors: [] };
     return {};
   };
   return { tasks, answer, refuse: (when: (method: string, path: string, body: any) => boolean) => (refusing = when) };
@@ -681,6 +682,18 @@ describe('completing a task completes its subtasks, and reopening a subtask reop
   const done = (world: ReturnType<typeof trip>) => ['p', 'c1', 'c2', 'c3', 'x'].map((id) => world.tasks.get(id)!.completed);
   const patched = (fake: ReturnType<typeof fakeClient>) => fake.calls.filter((call) => call.method === 'PATCH').map((call) => `${call.body.id}:${call.body.completed}`);
   const reads = (fake: ReturnType<typeof fakeClient>) => fake.calls.filter((call) => call.method === 'GET' && call.path.startsWith('/google/tasks/all')).length;
+
+  test("a task Google's own apps moved to another list since the last read: its subtasks are found where it is now", async () => {
+    const world = tasksWorld([
+      item({ id: 'p', title: 'Plan the trip', listId: 'L2' }),
+      item({ id: 'c1', title: 'Book the hotel', due: null, parent: 'p', listId: 'L2' }),
+    ]);
+    const fake = fakeClient(emptyState(), world.answer);
+    // The Planner still names L1, the list the task was in when it last read it.
+    await new GoogleStore(host, fake.client, 'page').completeListTask({ ...world.tasks.get('p')!, listId: 'L1' }, true);
+    expect(world.tasks.get('c1')!.completed).toBe(true);
+    expect(fake.calls.filter((call) => call.method === 'PATCH').map((call) => call.body.id)).toEqual(['c1', 'p']);
+  });
 
   test('from the calendar of a fresh panel (no list loaded): its subtasks are read from Google and completed first, then the task', async () => {
     const world = trip();

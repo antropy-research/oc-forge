@@ -657,7 +657,19 @@ export class GoogleStore {
    */
   private async relatives(task: { account: string; listId: string; id: string; parent?: string | null }, completed: boolean): Promise<GoogleTaskItem[]> {
     if (task.parent !== undefined && (completed ? task.parent !== null : task.parent === null)) return [];
-    const items = await this.listItems(task.account, task.listId);
+    let items = await this.listItems(task.account, task.listId);
+    if (!items.some((other) => other.id === task.id)) {
+      // Moved to another list in Google's own apps since the Planner last read it (the write finds it there too):
+      // its relatives are in the list it is in now.
+      const lists = this.view.lists.length ? this.view.lists : ((await this.client.call<{ lists?: GoogleTaskList[] }>('GET', '/google/tasklists').catch(() => null))?.lists ?? []);
+      for (const list of lists.filter((other) => other.account === task.account && other.id !== task.listId)) {
+        const there = await this.listItems(task.account, list.id);
+        if (there.some((other) => other.id === task.id)) {
+          items = there;
+          break;
+        }
+      }
+    }
     if (completed) return items.filter((other) => other.parent === task.id && !other.completed);
     const parent = task.parent ?? items.find((other) => other.id === task.id)?.parent ?? null;
     return parent ? items.filter((other) => other.id === parent && other.completed) : [];
