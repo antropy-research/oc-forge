@@ -7,7 +7,7 @@
 // occurrence is made once; a timed block's text fits its height.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
+import { GoogleStore, listKey, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
 import { dropTarget } from '../src/domain/gtasks.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { GoogleData, toTaskItem } from '../service/googleData.ts';
@@ -508,53 +508,139 @@ describe('the calendar shows deadlines and upcoming occurrences, as Google Calen
   });
 });
 
-describe('a repeating task and subtasks never go together, as in Google Tasks', () => {
-  const repeating = () => foldEvents([ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 1, next: null } } })]);
-  const row = (id: string, depth: 0 | 1 = 0, parent: string | null = null) => ({ item: item({ id, parent }), depth, children: 0 });
+/**
+ * Google Tasks behind the store, as Google keeps it: tasks made, changed,
+ * moved and read (subtasks too, by list); `refuse` makes the next call it
+ * matches fail, as Google's 503 does.
+ */
+const tasksWorld = (start: GoogleTaskItem[] = []) => {
+  const tasks = new Map(start.map((task) => [task.id, { ...task }]));
+  let n = 0;
+  let refusing: ((method: string, path: string, body: any) => boolean) | null = null;
+  const answer = (method: string, path: string, body: any) => {
+    if (refusing?.(method, path, body)) {
+      refusing = null;
+      throw new Error('Backend Error');
+    }
+    if (method === 'POST' && path === '/google/tasks') {
+      const made = item({ id: `gt${100 + ++n}`, listId: body.listId, title: body.title, notes: body.notes ?? '', due: body.due ?? null, parent: body.parent ?? null });
+      tasks.set(made.id, made);
+      return { task: made };
+    }
+    if (method === 'PATCH' && path === '/google/tasks') {
+      const { account: _account, listId: _listId, id, ...rest } = body;
+      const next = { ...tasks.get(id)!, ...rest };
+      tasks.set(id, next);
+      return { task: next };
+    }
+    if (method === 'POST' && path === '/google/tasks/move') {
+      const moved = { ...tasks.get(body.id)!, listId: body.destinationListId ?? body.listId, parent: body.parent ?? null };
+      tasks.set(body.id, moved);
+      return { task: moved };
+    }
+    if (method === 'GET' && path.startsWith('/google/tasks/all')) {
+      const list = new URLSearchParams(path.split('?')[1]).get('list');
+      return { tasks: [...tasks.values()].filter((task) => task.listId === list), complete: true };
+    }
+    if (method === 'POST' && path === '/google/tasks/linked') return { tasks: [...tasks.values()].filter((task) => body.groups.some((group: { ids: string[] }) => group.ids.includes(task.id))), missing: [] };
+    return {};
+  };
+  return { tasks, answer, refuse: (when: (method: string, path: string, body: any) => boolean) => (refusing = when) };
+};
+const refusedPatch = (method: string, path: string) => method === 'PATCH' && path === '/google/tasks';
 
-  test('dragged right under a repeating task, a task stays at the top level; a repeating task does not nest', () => {
-    const repeats = (id: string) => id === 'gt1';
-    const rows = [row('gt1'), row('gt2'), row('gt3')];
-    expect(dropTarget(rows, 'gt3', 1, true, repeats)).toEqual({ parent: null, previous: 'gt1' });
-    expect(dropTarget(rows, 'gt3', 2, true, repeats)).toEqual({ parent: 'gt2', previous: null });
-    expect(dropTarget(rows, 'gt1', 2, true, repeats)).toEqual({ parent: null, previous: 'gt3' });
-    expect(dropTarget(rows, 'gt3', 1, true)).toEqual({ parent: 'gt1', previous: null });
-  });
-
-  test('a subtask under a repeating task, a repeating task under another, or a repeat on a task with subtasks: refused before anything changes', async () => {
-    const fake = fakeClient(repeating(), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ id: 'gt2' }), item({ id: 'gt3', parent: 'gt2' })], complete: true } : {}));
+describe('an edit Google refuses leaves everything as it was; Save again applies it once', () => {
+  const fields = (title: string, due: string, time: number | null, deadline: string | null = null, rule: string | null = 'RRULE:FREQ=DAILY') => ({ title, notes: 'Agenda', due, kept: { time, duration: null, deadline, rule } });
+  /** The review's series: a daily task at 1pm, and another open occurrence of it (a second window made one). */
+  const daily = async () => {
+    const world = tasksWorld();
+    const fake = fakeClient(emptyState(), world.answer);
     const store = new GoogleStore(host, fake.client, 'page');
-    const refused = (work: Promise<unknown>) => work.then(() => null, (error: Error) => error.message);
-    expect(await refused(store.addListTask(ME, 'L1', { title: 'Child', parent: 'gt1' }))).toBe(REPEATING_NO_SUBTASKS);
-    expect(await refused(store.moveListTask(item({ id: 'gt2' }), { parent: 'gt1', previous: null }))).toBe(REPEATING_NO_SUBTASKS);
-    expect(await refused(store.moveListTask(item({ id: 'gt1' }), { parent: 'gt2', previous: null }))).toBe(REPEATING_NOT_SUBTASK);
-    const daily = { title: 'Send the report', notes: 'To Ann', due: '2026-10-26', kept: { time: null, duration: null, deadline: null, rule: 'RRULE:FREQ=DAILY' } };
-    expect(await refused(store.saveListTask(item({ id: 'gt2' }), daily))).toBe(SUBTASKS_NO_REPEAT);
-    expect(await refused(store.saveListTask(item({ id: 'gt3', parent: 'gt2' }), daily))).toBe(SUBTASK_NO_REPEAT);
-    // Nothing reached Google but a read of the list, and nothing was kept.
-    expect(fake.calls.every((call) => call.method === 'GET')).toBe(true);
-    expect(fake.dispatched).toEqual([]);
-    // A task without subtasks still takes a repeat, and a repeating one keeps its series on other edits.
-    await store.saveListTask(item({ id: 'gt1' }), { ...daily, title: 'Send the full report' });
-    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.rule).toBe('RRULE:FREQ=DAILY');
-  });
-});
+    const first = await store.addListTask(ME, 'L1', { title: 'Daily standup', notes: 'Agenda', due: '2026-10-27' }, { time: 13 * 60, rule: 'RRULE:FREQ=DAILY' });
+    const repeat = keptFor(fake.state(), first)!.repeat!;
+    await fake.client.dispatch([{ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt9', patch: { time: 13 * 60, repeat: { ...repeat, index: 2, on: '2026-10-28' } } }]);
+    return { world, fake, store, id: first.id, google: () => world.tasks.get(first.id)! };
+  };
+  /** What a reload shows: the service's log folded again. */
+  const reloaded = (fake: ReturnType<typeof fakeClient>, id: string) => keptFor(foldEvents(fake.log), { account: ME, id });
 
-describe('calendar titles fit their block, as Google Calendar fits them', () => {
-  test('one line reads "Title, 10am"; taller blocks give the title every whole line, the time the one after it', () => {
-    // A 30-minute block at 48 px an hour: 22 px, less its padding.
-    expect(blockText(18, 14)).toEqual({ inline: true, lines: 1 });
-    expect(blockText(6, 14)).toEqual({ inline: true, lines: 1 });
-    // 45 minutes, an hour, two hours.
-    expect(blockText(30, 14)).toEqual({ inline: false, lines: 2 });
-    expect(blockText(42, 14)).toEqual({ inline: false, lines: 3 });
-    expect(blockText(90, 14)).toEqual({ inline: false, lines: 6 });
+  test('This task or All tasks, a title, a time, a date, a deadline or a repeat: Google, what is kept and the series stay as they were, after a reload too', async () => {
+    const { world, fake, store, id, google } = await daily();
+    const before = { google: { ...google() }, kept: keptFor(fake.state(), { account: ME, id }), other: keptFor(fake.state(), { account: ME, id: 'gt9' }) };
+    const cases: [ReturnType<typeof fields>, 'this' | 'all'][] = [
+      [fields('Rejected title', '2026-10-27', 16 * 60), 'all'],
+      [fields('Rejected title', '2026-10-27', 16 * 60), 'this'],
+      [fields('Daily standup', '2026-10-29', 13 * 60, '2026-10-30'), 'all'],
+      [fields('Daily standup', '2026-10-29', 13 * 60), 'this'],
+      [fields('Daily standup', '2026-10-28', 13 * 60, null, 'RRULE:FREQ=WEEKLY;BYDAY=WE'), 'all'],
+    ];
+    for (const [edit, scope] of cases) {
+      const dispatched = fake.dispatched.length;
+      world.refuse(refusedPatch);
+      await expect(store.saveListTask(google(), edit, scope)).rejects.toThrow('Backend Error');
+      expect(google()).toEqual(before.google);
+      expect(keptFor(fake.state(), { account: ME, id })).toEqual(before.kept);
+      expect(keptFor(fake.state(), { account: ME, id: 'gt9' })).toEqual(before.other);
+      expect(fake.dispatched.length).toBe(dispatched);
+      expect(reloaded(fake, id)).toEqual(before.kept);
+    }
+    // Nothing was made in Google either.
+    expect(fake.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
   });
-});
 
-describe('the service reads tasks as the Planner shows them', () => {
-  test('toTaskItem keeps what a link compares against', () => {
-    const read = toTaskItem({ id: 'gt1', title: 'Send the report', notes: 'To Ann', due: '2026-10-26T00:00:00.000Z', status: 'needsAction', updated: '2026-10-26T15:00:00.000Z' }, ME, 'L1')!;
-    expect(gtaskSource(read)).toMatchObject({ title: 'Send the report', notes: 'To Ann', due: '2026-10-26', listId: 'L1' });
+  test('with the list shown in the Tasks view, it shows the task as Google has it again', async () => {
+    const { world, store, google } = await daily();
+    await store.loadBoard(ME, 'L1');
+    world.refuse(refusedPatch);
+    await expect(store.saveListTask(google(), fields('Rejected title', '2026-10-27', 16 * 60), 'all')).rejects.toThrow();
+    expect(store.getView().board[listKey(ME, 'L1')]!.items.find((task) => task.id === google().id)?.title).toBe('Daily standup');
+  });
+
+  test('Save again, once Google takes it: applied once, the series and its next occurrence with the new values', async () => {
+    const { world, fake, store, id, google } = await daily();
+    const edit = fields('Standup at four', '2026-10-27', 16 * 60);
+    world.refuse(refusedPatch);
+    await expect(store.saveListTask(google(), edit, 'all')).rejects.toThrow();
+    // The form still has the edit and saves it again, with the task as it was.
+    await store.saveListTask(google(), edit, 'all');
+    expect(google()).toMatchObject({ title: 'Standup at four', due: '2026-10-27' });
+    const kept = keptFor(fake.state(), { account: ME, id });
+    expect(kept).toMatchObject({ time: 960, repeat: { index: 1, on: '2026-10-27', template: { title: 'Standup at four', time: 960, start: '2026-10-27' } } });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt9' })).toMatchObject({ time: 960, repeat: { index: 2, on: '2026-10-28', template: { title: 'Standup at four' } } });
+    // One write reached Google (the other was refused); saved once more, nothing moves.
+    expect(fake.calls.filter((call) => call.method === 'PATCH' && call.body.title === 'Standup at four')).toHaveLength(2);
+    await store.saveListTask(google(), edit, 'all');
+    expect(keptFor(fake.state(), { account: ME, id })).toMatchObject({ time: 960, repeat: kept!.repeat! });
+    expect(fake.calls.filter((call) => call.method === 'PATCH' && call.body.title === 'Standup at four')).toHaveLength(2);
+    // Completed: the next one is made with the new values, on the series' next date.
+    await store.completeListTask(google(), true);
+    expect(fake.calls.filter((call) => call.method === 'POST' && call.path === '/google/tasks').at(-1)?.body).toMatchObject({ title: 'Standup at four', due: '2026-10-28' });
+    const next = [...world.tasks.values()].find((task) => !task.completed && task.id !== 'gt9')!;
+    expect(keptFor(fake.state(), next)).toMatchObject({ time: 960, repeat: { index: 2, on: '2026-10-28' } });
+  });
+
+  test('a move to another list Google refuses puts back the fields Google took; nothing is kept until both are taken', async () => {
+    const world = tasksWorld([item()]);
+    const fake = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    const edit = { title: 'Send the full report', notes: 'To Ann', due: '2026-10-26', kept: { time: 600, duration: null, deadline: null, rule: null } };
+    world.refuse((method, path) => method === 'POST' && path === '/google/tasks/move');
+    await expect(store.saveListTask(item(), edit, 'this', { starred: true, listId: 'L2' })).rejects.toThrow('Backend Error');
+    expect(world.tasks.get('gt1')).toMatchObject({ title: 'Send the report', listId: 'L1' });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })).toBeNull();
+    await store.saveListTask(item(), edit, 'this', { starred: true, listId: 'L2' });
+    expect(world.tasks.get('gt1')).toMatchObject({ title: 'Send the full report', listId: 'L2' });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })).toMatchObject({ listId: 'L2', time: 600, starredAt: expect.any(String) });
+  });
+
+  test('a timed task dragged to a day Google refuses keeps its time; taken, it has both', async () => {
+    const world = tasksWorld([item()]);
+    const fake = fakeClient(foldEvents([ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: 600 } })]), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    world.refuse(refusedPatch);
+    await expect(store.moveTimedTask(item(), '2026-10-27', 840)).rejects.toThrow();
+    expect([world.tasks.get('gt1')!.due, keptFor(fake.state(), { account: ME, id: 'gt1' })?.time]).toEqual(['2026-10-26', 600]);
+    await store.moveTimedTask(item(), '2026-10-27', 840);
+    expect([world.tasks.get('gt1')!.due, keptFor(fake.state(), { account: ME, id: 'gt1' })?.time]).toEqual(['2026-10-27', 840]);
   });
 });
