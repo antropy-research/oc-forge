@@ -282,8 +282,10 @@ export const upcomingEvent = (task: UpcomingTask, zone: string): CalendarEvent =
 /**
  * Deadlines on their own day, in the all-day section as Google Calendar
  * shows them: each task (once, however often it was read) whose kept deadline
- * falls between `from` and `to` on another day than its date. A task without
- * a date shows only there; one due that day shows its flag on itself.
+ * falls between `from` and `to`. A task without a date shows only there; a
+ * timed one keeps its block at its time and has its deadline there too, its
+ * own day included; an all-day task due on its deadline's day is one item,
+ * the task with its flag.
  */
 export const deadlineEvents = (items: readonly GoogleTaskItem[], kept: Readonly<Record<string, GoogleTaskKept>>, from: DateKey, to: DateKey, zone: string): CalendarEvent[] => {
   const seen = new Set<string>();
@@ -293,7 +295,9 @@ export const deadlineEvents = (items: readonly GoogleTaskItem[], kept: Readonly<
     const deadline = kept[key]?.deadline;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (!deadline || deadline < from || deadline > to || deadline === item.due) continue;
+    if (!deadline || deadline < from || deadline > to) continue;
+    // All day on its deadline's day: its own item carries the flag (a time puts it on the grid, as `withTaskTimes`).
+    if (deadline === item.due && (kept[key]?.time ?? null) === null) continue;
     out.push({ id: `gtask-deadline:${item.listId}:${item.id}`, calendarId: GOOGLE_TASKS_CALENDAR, title: item.title, location: '', start: instantAt(deadline, 0, zone), end: instantAt(addDays(deadline, 1), 0, zone), allDay: true, busy: false, googleTask: item, taskDeadline: true });
   }
   return out;

@@ -4,10 +4,13 @@
 // a write Google refuses leaves the Planner as Google is, and title, details
 // and date merge three ways. What the Planner keeps for Google tasks (time,
 // deadline, repeat, star) follows moves too; a repeating task's next
-// occurrence is made once; a timed block's text fits its height.
+// occurrence is made once; a timed block's text fits its height. An edit is
+// all or nothing (Google first, then what the Planner keeps); completing a
+// task completes its subtasks, and reopening a subtask its task, however
+// little the panel has loaded; a timed task's deadline has its all-day entry.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
+import { GoogleStore, listKey, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
 import { dropTarget } from '../src/domain/gtasks.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { GoogleData, toTaskItem } from '../service/googleData.ts';
@@ -505,6 +508,241 @@ describe('the calendar shows deadlines and upcoming occurrences, as Google Calen
     // What the service reads for them: by account and list, in the range only.
     expect(deadlineGroups(state, [ME], ...WEEK)).toEqual([{ account: ME, listId: 'L1', ids: ['gt1', 'gt2', 'gt3'] }]);
     expect(deadlineGroups(state, ['other@example.com'], ...WEEK)).toEqual([]);
+  });
+
+  test('a timed task’s deadline on its own day shows in the all-day section, its block staying at its time; an all-day task due that day stays one item', () => {
+    const zone = 'America/Los_Angeles';
+    const timed = item({ id: 'gt1', title: 'Review the deck', due: '2026-10-27' });
+    const allDay = item({ id: 'gt2', title: 'Send the report', due: '2026-10-27' });
+    const both = foldEvents([kept('gt1', { time: 13 * 60, deadline: '2026-10-27' }), kept('gt2', { deadline: '2026-10-27' })]);
+    const entries = (state: PlannerState, items: GoogleTaskItem[]) => deadlineEvents(items, state.googleTasks, ...WEEK, zone).map((event) => [event.id, event.start, event.allDay, event.taskDeadline]);
+    // The review's case: 1pm today, its deadline today.
+    expect(entries(both, [timed, allDay])).toEqual([['gtask-deadline:L1:gt1', '2026-10-27T07:00:00.000Z', true, true]]);
+    const due = (task: GoogleTaskItem): CalendarEvent => ({ id: `gtask:L1:${task.id}`, calendarId: 'google-tasks', title: task.title, location: '', start: `${task.due}T07:00:00.000Z`, end: '', allDay: true, busy: false, googleTask: task });
+    expect(withTaskTimes([due(timed), due(allDay)], both.googleTasks, zone).map((event) => [event.id, event.allDay, event.start])).toEqual([
+      ['gtask:L1:gt1', false, '2026-10-27T20:00:00.000Z'],
+      ['gtask:L1:gt2', true, '2026-10-27T07:00:00.000Z'],
+    ]);
+    // The entries follow either date: the deadline moved to tomorrow; the all-day task moved off its deadline's day; the time cleared.
+    const later = applyEvents(both, [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { deadline: '2026-10-28' } })]);
+    expect(entries(later, [timed, allDay])).toEqual([['gtask-deadline:L1:gt1', '2026-10-28T07:00:00.000Z', true, true]]);
+    expect(entries(both, [timed, { ...allDay, due: '2026-10-26' }]).map(([id]) => id)).toEqual(['gtask-deadline:L1:gt1', 'gtask-deadline:L1:gt2']);
+    const untimed = applyEvents(both, [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: null } })]);
+    expect(entries(untimed, [timed, allDay])).toEqual([]);
+  });
+});
+
+/**
+ * Google Tasks behind the store, as Google keeps it: tasks made, changed,
+ * moved and read (subtasks too, by list); `refuse` makes the next call it
+ * matches fail, as Google's 503 does.
+ */
+const tasksWorld = (start: GoogleTaskItem[] = []) => {
+  const tasks = new Map(start.map((task) => [task.id, { ...task }]));
+  let n = 0;
+  let refusing: ((method: string, path: string, body: any) => boolean) | null = null;
+  const answer = (method: string, path: string, body: any) => {
+    if (refusing?.(method, path, body)) {
+      refusing = null;
+      throw new Error('Backend Error');
+    }
+    if (method === 'POST' && path === '/google/tasks') {
+      const made = item({ id: `gt${100 + ++n}`, listId: body.listId, title: body.title, notes: body.notes ?? '', due: body.due ?? null, parent: body.parent ?? null });
+      tasks.set(made.id, made);
+      return { task: made };
+    }
+    if (method === 'PATCH' && path === '/google/tasks') {
+      const { account: _account, listId: _listId, id, ...rest } = body;
+      const next = { ...tasks.get(id)!, ...rest };
+      tasks.set(id, next);
+      return { task: next };
+    }
+    if (method === 'POST' && path === '/google/tasks/move') {
+      const moved = { ...tasks.get(body.id)!, listId: body.destinationListId ?? body.listId, parent: body.parent ?? null };
+      tasks.set(body.id, moved);
+      return { task: moved };
+    }
+    if (method === 'GET' && path.startsWith('/google/tasks/all')) {
+      const list = new URLSearchParams(path.split('?')[1]).get('list');
+      return { tasks: [...tasks.values()].filter((task) => task.listId === list), complete: true };
+    }
+    if (method === 'POST' && path === '/google/tasks/linked') return { tasks: [...tasks.values()].filter((task) => body.groups.some((group: { ids: string[] }) => group.ids.includes(task.id))), missing: [] };
+    return {};
+  };
+  return { tasks, answer, refuse: (when: (method: string, path: string, body: any) => boolean) => (refusing = when) };
+};
+const refusedPatch = (method: string, path: string) => method === 'PATCH' && path === '/google/tasks';
+
+describe('an edit Google refuses leaves everything as it was; Save again applies it once', () => {
+  const fields = (title: string, due: string, time: number | null, deadline: string | null = null, rule: string | null = 'RRULE:FREQ=DAILY') => ({ title, notes: 'Agenda', due, kept: { time, duration: null, deadline, rule } });
+  /** The review's series: a daily task at 1pm, and another open occurrence of it (a second window made one). */
+  const daily = async () => {
+    const world = tasksWorld();
+    const fake = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    const first = await store.addListTask(ME, 'L1', { title: 'Daily standup', notes: 'Agenda', due: '2026-10-27' }, { time: 13 * 60, rule: 'RRULE:FREQ=DAILY' });
+    const repeat = keptFor(fake.state(), first)!.repeat!;
+    await fake.client.dispatch([{ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt9', patch: { time: 13 * 60, repeat: { ...repeat, index: 2, on: '2026-10-28' } } }]);
+    return { world, fake, store, id: first.id, google: () => world.tasks.get(first.id)! };
+  };
+  /** What a reload shows: the service's log folded again. */
+  const reloaded = (fake: ReturnType<typeof fakeClient>, id: string) => keptFor(foldEvents(fake.log), { account: ME, id });
+
+  test('This task or All tasks, a title, a time, a date, a deadline or a repeat: Google, what is kept and the series stay as they were, after a reload too', async () => {
+    const { world, fake, store, id, google } = await daily();
+    const before = { google: { ...google() }, kept: keptFor(fake.state(), { account: ME, id }), other: keptFor(fake.state(), { account: ME, id: 'gt9' }) };
+    const cases: [ReturnType<typeof fields>, 'this' | 'all'][] = [
+      [fields('Rejected title', '2026-10-27', 16 * 60), 'all'],
+      [fields('Rejected title', '2026-10-27', 16 * 60), 'this'],
+      [fields('Daily standup', '2026-10-29', 13 * 60, '2026-10-30'), 'all'],
+      [fields('Daily standup', '2026-10-29', 13 * 60), 'this'],
+      [fields('Daily standup', '2026-10-28', 13 * 60, null, 'RRULE:FREQ=WEEKLY;BYDAY=WE'), 'all'],
+    ];
+    for (const [edit, scope] of cases) {
+      const dispatched = fake.dispatched.length;
+      world.refuse(refusedPatch);
+      await expect(store.saveListTask(google(), edit, scope)).rejects.toThrow('Backend Error');
+      expect(google()).toEqual(before.google);
+      expect(keptFor(fake.state(), { account: ME, id })).toEqual(before.kept);
+      expect(keptFor(fake.state(), { account: ME, id: 'gt9' })).toEqual(before.other);
+      expect(fake.dispatched.length).toBe(dispatched);
+      expect(reloaded(fake, id)).toEqual(before.kept);
+    }
+    // Nothing was made in Google either.
+    expect(fake.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+  });
+
+  test('with the list shown in the Tasks view, it shows the task as Google has it again', async () => {
+    const { world, store, google } = await daily();
+    await store.loadBoard(ME, 'L1');
+    world.refuse(refusedPatch);
+    await expect(store.saveListTask(google(), fields('Rejected title', '2026-10-27', 16 * 60), 'all')).rejects.toThrow();
+    expect(store.getView().board[listKey(ME, 'L1')]!.items.find((task) => task.id === google().id)?.title).toBe('Daily standup');
+  });
+
+  test('Save again, once Google takes it: applied once, the series and its next occurrence with the new values', async () => {
+    const { world, fake, store, id, google } = await daily();
+    const edit = fields('Standup at four', '2026-10-27', 16 * 60);
+    world.refuse(refusedPatch);
+    await expect(store.saveListTask(google(), edit, 'all')).rejects.toThrow();
+    // The form still has the edit and saves it again, with the task as it was.
+    await store.saveListTask(google(), edit, 'all');
+    expect(google()).toMatchObject({ title: 'Standup at four', due: '2026-10-27' });
+    const kept = keptFor(fake.state(), { account: ME, id });
+    expect(kept).toMatchObject({ time: 960, repeat: { index: 1, on: '2026-10-27', template: { title: 'Standup at four', time: 960, start: '2026-10-27' } } });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt9' })).toMatchObject({ time: 960, repeat: { index: 2, on: '2026-10-28', template: { title: 'Standup at four' } } });
+    // One write reached Google (the other was refused); saved once more, nothing moves.
+    expect(fake.calls.filter((call) => call.method === 'PATCH' && call.body.title === 'Standup at four')).toHaveLength(2);
+    await store.saveListTask(google(), edit, 'all');
+    expect(keptFor(fake.state(), { account: ME, id })).toMatchObject({ time: 960, repeat: kept!.repeat! });
+    expect(fake.calls.filter((call) => call.method === 'PATCH' && call.body.title === 'Standup at four')).toHaveLength(2);
+    // Completed: the next one is made with the new values, on the series' next date.
+    await store.completeListTask(google(), true);
+    expect(fake.calls.filter((call) => call.method === 'POST' && call.path === '/google/tasks').at(-1)?.body).toMatchObject({ title: 'Standup at four', due: '2026-10-28' });
+    const next = [...world.tasks.values()].find((task) => !task.completed && task.id !== 'gt9')!;
+    expect(keptFor(fake.state(), next)).toMatchObject({ time: 960, repeat: { index: 2, on: '2026-10-28' } });
+  });
+
+  test('a move to another list Google refuses puts back the fields Google took; nothing is kept until both are taken', async () => {
+    const world = tasksWorld([item()]);
+    const fake = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    const edit = { title: 'Send the full report', notes: 'To Ann', due: '2026-10-26', kept: { time: 600, duration: null, deadline: null, rule: null } };
+    world.refuse((method, path) => method === 'POST' && path === '/google/tasks/move');
+    await expect(store.saveListTask(item(), edit, 'this', { starred: true, listId: 'L2' })).rejects.toThrow('Backend Error');
+    expect(world.tasks.get('gt1')).toMatchObject({ title: 'Send the report', listId: 'L1' });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })).toBeNull();
+    await store.saveListTask(item(), edit, 'this', { starred: true, listId: 'L2' });
+    expect(world.tasks.get('gt1')).toMatchObject({ title: 'Send the full report', listId: 'L2' });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })).toMatchObject({ listId: 'L2', time: 600, starredAt: expect.any(String) });
+  });
+
+  test('a timed task dragged to a day Google refuses keeps its time; taken, it has both', async () => {
+    const world = tasksWorld([item()]);
+    const fake = fakeClient(foldEvents([ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: 600 } })]), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    world.refuse(refusedPatch);
+    await expect(store.moveTimedTask(item(), '2026-10-27', 840)).rejects.toThrow();
+    expect([world.tasks.get('gt1')!.due, keptFor(fake.state(), { account: ME, id: 'gt1' })?.time]).toEqual(['2026-10-26', 600]);
+    await store.moveTimedTask(item(), '2026-10-27', 840);
+    expect([world.tasks.get('gt1')!.due, keptFor(fake.state(), { account: ME, id: 'gt1' })?.time]).toEqual(['2026-10-27', 840]);
+  });
+});
+
+describe('completing a task completes its subtasks, and reopening a subtask reopens its task, however cold the panel is', () => {
+  const trip = () =>
+    tasksWorld([
+      item({ id: 'p', title: 'Plan the trip', due: '2026-10-29' }),
+      item({ id: 'c1', title: 'Book the hotel', due: null, parent: 'p' }),
+      item({ id: 'c2', title: 'Pack the bags', due: null, parent: 'p' }),
+      item({ id: 'c3', title: 'Renew the passport', due: null, parent: 'p', completed: true }),
+      item({ id: 'x', title: 'Send the report' }),
+    ]);
+  const done = (world: ReturnType<typeof trip>) => ['p', 'c1', 'c2', 'c3', 'x'].map((id) => world.tasks.get(id)!.completed);
+  const patched = (fake: ReturnType<typeof fakeClient>) => fake.calls.filter((call) => call.method === 'PATCH').map((call) => `${call.body.id}:${call.body.completed}`);
+  const reads = (fake: ReturnType<typeof fakeClient>) => fake.calls.filter((call) => call.method === 'GET' && call.path.startsWith('/google/tasks/all')).length;
+
+  test('from the calendar of a fresh panel (no list loaded): its subtasks are read from Google and completed first, then the task', async () => {
+    const world = trip();
+    const fake = fakeClient(emptyState(), world.answer);
+    await new GoogleStore(host, fake.client, 'page').completeListTask(world.tasks.get('p')!, true);
+    expect(done(world)).toEqual([true, true, true, true, false]);
+    expect(reads(fake)).toBe(1);
+    // The one done already is left alone; no open subtask is ever under a completed task.
+    expect(patched(fake)).toEqual(['c1:true', 'c2:true', 'p:true']);
+  });
+
+  test('reopening a subtask of a completed task reopens that task first, cold or warm; a subtask completed, or a task at the top reopened, reads nothing', async () => {
+    const world = trip();
+    for (const id of ['p', 'c1', 'c2']) world.tasks.set(id, { ...world.tasks.get(id)!, completed: true });
+    const cold = fakeClient(emptyState(), world.answer);
+    await new GoogleStore(host, cold.client, 'page').completeListTask(world.tasks.get('c1')!, false);
+    expect(done(world)).toEqual([false, false, true, true, false]);
+    expect(patched(cold)).toEqual(['p:false', 'c1:false']);
+    const warm = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, warm.client, 'page');
+    await store.completeListTask(world.tasks.get('c2')!, false);
+    expect(patched(warm)).toEqual(['c2:false']);
+    await store.loadBoard(ME, 'L1');
+    await store.completeListTask(world.tasks.get('p')!, true);
+    expect(done(world)).toEqual([true, true, true, true, false]);
+    // The list as the Tasks view read it served, and shows the result.
+    expect(reads(warm)).toBe(2);
+    expect(store.getView().board[listKey(ME, 'L1')]!.items.filter((task) => task.completed).map((task) => task.id).sort()).toEqual(['c1', 'c2', 'c3', 'p']);
+    const quiet = fakeClient(emptyState(), world.answer);
+    const other = new GoogleStore(host, quiet.client, 'page');
+    await other.completeListTask(world.tasks.get('p')!, false);
+    await other.completeListTask(world.tasks.get('c1')!, true);
+    expect(reads(quiet)).toBe(0);
+  });
+
+  test('a linked Planner task completed (Home, Today, Focus) completes its Google task’s subtasks; one reopened under a completed task reopens it', async () => {
+    const world = trip();
+    const linked = (id: string, taskId: string) => ev({ type: 'task.created', task: taskFromGoogleTask(world.tasks.get(id)!, taskId, { kind: 'day', date: '2026-10-29' }, 1) });
+    const fake = fakeClient(foldEvents([linked('p', 't1'), linked('c1', 't2')]), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    expect(await store.writeTask(fake.state().tasks.t1!, { completed: true })).toBe(true);
+    expect(done(world)).toEqual([true, true, true, true, false]);
+    expect(patched(fake)).toEqual(['c1:true', 'c2:true', 'p:true']);
+    // The Planner task planning a subtask takes the completion too.
+    expect(fake.state().tasks.t2!.completedAt).toBeTruthy();
+    expect(await store.writeTask(fake.state().tasks.t2!, { completed: false })).toBe(true);
+    expect(done(world)).toEqual([false, false, true, true, false]);
+    expect(patched(fake).slice(-2)).toEqual(['p:false', 'c1:false']);
+  });
+
+  test('refused half way: the task stays open (never completed over an open subtask), and a linked Planner task stays open too', async () => {
+    const world = trip();
+    const fake = fakeClient(emptyState(), world.answer);
+    world.refuse((method, _path, body) => method === 'PATCH' && body.id === 'c2');
+    await expect(new GoogleStore(host, fake.client, 'page').completeListTask(world.tasks.get('p')!, true)).rejects.toThrow('Backend Error');
+    expect(done(world)).toEqual([false, true, false, true, false]);
+    const start = applyEvents(foldEvents([ev({ type: 'task.created', task: taskFromGoogleTask(world.tasks.get('p')!, 't1', { kind: 'day', date: '2026-10-29' }, 1) })]), [ev({ type: 'task.completed', taskId: 't1', on: '2026-10-26' })]);
+    const linked = fakeClient(start, world.answer);
+    world.refuse((method, _path, body) => method === 'PATCH' && body.id === 'c2');
+    expect(await new GoogleStore(host, linked.client, 'page').writeTask(linked.state().tasks.t1!, { completed: true })).toBe(false);
+    expect(world.tasks.get('p')!.completed).toBe(false);
+    expect(linked.state().tasks.t1!.completedAt).toBeNull();
   });
 });
 

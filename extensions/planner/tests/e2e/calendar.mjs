@@ -12,8 +12,12 @@
 // repeating task's series (This task changes one occurrence, All tasks the
 // series, the next one made from it) and its upcoming occurrences on the grid;
 // a deadline-only task on its deadline's day; Edit from a task's details over
-// the calendar; a repeating task takes no subtasks by any path; titles that
-// read in full; the layout at 1440 and 1024 px.
+// the calendar; a repeating task takes no subtasks by any path; an edit Google
+// refuses changes nothing and its editor stays open to save again (applied
+// once); completing a task on the calendar of a freshly opened Planner
+// completes its subtasks, and reopening one reopens it; a timed task's
+// deadline on its own day in the all-day section; titles that read in full;
+// the layout at 1440 and 1024 px.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/calendar.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
@@ -1032,6 +1036,331 @@ try {
   await deleteSeries.getByRole('button', { name: 'Delete all future tasks' }).click();
   const seriesGone = await until(async () => requests('DELETE', `/tasks/v1/lists/L1/tasks/${standupId}`).length === 1 && !(await keptOf(standupId)) && (await f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).count()) === 0);
   check('Delete all future tasks from an upcoming occurrence deletes the open task in Google, and no upcoming one is left', Boolean(seriesGone), JSON.stringify({ deletes: requests('DELETE', /\/tasks\//).map((request) => request.path), upcoming: await f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).count() }));
+  await todayButton.click();
+
+  // ── 13. An edit Google refuses is all or nothing (review 4): a daily task at 1pm, All tasks to a new title at 4pm, refused with a 503 ──
+  const atomicTitle = 'Harness atomic';
+  const atomicNew = 'Harness atomic at four';
+  await openTasks();
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const atomicForm = myTasks.getByRole('group', { name: 'New task' });
+  await atomicForm.getByRole('textbox', { name: 'Title' }).fill(atomicTitle);
+  await atomicForm.getByLabel('Date', { exact: true }).fill(today);
+  await atomicForm.getByRole('combobox', { name: 'Time' }).selectOption('780');
+  await atomicForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
+  await atomicForm.getByRole('button', { name: 'Add' }).click();
+  const atomicId = await until(() => fake.tasks.get('L1').find((task) => task.title === atomicTitle)?.id);
+  await until(() => keptOf(atomicId).then((kept) => Boolean(kept?.repeat?.template)));
+  await atomicForm.getByRole('button', { name: 'Cancel' }).click();
+  const atomicGoogle = () => fake.tasks.get('L1').find((task) => task.id === atomicId);
+  const atomicPatches = () => requests('PATCH', `/tasks/v1/lists/L1/tasks/${atomicId}`);
+  const atomicEditor = myTasks.getByRole('group', { name: `Edit ${atomicTitle}` });
+  /** Edit it as the review did: a new title and 4pm, Done, All tasks; the fake answers 503 when asked to. */
+  const editAtomic = async (refuse) => {
+    await myTasks.getByRole('button', { name: `Edit ${atomicTitle}` }).click();
+    await atomicEditor.getByRole('textbox', { name: 'Title' }).fill(atomicNew);
+    await atomicEditor.getByRole('combobox', { name: 'Time' }).selectOption('960');
+    if (refuse) fake.failNext('PATCH', `/tasks/${atomicId}`, 503, 'Backend Error');
+    await atomicEditor.getByRole('button', { name: 'Done' }).click();
+    await repeatQuestion.getByRole('radio', { name: 'All tasks' }).check();
+    await repeatQuestion.getByRole('button', { name: 'OK' }).click();
+  };
+  const refusedFrom = atomicPatches().length;
+  await editAtomic(true);
+  const refusedSaid = await atomicEditor.getByRole('alert').waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  const refusedText = refusedSaid ? await atomicEditor.getByRole('alert').innerText() : '';
+  const editKept = refusedSaid && (await atomicEditor.getByRole('textbox', { name: 'Title' }).inputValue()) === atomicNew && (await atomicEditor.getByRole('combobox', { name: 'Time' }).inputValue()) === '960';
+  await page.waitForTimeout(800);
+  const keptRefused = await keptOf(atomicId);
+  check(
+    'an edit Google refuses (503; All tasks: a new title and 4pm) keeps its editor open with the error and the edit; Google, the kept 1pm and the series stay as they were',
+    refusedSaid && refusedText.includes('Google Tasks did not take it') && editKept && atomicPatches().length === refusedFrom + 1 && atomicPatches().at(-1)?.body?.title === atomicNew && atomicGoogle()?.title === atomicTitle && keptRefused?.time === 780 && keptRefused?.repeat?.template?.title === atomicTitle && keptRefused.repeat.template.time === 780,
+    JSON.stringify({ refusedSaid, refusedText, editKept, google: atomicGoogle()?.title, kept: keptRefused }),
+  );
+  await shot('cal-50-refused-edit-stays-open-1440');
+  await reload();
+  await openTasks();
+  const atomicRow = myTasks.locator(`li.gt-row[data-task="${atomicId}"]`);
+  await atomicRow.waitFor({ timeout: 15_000 });
+  const atomicRowText = await atomicRow.innerText();
+  const keptReloaded = await keptOf(atomicId);
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  await goTo(tomorrow);
+  const atomicUpcoming = upcomingOn(tomorrow, atomicTitle);
+  const projected = await atomicUpcoming.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+  const projectedTop = projected ? (await atomicUpcoming.boundingBox()).y - (await lane(tomorrow).boundingBox()).y : null;
+  const rejectedShown = await f.locator('.grid-item, .all-day-bar', { hasText: atomicNew }).count();
+  check(
+    'after a reload, Google, the Tasks view, the upcoming occurrences and the kept time still have the old title at 1pm',
+    atomicGoogle()?.title === atomicTitle && atomicRowText.includes(atomicTitle) && atomicRowText.includes('Today, 1pm') && keptReloaded?.time === 780 && keptReloaded?.repeat?.template?.title === atomicTitle && keptReloaded.repeat.template.time === 780 && projected && Math.abs(projectedTop - 780 * 0.8) <= 2 && rejectedShown === 0,
+    JSON.stringify({ google: atomicGoogle()?.title, row: atomicRowText, kept: keptReloaded, projectedTop, rejectedShown }),
+  );
+  await shot('cal-51-refused-after-reload-1440');
+  await todayButton.click();
+  // Refused again, then Save again in the same editor once the fake answers: applied once.
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await editAtomic(true);
+  const refusedAgain = await atomicEditor.getByRole('alert').waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  const retryFrom = atomicPatches().length;
+  await atomicEditor.getByRole('button', { name: 'Done' }).click();
+  await repeatQuestion.getByRole('radio', { name: 'All tasks' }).check();
+  await repeatQuestion.getByRole('button', { name: 'OK' }).click();
+  const applied = await until(async () => atomicGoogle()?.title === atomicNew && (await keptOf(atomicId))?.time === 960, 15_000);
+  const editorClosed = await until(async () => (await myTasks.getByRole('group', { name: /^Edit Harness atomic/ }).count()) === 0);
+  await page.waitForTimeout(1000);
+  const keptApplied = await keptOf(atomicId);
+  check(
+    'Save again, once Google takes it: the edit applies once (one more write; the series has the new title and 4pm, its schedule where it was) and the editor closes',
+    refusedAgain && applied && editorClosed && atomicPatches().length === retryFrom + 1 && keptApplied?.repeat?.template?.title === atomicNew && keptApplied.repeat.template.time === 960 && keptApplied.repeat.template.start === today && keptApplied.repeat.on === today && keptApplied.repeat.index === 1,
+    JSON.stringify({ refusedAgain, applied, editorClosed, writes: atomicPatches().slice(retryFrom).map((request) => request.body), kept: keptApplied }),
+  );
+  await shot('cal-52-saved-again-1440');
+  const atomicPosts = () => requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => [atomicTitle, atomicNew].includes(request.body?.title));
+  const postsBeforeDone = atomicPosts().length;
+  await myTasks.getByRole('checkbox', { name: `Mark ${atomicNew} complete` }).click();
+  const nextAtomic = await until(() => fake.tasks.get('L1').find((task) => task.title === atomicNew && task.status !== 'completed' && task.id !== atomicId), 15_000);
+  const nextAtomicKept = nextAtomic ? await until(() => keptOf(nextAtomic.id).then((kept) => (kept?.repeat ? kept : null))) : null;
+  await page.waitForTimeout(1000);
+  check(
+    'completing it then makes the next one once, with the new values: its new title in Google tomorrow, 4pm in the Planner',
+    nextAtomic?.due === due(tomorrow) && nextAtomicKept?.time === 960 && nextAtomicKept.repeat?.index === 2 && atomicPosts().length === postsBeforeDone + 1 && atomicPosts().at(-1)?.body?.title === atomicNew,
+    JSON.stringify({ nextAtomic, nextAtomicKept, posts: atomicPosts().map((request) => request.body) }),
+  );
+  // Out of the way of the layout checks below (their events at 4pm): the series goes, in Google and in the Planner.
+  const atomicIds = [atomicId, nextAtomic?.id].filter(Boolean);
+  for (const id of atomicIds) await fetch(`${fake.base}tasks/v1/lists/L1/tasks/${id}`, { method: 'DELETE' });
+  await h.call('POST', '/commands', { commands: atomicIds.map((id, index) => ({ cmd: `harness-atomic-gone-${index}`, type: 'gtask.dropped', account: ME, taskId: id })) });
+  // A new task Google refuses: its form keeps what was typed and says why; Add again adds it once.
+  const refusedNew = 'Harness refused at first';
+  const countNew = () => fake.tasks.get('L1').filter((task) => task.title === refusedNew).length;
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const newForm = myTasks.getByRole('group', { name: 'New task' });
+  await newForm.getByRole('textbox', { name: 'Title' }).fill(refusedNew);
+  await newForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('600');
+  fake.failNext('POST', '/tasks/v1/lists/L1/tasks', 503, 'Backend Error');
+  await newForm.getByRole('button', { name: 'Add' }).click();
+  const newRefused = await newForm.getByRole('alert').waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  const newTyped = newRefused && (await newForm.getByRole('textbox', { name: 'Title' }).inputValue()) === refusedNew && (await newForm.getByRole('combobox', { name: 'Time', exact: true }).inputValue()) === '600';
+  const newNone = countNew() === 0;
+  await shot('cal-52b-new-task-refused-1440');
+  await newForm.getByRole('button', { name: 'Add' }).click();
+  const newAdded = await until(async () => countNew() === 1 && (await newForm.getByRole('textbox', { name: 'Title' }).inputValue()) === '');
+  const newId = fake.tasks.get('L1').find((task) => task.title === refusedNew)?.id;
+  const newKept = newId ? await until(() => keptOf(newId).then((kept) => (kept?.time === 600 ? kept : null))) : null;
+  await newForm.getByRole('button', { name: 'Cancel' }).click();
+  check(
+    "a new task Google refuses keeps its form open with the error and what was typed; Add again adds it once, its time kept, and the form empties for the next",
+    newRefused && newTyped && newNone && newAdded && countNew() === 1 && Boolean(newKept),
+    JSON.stringify({ newRefused, newTyped, newNone, newAdded, count: countNew(), newKept }),
+  );
+  if (newId) await fetch(`${fake.base}tasks/v1/lists/L1/tasks/${newId}`, { method: 'DELETE' });
+  // The calendar's editor: a refusal leaves the dialog open with the error and the edit; nothing changes.
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  await todayButton.click();
+  const quickTitle = 'Harness quick task';
+  await lane(dragDay).locator('.grid-item.is-task', { hasText: quickTitle }).click();
+  await f.getByRole('dialog', { name: `Google task: ${quickTitle}` }).getByRole('button', { name: 'Edit task' }).click();
+  const quickEditor = f.getByRole('dialog', { name: `Edit task: ${quickTitle}` });
+  await quickEditor.getByRole('textbox', { name: 'Title' }).fill(`${quickTitle}, refused`);
+  await quickEditor.getByRole('combobox', { name: 'Time', exact: true }).selectOption('660');
+  fake.failNext('PATCH', `/tasks/${quickId}`, 503, 'Backend Error');
+  await quickEditor.getByRole('button', { name: 'Done' }).click();
+  const editorRefused = await quickEditor.getByRole('alert').waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  const editorTyped = editorRefused && (await quickEditor.getByRole('textbox', { name: 'Title' }).inputValue()) === `${quickTitle}, refused` && (await quickEditor.getByRole('combobox', { name: 'Time', exact: true }).inputValue()) === '660';
+  await shot('cal-52c-calendar-editor-refused-1440');
+  const quickNow = fake.tasks.get('L1').find((task) => task.id === quickId);
+  check(
+    "on the calendar, a task's editor Google refuses stays open with the error and the edit; Google and its kept 10am stay as they were",
+    editorRefused && editorTyped && quickNow?.title === quickTitle && (await keptOf(quickId))?.time === 600,
+    JSON.stringify({ editorRefused, editorTyped, google: quickNow?.title, kept: await keptOf(quickId) }),
+  );
+  await quickEditor.getByRole('button', { name: 'Close' }).click();
+
+  // ── 14. Completing a task on the calendar of a freshly opened Planner (Tasks never opened) completes its subtasks; reopening one reopens it (review 4) ──
+  /** A task made in Google (the fake's own API), under `parent` when given. */
+  const madeInGoogle = async (title, parent = null, dueDate = null) => {
+    const response = await fetch(`${fake.base}tasks/v1/lists/L1/tasks${parent ? `?parent=${parent}` : ''}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, ...(dueDate ? { due: due(dueDate) } : {}) }) });
+    return (await response.json()).id;
+  };
+  const statusOf = (id) => fake.tasks.get('L1').find((task) => task.id === id)?.status;
+  /** Reads of a whole list (the Tasks view's, or a task's subtasks), not the calendar's reads of tasks due or by id. */
+  const listReads = (from) => fake.requests.slice(from).filter((request) => request.method === 'GET' && request.path === '/tasks/v1/lists/L1/tasks' && request.query.showHidden === 'true' && !request.query.dueMin);
+  const writesTo = (from, ids) => fake.requests.slice(from).filter((request) => request.method === 'PATCH' && ids.includes(request.path.split('/').at(-1))).map((request) => `${request.path.split('/').at(-1)}:${request.body?.status}`);
+  /** The Planner's own menu, folded behind its button on a narrow page. */
+  const navTo = async (name) => {
+    const menu = f.getByRole('button', { name: 'Planner menu' });
+    if (await menu.isVisible().catch(() => false)) await menu.click();
+    await h.nav(name).click();
+  };
+  /** A freshly opened Planner, straight to Calendar (this week), every all-day item shown. */
+  const freshCalendar = async () => {
+    await reload();
+    await navTo('Calendar');
+    await f.locator('.day-lane').first().waitFor({ timeout: 15_000 });
+    await todayButton.click();
+    // This week read (its events and tasks come together), then every all-day item shown.
+    await planning.waitFor({ timeout: 15_000 }).catch(() => {});
+    const allDayToggle = f.getByRole('button', { name: 'Show all all-day events' });
+    if (await allDayToggle.count()) await allDayToggle.click();
+  };
+  const coldParent = async (size, viewport) => {
+    await page.setViewportSize(viewport);
+    await todayButton.click();
+    const thisWeek = await f.locator('.day-lane').evaluateAll((lanes) => lanes.map((element) => element.getAttribute('data-date')));
+    const trip = await madeInGoogle(`Harness trip ${size}`, null, today);
+    const hotel = await madeInGoogle(`Harness hotel ${size}`, trip, today);
+    const bags = await madeInGoogle(`Harness bags ${size}`, trip);
+    const ids = [trip, hotel, bags];
+    // Made in Google: the service's copy of this week's tasks (kept a minute and a half) is read again.
+    await h.call('GET', `/calendar?from=${thisWeek[0]}&to=${thisWeek.at(-1)}&refresh=1`);
+
+    // From its details ("Mark completed").
+    await freshCalendar();
+    const tripChip = f.getByRole('button', { name: new RegExp(`^Google task Harness trip ${size}, due`) });
+    await tripChip.waitFor({ timeout: 15_000 });
+    let at = fake.requests.length;
+    await tripChip.click();
+    const tripPopover = f.getByRole('dialog', { name: `Google task: Harness trip ${size}` });
+    await tripPopover.getByRole('button', { name: 'Mark completed' }).waitFor();
+    await shot(`cal-53-cold-parent-details-${size}`);
+    await tripPopover.getByRole('button', { name: 'Mark completed' }).click();
+    const allDone = await until(() => ids.every((id) => statusOf(id) === 'completed'), 15_000);
+    const order = writesTo(at, ids);
+    check(
+      `${size} px: in a freshly opened Planner, on Calendar (Tasks never opened), "Mark completed" on a task completes it and every subtask in Google (read from Google), the subtasks first`,
+      allDone && listReads(at).length >= 1 && order.at(-1) === `${trip}:completed` && order.includes(`${hotel}:completed`) && order.includes(`${bags}:completed`),
+      JSON.stringify({ status: ids.map(statusOf), order, reads: listReads(at).length }),
+    );
+    await shot(`cal-54-cold-parent-completed-${size}`);
+
+    // Reopening a subtask from its details: the task it is under reopens first.
+    await freshCalendar();
+    const hotelChip = f.getByRole('button', { name: new RegExp(`^Google task Harness hotel ${size}, due .*completed`) });
+    await hotelChip.waitFor({ timeout: 15_000 });
+    at = fake.requests.length;
+    await hotelChip.click();
+    await f.getByRole('dialog', { name: `Google task: Harness hotel ${size}` }).getByRole('button', { name: 'Mark uncompleted' }).click();
+    const reopened = await until(() => statusOf(hotel) === 'needsAction' && statusOf(trip) === 'needsAction', 15_000);
+    const reopenOrder = writesTo(at, ids);
+    check(
+      `${size} px: reopening a subtask on the calendar of a freshly opened Planner reopens the task it is under in Google, first`,
+      reopened && statusOf(bags) === 'completed' && reopenOrder[0] === `${trip}:needsAction` && reopenOrder.includes(`${hotel}:needsAction`),
+      JSON.stringify({ status: ids.map(statusOf), reopenOrder }),
+    );
+    await shot(`cal-55-cold-subtask-reopened-${size}`);
+
+    // A time kept in the Planner puts it on the grid with its check circle, which does the same.
+    await h.call('POST', '/commands', { commands: [{ cmd: `harness-trip-time-${size}`, type: 'gtask.kept', account: ME, listId: 'L1', taskId: trip, patch: { time: 11 * 60 } }] });
+    await freshCalendar();
+    const tripCheck = lane(today).locator('.grid-item.is-task', { hasText: `Harness trip ${size}` }).getByRole('checkbox', { name: `Mark Harness trip ${size} complete` });
+    await tripCheck.waitFor({ timeout: 15_000 });
+    await shot(`cal-56-cold-parent-chip-${size}`);
+    at = fake.requests.length;
+    await tripCheck.click();
+    const circleDone = await until(() => ids.every((id) => statusOf(id) === 'completed'), 15_000);
+    const circleOrder = writesTo(at, ids);
+    check(
+      `${size} px: its calendar chip's check circle (a freshly opened Planner) completes the task and every open subtask in Google (read from Google), the subtasks first`,
+      circleDone && listReads(at).length >= 1 && circleOrder.at(-1) === `${trip}:completed` && circleOrder.includes(`${hotel}:completed`),
+      JSON.stringify({ status: ids.map(statusOf), circleOrder }),
+    );
+    await shot(`cal-57-cold-parent-chip-completed-${size}`);
+    // Out of the way of what follows.
+    await fetch(`${fake.base}tasks/v1/lists/L1/tasks/${trip}`, { method: 'DELETE' });
+  };
+  await coldParent(1440, { width: 1440, height: 900 });
+  await coldParent(1024, { width: 1024, height: 768 });
+
+  // ── 15. A timed task's deadline on its own day (review 4): its block at 1pm and its deadline in the all-day section, in Day and Week, at both sizes ──
+  /** Back to 1440 px: the host leaves an extension's page when its window widens again, so the Planner is opened again. */
+  const wideAgain = async () => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await reload();
+  };
+  await wideAgain();
+  const sameTitle = 'Harness same-day deadline';
+  await openTasks();
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const sameForm = myTasks.getByRole('group', { name: 'New task' });
+  await sameForm.getByRole('textbox', { name: 'Title' }).fill(sameTitle);
+  await sameForm.getByLabel('Date', { exact: true }).fill(today);
+  await sameForm.getByRole('combobox', { name: 'Time' }).selectOption('780');
+  await sameForm.getByLabel('Deadline', { exact: true }).fill(today);
+  await sameForm.getByRole('button', { name: 'Add' }).click();
+  const sameId = await until(() => fake.tasks.get('L1').find((task) => task.title === sameTitle)?.id);
+  await until(() => keptOf(sameId).then((kept) => kept?.time === 780 && kept.deadline === today));
+  await sameForm.getByRole('button', { name: 'Cancel' }).click();
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  const sameBlock = (date) => lane(date).locator('.grid-item.is-task', { hasText: sameTitle });
+  const sameEntry = f.locator('.all-day-bar.is-deadline', { hasText: sameTitle });
+  /** On `date` in the view shown: its timed block, and its deadline entry over that day's all-day cell. */
+  const sameOn = async (date) => {
+    const allDayToggle = f.getByRole('button', { name: 'Show all all-day events' });
+    if (await allDayToggle.count()) await allDayToggle.click();
+    await page.waitForTimeout(300);
+    const entries = await sameEntry.count();
+    return { block: await sameBlock(date).count(), entries, entry: entries === 1 && (await over(sameEntry, f.locator(`.all-day-cell[data-date="${date}"]`))) };
+  };
+  /** Week, then Day, for `date`. */
+  const weekAndDay = async (date, shotName) => {
+    await todayButton.click();
+    await pickView('Week');
+    await f.locator('.day-lane').nth(6).waitFor({ timeout: 5000 });
+    if (!(await lane(date).count())) await f.getByRole('button', { name: 'Next week' }).click();
+    await sameBlock(today).or(sameEntry).first().waitFor({ timeout: 15_000 }).catch(() => {});
+    const week = await sameOn(date);
+    await shot(`${shotName}-week`);
+    await f.getByRole('button', { name: new RegExp(`^${longDay(date)}(, today)?: show this day$`) }).click();
+    await lane(date).waitFor();
+    await sameBlock(date).or(sameEntry).first().waitFor({ timeout: 15_000 }).catch(() => {});
+    const day = await sameOn(date);
+    await shot(`${shotName}-day`);
+    await pickView('Week');
+    return { week, day };
+  };
+  const both = (seen) => seen.block === 1 && seen.entry;
+  const sameWide = await weekAndDay(today, 'cal-58-same-day-deadline-1440');
+  await reload();
+  await navTo('Calendar');
+  const sameReloaded = await weekAndDay(today, 'cal-59-same-day-deadline-reloaded-1440');
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.waitForTimeout(800);
+  const sameNarrow = await weekAndDay(today, 'cal-60-same-day-deadline-1024');
+  check(
+    'a task at 1pm with its deadline the same day shows its timed block and its deadline in the all-day section, in Week and Day, at 1440 and 1024 px and after a reload',
+    [sameWide, sameReloaded, sameNarrow].every((seen) => both(seen.week) && both(seen.day)),
+    JSON.stringify({ sameWide, sameReloaded, sameNarrow }),
+  );
+  // The deadline moved to tomorrow: the entry follows it, the block stays at 1pm today; also after a reload, at both sizes.
+  await wideAgain();
+  await openTasks();
+  await myTasks.getByRole('button', { name: `Edit ${sameTitle}` }).click();
+  const sameEdit = myTasks.getByRole('group', { name: `Edit ${sameTitle}` });
+  await sameEdit.getByLabel('Deadline', { exact: true }).fill(tomorrow);
+  await sameEdit.getByRole('button', { name: 'Done' }).click();
+  await until(() => keptOf(sameId).then((kept) => kept?.deadline === tomorrow));
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  const movedSeen = async (size) => {
+    const onToday = await weekAndDay(today, `cal-61-deadline-moved-today-${size}`);
+    const onTomorrow = await weekAndDay(tomorrow, `cal-62-deadline-moved-tomorrow-${size}`);
+    // In Day: the block alone today, the deadline alone tomorrow.
+    return { onToday, onTomorrow, ok: onToday.day.block === 1 && onToday.day.entries === 0 && onTomorrow.day.block === 0 && onTomorrow.day.entry && onTomorrow.week.entry };
+  };
+  const movedWide = await movedSeen(1440);
+  await reload();
+  await navTo('Calendar');
+  const movedReloaded = await movedSeen('1440-reloaded');
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.waitForTimeout(800);
+  const movedNarrow = await movedSeen(1024);
+  check(
+    'moved to tomorrow, its deadline entry follows it while its block stays at 1pm today, after a reload too, at both sizes',
+    movedWide.ok && movedReloaded.ok && movedNarrow.ok,
+    JSON.stringify({ movedWide, movedReloaded, movedNarrow }),
+  );
+  await wideAgain();
+  await h.nav('Calendar').click();
+  await f.locator('.day-lane').nth(6).waitFor({ timeout: 15_000 });
   await todayButton.click();
 
   // 7. (below, with the layout) Titles of two and three words read in full in blocks of an hour or more.

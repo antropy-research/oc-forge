@@ -430,12 +430,20 @@ export class GoogleStore {
    * other lists once and writes there, and the link follows. A write that
    * still fails says so, and the Planner does not keep claiming what Google
    * does not have: a completion or reopening Google refused is undone here, a
-   * task Google no longer has shows as deleted there.
+   * task Google no longer has shows as deleted there. Completed or reopened,
+   * it takes its subtasks or the task it is under along first, as the Tasks
+   * view does (`completeListTask`), however little of its list is loaded.
    */
   async writeTask(task: Task, patch: GoogleTaskWrite['patch'] & { completed?: boolean }, quiet = false): Promise<boolean> {
     const source = task.source;
     if (source?.kind !== 'gtask' || !source.account || !source.listId) return false;
     try {
+      const completed = patch.completed;
+      if (completed !== undefined) {
+        const related = await this.relatives({ account: source.account, listId: source.listId, id: source.id }, completed);
+        // Planner tasks planning those take the change too.
+        if (related.length) await this.syncItems(await this.writeListTask(related, () => ({ completed }), true));
+      }
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { account: source.account, listId: source.listId, id: source.id, ...patch });
       const item = answer.task;
       if (item) {
@@ -487,24 +495,24 @@ export class GoogleStore {
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
   }
 
-  /** What the Planner keeps for a Google task (a time, a deadline, a repeat, a star): set at once. */
+  /** What the Planner keeps for a Google task (a time, a deadline, a repeat, a star): set at once, with no Google write (Google Tasks has none of them for other apps). */
   setKept(item: Pick<GoogleTaskItem, 'account' | 'listId' | 'id'>, patch: GoogleTaskKeptPatch): Promise<void> {
     return this.client.dispatch([{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch }]);
   }
 
-  /** Google Tasks' star: on, or off. */
+  /** Google Tasks' star: on, or off. Kept in the Planner alone, so nothing goes to Google. */
   toggleStar(item: Pick<GoogleTaskItem, 'account' | 'listId' | 'id'>): Promise<void> {
     return this.setKept(item, { starred: !keptFor(this.client.getView().state, item)?.starredAt });
   }
 
   /**
-   * A timed Google task dragged on the grid: a new time is kept here; a new
-   * day is Google's date (the task keeps its time).
+   * A timed Google task dragged on the grid: a new day is Google's date,
+   * written first; a new time is kept here once Google has the day, so a day
+   * Google refuses leaves the time as it was (the task keeps its time).
    */
   async moveTimedTask(item: GoogleTaskItem, date: DateKey, time: number): Promise<void> {
-    const kept = keptFor(this.client.getView().state, item);
-    if (kept?.time !== time) await this.setKept(item, { time });
     if (item.due !== date) await this.setTaskDue(item, date);
+    if (keptFor(this.client.getView().state, item)?.time !== time) await this.setKept(item, { time });
   }
 
   /**
@@ -628,11 +636,31 @@ export class GoogleStore {
     return answer.tasks.find((item) => item.id === id) ?? null;
   }
 
-  /** Whether a task has subtasks (open or done) in Google: from the Tasks view's copy of its list, else read. */
+  /** A list's tasks, completed ones too: the Tasks view's copy of it, else read from Google. */
+  private async listItems(account: string, listId: string): Promise<GoogleTaskItem[]> {
+    const known = this.view.board[listKey(account, listId)]?.items;
+    return known ?? (await this.client.call<{ tasks?: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}`)).tasks ?? [];
+  }
+
+  /** Whether a task has subtasks (open or done) in Google. */
   private async hasSubtasks(item: GoogleTaskItem): Promise<boolean> {
-    const known = this.view.board[listKey(item.account, item.listId)]?.items;
-    const items = known ?? (await this.client.call<{ tasks?: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}`)).tasks ?? [];
-    return items.some((other) => other.parent === item.id);
+    return (await this.listItems(item.account, item.listId)).some((other) => other.parent === item.id);
+  }
+
+  /**
+   * What changes with a task completed or reopened, as in Google Tasks: its
+   * open subtasks when it is completed, the completed task it is under when it
+   * is reopened. Its list as the Tasks view has it, else read from Google, so
+   * the result is the same however little the panel has loaded. A task whose
+   * parent is known needs no read when it can have none: a subtask has no
+   * subtasks, a task at the top is under none.
+   */
+  private async relatives(task: { account: string; listId: string; id: string; parent?: string | null }, completed: boolean): Promise<GoogleTaskItem[]> {
+    if (task.parent !== undefined && (completed ? task.parent !== null : task.parent === null)) return [];
+    const items = await this.listItems(task.account, task.listId);
+    if (completed) return items.filter((other) => other.parent === task.id && !other.completed);
+    const parent = task.parent ?? items.find((other) => other.id === task.id)?.parent ?? null;
+    return parent ? items.filter((other) => other.id === parent && other.completed) : [];
   }
 
   /**
@@ -753,28 +781,30 @@ export class GoogleStore {
     }
   }
 
-  /** Rename a task, change its details or date; linked Planner tasks take the change at once. */
-  async editListTask(item: GoogleTaskItem, patch: { title?: string; notes?: string; due?: DateKey | null }): Promise<void> {
-    const answers = await this.writeListTask([item], () => patch, patch.due !== undefined || patch.title !== undefined);
-    await this.syncItems(answers);
-  }
-
   /**
-   * A task's form saved: Google's fields written to Google, the rest kept in
-   * the Planner. For a repeating task, `scope` says whether the change is for
-   * this task or all of the series, as Google Tasks asks (a new rule is for
-   * all). "This task" changes this occurrence alone, in Google and in what is
-   * kept for it; the series' template and schedule stay. "All tasks" changes
-   * the template (and the series' other open occurrences), then this
-   * occurrence to match; a new rule or a new date starts the schedule there.
-   * A subtask, or a task with subtasks, does not repeat, as in Google Tasks:
+   * A task's form saved, all or nothing: Google's fields (title, details,
+   * date) and a move to another list are written first, and what the Planner
+   * keeps (time, deadline, repeat with the series' template, star) changes
+   * only once Google has taken them, so an edit Google refuses leaves the
+   * task, what is kept for it and its series as they were, for the form to
+   * try again. A change of what the Planner keeps alone needs no Google write.
+   * For a repeating task, `scope` says whether the change is for this task or
+   * all of the series, as Google Tasks asks (a new rule is for all); either
+   * way it is all or nothing. "This task" changes this occurrence alone, in
+   * Google and in what is kept for it; the series' template and schedule
+   * stay. "All tasks" changes the template (and the series' other open
+   * occurrences), then this occurrence to match; a new rule or a new date
+   * starts the schedule there. A subtask, or a task with subtasks, does not
+   * repeat, and a repeating task stays in its list, as in Google Tasks:
    * refused before anything changes.
    */
-  async saveListTask(item: GoogleTaskItem, fields: TaskFields, scope: RepeatScope = 'this'): Promise<void> {
+  async saveListTask(item: GoogleTaskItem, fields: TaskFields, scope: RepeatScope = 'this', extra: { starred?: boolean; listId?: string } = {}): Promise<void> {
     const kept = keptFor(this.client.getView().state, item);
     const repeat = kept?.repeat ?? null;
     const rule = fields.kept.rule && fields.due ? fields.kept.rule : null;
+    const moveTo = extra.listId && extra.listId !== item.listId ? extra.listId : null;
     if (rule && !repeat && item.parent) throw new Error(SUBTASK_NO_REPEAT);
+    if (moveTo && (repeat || rule)) throw new Error(REPEATING_STAYS);
     if (rule && !repeat && (await this.hasSubtasks(item))) throw new Error(SUBTASKS_NO_REPEAT);
     const state = this.client.getView().state;
     const google = { ...(fields.title !== item.title ? { title: fields.title } : {}), ...(fields.notes !== item.notes ? { notes: fields.notes } : {}), ...(fields.due !== item.due ? { due: fields.due } : {}) };
@@ -799,7 +829,9 @@ export class GoogleStore {
         patch.repeat = { ...repeat, on, template };
       }
     }
-    const bodies: EventBody[] = Object.keys(patch).length ? [{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch }] : [];
+    // A star is the Planner's alone: no Google write.
+    if (extra.starred !== undefined && extra.starred !== Boolean(kept?.starredAt)) patch.starred = extra.starred;
+    const others: EventBody[] = [];
     if (all && repeat && patch.repeat !== undefined) {
       // The series' other open occurrences take its rule, template, time and deadline.
       const series = patch.repeat;
@@ -808,23 +840,42 @@ export class GoogleStore {
         if (other.repeat?.seriesId !== repeat.seriesId || other.taskId === item.id || other.repeat.next) continue;
         const own = other.repeat;
         const timing = template ? { time: template.time, duration: template.duration, deadline: own.on ? (template.deadline === null ? null : addDays(own.on, template.deadline)) : other.deadline } : {};
-        bodies.push({ type: 'gtask.kept', account: other.account, listId: other.listId, taskId: other.taskId, patch: series ? { ...timing, repeat: { ...own, rule: series.rule, ...(template ? { template } : {}) } } : { repeat: null } });
+        others.push({ type: 'gtask.kept', account: other.account, listId: other.listId, taskId: other.taskId, patch: series ? { ...timing, repeat: { ...own, rule: series.rule, ...(template ? { template } : {}) } } : { repeat: null } });
       }
     }
+    // Google first. A refusal throws here, before anything kept in the Planner has changed.
+    const answers = Object.keys(google).length ? await this.writeListTask([item], () => google, google.due !== undefined || google.title !== undefined) : [];
+    let now: GoogleTaskItem | null = answers[0] ?? null;
+    if (moveTo) {
+      try {
+        now = await this.moveListTask(now ?? item, { parent: null, previous: null }, moveTo);
+      } catch (error) {
+        // Google took the fields but not the move: they go back as they were, so nothing of the edit stays.
+        const back = { ...(google.title !== undefined ? { title: item.title } : {}), ...(google.notes !== undefined ? { notes: item.notes } : {}), ...(google.due !== undefined ? { due: item.due } : {}) };
+        if (answers[0] && Object.keys(back).length) await this.writeListTask([answers[0]], () => back, true).catch(() => {});
+        throw error;
+      }
+    }
+    // Google has it: now what the Planner keeps, for the task where it is now.
+    const at = now ?? item;
+    const bodies: EventBody[] = [...(Object.keys(patch).length ? [{ type: 'gtask.kept' as const, account: at.account, listId: at.listId, taskId: at.id, patch }] : []), ...others];
     if (bodies.length) await this.client.dispatch(bodies);
-    if (Object.keys(google).length) await this.editListTask(item, google);
+    // Linked Planner tasks take Google's change at once.
+    if (now) await this.syncItems([now]);
     else calendarUi.refresh();
   }
 
   /**
-   * Complete or reopen a task. As in Google Tasks, completing a task completes
-   * its subtasks, and reopening a subtask reopens the task it is under; a
-   * repeating task's next occurrence appears.
+   * Complete or reopen a task, wherever it is done (the Tasks view, the
+   * calendar, Starred). As in Google Tasks, completing a task completes its
+   * subtasks, and reopening a subtask reopens the task it is under, read from
+   * Google when its list is not loaded (`relatives`). Those are written
+   * first, so Google never has an open subtask under a completed task, even
+   * when a write fails half way. A repeating task's next occurrence appears.
    */
   async completeListTask(item: GoogleTaskItem, completed: boolean): Promise<void> {
-    const items = this.view.board[listKey(item.account, item.listId)]?.items ?? [item];
-    const related = completed ? items.filter((other) => other.parent === item.id && !other.completed) : items.filter((other) => other.id === item.parent && other.completed);
-    const answers = await this.writeListTask([item, ...related], () => ({ completed }), true);
+    const related = await this.relatives(item, completed);
+    const answers = await this.writeListTask([...related, item], () => ({ completed }), true);
     if (completed) await this.makeNextOccurrences(answers);
     void this.sync();
   }
@@ -879,9 +930,9 @@ export class GoogleStore {
    * Put a task under `parent` after `previous`, in its list or another of the
    * same account. Shown at once. As in Google Tasks, a repeating task stays in
    * its list, takes no subtasks and is no subtask: such a move is refused
-   * before anything moves.
+   * before anything moves. The task as Google has it after the move.
    */
-  async moveListTask(item: GoogleTaskItem, target: MoveTarget, destinationListId: string = item.listId): Promise<void> {
+  async moveListTask(item: GoogleTaskItem, target: MoveTarget, destinationListId: string = item.listId): Promise<GoogleTaskItem> {
     const state = this.client.getView().state;
     if (destinationListId !== item.listId && keptFor(state, item)?.repeat) throw new Error(REPEATING_STAYS);
     if (target.parent && keptFor(state, item)?.repeat) throw new Error(REPEATING_NOT_SUBTASK);
@@ -897,9 +948,9 @@ export class GoogleStore {
     }
     try {
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks/move', { account: item.account, listId: item.listId, id: item.id, parent: target.parent, previous: target.previous, ...(to !== from ? { destinationListId } : {}) });
+      const movedTask = answer.task ?? { ...item, listId: destinationListId, parent: target.parent };
       if (to !== from) {
         // The Planner tasks planning it (and its subtasks), and what is kept for them, follow it to the other list.
-        const movedTask = answer.task ?? { ...item, listId: destinationListId };
         await this.followMove(item, movedTask);
         for (const kid of before.from.filter((other) => other.parent === item.id)) await this.followMove(kid, { ...kid, listId: destinationListId });
       }
@@ -907,6 +958,7 @@ export class GoogleStore {
       // A move can renumber the places of the tasks around it: read the lists as Google has them now.
       if (this.view.board[from]) void this.loadBoard(item.account, item.listId);
       if (to !== from && this.view.board[to]) void this.loadBoard(item.account, destinationListId);
+      return movedTask;
     } catch (error) {
       this.patchBoard(from, before.from);
       if (to !== from) this.patchBoard(to, before.to);
@@ -944,6 +996,8 @@ export class GoogleStore {
       return answers;
     } catch (error) {
       if (before) this.patchBoard(key, before);
+      // Refused half way: the list as Google has it now.
+      if (before && answers.length) void this.loadBoard(first.account, first.listId);
       throw error;
     }
   }

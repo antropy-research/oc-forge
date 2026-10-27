@@ -3,7 +3,8 @@
 // deadline, repeat, star) and the task's list, in a dialog. The calendar stays
 // on the view and date it was on. A repeating task asks This task or All
 // tasks; opened from an upcoming occurrence it edits all of its series, which
-// the form shows as the series has it.
+// the form shows as the series has it. It closes once Google has the edit; a
+// refusal stays in it, with the edit, to save again.
 import { useEffect } from 'preact/hooks';
 import { addDays } from '../../../src/domain/dates.ts';
 import { keptFor, seriesTemplate } from '../../../src/domain/gtaskKept.ts';
@@ -51,7 +52,8 @@ export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
           repeatNote={block}
           lists={{ lists: gv.lists.filter((list) => list.account === item.account), locked: kept?.repeat ? REPEATING_STAYS : null }}
           onCancel={close}
-          onSave={(fields, starred, listId) => void save(item, fields, starred, target.series ? 'all' : undefined, listId).then((done) => done && close())}
+          // Open until Google has it: a refusal shows in the form, with the edit, to try again.
+          onSave={(fields, starred, listId) => save(item, fields, starred, target.series ? 'all' : undefined, listId).then((saved) => saved && close())}
         />
       </div>
     </div>

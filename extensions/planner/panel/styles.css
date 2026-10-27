@@ -1533,3 +1533,7 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gt-editor-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 4px 20px; }
 .gt-editor-bar h2 { margin: 0; font-size: 18px; font-weight: 400; }
 .gt-task-editor .gt-form { padding: 6px 16px 4px 20px; }
+/* ── A Google task's edit is all or nothing (planner-google4): a save Google refuses keeps the form open with why,
+   and Save waits for Google's answer. ── */
+.gt-form-problem { margin: 2px 0; font-size: 12.5px; line-height: 1.4; }
+.gt-form-actions .primary:disabled { opacity: 0.6; cursor: progress; }
