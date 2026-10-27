@@ -10,7 +10,7 @@ OpenCode 2.1.4). Not part of the release build; `vendors/` stays pristine.
 | OpenChamber | 2.5.2 | npm `@openchamber/web` |
 | OpenCode | 2.1.4 | npm `@opencode/cli`; OpenChamber starts and manages it |
 | VS Code Server | 1.140.0 | Microsoft's server for the web (`server-linux-<arch>-web`), the VS Code release `vendors.json` pins; the `vscode` service |
-| GitHub CLI | 2.103.2 | the release tarball; the Planner reads GitHub with it and agents open pull requests with it (`gh auth login` once in the container) |
+| GitHub CLI | 2.103.2 | the release tarball; the Planner reads GitHub with it and agents open pull requests with it (`gh auth login` once in the container; the agent journey points it at a fake GitHub instead) |
 | Node | 26.12.0 | `node:26.12.0-trixie-slim` |
 | Bun | 1.4.4 | `oven/bun:1.4.4`, for `bunx openchamber-guest-bundle` |
 
@@ -72,3 +72,23 @@ docker compose exec -w /extensions/planner openchamber bun run build   # panel/m
 
 A folder install keeps its real path: the catalog re-reads `package.json` and serves
 the rebuilt files, so reload the page after a build instead of reinstalling.
+
+## A model for agents
+
+Without a provider of its own, the container's OpenCode runs agents on OpenCode's free
+models, which stop at a daily limit ("Free usage limit reached", HTTP 429). To give its
+agents a model, add a provider to the container's OpenCode config, with the key in a file
+of its own (OpenCode 2 reads `{file:…}` references; the key is never in the config):
+
+```sh
+# The key, from the host's environment, into a 0600 file in the container's home.
+printf '%s' "$OPENCODE_OPENAI_API_KEY" | docker compose exec -T openchamber sh -c 'umask 077 && cat > ~/.config/opencode/model-proxy.key'
+# ~/.config/opencode/opencode.json in the container: an OpenAI-compatible provider whose
+# settings are { "baseURL": "<the proxy's /v1>", "apiKey": "{file:~/.config/opencode/model-proxy.key}" }
+# and whose models include the one the agents use (openai/gpt-6-luna by default).
+```
+
+Then restart the container's OpenCode: Settings → OpenCode, or `POST /api/config/reload`.
+`extensions/planner/tests/e2e/agentpr.mjs` runs its agent on `AGENTPR_MODEL`
+(default `openai/gpt-6-luna`), and stops early, saying so, when the container's OpenCode
+has no such provider. Remove both files and reload to go back to the free models.

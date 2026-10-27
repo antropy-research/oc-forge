@@ -151,8 +151,10 @@ node ../../extensions/planner/tests/e2e/calendar.mjs /tmp/planner-calendar   # t
 node ../../extensions/planner/tests/e2e/agentpr.mjs http://<bind>:35310   # the installed extension, a real agent, a fake GitHub
 ```
 
-`agentpr.mjs` assigns a task to OpenCode's build agent on the installed Planner and follows
-it to a pull request: the agent commits in its new worktree, pushes, and runs
+`agentpr.mjs` assigns a task to OpenCode's build agent on the installed Planner, on
+`AGENTPR_MODEL` (default `openai/gpt-6-luna`, through a preset it adds and removes; the
+container's OpenCode needs a provider for it, see `containers/openchamber-dev/README.md`),
+and follows it to a pull request: the agent commits in its new worktree, pushes, and runs
 `gh pr create`; the service finds the pull request with `gh`, the task shows it, and a merge
 offers to complete the task. Only GitHub is fake. `tests/e2e/fakeGithub.mjs` runs in the
 container, and its `gh` (the agent's and the service's) reaches it through a Unix socket

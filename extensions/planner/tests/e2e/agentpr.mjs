@@ -3,8 +3,11 @@
 // instructions (commit, push, `gh pr create`); the Planner's service finds the pull
 // request with gh and shows it on the task; once it is merged, the task offers to complete.
 //
-// In the dev container's real OpenChamber, on the installed Planner, with a real agent on
-// the container's model and the real gh. Only GitHub is fake: tests/e2e/fakeGithub.mjs
+// In the dev container's real OpenChamber, on the installed Planner, with a real agent and
+// the real gh. The agent is OpenCode's build agent on AGENTPR_MODEL (default
+// openai/gpt-6-luna), through a Planner preset the journey adds and removes: OpenCode's free
+// models stop at a daily limit, so the container's OpenCode needs a provider for it
+// (containers/openchamber-dev/README.md, "A model for agents"). Only GitHub is fake: tests/e2e/fakeGithub.mjs
 // runs in the container, and its gh (the agent's and the service's) reaches it through a
 // Unix socket (a ~/.config/gh written for the run). planner-demo-a gets an origin whose
 // fetch URL is https://github.com/harness-org/planner-demo-a (what gh reads) and whose
@@ -36,6 +39,8 @@ const GH_SAVED = `${STATE}/gh-config-before`;
 const OWNER = 'harness-org';
 const REPO = 'planner-demo-a';
 const FETCH_URL = `https://github.com/${OWNER}/${REPO}.git`;
+const MODEL = process.env.AGENTPR_MODEL ?? 'openai/gpt-6-luna';
+const PRESET = { id: 'agentpr-build', name: 'Build · agentpr', agent: 'build', model: MODEL };
 const AGENT_MS = 15 * 60_000;
 const QUIET_MS = 4 * 60_000;
 // Its own prefix: other journeys clean up planner/harness-* and planner/e2e-* in the same project.
@@ -127,9 +132,12 @@ const cleanUpRun = async () => {
       const response = await context.request.delete(`${base}/api/session/${id}?directory=${encodeURIComponent(directory)}`).catch(() => null);
       console.log(`INFO deleted chat ${id}: ${response?.status() ?? 'failed'}`);
     }
+    const presets = state?.settings?.agentPresets ?? [];
     const commands = [
       ...runs.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
       ...tasks.map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
+      // The journey's preset, and with it its OpenCode command.
+      ...(presets.some((preset) => preset.id === PRESET.id) ? [{ cmd: `cleanup-preset-${Date.now().toString(36)}`, type: 'settings.updated', patch: { agentPresets: presets.filter((preset) => preset.id !== PRESET.id) } }] : []),
     ];
     if (commands.length) await serviceCall('POST', '/commands', { commands });
   } catch (error) {
@@ -166,6 +174,13 @@ try {
   const listed = docker(`cd ${DEMO} && gh pr list --state all --json number 2>&1; true`).trim();
   check("the container's gh reaches the fake GitHub for planner-demo-a's origin", listed === '[]', listed);
 
+  // A model the agent can run on: its provider in the container's OpenCode, and a preset naming it.
+  const providers = await context.request.get(`${base}/api/provider`).then((response) => response.json()).catch(() => null);
+  const providerIds = Object.values(providers?.data ?? providers ?? {}).map((provider) => provider?.id);
+  if (!providerIds.includes(MODEL.split('/')[0])) throw new Error(`the container's OpenCode has no provider ${MODEL.split('/')[0]} for ${MODEL} (it has ${providerIds.join(', ') || 'none'}): connect one, see containers/openchamber-dev/README.md`);
+  const before = (await serviceState()).state?.settings?.agentPresets ?? [];
+  await serviceCall('POST', '/commands', { commands: [{ cmd: `agentpr-preset-${run}`, type: 'settings.updated', patch: { agentPresets: [...before.filter((preset) => preset.id !== PRESET.id), PRESET] } }] });
+
   // Restart the Planner's service so it runs the installed build, then open the Planner.
   for (const enabled of [false, true]) await context.request.put(`${base}/api/guests/oc-forge-planner/enabled`, { data: { enabled } });
   await page.goto(`${base}/`, { waitUntil: 'load' });
@@ -201,7 +216,7 @@ try {
   const form = detail.getByRole('group', { name: 'Assign to an agent' });
   await form.getByRole('combobox', { name: 'Agent project' }).selectOption({ label: 'planner-demo-a' });
   await form.getByRole('button', { name: 'Agent', exact: true }).click();
-  await frame.getByRole('dialog', { name: 'Choose the agent' }).getByRole('option', { name: 'Build', exact: true }).click();
+  await frame.getByRole('dialog', { name: 'Choose the agent' }).getByRole('option', { name: PRESET.name, exact: true }).click();
   await form.getByRole('textbox', { name: 'Worktree branch' }).fill(branch);
   await form.getByRole('button', { name: 'Edit the instructions' }).click();
   const instructions = await form.getByRole('textbox', { name: 'Agent prompt' }).inputValue();
@@ -210,7 +225,7 @@ try {
   await form.getByRole('button', { name: 'Assign', exact: true }).click();
   const started = await waitForState((latest) => Boolean(runOf(latest)?.sessionId), 240_000);
   const item = runOf(started);
-  check('the run works in a new worktree on its branch, as the build agent, and expects a pull request', item?.worktree?.branch === branch && item.assignee?.agent === 'build' && item.wantsPr === true, JSON.stringify({ branch: item?.worktree?.branch, assignee: item?.assignee, wantsPr: item?.wantsPr }));
+  check(`the run works in a new worktree on its branch, as the build agent on ${MODEL}, and expects a pull request`, item?.worktree?.branch === branch && item.assignee?.agent === 'build' && item.assignee?.model === MODEL && item.wantsPr === true, JSON.stringify({ branch: item?.worktree?.branch, assignee: item?.assignee, wantsPr: item?.wantsPr }));
   if (!item?.sessionId) throw new Error('no run started');
 
   // The agent works: wait for its pull request, or its error, or a long silence.
