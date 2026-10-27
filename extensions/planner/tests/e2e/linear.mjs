@@ -2,7 +2,10 @@
 // build (see harness.mjs): saved views as saved (a completed-only view, a 320-issue view read
 // page by page, a view of projects), the sidebar, filters from the keyboard sent to Linear as
 // an IssueFilter, a chip's operator, the issue view's properties with S / A / L / P / Shift D
-// and J / K, and a board of two teams' exact workflow states.
+// and J / K, and a board of two teams' exact workflow states; Linear's advanced filters (all /
+// any, nested groups, content, subscribers, relations) built from the UI, a saved view whose
+// filter is an "or" of groups, and the page at 1024×768 with OpenChamber's sidebar open (its
+// own sidebar behind a toggle, "/" into the header's search).
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/linear.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { makeFilters, page } from './linearFake.mjs';
@@ -58,13 +61,15 @@ const issue = (team, number, title, stateId, extra = {}) => {
     comments: { nodes: [] }, attachments: { nodes: [] }, history: { nodes: [] }, subscribers: [], ...extra,
   };
 };
+const milestones = [{ id: 'm1', name: 'Planner beta', targetDate: dayKey(14), project: { id: 'p1', name: 'Planner' } }];
 const issues = [
   issue(har, 1, 'plan the launch', 'st-h-todo', { priority: 2, project: slimProject('p1'), cycle: slimCycle('c7'), labels: { nodes: [label('lbl-bug-h')] }, dueDate: dayKey(-2), subscribers: ['u-h'], estimate: 3,
+    projectMilestone: { id: 'm1', name: 'Planner beta' }, relations: { blocking: ['iss-har-2'] },
     attachments: { nodes: [{ id: 'att-1', title: 'Pull request #12: Launch plan', subtitle: 'Open', url: 'https://github.com/harness/app/pull/12', sourceType: 'github' }] },
     comments: { nodes: [{ id: 'c-1', body: 'Looks good, **ship it**', createdAt: ago(30), editedAt: null, user: person('u-mate'), botActor: null, parent: null }] },
     history: { nodes: [{ id: 'h-1', createdAt: ago(48), actor: person('u-mate'), botActor: null, fromState: { name: 'Backlog', color: '#bec2c8', type: 'backlog' }, toState: { name: 'Todo', color: '#e2e2e2', type: 'unstarted' }, fromAssignee: null, toAssignee: null, fromPriority: null, toPriority: null, fromTitle: null, toTitle: null, addedLabels: null, removedLabels: null, fromDueDate: null, toDueDate: null, fromProject: null, toProject: null, fromCycle: null, toCycle: null, fromEstimate: null, toEstimate: null, updatedDescription: null }] } }),
-  issue(har, 2, 'fix login', 'st-h-prog', { priority: 1, creator: person('u-mate'), labels: { nodes: [label('lbl-feat')] }, dueDate: dayKey(0), project: slimProject('p1') }),
-  issue(har, 3, 'write docs', 'st-h-backlog', { priority: 3 }),
+  issue(har, 2, 'fix login', 'st-h-prog', { priority: 1, creator: person('u-mate'), labels: { nodes: [label('lbl-feat')] }, dueDate: dayKey(0), project: slimProject('p1'), relations: { blockedBy: ['iss-har-1'] } }),
+  issue(har, 3, 'write docs', 'st-h-backlog', { priority: 3, description: 'Document the Login flow, step by step.' }),
   issue(har, 4, 'review api', 'st-h-review', { priority: 4, assignee: person('u-mate'), labels: { nodes: [label('lbl-feat'), label('lbl-bug-h')] }, subscribers: ['u-h'] }),
   issue(har, 5, 'shipped search', 'st-h-done', { completedAt: ago(48) }),
   issue(har, 6, 'dropped idea', 'st-h-canceled', { canceledAt: ago(24 * 40) }),
@@ -75,11 +80,13 @@ const issues = [
   issue(ops, 3, 'ops doing migration', 'st-o-doing', { project: slimProject('p2') }),
   issue(ops, 4, 'ops shipped cache', 'st-o-shipped', { completedAt: ago(24) }),
   issue(ops, 5, 'ops done cleanup', 'st-o-done', { assignee: person('u-ops'), completedAt: ago(24 * 10) }),
+  issue(ops, 6, 'ops urgent bug', 'st-o-ready', { priority: 1, assignee: person('u-ops'), labels: { nodes: [label('lbl-bug-o')] } }),
 ];
 for (let n = 100; n < 420; n++) issues.push(issue(har, n, `bulk item ${n}`, n % 2 ? 'st-h-todo' : 'st-h-backlog', { assignee: person('u-mate'), creator: person('u-mate'), priority: n % 5, bulk: true }));
 const byKey = (key) => issues.find((item) => item.identifier === key);
 
-const view = (id, name, extra) => ({ id, name: `harness ${name}`, description: null, icon: null, color: null, shared: true, modelName: 'Issue', slugId: `slug-${id}`, updatedAt: ago(3), team: null, owner: viewer, ...extra });
+const view = (id, name, extra) => ({ id, name: `harness ${name}`, description: null, icon: null, color: null, shared: true, modelName: 'Issue', slugId: `slug-${id}`, updatedAt: ago(3), team: null, owner: viewer, filterData: {}, ...extra });
+const OR_FILTER = { or: [{ priority: { eq: 1 } }, { and: [{ assignee: { isMe: { eq: true } } }, { labels: { some: { id: { in: ['lbl-bug-h'] } } } }] }] };
 const views = [
   view('v-open', 'Open work', { team: har, description: 'Everything open in Harness', prefs: { layout: 'list', issueGrouping: 'workflowState', issueSubGrouping: null, viewOrdering: 'priority', showCompletedIssues: 'none', showSubIssues: true }, holds: (i) => i.team.id === har.id && !i.bulk && !['completed', 'canceled'].includes(i.state.type) }),
   view('v-done', 'Finished work', { prefs: { layout: 'list', issueGrouping: 'noGrouping', viewOrdering: 'updatedAt', showCompletedIssues: 'all' }, holds: (i) => ['completed', 'canceled'].includes(i.state.type) }),
@@ -87,14 +94,18 @@ const views = [
   view('v-board', 'Two-team board', { prefs: { layout: 'board', issueGrouping: 'workflowState', viewOrdering: 'priority', showCompletedIssues: 'all', showEmptyGroupsBoard: true }, holds: (i) => !i.bulk && i.state.type !== 'canceled' }),
   view('v-proj', 'Project portfolio', { modelName: 'Project', prefs: { projectLayout: 'list', projectGrouping: 'status', projectViewOrdering: 'priority', showCompletedProjects: 'all' }, holdsProject: () => true }),
   view('v-mine', 'My bugs', { shared: false, prefs: { layout: 'list', issueGrouping: 'priority', showCompletedIssues: 'week' }, holds: (i) => i.labels.nodes.some((l) => l.name === 'Bug') }),
+  // Every issue, so a filter built in the page can be checked against the fake's own evaluation of the whole world.
+  view('v-all', 'Everything', { prefs: { layout: 'list', issueGrouping: 'noGrouping', viewOrdering: 'createdAt', showCompletedIssues: 'all' }, holds: () => true }),
+  // A view saved in Linear with an advanced filter: an "or" of a rule and a group (Linear keeps labels by id).
+  view('v-or', 'Urgent or my bugs', { team: har, filterData: OR_FILTER, prefs: { layout: 'list', issueGrouping: 'noGrouping', viewOrdering: 'priority', showCompletedIssues: 'all' }, holds: (i) => i.team.id === har.id && matchIssue(i, OR_FILTER) }),
 ];
 const world = { org: { id: 'org-h', name: 'Harness Org', urlKey: 'harness' }, viewer, teams: [har, ops], members, issues, views };
 
 // Linear's filters, evaluated the way Linear does.
-const { matchProject, issuesWhere: filtered } = makeFilters({ viewerId: viewer.id, cycleFlags: (id) => slimCycle(id) ?? {} });
-const listed = ({ description: _d, comments: _c, attachments: _a, history: _h, subscribers: _s, bulk: _b, ...rest }) => rest;
+const { matchIssue, matchProject, issuesWhere: filtered } = makeFilters({ viewerId: viewer.id, cycleFlags: (id) => slimCycle(id) ?? {}, childrenOf: (item) => issues.filter((other) => other.parent?.id === item.id) });
+const listed = ({ description: _d, comments: _c, attachments: _a, history: _h, subscribers: _s, relations: _r, bulk: _b, ...rest }) => rest;
 const detailed = (item) => {
-  const { subscribers: _s, bulk: _b, ...rest } = item;
+  const { subscribers: _s, relations: _r, bulk: _b, ...rest } = item;
   const children = issues.filter((other) => other.parent?.id === item.id).map((child) => ({ id: child.id, identifier: child.identifier, title: child.title, priority: child.priority, state: child.state, assignee: child.assignee }));
   return { ...rest, children: { nodes: children } };
 };
@@ -105,7 +116,7 @@ const stateOf = (item, stateId) => statesOf(item.team.id).find((state) => state.
 const answer = (op, variables) => {
   switch (op) {
     case 'PlannerWhoAmI': return { viewer, organization: world.org };
-    case 'PlannerViews': return { customViews: page(views.map(({ prefs: _p, holds: _h, holdsProject: _hp, ...meta }) => meta), 100, variables.after) };
+    case 'PlannerViews': return { customViews: page(views.map(({ prefs: _p, holds: _h, holdsProject: _hp, filterData: _f, ...meta }) => meta), 100, variables.after) };
     case 'PlannerFavoriteViews': return { favorites: { nodes: [
       { id: 'f1', type: 'customView', sortOrder: 1, customView: { id: 'v-open' }, project: null, issue: null },
       { id: 'f2', type: 'project', sortOrder: 2, customView: null, project: projects[0], issue: null },
@@ -150,6 +161,7 @@ const answer = (op, variables) => {
     case 'PlannerFilterLabels': return { issueLabels: page(labels.map((item) => ({ ...label(item.id), isGroup: false, parent: null, team: item.team ? { id: item.team.id, key: item.team.key } : null })), 250, variables.after) };
     case 'PlannerFilterProjects': return { projects: page(projects.map((item) => ({ id: item.id, name: item.name, color: item.color, icon: null, status: { type: item.status.type } })), 250, variables.after) };
     case 'PlannerFilterCycles': return { cycles: page(cycles.map((item) => ({ ...item, team: { id: item.team.id, key: item.team.key } })), 250, variables.after) };
+    case 'PlannerFilterMilestones': return { projectMilestones: page(milestones, 250, variables.after) };
     case 'PlannerProjects': return { projects: page(projects.filter((item) => !['completed', 'canceled'].includes(item.status.type)), 50, variables.after) };
     case 'PlannerProject': {
       const found = projects.find((item) => item.id === variables.id);
@@ -276,7 +288,7 @@ try {
   const sections = await Promise.all(['Assigned', 'Created', 'Subscribed', 'Planned', 'All projects'].map((name) => sidebar().getByRole('button', { name, exact: true }).count()));
   check('the sidebar has My issues (Assigned, Created, Subscribed), Planned and Projects', sections.every((count) => count === 1), sections.join(','));
   check('Favorites lists the favorite view, project and issue in Linear’s order', favorites.map((text) => text.replace(/\s+/g, ' ').trim()).join(' | ').startsWith('harness Open work') && favorites.some((text) => text.includes('Planner')) && favorites.some((text) => text.includes('HAR-2')), favorites.join(' | '));
-  check('Views lists every saved view, of issues and of projects, by team and workspace', viewGroups.join(' | ') === 'HAR · Harness: harness Bulk backlog, harness Open work | Workspace views: harness Finished work, harness Project portfolio, harness Two-team board | My views: harness My bugs', viewGroups.join(' | '));
+  check('Views lists every saved view, of issues and of projects, by team and workspace', viewGroups.join(' | ') === 'HAR · Harness: harness Bulk backlog, harness Open work, harness Urgent or my bugs | Workspace views: harness Everything, harness Finished work, harness Project portfolio, harness Two-team board | My views: harness My bugs', viewGroups.join(' | '));
   await rows().first().waitFor({ timeout: 15_000 });
   const myGroups = await frame.locator('.linear-page .lin-group-head .lin-group-name').allInnerTexts();
   check('My issues opens on Assigned, grouped by the exact workflow states of both teams', (await heading()) === 'Assigned' && ['In Progress', 'Todo', 'Ready', 'Backlog', 'Triage', 'Doing'].every((name) => myGroups.includes(name)), myGroups.join(' | '));
@@ -570,6 +582,261 @@ try {
   check('a workspace filter asks only that workspace', (await rowKeys()).sort().join(',') === 'SIDE-1,SIDE-2' && calls('PlannerAssigned').length === assignedAfter && sideCalls.some((call) => call.op === 'PlannerAssigned'), (await rowKeys()).join(','));
   await h.shot('11-linear-two-workspaces');
   await frame.getByRole('button', { name: 'Clear filters' }).click();
+
+  // 12. Linear's advanced filters, built in the page at 1440×900: (priority = Urgent or assignee = me) and label = Bug,
+  // all / any at the top, content, subscribers and relations. Each goes to Linear as an IssueFilter, and the rows shown
+  // are exactly the fake's own evaluation of that filter over its whole world (the view holds every issue).
+  await browserPage.setViewportSize({ width: 1440, height: 900 });
+  await browserPage.keyboard.press('[');
+  await sidebar().waitFor({ state: 'detached', timeout: 5000 });
+  const folded = await frame.getByRole('button', { name: 'Show the sidebar' }).isVisible();
+  await browserPage.keyboard.press('[');
+  await sidebar().waitFor({ timeout: 5000 });
+  check('"[" folds the sidebar away (a toggle stays in the header) and brings it back, as in Linear', folded && (await sidebar().isVisible()) && (await frame.getByRole('button', { name: 'Show the sidebar' }).count()) === 0);
+  await openFromSidebar('harness Everything');
+  await rows().first().waitFor({ timeout: 15_000 });
+  const bar = frame.locator('.linear-page .lin-filters').first();
+  // A list's first page: what a new read asks (a replaced read may still have had a page on its way).
+  const everything = () => calls('PlannerViewIssues').filter((call) => call.variables.id === 'v-all' && !call.variables.after);
+  const keysOf = (list) => list.map((item) => item.identifier).sort();
+  /** Wait for Linear to be asked for `filter`, then compare the rows with the fake's evaluation of it. */
+  const shownFor = async (filter, base = issues) => {
+    const expected = keysOf(filtered(base, filter));
+    await until(async () => JSON.stringify(everything().at(-1)?.variables.filter) === JSON.stringify(filter) && (await rowKeys()).sort().join() === expected.join(), 15_000);
+    return { sent: everything().at(-1)?.variables.filter, shown: (await rowKeys()).sort(), expected };
+  };
+  const same = (result, filter) => JSON.stringify(result.sent) === JSON.stringify(filter) && result.shown.join() === result.expected.join() && result.expected.length > 0;
+  const summary = (result) => `sent ${JSON.stringify(result.sent)} · shown ${result.shown.join(',')} · fake ${result.expected.join(',')}${JSON.stringify(result.sent) === 'null' ? ` · last asks ${everything().slice(-5).map((call) => JSON.stringify([call.variables.after, call.variables.filter])).join(' ')}` : ''}`;
+  await browserPage.keyboard.press('f');
+  await frame.getByRole('dialog', { name: 'Filter' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.type('Labels');
+  await browserPage.keyboard.press('Enter');
+  await frame.getByRole('dialog', { name: 'Filter by Labels' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.type('Bug');
+  await browserPage.keyboard.press('Enter');
+  await browserPage.keyboard.press('Escape');
+  await bar.getByRole('group', { name: 'Labels include Bug' }).waitFor({ timeout: 5000 });
+  await bar.getByRole('button', { name: 'Filter', exact: true }).click();
+  await frame.getByRole('dialog', { name: 'Filter' }).getByRole('option', { name: /^Advanced filter/ }).click();
+  const builder = frame.getByRole('dialog', { name: 'Advanced filter' });
+  await builder.waitFor({ timeout: 5000 });
+  await builder.getByRole('button', { name: 'Add filter group' }).click();
+  await browserPage.keyboard.type('Priority');
+  await browserPage.keyboard.press('Enter');
+  await frame.getByRole('dialog', { name: 'Filter by Priority' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.type('Urgent');
+  await browserPage.keyboard.press('Enter');
+  await browserPage.keyboard.press('Escape');
+  const newGroup = builder.getByRole('group', { name: /^All of 1 filter/ });
+  await newGroup.waitFor({ timeout: 5000 });
+  await newGroup.getByRole('button', { name: 'Add filter', exact: true }).click();
+  await browserPage.keyboard.type('Assignee');
+  await browserPage.keyboard.press('Enter');
+  await frame.getByRole('dialog', { name: 'Filter by Assignee' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.type('Me');
+  await browserPage.keyboard.press('Enter');
+  await browserPage.keyboard.press('Escape');
+  await builder.getByRole('group', { name: /^All of 2 filters/ }).getByRole('button', { name: /^All of these filters/ }).click();
+  const anyGroup = builder.getByRole('group', { name: 'Any of 2 filters: Priority is Urgent or Assignee is Me' });
+  await anyGroup.waitFor({ timeout: 5000 });
+  await h.shot('12-linear-advanced-filter-1440');
+  await browserPage.keyboard.press('Escape');
+  await builder.waitFor({ state: 'detached', timeout: 5000 });
+  const urgentOrMine = { or: [{ priority: { in: [1] } }, { assignee: { isMe: { eq: true } } }] };
+  const bugs = { labels: { some: { name: { in: ['Bug'] } } } };
+  const built = await shownFor({ and: [bugs, urgentOrMine] });
+  const groupChip = bar.getByRole('group', { name: 'Any of 2 filters: Priority is Urgent or Assignee is Me' });
+  check('(priority = Urgent or assignee = me) and label = Bug, built from the UI, goes to Linear as and / or, and the rows are the fake’s own evaluation of it',
+    same(built, { and: [bugs, urgentOrMine] }) && built.expected.join() === 'HAR-1,OPS-2,OPS-6' && (await groupChip.innerText()).includes('Any of 2 filters'), summary(built));
+  await h.shot('13-linear-filters-1440');
+  await bar.getByRole('button', { name: 'Match all filters' }).click();
+  await frame.getByRole('dialog', { name: 'Match' }).getByRole('option', { name: 'Any filter' }).click();
+  const anyOf = await shownFor({ or: [bugs, urgentOrMine] });
+  check('"Match any" at the top sends an "or" of the top-level filters', same(anyOf, { or: [bugs, urgentOrMine] }) && anyOf.expected.length > built.expected.length, summary(anyOf));
+  await bar.getByRole('button', { name: 'Match any filter' }).click();
+  await frame.getByRole('dialog', { name: 'Match' }).getByRole('option', { name: 'All filters' }).click();
+  await shownFor({ and: [bugs, urgentOrMine] });
+  await bar.getByRole('button', { name: 'Clear filters' }).click();
+  // Content: the title or the description contains the text (HAR-2's title, HAR-3's description).
+  await browserPage.keyboard.press('f');
+  await browserPage.keyboard.type('Content');
+  await browserPage.keyboard.press('Enter');
+  await frame.getByRole('dialog', { name: 'Filter by Content' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.type('login');
+  await browserPage.keyboard.press('Enter');
+  await bar.getByRole('group', { name: 'Content contains “login”' }).waitFor({ timeout: 5000 });
+  const contentFilter = { or: [{ title: { containsIgnoreCase: 'login' } }, { description: { containsIgnoreCase: 'login' } }] };
+  const content = await shownFor(contentFilter);
+  check('a content filter: title or description contains the text', same(content, contentFilter) && content.expected.join() === 'HAR-2,HAR-3', summary(content));
+  await bar.getByRole('button', { name: 'Clear filters' }).click();
+  // Subscribers, me among them.
+  await browserPage.keyboard.press('f');
+  await browserPage.keyboard.type('Subscribers');
+  await browserPage.keyboard.press('Enter');
+  await frame.getByRole('dialog', { name: 'Filter by Subscribers' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.type('Me');
+  await browserPage.keyboard.press('Enter');
+  await browserPage.keyboard.press('Escape');
+  await bar.getByRole('group', { name: 'Subscribers include Me' }).waitFor({ timeout: 5000 });
+  const subscribedFilter = { subscribers: { some: { isMe: { eq: true } } } };
+  const subscribed = await shownFor(subscribedFilter);
+  check('a subscriber filter (Me)', same(subscribed, subscribedFilter) && subscribed.expected.join() === 'HAR-1,HAR-4', summary(subscribed));
+  await bar.getByRole('button', { name: 'Clear filters' }).click();
+  // Relations are top-level choices: typing finds them.
+  await browserPage.keyboard.press('f');
+  await browserPage.keyboard.type('Blocked');
+  await frame.getByRole('dialog', { name: 'Filter' }).getByRole('option', { name: 'Blocked by' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.press('Enter');
+  await bar.getByRole('group', { name: 'Relations include Blocked by' }).waitFor({ timeout: 5000 });
+  const blockedFilter = { hasBlockedByRelations: { eq: true } };
+  const blocked = await shownFor(blockedFilter);
+  check('a relation filter (blocked by an issue)', same(blocked, blockedFilter) && blocked.expected.join() === 'HAR-2', summary(blocked));
+  await bar.getByRole('button', { name: 'Clear filters' }).click();
+
+  // 13. A view saved in Linear with an "or" of a rule and a group: shown as one group and applied by Linear; changed
+  // here, the Planner sends the changed filter itself (the view's team's issues), and Reset brings the view back.
+  await openFromSidebar('harness Urgent or my bugs');
+  const savedChip = bar.getByRole('group', { name: 'Any of 2 filters: Priority is Urgent or (Assignee is Me and Labels include Bug)' });
+  await savedChip.waitFor({ timeout: 10_000 });
+  const viewOr = () => calls('PlannerViewIssues').filter((call) => call.variables.id === 'v-or');
+  const savedRows = keysOf(issues.filter((item) => item.team.id === har.id && matchIssue(item, OR_FILTER)));
+  await until(async () => (await rowKeys()).sort().join() === savedRows.join());
+  check('a saved view whose filter is an "or" of a rule and a group loads with that group shown, and Linear applies it',
+    (await rowKeys()).sort().join() === savedRows.join() && savedRows.includes('HAR-1') && savedRows.includes('HAR-2') && viewOr().at(-1)?.variables.filter === null && (await savedChip.innerText()).includes('Any of 2 filters'),
+    `${(await rowKeys()).length} rows · ${JSON.stringify(viewOr().at(-1)?.variables.filter)}`);
+  await savedChip.getByRole('button', { name: 'Edit filter group: Any of 2 filters' }).click();
+  const groupBuilder = frame.getByRole('dialog', { name: 'Filter group' });
+  await groupBuilder.waitFor({ timeout: 5000 });
+  const nested = groupBuilder.getByRole('group', { name: 'All of 2 filters: Assignee is Me and Labels include Bug' });
+  check('…its builder shows the nested group with its own "and"', (await nested.count()) === 1 && (await groupBuilder.getByRole('group', { name: 'Priority is Urgent' }).count()) === 1);
+  await nested.getByRole('button', { name: /^All of these filters/ }).click();
+  await groupBuilder.getByRole('group', { name: 'Any of 2 filters: Assignee is Me or Labels include Bug' }).waitFor({ timeout: 5000 });
+  await h.shot('14-linear-saved-view-group-1440');
+  await browserPage.keyboard.press('Escape');
+  const changedFilter = { and: [{ team: { id: { eq: har.id } } }, { or: [{ priority: { in: [1] } }, { or: [{ assignee: { isMe: { eq: true } } }, { labels: { some: { name: { in: ['Bug'] } } } }] }] }] };
+  const changedRows = keysOf(filtered(issues, changedFilter));
+  const changedSent = await until(() => calls('PlannerIssues').some((call) => JSON.stringify(call.variables.filter) === JSON.stringify(changedFilter)));
+  await until(async () => (await rowKeys()).sort().join() === changedRows.join());
+  check("changing the view's group here sends the changed filter, with the view's team, and the rows follow the fake",
+    Boolean(changedSent) && (await rowKeys()).sort().join() === changedRows.join() && changedRows.length > savedRows.length, `${(await rowKeys()).length} rows (fake ${changedRows.length})`);
+  await bar.getByRole('button', { name: "Reset the view's filters" }).click();
+  await until(async () => (await rowKeys()).sort().join() === savedRows.join());
+  check('Reset brings the view’s own filter back', (await rowKeys()).sort().join() === savedRows.join() && (await savedChip.count()) === 1);
+
+  // 14. The page at 1024×768 with OpenChamber's sidebar open (the Planner gets about 700 px): Linear's sidebar folds
+  // behind a toggle in the header and opens over the list; views, projects, My issues and Favorites are reachable by
+  // mouse and keyboard; "/" lands in the header's search.
+  await browserPage.setViewportSize({ width: 1024, height: 768 });
+  await frame.locator('.lin-shell.is-narrow').waitFor({ timeout: 10_000 });
+  const narrowFrame = await browserPage.locator('.inset-0 > iframe[title="Planner"]').boundingBox();
+  const ocSidebar = await browserPage.locator('aside, nav').first().boundingBox().catch(() => null);
+  const toggle = frame.getByRole('button', { name: 'Show the sidebar' });
+  const overlay = frame.locator('#lin-sidebar');
+  const visibleIn = async (locator) => {
+    const box = await locator.boundingBox();
+    const main = await frame.locator('.lin-main').boundingBox();
+    return Boolean(box && main && box.x >= main.x - 1 && box.x + box.width <= main.x + main.width + 1 && box.y >= 0 && box.y + box.height <= 768);
+  };
+  check('at 1024×768 with OpenChamber’s sidebar open, the Planner is about 700 px and Linear’s sidebar folds behind a visible toggle',
+    Boolean(narrowFrame && narrowFrame.width <= 720 && narrowFrame.x > 200) && (await toggle.isVisible()) && (await overlay.count()) === 0 && (await visibleIn(toggle)), `${JSON.stringify(narrowFrame)} · ${JSON.stringify(ocSidebar)}`);
+  await h.shot('15-linear-1024-sidebar-closed');
+  // The list at this width: each title keeps room (or shows whole), properties that do not fit go under it, none runs off.
+  const rowFit = await frame.locator('.linear-page li.lin-row').evaluateAll((items) => items.slice(0, 40).map((row) => {
+    const box = row.getBoundingClientRect();
+    const title = row.querySelector('.lin-title-text');
+    const props = row.querySelector('.lin-props')?.getBoundingClientRect();
+    return { key: row.getAttribute('aria-label')?.split(' ')[0], title: title ? Math.round(title.clientWidth) : 0, whole: title ? title.scrollWidth <= title.clientWidth + 1 : false, overflow: props ? Math.round(props.right - box.right) : 0 };
+  }));
+  check('at this width each row keeps its title readable and nothing runs off its right edge', rowFit.length > 0 && rowFit.every((row) => (row.whole || row.title >= 120) && row.overflow <= 1), JSON.stringify(rowFit.filter((row) => !((row.whole || row.title >= 120) && row.overflow <= 1)).slice(0, 3)));
+  const openOverlay = async () => {
+    await toggle.click();
+    await overlay.waitFor({ timeout: 5000 });
+  };
+  await openOverlay();
+  check('the toggle opens the sidebar over the list, with everything the wide one has', (await sidebar().getByRole('group', { name: 'Favorites', exact: true }).isVisible()) && (await sidebar().getByRole('group', { name: 'Views', exact: true }).isVisible()) && (await sidebar().getByRole('button', { name: 'All projects', exact: true }).isVisible()) && (await overlay.getByRole('searchbox', { name: 'Search Linear issues' }).isVisible()));
+  await h.shot('16-linear-1024-sidebar-open');
+  await sidebar().getByRole('button', { name: 'harness Finished work', exact: true }).click();
+  await frame.locator('.lin-head h1', { hasText: 'harness Finished work' }).waitFor({ timeout: 10_000 });
+  // What the view holds now: the board above moved OPS-3 to Done.
+  const finished = keysOf(issues.filter(views.find((item) => item.id === 'v-done').holds));
+  await until(async () => (await rowKeys()).sort().join() === finished.join());
+  check('picking a saved issue view opens it and closes the sidebar', (await overlay.count()) === 0 && (await rowKeys()).sort().join() === finished.join(), `${(await rowKeys()).join(',')} (fake ${finished.join(',')})`);
+  await openOverlay();
+  await sidebar().getByRole('button', { name: 'harness Project portfolio', exact: true }).click();
+  await frame.getByRole('button', { name: 'Open project Shipped Thing' }).waitFor({ timeout: 10_000 });
+  check('…and a view of projects', (await overlay.count()) === 0 && (await heading()) === 'harness Project portfolio');
+  await openOverlay();
+  await sidebar().getByRole('button', { name: 'Created', exact: true }).click();
+  await frame.locator('.lin-head h1', { hasText: 'Created' }).waitFor({ timeout: 10_000 });
+  check('Created is reachable with the visible toggle', (await overlay.count()) === 0 && (await heading()) === 'Created');
+  // The keyboard: "[" opens it on the open section, ↑/↓ move, Enter opens, Escape closes.
+  const focusedLabel = () => frame.locator(':focus').evaluate((element) => element.querySelector('.lin-nav-label')?.textContent ?? element.getAttribute('aria-label') ?? element.textContent ?? '').catch(() => '');
+  await browserPage.keyboard.press('[');
+  await overlay.waitFor({ timeout: 5000 });
+  const firstFocus = await focusedLabel();
+  await browserPage.keyboard.press('ArrowDown');
+  const onSubscribed = await focusedLabel();
+  await browserPage.keyboard.press('Enter');
+  await frame.locator('.lin-head h1', { hasText: 'Subscribed' }).waitFor({ timeout: 10_000 });
+  check('"[" opens the sidebar on the open section; ↓ and Enter open Subscribed', firstFocus === 'Created' && onSubscribed === 'Subscribed' && (await overlay.count()) === 0, `${firstFocus} → ${onSubscribed}`);
+  await browserPage.keyboard.press('[');
+  await overlay.waitFor({ timeout: 5000 });
+  await browserPage.keyboard.press('ArrowDown');
+  await browserPage.keyboard.press('ArrowDown');
+  const onFavorite = await focusedLabel();
+  const inFavorites = await frame.locator(':focus').evaluate((element) => Boolean(element.closest('[aria-label="Favorites"]'))).catch(() => false);
+  await browserPage.keyboard.press('Enter');
+  await frame.locator('.lin-head h1', { hasText: 'harness Open work' }).waitFor({ timeout: 10_000 });
+  check('…and a favorite view, from the keyboard', onFavorite === 'harness Open work' && inFavorites && (await overlay.count()) === 0, onFavorite);
+  await openOverlay();
+  await sidebar().getByRole('group', { name: 'Favorites', exact: true }).getByRole('button', { name: 'Planner' }).click();
+  await frame.locator('.project-detail').getByRole('heading', { name: 'Planner' }).waitFor({ timeout: 10_000 });
+  check('a favorite project opens from the sidebar over the list', (await overlay.count()) === 0);
+  await openOverlay();
+  await browserPage.keyboard.press('Escape');
+  await overlay.waitFor({ state: 'detached', timeout: 5000 });
+  await browserPage.waitForTimeout(150);
+  const escapeBack = await frame.locator(':focus').getAttribute('aria-label').catch(() => null);
+  await openOverlay();
+  await frame.locator('.lin-scrim').click({ position: { x: 460, y: 300 } });
+  await overlay.waitFor({ state: 'detached', timeout: 5000 });
+  check('Escape and a click outside close it; Escape gives the focus back to the toggle', escapeBack === 'Show the sidebar' && (await overlay.count()) === 0, String(escapeBack));
+  await openOverlay();
+  await sidebar().getByRole('button', { name: 'Assigned', exact: true }).click();
+  await rows().first().waitFor({ timeout: 10_000 });
+  await browserPage.keyboard.press('/');
+  const headSearch = frame.locator('.lin-head-search input');
+  await headSearch.waitFor({ timeout: 5000 });
+  const searchFocused = await headSearch.evaluate((element) => element === document.activeElement);
+  await browserPage.keyboard.type('fix');
+  await frame.locator('.lin-head h1', { hasText: '“fix”' }).waitFor({ timeout: 10_000 });
+  await until(async () => (await rowKeys()).join() === 'HAR-2');
+  check('"/" focuses a visible search box in the header, and typing searches the issues', searchFocused && (await visibleIn(headSearch)) && (await rowKeys()).join() === 'HAR-2' && lastCall('PlannerSearch')?.variables.term === 'fix', `${searchFocused} · ${(await rowKeys()).join(',')}`);
+  await h.shot('17-linear-1024-search');
+  await headSearch.press('Escape');
+  // The list's controls, a board, the filter menu and the issue view fit the narrow page.
+  await openOverlay();
+  await sidebar().getByRole('button', { name: 'harness Two-team board', exact: true }).click();
+  await frame.locator('.lin-board section.board-column').first().waitFor({ timeout: 10_000 });
+  const filterButton = frame.locator('.linear-page').getByRole('button', { name: 'Filter', exact: true });
+  const displayButton1024 = frame.locator('.linear-page').getByRole('button', { name: 'Display', exact: true });
+  check('on a board, the header and its Filter and Display stay on screen', (await visibleIn(filterButton)) && (await visibleIn(displayButton1024)) && (await visibleIn(frame.getByRole('button', { name: 'Refresh Linear' }))));
+  await h.shot('18-linear-1024-board');
+  await filterButton.click();
+  const narrowMenu = frame.getByRole('dialog', { name: 'Filter' });
+  await narrowMenu.waitFor({ timeout: 5000 });
+  check('the filter menu opens inside the page', await visibleIn(narrowMenu), JSON.stringify(await narrowMenu.boundingBox()));
+  await h.shot('19-linear-1024-filter-menu');
+  await browserPage.keyboard.press('Escape');
+  await frame.locator('.lin-board li.lin-card', { hasText: 'HAR-1' }).first().click();
+  const narrowIssue = frame.getByRole('dialog', { name: 'Linear issue HAR-1' });
+  await narrowIssue.getByRole('complementary', { name: 'Properties' }).waitFor({ timeout: 10_000 });
+  const issueBox = await narrowIssue.boundingBox();
+  check('the issue view fits the narrow page, its properties below the description', Boolean(issueBox && issueBox.width <= 702 && issueBox.x >= 0), JSON.stringify(issueBox));
+  await h.shot('20-linear-1024-issue');
+  await browserPage.keyboard.press('Escape');
+  await narrowIssue.waitFor({ state: 'detached', timeout: 5000 });
+  await browserPage.setViewportSize({ width: 1920, height: 1080 });
 
   // The host's own requests (such as its source-control binding) may fail in the dev container; those are not the Planner's.
   const errors = h.problems.filter((problem) => !/favicon|ERR_ABORTED|Failed to load resource/.test(problem));
