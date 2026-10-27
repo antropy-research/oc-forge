@@ -1489,6 +1489,8 @@ try {
     if (url.pathname === '/google/calendars') return { calendars: fake.accounts.length ? fake.calendars : [], errors: [] };
     if (url.pathname === '/google/tasklists') return { lists: fake.accounts.length ? fake.lists : [], errors: [] };
     if (url.pathname === '/google/tasks' && method === 'GET') return { tasks: fake.tasks.filter((item) => !item.completed) };
+    // A list's every task, completed ones too: completing a task reads it for the subtasks that complete with it.
+    if (url.pathname === '/google/tasks/all' && method === 'GET') return { tasks: fake.tasks.filter((item) => item.listId === url.searchParams.get('list')), complete: true };
     if (url.pathname === '/google/tasks/linked') return { tasks: fake.tasks.filter((item) => body.groups.some((group) => group.ids.includes(item.id))) };
     if (url.pathname === '/google/tasks' && method === 'PATCH') {
       fake.writes.push({ method, ...body });
