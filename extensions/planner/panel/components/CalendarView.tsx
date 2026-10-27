@@ -16,7 +16,7 @@ import { LinearIssues } from './LinearPanel.tsx';
 import { TasksView } from './TasksView.tsx';
 import { CalendarRail } from './calendar/Rail.tsx';
 import { MonthView } from './calendar/MonthView.tsx';
-import { ScheduleView } from './calendar/ScheduleView.tsx';
+import { ScheduleView, SearchResults } from './calendar/ScheduleView.tsx';
 import { CalendarOverlays } from './calendar/Overlays.tsx';
 import { Icon } from './calendar/Icon.tsx';
 import { isTaskEvent } from './calendar/items.ts';
@@ -133,6 +133,14 @@ export const CalendarView = () => {
   const setAnchor = (date: DateKey) => calendarUi.prefs({ anchor: date });
   const goDay = (date: DateKey) => calendarUi.prefs({ mode: 'day', anchor: date, page: 'calendar' });
 
+  // Google Calendar's search: the header becomes a search box (or press /); Enter shows what matches.
+  const [search, setSearch] = useState<{ text: string; shown: string | null } | null>(null);
+  const searchBox = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (search && search.shown === null) searchBox.current?.focus();
+  }, [search !== null]);
+  const leaveSearch = () => setSearch(null);
+
   // Google Calendar's keys: D, W, M (or 1, 2, 3), 5 for Schedule, J and K for next and previous.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -142,7 +150,8 @@ export const CalendarView = () => {
       if (ui.popover || ui.draft || ui.editor || ui.question || ui.prefs.page !== 'calendar' || document.querySelector('.modal-backdrop')) return;
       const key = event.key.toLowerCase();
       const next = MODE_DIGITS[key] ?? (Object.keys(MODE_KEYS) as CalendarMode[]).find((item) => MODE_KEYS[item].toLowerCase() === key);
-      if (next) calendarUi.prefs({ mode: next });
+      if (key === '/') setSearch((current) => current ?? { text: '', shown: null });
+      else if (next) calendarUi.prefs({ mode: next });
       else if (key === 'j') calendarUi.prefs({ anchor: stepAnchor(ui.prefs.mode, ui.prefs.anchor ?? view.today, 1) });
       else if (key === 'k') calendarUi.prefs({ anchor: stepAnchor(ui.prefs.mode, ui.prefs.anchor ?? view.today, -1) });
       else return;
@@ -163,7 +172,28 @@ export const CalendarView = () => {
           </button>
         )}
         <h1 class="gcal-brand">{tasksPage ? 'Tasks' : 'Calendar'}</h1>
-        {!tasksPage && (
+        {!tasksPage && search && (
+          <div class="gcal-search" role="search">
+            <button class="icon-button" aria-label="Back to the calendar" title="Back" onClick={leaveSearch}><Icon name="back" size={20} /></button>
+            <input
+              ref={searchBox}
+              type="search"
+              aria-label="Search events"
+              placeholder="Search"
+              value={search.text}
+              onInput={(event) => setSearch({ text: event.currentTarget.value, shown: search.shown })}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && search.text.trim()) setSearch({ text: search.text, shown: search.text.trim() });
+                else if (event.key === 'Escape') {
+                  event.preventDefault();
+                  leaveSearch();
+                }
+              }}
+            />
+            <button class="icon-button" aria-label="Search" title="Search" disabled={!search.text.trim()} onClick={() => search.text.trim() && setSearch({ text: search.text, shown: search.text.trim() })}><Icon name="search" size={20} /></button>
+          </div>
+        )}
+        {!tasksPage && !search && (
           <>
             <button class="gcal-today" onClick={() => setAnchor(view.today)} title={`Today, ${view.today}`}>Today</button>
             <div class="gcal-arrows">
@@ -175,7 +205,8 @@ export const CalendarView = () => {
           </>
         )}
         <div class="gcal-actions">
-          {!tasksPage && <ViewMenu mode={mode} />}
+          {!tasksPage && !search && <button class="icon-button gcal-search-button" aria-label="Search events" title="Search (/)" onClick={() => setSearch({ text: '', shown: null })}><Icon name="search" size={20} /></button>}
+          {!tasksPage && !search && <ViewMenu mode={mode} />}
           {tasksAccounts > 0 && (
             <div class="segmented gcal-switch" role="radiogroup" aria-label="Calendar or Tasks">
               <button role="radio" aria-checked={!tasksPage} aria-label="Calendar" title="Calendar" onClick={() => calendarUi.prefs({ page: 'calendar' })}><Icon name="calendar" size={20} /></button>
@@ -196,9 +227,10 @@ export const CalendarView = () => {
         <div class="gcal-body">
           {showRail && <CalendarRail anchor={anchor} shown={days} onPick={setAnchor} />}
           <div class="gcal-main">
-            {(mode === 'day' || mode === 'week') && <TimeGrid dates={days} events={events} onDay={mode === 'week' ? goDay : undefined} />}
-            {mode === 'month' && <MonthView anchor={anchor} events={events} onDay={goDay} />}
-            {mode === 'schedule' && <ScheduleView from={days[0]!} to={days[days.length - 1]!} events={events} onDay={goDay} />}
+            {(mode === 'day' || mode === 'week') && !search?.shown && <TimeGrid dates={days} events={events} onDay={mode === 'week' ? goDay : undefined} />}
+            {mode === 'month' && !search?.shown && <MonthView anchor={anchor} events={events} onDay={goDay} />}
+            {mode === 'schedule' && !search?.shown && <ScheduleView from={days[0]!} to={days[days.length - 1]!} events={events} onDay={goDay} />}
+            {search?.shown && <SearchResults query={search.shown} onDay={(date) => { leaveSearch(); goDay(date); }} />}
           </div>
           {showSide && (
             <aside class="side-panel gcal-side" aria-label="Unscheduled work">

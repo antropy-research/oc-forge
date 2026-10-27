@@ -14,7 +14,7 @@ import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
 import { googleWriteRoute } from './googleRoutes.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
-import { addDays, daysBetween, instantAt, isDateKey } from '../src/domain/dates.ts';
+import { addDays, daysBetween, instantAt, isDateKey, todayIn } from '../src/domain/dates.ts';
 import { CommandFiles, OpenCodeInfo, agentRoute, opencodeConfigDir } from './agents.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
@@ -390,6 +390,39 @@ const server = http.createServer(async (req, res) => {
       });
       // Sessions moved or deleted in Google follow, once the answer is on its way.
       if (fromGoogle.reads.size) void timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
+    // Google Calendar's search: the calendars shown, a year back and two ahead, in date order.
+    if (url.pathname === '/calendar/search' && req.method === 'GET') {
+      const query = (url.searchParams.get('q') ?? '').trim();
+      if (!query || query.length > 200) {
+        json(res, 400, { error: 'q must be 1-200 characters' });
+        return;
+      }
+      const zone = planner.state.settings.timezone ?? 'UTC';
+      const today = todayIn(zone);
+      const [from, to] = [addDays(today, -366), addDays(today, 731)];
+      const [timeMin, timeMax] = [instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone)];
+      const shown = Object.values(planner.state.calendars).filter((calendar) => calendar.visible);
+      const needle = query.toLocaleLowerCase();
+      const errors: { calendarId: string; message: string }[] = [];
+      let more = false;
+      const [feed, ...fromGoogle] = await Promise.all([
+        feeds.eventsFor(shown.filter((calendar) => !calendar.google), from, to, zone),
+        ...shown.filter((calendar) => calendar.google).map((calendar) =>
+          googleData.searchEvents(calendar.google!.account, calendar.google!.calendarId, query, timeMin, timeMax, zone, calendar.id).catch((error) => {
+            errors.push({ calendarId: calendar.id, message: error instanceof Error ? error.message : String(error) });
+            return { events: [], more: false };
+          }),
+        ),
+      ]);
+      errors.push(...feed.errors);
+      const events = feed.events.filter((event) => `${event.title}\n${event.location}`.toLocaleLowerCase().includes(needle));
+      for (const found of fromGoogle) {
+        events.push(...found.events);
+        more ||= found.more;
+      }
+      json(res, 200, { events: events.sort((a, b) => a.start.localeCompare(b.start)), from, to, more, errors });
       return;
     }
     if (url.pathname === '/activity' && req.method === 'GET') {

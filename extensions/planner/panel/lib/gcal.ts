@@ -243,6 +243,10 @@ export const createEvent = (client: PlannerClient, account: string, calendarId: 
 export const updateEvent = (client: PlannerClient, ref: GoogleEventRef, event: EventInput, scope: EditScope, sendUpdates: 'all' | 'none'): Promise<unknown> =>
   client.call('PATCH', '/google/events', { account: ref.account, calendarId: ref.calendarId, eventId: ref.eventId, event, scope, sendUpdates });
 
+/** Google Calendar's search over the calendars shown: matching events a year back and two ahead, in date order. */
+export const searchEvents = (client: PlannerClient, query: string): Promise<{ events: CalendarEvent[]; from: DateKey; to: DateKey; more: boolean; errors: { calendarId: string; message: string }[] }> =>
+  client.call('GET', `/calendar/search?${q({ q: query })}`);
+
 /** Delete; `undo` is a token that puts one deleted event or occurrence back for a while (a series has none). */
 export const deleteEvent = (client: PlannerClient, ref: GoogleEventRef, scope: EditScope, sendUpdates: 'all' | 'none'): Promise<{ requests: number; undo: string | null }> =>
   client.call('DELETE', `/google/events?${q({ account: ref.account, calendar: ref.calendarId, id: ref.eventId, scope, sendUpdates })}`);

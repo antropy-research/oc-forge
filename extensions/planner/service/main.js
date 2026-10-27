@@ -3690,6 +3690,18 @@ ${calendarId}`, accessRole);
     }
     return { events, sessions };
   }
+  async searchEvents(account, calendarId, query, timeMin, timeMax, zone, subscriptionId) {
+    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events?${new URLSearchParams({ q: query, singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, 2);
+    const accessRole = typeof first?.accessRole === "string" ? first.accessRole : this.roles.get(`${account}
+${calendarId}`);
+    const events = [];
+    for (const raw of items) {
+      const event = googleEvent(raw, subscriptionId, zone, { account, calendarId, accessRole });
+      if (event)
+        events.push(event);
+    }
+    return { events, more: !complete };
+  }
   async putTimebox(account, calendarId, timebox, eventId) {
     const body = {
       summary: timebox.title,
@@ -5206,6 +5218,37 @@ var server = http2.createServer(async (req, res) => {
       });
       if (fromGoogle.reads.size)
         timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
+    if (url.pathname === "/calendar/search" && req.method === "GET") {
+      const query = (url.searchParams.get("q") ?? "").trim();
+      if (!query || query.length > 200) {
+        json(res, 400, { error: "q must be 1-200 characters" });
+        return;
+      }
+      const zone = planner.state.settings.timezone ?? "UTC";
+      const today = todayIn(zone);
+      const [from, to] = [addDays(today, -366), addDays(today, 731)];
+      const [timeMin, timeMax] = [instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone)];
+      const shown = Object.values(planner.state.calendars).filter((calendar) => calendar.visible);
+      const needle = query.toLocaleLowerCase();
+      const errors = [];
+      let more = false;
+      const [feed, ...fromGoogle] = await Promise.all([
+        feeds.eventsFor(shown.filter((calendar) => !calendar.google), from, to, zone),
+        ...shown.filter((calendar) => calendar.google).map((calendar) => googleData.searchEvents(calendar.google.account, calendar.google.calendarId, query, timeMin, timeMax, zone, calendar.id).catch((error) => {
+          errors.push({ calendarId: calendar.id, message: error instanceof Error ? error.message : String(error) });
+          return { events: [], more: false };
+        }))
+      ]);
+      errors.push(...feed.errors);
+      const events = feed.events.filter((event) => `${event.title}
+${event.location}`.toLocaleLowerCase().includes(needle));
+      for (const found of fromGoogle) {
+        events.push(...found.events);
+        more ||= found.more;
+      }
+      json(res, 200, { events: events.sort((a, b) => a.start.localeCompare(b.start)), from, to, more, errors });
       return;
     }
     if (url.pathname === "/activity" && req.method === "GET") {

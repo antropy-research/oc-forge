@@ -205,6 +205,26 @@ export class GoogleData {
     return { events, sessions };
   }
 
+  /**
+   * Events of one calendar whose text matches `query`, as Google Calendar's
+   * search finds them (Google matches title, place, description and guests),
+   * at most two pages; `more` says Google had more.
+   */
+  async searchEvents(account: string, calendarId: string, query: string, timeMin: string, timeMax: string, zone: string, subscriptionId: string): Promise<{ events: CalendarEvent[]; more: boolean }> {
+    const { items, complete, first } = await this.pages<RawGoogleEvent>(
+      account,
+      (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events?${new URLSearchParams({ q: query, singleEvents: 'true', orderBy: 'startTime', timeMin, timeMax, maxResults: '250', fields: EVENT_FIELDS, ...(token ? { pageToken: token } : {}) })}`,
+      2,
+    );
+    const accessRole = typeof first?.accessRole === 'string' ? first.accessRole : this.roles.get(`${account}\n${calendarId}`);
+    const events: CalendarEvent[] = [];
+    for (const raw of items) {
+      const event = googleEvent(raw, subscriptionId, zone, { account, calendarId, accessRole });
+      if (event) events.push(event);
+    }
+    return { events, more: !complete };
+  }
+
   /** Write a working session as an event, or update the one written before; returns its event id. */
   async putTimebox(account: string, calendarId: string, timebox: TimeboxEvent, eventId: string | null): Promise<string> {
     const body = {

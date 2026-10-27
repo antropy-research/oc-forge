@@ -213,6 +213,15 @@ describe('Google Calendar events', () => {
     expect(calls.map((call) => call.query.pageToken ?? null)).toEqual([null, 'n2']);
     expect(calls[0]!.query.maxResults).toBe('2500');
   });
+
+  test('search asks Google with q, one occurrence per event in date order, two pages at most', async () => {
+    const pageOf = (n: number) => ok({ accessRole: 'owner', items: [{ id: `e${n}`, summary: 'Quarter planning', start: { dateTime: `2026-10-2${n}T21:00:00Z` }, end: { dateTime: `2026-10-2${n}T22:00:00Z` } }], nextPageToken: `p${n + 1}` });
+    const { data, calls } = google((call) => (call.path.endsWith('/events') ? pageOf(call.query.pageToken ? Number(call.query.pageToken.slice(1)) : 1) : ok({})));
+    const found = await data.searchEvents(ME, 'primary', 'planning', '2025-10-26T07:00:00Z', '2028-10-27T07:00:00Z', LA, 'sub1');
+    expect(calls.map((call) => [call.query.q, call.query.singleEvents, call.query.orderBy, call.query.pageToken ?? null])).toEqual([['planning', 'true', 'startTime', null], ['planning', 'true', 'startTime', 'p2']]);
+    expect(found.events.map((event) => [event.id, event.title, event.google?.editable])).toEqual([['sub1:e1', 'Quarter planning', true], ['sub1:e2', 'Quarter planning', true]]);
+    expect(found.more).toBe(true);
+  });
 });
 
 describe('Google Tasks', () => {

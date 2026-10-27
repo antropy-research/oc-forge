@@ -1041,6 +1041,11 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gcal-switch { border-radius: 18px; }
 .gcal-switch button { display: inline-flex; align-items: center; padding: 4px 12px; }
 .gcal-switch button[aria-checked='true'] { background: color-mix(in srgb, var(--oc-primary) 14%, transparent); color: var(--oc-primary-text, var(--oc-primary)); }
+/* Search: the header becomes a search box, as in Google Calendar; results read like Schedule. */
+.gcal-search { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0; }
+.gcal-search input { flex: 1; min-width: 0; height: 36px; border: 0; border-radius: 18px; padding: 0 16px; font: inherit; font-size: 15px; color: var(--oc-fg); background: var(--pl-soft); }
+.gcal-search input:focus { outline: 2px solid color-mix(in srgb, var(--oc-primary) 50%, transparent); outline-offset: 0; background: var(--pl-surface); }
+.search-results { overflow-y: auto; }
 .gcal-view.is-narrow .gcal-title { font-size: 16px; }
 .gcal-view.is-narrow .gcal-brand { display: none; }
 /* Narrow (the Planner beside OpenChamber's own panels, a 1024 px window): one row, as Google Calendar keeps it;

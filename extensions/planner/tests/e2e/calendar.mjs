@@ -116,6 +116,26 @@ try {
   await page.keyboard.press('w');
   check('Google Calendar\'s keys switch views (W: week)', (await f.locator('.day-lane').count()) === 7);
 
+  // Search, as in Google Calendar: / opens the search box, Enter lists what matches across the calendars shown.
+  await page.keyboard.press('/');
+  const searchBox = f.getByRole('searchbox', { name: 'Search events' });
+  await searchBox.waitFor({ timeout: 5000 });
+  await searchBox.fill('planning');
+  await page.keyboard.press('Enter');
+  const results = f.getByRole('region', { name: 'Search results for planning' });
+  const hit = results.getByRole('button', { name: /^Quarter planning, / });
+  const found = await hit.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+  const askedGoogle = requests('GET', EVENTS).some((request) => request.query.q === 'planning');
+  const strays = await results.getByRole('button', { name: /^Standup, / }).count();
+  check('/ opens search; Enter lists the matching events, as Google finds them (q), and nothing else', found && askedGoogle && strays === 0, `found ${found}, asked Google ${askedGoogle}, other events ${strays}`);
+  await shot('cal-04b-search');
+  await hit.click();
+  const fromSearch = await f.getByRole('dialog', { name: 'Event: Quarter planning' }).waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+  await page.keyboard.press('Escape');
+  await f.getByRole('button', { name: 'Back to the calendar' }).click();
+  const backToGrid = await f.locator('.day-lane').first().waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+  check('a result opens its details; Back returns to the calendar', fromSearch && backToGrid);
+
   // The mini month moves the calendar; Today comes back.
   const later = `${addDays(`${today.slice(0, 8)}01`, 40).slice(0, 8)}15`;
   await goTo(later);

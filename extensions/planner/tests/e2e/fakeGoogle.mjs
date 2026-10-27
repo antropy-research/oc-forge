@@ -210,7 +210,10 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
           } else if (timeMs(event.end) > from && timeMs(event.start) < to) items.push(withLinks(calendar.id, event));
         }
         items.sort((a, b) => timeMs(a.start) - timeMs(b.start));
-        return [200, page(items, query, 'events', { accessRole: calendar.accessRole, timeZone: world.zone })];
+        // q: Google's free-text search over the title, place, description and guests.
+        const q = query.get('q')?.toLowerCase();
+        const found = q ? items.filter((item) => [item.summary, item.location, item.description, ...(item.attendees ?? []).flatMap((guest) => [guest.email, guest.displayName])].some((text) => typeof text === 'string' && text.toLowerCase().includes(q))) : items;
+        return [200, page(found, query, 'events', { accessRole: calendar.accessRole, timeZone: world.zone })];
       }
       if (!eventId && method === 'POST') {
         const event = { ...structuredClone(body), id: id('ev'), organizer: { email: calendar.id === 'primary' ? world.account : calendar.id, self: true }, status: 'confirmed' };
