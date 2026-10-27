@@ -175,9 +175,17 @@ try {
   check("the container's gh reaches the fake GitHub for planner-demo-a's origin", listed === '[]', listed);
 
   // A model the agent can run on: its provider in the container's OpenCode, and a preset naming it.
-  const providers = await context.request.get(`${base}/api/provider`).then((response) => response.json()).catch(() => null);
-  const providerIds = Object.values(providers?.data ?? providers ?? {}).map((provider) => provider?.id);
-  if (!providerIds.includes(MODEL.split('/')[0])) throw new Error(`the container's OpenCode has no provider ${MODEL.split('/')[0]} for ${MODEL} (it has ${providerIds.join(', ') || 'none'}): connect one, see containers/openchamber-dev/README.md`);
+  // OpenCode answers an empty list while it reloads (a command file just written does that): ask again for a while,
+  // and stop early only on a list that lacks the provider.
+  let providerIds = null;
+  for (let i = 0; i < 10 && !providerIds?.length; i++) {
+    const response = await context.request.get(`${base}/api/provider`).catch(() => null);
+    const providers = response?.ok() ? await response.json().catch(() => null) : null;
+    providerIds = Object.values(providers?.data ?? providers ?? {}).map((provider) => provider?.id).filter(Boolean);
+    if (!providerIds.length) await sleep(2000);
+  }
+  if (providerIds?.length && !providerIds.includes(MODEL.split('/')[0])) throw new Error(`the container's OpenCode has no provider ${MODEL.split('/')[0]} for ${MODEL} (it has ${providerIds.join(', ')}): connect one, see containers/openchamber-dev/README.md`);
+  if (!providerIds?.length) console.log(`INFO OpenCode listed no providers within 20 s; going on, the run will show whether ${MODEL} answers`);
   const before = (await serviceState()).state?.settings?.agentPresets ?? [];
   await serviceCall('POST', '/commands', { commands: [{ cmd: `agentpr-preset-${run}`, type: 'settings.updated', patch: { agentPresets: [...before.filter((preset) => preset.id !== PRESET.id), PRESET] } }] });
 
