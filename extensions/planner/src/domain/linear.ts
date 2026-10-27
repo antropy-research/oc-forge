@@ -3,7 +3,7 @@
 import type { DateKey, Placement, PlannerState, Priority, Task, TaskSourceRef } from './types.ts';
 import type { EventBody, NewTask } from './events.ts';
 import { isDateKey } from './dates.ts';
-import { PRIORITY_NAMES, VIEW_PREF_FIELDS, type ViewPrefs } from './linearDisplay.ts';
+import { PRIORITY_NAMES, VIEW_PREF_FIELDS, type GraphFilter, type ViewPrefs } from './linearDisplay.ts';
 
 export interface LinearState {
   id: string;
@@ -38,6 +38,8 @@ export interface LinearIssue {
   creator?: { id: string; name: string } | null;
   project: { id: string; name: string; color?: string; icon?: string | null } | null;
   cycle: { id: string; number: number; name?: string | null; isActive?: boolean; isNext?: boolean } | null;
+  /** Its project milestone; absent on issues read before lists carried it. */
+  projectMilestone?: { id: string; name: string } | null;
   /** The issue this one is a sub-issue of. */
   parent?: { id: string; identifier: string; title: string } | null;
   /** Its labels, for filtering; absent on issues read before lists carried them. */
@@ -214,6 +216,7 @@ const ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrd
     creator { id name }
     project { id name color icon }
     cycle { id number name isActive isNext }
+    projectMilestone { id name }
     parent { id identifier title }
     labels(first: 25) { nodes { id name color } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
@@ -283,10 +286,11 @@ export const FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
   }
 }`;
 
-/** One saved view: what it lists and the display saved with it (layout, grouping, ordering, completed issues…). */
+/** One saved view: its filter, what it lists and the display saved with it (layout, grouping, ordering, completed issues…). */
 export const VIEW_QUERY = `query PlannerView($id: String!) {
   customView(id: $id) {
     ${VIEW_FIELDS}
+    filterData
     viewPreferencesValues { ${VIEW_PREF_FIELDS} }
   }
 }`;
@@ -366,11 +370,19 @@ export const PROJECT_QUERY = `query PlannerProject($id: String!) {
   }
 }`;
 
-// What filters offer: every team with its states, the people, labels, projects
-// and recent and coming cycles of the workspace, page by page.
+// What filters offer: every team with its states and estimate scale, the people,
+// labels, projects, milestones and recent and coming cycles of the workspace,
+// page by page.
 export const FILTER_TEAMS_QUERY = `query PlannerFilterTeams($after: String) {
   teams(first: 50, after: $after) {
-    nodes { id key name states(first: 50) { nodes { id name type color position } } }
+    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } } }
+    ${PAGE}
+  }
+}`;
+
+export const FILTER_MILESTONES_QUERY = `query PlannerFilterMilestones($after: String) {
+  projectMilestones(first: 250, after: $after) {
+    nodes { id name targetDate project { id name } }
     ${PAGE}
   }
 }`;
@@ -483,6 +495,7 @@ export const ALL_DOCUMENTS = [
   FILTER_LABELS_QUERY,
   FILTER_PROJECTS_QUERY,
   FILTER_CYCLES_QUERY,
+  FILTER_MILESTONES_QUERY,
   ISSUE_DETAIL_QUERY,
   TEAM_OPTIONS_QUERY,
   SET_STATE_MUTATION,
@@ -685,9 +698,11 @@ export interface LinearSavedView {
   favoriteOrder?: number;
 }
 
-/** A saved view as opened: what it lists and the display saved with it. */
+/** A saved view as opened: its filter, what it lists and the display saved with it. */
 export interface LinearViewMeta extends LinearSavedView {
   viewPreferencesValues: ViewPrefs | null;
+  /** The view's own filter of issues, as Linear keeps it (an IssueFilter). */
+  filterData?: GraphFilter | null;
 }
 
 const NON_ISSUE_MODELS = new Set(['project', 'projects', 'initiative', 'initiatives', 'feeditem', 'feeditems', 'customer', 'customers', 'document', 'documents', 'release', 'releases']);

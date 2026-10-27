@@ -1413,4 +1413,23 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .lin-shell.is-narrow .lin-row-title { flex: 1 1 160px; min-width: min(160px, 100%); }
 .lin-shell.is-narrow .lin-props { flex: 0 1 auto; max-width: 100%; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
 
+/* Filters: whether all or any hold, a group's chip, a part of a saved view kept as it is. */
+.lin-match { padding: 2px 8px; font-size: 12px; color: var(--oc-muted); }
+.lin-chip.is-group .lin-chip-values { display: inline-flex; align-items: center; gap: 5px; }
+.lin-chip.is-raw .lin-chip-field { white-space: normal; }
+/* Linear's advanced filter: rows joined by and / or, groups as boxes of their own. */
+.lin-popover.lin-advanced { width: max-content; min-width: 300px; max-width: min(640px, calc(100vw - 16px)); overflow: visible; }
+.lin-advanced-body { padding: 4px 10px 10px; }
+.lin-adv-rows { display: flex; flex-direction: column; gap: 6px; }
+.lin-adv-row { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 8px; }
+.lin-adv-row > .lin-chip, .lin-adv-row > .lin-adv-add { justify-self: start; }
+.lin-adv-join { display: flex; justify-content: flex-end; padding-top: 2px; font-size: 12px; color: var(--oc-muted); }
+.lin-adv-word { padding-right: 8px; }
+.lin-adv-switch { border: 1px solid var(--pl-line); border-radius: 6px; background: var(--pl-soft); padding: 1px 7px; font-size: 12px; color: var(--oc-fg); }
+.lin-adv-switch:hover { background: color-mix(in srgb, var(--oc-fg) 9%, transparent); }
+.lin-adv-group { position: relative; min-width: 0; padding: 8px 30px 8px 6px; border: 1px solid var(--pl-line); border-radius: 8px; background: var(--pl-softer); }
+.lin-adv-remove { position: absolute; top: 5px; right: 5px; border: 0; border-radius: 5px; background: none; padding: 1px 6px; color: var(--oc-muted); font-size: 15px; line-height: 1.2; }
+.lin-adv-remove:hover { background: var(--pl-soft); color: var(--oc-fg); }
+.lin-adv-add { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.lin-adv-add-button { padding: 2px 8px; font-size: 12px; color: var(--oc-muted); }
 /* ==== end Linear page at narrow widths, and advanced filters ==== */
