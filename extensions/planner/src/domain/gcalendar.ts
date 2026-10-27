@@ -121,6 +121,17 @@ export const compactRange = (start: number, end: number): string => {
   return sameHalf ? `${a.replace(/(am|pm)$/, '')} – ${b}` : `${a} – ${b}`;
 };
 
+/**
+ * How a timed block's text fits its height, as Google Calendar fits it: a
+ * block with room for one line reads "Title, 10am"; a taller one gives the
+ * title as many whole lines as it has, and the time the line after the title
+ * when the title leaves one.
+ */
+export const blockText = (heightPx: number, lineHeightPx: number): { inline: boolean; lines: number } => {
+  const lines = Math.max(1, Math.floor(heightPx / lineHeightPx));
+  return { inline: lines === 1, lines };
+};
+
 /** The local days an event covers, first and last included. */
 export interface Span {
   first: DateKey;

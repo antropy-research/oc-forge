@@ -5,7 +5,11 @@
 // mini month; drag to create; details; RSVP; move and resize; recurring events
 // (This event, This and following, All events); a custom repeat rule; Google
 // Tasks lists and tasks (create, rename, delete, subtasks, reorder, complete);
-// a Google task planned stays on its due day; the layout at 1440 and 1024 px.
+// a Google task planned stays on its due day; a planned task moved to another
+// list keeps its link (completion writes there), changes in Google reach the
+// Planner and a title changed on both sides takes the newer change; a time, a
+// deadline, a weekly repeat and a star kept in the Planner for Google tasks;
+// titles that read in full; the layout at 1440 and 1024 px.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/calendar.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
@@ -381,7 +385,7 @@ try {
   // A Google task planned from the calendar stays on its due day.
   await reportChip.click();
   const taskPopover = f.getByRole('dialog', { name: 'Google task: Send the report' });
-  check('a Google task opens its details: date only, as Google Tasks has no time', (await taskPopover.innerText()).includes('Date only'));
+  check('a Google task opens its details: its day, its star, and planning it', (await taskPopover.innerText()).includes(longDay(today)) && (await taskPopover.getByRole('button', { name: 'Star Send the report' }).count()) === 1);
   await taskPopover.getByRole('button', { name: /^Plan on today/ }).click();
   const plannedState = await until(async () => Object.values((await state()).tasks).find((task) => task.source?.id === 't-report' && task.placement.kind === 'day' && task.placement.date === today));
   const stillThere = await until(async () => (await f.getByRole('button', { name: /^Google task Send the report, due .*planned in the Planner/ }).count()) === 1);
@@ -393,7 +397,7 @@ try {
   const myTasks = f.getByRole('region', { name: 'My Tasks' });
   await myTasks.getByText('Plan the trip').waitFor();
   check('Tasks shows each list, subtasks under their task, and completed tasks folded away', (await myTasks.locator('li.gt-row.depth-1', { hasText: 'Book the hotel' }).count()) === 1 && (await myTasks.getByRole('button', { name: 'Completed (1)' }).count()) === 1);
-  check('Starred says why it is not there', ((await f.getByRole('button', { name: /Starred/ }).getAttribute('title')) ?? '').includes('does not let other apps'));
+  check('Starred is a view of its own, and says its stars are kept in the Planner', ((await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'Starred' }).getAttribute('title')) ?? '').includes("doesn't let other apps"));
   await shot('cal-13-tasks');
 
   await f.getByRole('button', { name: 'Create new list' }).click();
@@ -449,8 +453,12 @@ try {
   // Edit in place: a date, which the calendar shows on that day.
   await myTasks.getByRole('button', { name: 'Edit Plan the trip' }).click();
   const editing = myTasks.getByRole('group', { name: 'Edit Plan the trip' });
-  check('editing a task says Google keeps only its date', (await editing.innerText()).includes('No time'));
-  await editing.locator('input[type="date"]').fill(addDays(today, 1));
+  check(
+    'editing a task offers a time, a deadline and a star (no repeat for a task with subtasks), and says the Planner keeps them',
+    (await editing.getByRole('combobox', { name: 'Time' }).count()) === 1 && (await editing.getByLabel('Deadline', { exact: true }).count()) === 1 && (await editing.getByRole('button', { name: 'Star' }).count()) === 1 && (await editing.getByRole('combobox', { name: 'Repeat' }).count()) === 0 && (await editing.innerText()).includes('Kept in the Planner'),
+    await editing.innerText(),
+  );
+  await editing.getByLabel('Date', { exact: true }).fill(addDays(today, 1));
   await editing.getByRole('button', { name: 'Done' }).click();
   check('a new date is written to Google Tasks', await until(() => requests('PATCH', '/tasks/v1/lists/L1/tasks/t-trip').find((request) => request.body?.due === `${addDays(today, 1)}T00:00:00.000Z`)));
 
@@ -510,11 +518,260 @@ try {
     asked && cleared && deletes.length === 4 && deletes.indexOf('t-hotel') < deletes.indexOf('t-trip') && (await until(async () => (await myTasks.getByRole('button', { name: /^Completed \(/ }).count()) === 0)),
     JSON.stringify({ asked, deletes }),
   );
+
+  // ── A planned Google task and its Planner task stay in step, whatever moves or changes ──
+  /** Reload the Planner and wait until its Google side has read the account again (the sync runs then). */
+  const reload = async () => {
+    const mark = fake.requests.length;
+    await h.openPlanner();
+    await until(() => fake.requests.slice(mark).some((request) => request.path === '/tasks/v1/users/@me/lists'), 15_000);
+    await page.waitForTimeout(1200);
+  };
+  const openTasks = async () => {
+    await h.nav('Calendar').click();
+    await f.getByRole('radio', { name: 'Tasks' }).click();
+    await myTasks.waitFor();
+  };
+  const linkedTo = async (id) => Object.values((await state()).tasks).find((task) => task.source?.id === id && !task.deletedAt);
+  const keptOf = async (id) => (await state()).googleTasks?.[`${ME}\n${id}`];
+
+  // 1. Moved to another list in Tasks: the Planner task follows; after a reload, completing it in the Planner writes to that list.
+  await myTasks.getByRole('button', { name: 'Actions for Send the report' }).click();
+  await myTasks.getByRole('menuitem', { name: 'Move to Errands' }).click();
+  const reportMove = await until(() => requests('POST', '/tasks/v1/lists/L1/tasks/t-report/move').find((request) => request.query.destinationTasklist === 'L2'));
+  const followed = await until(async () => (await linkedTo('t-report'))?.source?.listId === 'L2');
+  check('moving a planned task to another list in Tasks moves it in Google, and its Planner task follows', reportMove && followed, JSON.stringify((await linkedTo('t-report'))?.source));
+  await shot('cal-20-planned-task-moved');
+  await reload();
+  await h.nav('Today').click();
+  const reportCard = f.locator('li.task-card', { hasText: 'Send the report' });
+  await reportCard.waitFor();
+  await reportCard.getByRole('button', { name: 'Mark complete' }).click();
+  const completedThere = await until(() => requests('PATCH', '/tasks/v1/lists/L2/tasks/t-report').find((request) => request.body?.status === 'completed'), 15_000);
+  await reload();
+  const agreed = await until(async () => {
+    const task = await linkedTo('t-report');
+    return task?.completedAt && task.source?.status?.type === 'completed' ? task : null;
+  });
+  const stale = requests('PATCH', '/tasks/v1/lists/L1/tasks/t-report').filter((request) => request.at > (reportMove?.at ?? 0));
+  check(
+    'completing it in the Planner after a reload writes PATCH …/lists/L2/tasks/t-report (completed); both sides agree after another reload',
+    completedThere && !stale.length && agreed && fake.tasks.get('L2').find((task) => task.id === 't-report')?.status === 'completed',
+    JSON.stringify({ completedThere: completedThere?.path, stale: stale.map((request) => request.path), planner: agreed?.source, google: fake.tasks.get('L2').find((task) => task.id === 't-report')?.status }),
+  );
+  await shot('cal-21-completed-after-move');
+
+  // 2. Changed in Google: the Planner copy takes the new details and date. Changed on both sides: the newer change wins.
+  await openTasks();
+  await errands.getByRole('button', { name: 'Actions for Harness buy milk' }).click();
+  await errands.getByRole('menuitem', { name: 'Plan today' }).click();
+  // Planned today, it is due today in Google too (the setting); edits in Google come after that write.
+  await until(async () => (await linkedTo(milkId))?.source?.due === today, 15_000);
+  const milk = () => fake.tasks.get('L2').find((task) => task.id === milkId);
+  Object.assign(milk(), { notes: 'Oat, two cartons', due: `${addDays(today, 2)}T00:00:00.000Z`, updated: new Date().toISOString() });
+  await reload();
+  const fromGoogle = await until(async () => {
+    const task = await linkedTo(milkId);
+    return task?.notes === 'Oat, two cartons' && task.dueDate === addDays(today, 2) ? task : null;
+  }, 15_000);
+  check('details and a date changed in Google reach the Planner task on a refresh', fromGoogle, JSON.stringify(await linkedTo(milkId)));
+  /** Rename the Planner task in its details while Google refuses the write, so both sides change apart. */
+  const renameApart = async (title) => {
+    fake.failNext('PATCH', `/tasks/${milkId}`, 503, 'Backend Error');
+    const before = (await linkedTo(milkId)).title;
+    await f.getByRole('button', { name: `Open ${before}` }).first().click();
+    const details = f.getByRole('dialog', { name: 'Task details' });
+    await details.getByRole('textbox', { name: 'Title' }).fill(title);
+    await details.getByRole('textbox', { name: 'Title' }).press('Enter');
+    await until(async () => (await linkedTo(milkId))?.title === title);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(600);
+  };
+  await renameApart('Harness milk, mine');
+  Object.assign(milk(), { title: 'Harness milk, from Google', updated: new Date(Date.now() + 1000).toISOString() });
+  await reload();
+  const googleNewer = await until(async () => (await linkedTo(milkId))?.title === 'Harness milk, from Google', 15_000);
+  await renameApart('Harness milk, mine again');
+  Object.assign(milk(), { title: 'Harness milk, older in Google', updated: new Date(Date.now() - 60_000).toISOString() });
+  await reload();
+  const plannerNewer = await until(() => requests('PATCH', `/tasks/v1/lists/L2/tasks/${milkId}`).find((request) => request.body?.title === 'Harness milk, mine again'), 15_000);
+  check(
+    'renamed on both sides: the newer change wins, Google’s when it is newer, the Planner’s (sent to Google) when it is',
+    googleNewer && plannerNewer && milk().title === 'Harness milk, mine again' && (await linkedTo(milkId))?.title === 'Harness milk, mine again',
+    JSON.stringify({ googleNewer, plannerNewer: plannerNewer?.body, google: milk().title, planner: (await linkedTo(milkId))?.title }),
+  );
+
+  // 3. A time on a Google task (kept in the Planner): in the grid at that time after a reload; dragged to another day, Google's date follows.
+  await openTasks();
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const timedForm = myTasks.getByRole('group', { name: 'New task' });
+  await timedForm.getByRole('textbox', { name: 'Title' }).fill('Harness timed task');
+  await timedForm.getByLabel('Date', { exact: true }).fill(today);
+  await timedForm.getByRole('combobox', { name: 'Time' }).selectOption('840');
+  await timedForm.getByRole('combobox', { name: 'End time' }).selectOption('900');
+  await shot('cal-22-task-time');
+  await timedForm.getByRole('button', { name: 'Add' }).click();
+  await timedForm.getByRole('button', { name: 'Cancel' }).click();
+  const timedPost = await until(() => requests('POST', '/tasks/v1/lists/L1/tasks').find((request) => request.body?.title === 'Harness timed task'));
+  const timedId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness timed task')?.id);
+  const timedKept = await until(() => keptOf(timedId).then((kept) => (kept?.time === 840 ? kept : null)));
+  check('a task with a time: Google gets its date only, the Planner keeps the time (2 – 3pm)', timedPost?.body?.due === `${today}T00:00:00.000Z` && !/T14|2pm|14:00/.test(JSON.stringify(timedPost.body)) && timedKept?.duration === 60, JSON.stringify({ body: timedPost?.body, kept: timedKept }));
+  await reload();
+  await h.nav('Calendar').click();
+  const timedChip = (date) => lane(date).locator('.grid-item.is-task', { hasText: 'Harness timed task' });
+  await timedChip(today).waitFor({ timeout: 15_000 });
+  const laneTop = (await lane(today).boundingBox()).y;
+  let chipBox = await timedChip(today).boundingBox();
+  check('after a reload it sits in the week’s grid at 2pm, with its check circle', Math.abs(chipBox.y - laneTop - 840 * 0.8) <= 2 && (await timedChip(today).getByRole('checkbox').count()) === 1, JSON.stringify({ top: chipBox.y - laneTop }));
+  await shot('cal-23-timed-task-in-grid');
+  const dragDay = (await f.locator('.day-lane').evaluateAll((lanes, day) => lanes.map((element) => element.getAttribute('data-date')).filter((date) => date !== day), today)).find((date) => date > today) ?? (await f.locator('.day-lane').first().getAttribute('data-date'));
+  const dragBox = await lane(dragDay).boundingBox();
+  await page.mouse.move(chipBox.x + chipBox.width / 2, chipBox.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(dragBox.x + dragBox.width / 2, chipBox.y + 8, { steps: 10 });
+  await page.mouse.up();
+  const dueMoved = await until(() => requests('PATCH', `/tasks/v1/lists/L1/tasks/${timedId}`).find((request) => request.body?.due === `${dragDay}T00:00:00.000Z`));
+  const landed = await timedChip(dragDay).waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+  chipBox = landed ? await timedChip(dragDay).boundingBox() : null;
+  check('dragging it to another day patches Google’s due date; it keeps its time there', dueMoved && landed && (await keptOf(timedId))?.time === 840 && Math.abs(chipBox.y - laneTop - 840 * 0.8) <= 2, JSON.stringify({ dueMoved: dueMoved?.body, landed }));
+  // Quick create's Task, as in Google Calendar: one Google task on that day, at the time clicked (kept in the Planner), and nothing else.
+  const quickLane = await lane(dragDay).boundingBox();
+  await page.mouse.click(quickLane.x + quickLane.width / 2, quickLane.y + 10 * 48 + 3);
+  await f.getByRole('dialog', { name: 'New event' }).getByRole('radio', { name: 'Task' }).click();
+  const quickTask = f.getByRole('dialog', { name: 'New task' });
+  await quickTask.getByRole('textbox', { name: 'Title' }).fill('Harness quick task');
+  await shot('cal-23b-quick-create-task');
+  await quickTask.getByRole('button', { name: 'Save' }).click();
+  const quickPost = await until(() => requests('POST', '/tasks/v1/lists/L1/tasks').find((request) => request.body?.title === 'Harness quick task'));
+  const quickId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness quick task')?.id);
+  const quickKept = await until(() => keptOf(quickId).then((kept) => (kept?.time === 600 ? kept : null)));
+  const quickChip = await lane(dragDay).locator('.grid-item.is-task', { hasText: 'Harness quick task' }).waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+  const plannerCopies = Object.values((await state()).tasks).filter((task) => task.title === 'Harness quick task').length;
+  check('quick create’s Task makes one Google task on that day, its 10am kept in the Planner, shown at 10am; no Planner task besides', quickPost?.body?.due === `${dragDay}T00:00:00.000Z` && quickKept?.duration === 60 && quickChip && plannerCopies === 0, JSON.stringify({ body: quickPost?.body, kept: quickKept, quickChip, plannerCopies }));
+
+  // 4. A deadline: on the task in Tasks and on its calendar chip, red once it has passed.
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await myTasks.getByRole('button', { name: 'Edit Harness timed task' }).click();
+  const timedEdit = myTasks.getByRole('group', { name: 'Edit Harness timed task' });
+  await timedEdit.getByLabel('Deadline', { exact: true }).fill(addDays(today, -1));
+  await timedEdit.getByRole('button', { name: 'Done' }).click();
+  const rowDeadline = myTasks.locator('li.gt-row', { hasText: 'Harness timed task' }).locator('.gt-deadline');
+  const deadlineShown = await rowDeadline.waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+  const rowText = deadlineShown ? await rowDeadline.innerText() : '';
+  const rowOverdue = deadlineShown && ((await rowDeadline.getAttribute('class')) ?? '').includes('is-overdue');
+  await shot('cal-24-deadline-tasks');
   await f.getByRole('radio', { name: 'Calendar' }).click();
+  const chipDeadline = timedChip(dragDay).locator('.task-deadline');
+  const onChip = await chipDeadline.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  check(
+    'a deadline shows on the task in Tasks and on its calendar chip, red once passed',
+    rowText.includes('Deadline') && rowOverdue && onChip && ((await chipDeadline.getAttribute('class')) ?? '').includes('is-overdue') && ((await timedChip(dragDay).getAttribute('aria-label')) ?? '').includes(`deadline ${longDay(addDays(today, -1))}, overdue`),
+    JSON.stringify({ rowText, rowOverdue, onChip, label: await timedChip(dragDay).getAttribute('aria-label').catch(() => null) }),
+  );
+  await shot('cal-25-deadline-chip');
+
+  // 5. A weekly repeating task: completing it makes the next one a week on in Google; editing All tasks changes the rule.
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const weeklyForm = myTasks.getByRole('group', { name: 'New task' });
+  await weeklyForm.getByRole('textbox', { name: 'Title' }).fill('Harness weekly review');
+  await weeklyForm.getByLabel('Date', { exact: true }).fill(today);
+  await weeklyForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: `Weekly on ${WEEKDAYS[new Date(`${today}T00:00:00Z`).getUTCDay()]}` });
+  await shot('cal-26-repeat');
+  await weeklyForm.getByRole('button', { name: 'Add' }).click();
+  await weeklyForm.getByRole('button', { name: 'Cancel' }).click();
+  const weeklyId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness weekly review')?.id);
+  const weeklyRule = await until(() => keptOf(weeklyId).then((kept) => kept?.repeat?.rule ?? null));
+  await myTasks.getByRole('checkbox', { name: 'Mark Harness weekly review complete' }).click();
+  const nextWeek = addDays(today, 7);
+  const nextPost = await until(() => requests('POST', '/tasks/v1/lists/L1/tasks').find((request) => request.body?.title === 'Harness weekly review' && request.body?.due === `${nextWeek}T00:00:00.000Z`), 15_000);
+  await page.waitForTimeout(1500);
+  const weeklyPosts = requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => request.body?.title === 'Harness weekly review');
+  check(
+    'completing a weekly task inserts the next one in Google Tasks, a week on, once',
+    weeklyRule === `RRULE:FREQ=WEEKLY;BYDAY=${['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][new Date(`${today}T00:00:00Z`).getUTCDay()]}` && nextPost && weeklyPosts.length === 2,
+    JSON.stringify({ weeklyRule, posts: weeklyPosts.map((request) => request.body?.due) }),
+  );
+  const nextId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness weekly review' && task.status !== 'completed')?.id);
+  await myTasks.getByRole('button', { name: 'Edit Harness weekly review' }).click();
+  const seriesEdit = myTasks.getByRole('group', { name: 'Edit Harness weekly review' });
+  await seriesEdit.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
+  await seriesEdit.getByRole('button', { name: 'Done' }).click();
+  const seriesQuestion = f.getByRole('alertdialog', { name: 'Edit repeating task' });
+  await seriesQuestion.waitFor();
+  await shot('cal-27-edit-all-tasks');
+  await seriesQuestion.getByRole('radio', { name: 'All tasks' }).check();
+  await seriesQuestion.getByRole('button', { name: 'OK' }).click();
+  const daily = await until(() => keptOf(nextId).then((kept) => kept?.repeat?.rule === 'RRULE:FREQ=DAILY'));
+  check('editing All tasks changes the series’ rule', daily, JSON.stringify(await keptOf(nextId)));
+
+  // 6. A star: the task shows in Starred, then leaves it, and stays so after a reload.
+  const starredView = f.getByRole('region', { name: 'Starred' });
+  const starredRow = starredView.locator('li.gt-row', { hasText: 'Harness timed task' });
+  await myTasks.getByRole('button', { name: 'Star Harness timed task' }).click();
+  await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'Starred' }).click();
+  const starredIn = await starredRow.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  await shot('cal-28-starred');
+  await reload();
+  await openTasks();
+  await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'Starred' }).click();
+  const starredKept = await starredRow.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  await starredView.getByRole('button', { name: 'Star Harness timed task' }).click();
+  // Gone from the view, and kept so by the service, before the page goes away.
+  const starredOut = (await until(async () => (await starredRow.count()) === 0)) && (await until(async () => !(await keptOf(timedId))?.starredAt));
+  await reload();
+  await openTasks();
+  await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'Starred' }).click();
+  await starredView.waitFor();
+  await page.waitForTimeout(1500);
+  check('starring a task shows it in Starred, unstarring takes it out, and both last through a reload', starredIn && starredKept && starredOut && (await starredRow.count()) === 0, JSON.stringify({ starredIn, starredKept, starredOut }));
+  await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'All tasks' }).click();
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+
+  // 7. (below, with the layout) Titles of two and three words read in full in blocks of an hour or more.
+  primary().set('budget', { id: 'budget', summary: 'Budget review meeting', start: { dateTime: new Date(at(today, 16 * 60)).toISOString() }, end: { dateTime: new Date(at(today, 17 * 60)).toISOString() }, organizer: { email: ME, self: true } });
+  // Made in Google, so the service's copy of this week (it keeps one for a minute and a half) is read again.
+  const week = await f.locator('.day-lane').evaluateAll((lanes) => lanes.map((element) => element.getAttribute('data-date')));
+  await h.call('GET', `/calendar?from=${week[0]}&to=${week.at(-1)}&refresh=1`);
+  await reload();
+  await h.nav('Calendar').click();
+  await f.locator('.grid-item.is-event', { hasText: 'Budget review meeting' }).waitFor({ timeout: 15_000 });
+  /** Each title of an hour or more shows whole: not cut by its block, no word broken across lines. */
+  const titlesWhole = async () =>
+    f.locator('.gcal-grid .grid-item.is-event').evaluateAll((items) =>
+      items
+        .filter((item) => item.getBoundingClientRect().height >= 44)
+        .map((item) => {
+          const title = item.querySelector('.item-title');
+          const text = item.querySelector('.item-text');
+          const words = [];
+          const walker = document.createTreeWalker(title, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            if (node.parentElement?.classList.contains('item-time')) continue;
+            for (const match of node.data.matchAll(/\S+/g)) {
+              const range = document.createRange();
+              range.setStart(node, match.index);
+              range.setEnd(node, match.index + match[0].length);
+              words.push(range.getClientRects().length);
+            }
+          }
+          const whole = title.scrollHeight <= title.clientHeight + 1 && words.every((count) => count === 1);
+          return { title: title.textContent.trim(), whole, width: Math.round(item.getBoundingClientRect().width), lines: Number(getComputedStyle(text).getPropertyValue('--lines')) };
+        }),
+    );
 
   // Layout at 1440: the rail and the week fit; the task panel opens on request.
   const laneWidth = async () => (await lane(today).boundingBox())?.width ?? 0;
   check('at 1440 px, the rail is open and each day is wide enough to read (≥ 80 px)', (await rail.count()) === 1 && (await laneWidth()) >= 80, `${await laneWidth()}`);
+  const wideTitles = await titlesWhole();
+  check('at 1440 px, two- and three-word titles read in full in blocks of an hour or more (Week)', wideTitles.length >= 3 && wideTitles.every((item) => item.whole) && wideTitles.some((item) => item.title.startsWith('Budget review meeting')), JSON.stringify(wideTitles));
+  await shot('cal-29-week-titles-1440');
+  await pickView('Day');
+  await shot('cal-29b-day-1440');
+  await pickView('Month');
+  await shot('cal-29c-month-1440');
+  await pickView('Week');
+  await f.locator('.day-lane').nth(6).waitFor({ timeout: 5000 });
   await f.getByRole('button', { name: 'Show the task panel' }).click();
   const side = f.getByRole('complementary', { name: 'Unscheduled work' });
   check('opening the task panel folds the rail so the week stays readable', (await side.count()) === 1 && (await rail.count()) === 0 && (await laneWidth()) >= 80, `${await laneWidth()}`);
@@ -526,6 +783,13 @@ try {
   await page.waitForTimeout(800);
   const narrow = await laneWidth();
   check('at 1024 px, the rail and task panel fold away and each day stays readable (≥ 56 px)', (await rail.count()) === 0 && narrow >= 56, `${narrow}`);
+  const narrowTitles = await titlesWhole();
+  check('at 1024 px (OpenChamber’s sidebar open), two- and three-word titles read in full in blocks of an hour or more (Week)', narrowTitles.length >= 3 && narrowTitles.every((item) => item.whole), JSON.stringify({ frame: (await page.locator('.inset-0 > iframe[title="Planner"]').boundingBox())?.width, narrowTitles }));
+  await shot('cal-30-week-titles-1024');
+  await pickView('Day');
+  await shot('cal-30b-day-1024');
+  await pickView('Week');
+  await f.locator('.day-lane').nth(6).waitFor({ timeout: 5000 });
   await planning.click();
   const small = f.getByRole('dialog', { name: 'Event: Quarter planning' });
   const popBox = await small.boundingBox();

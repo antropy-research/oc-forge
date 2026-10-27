@@ -1,10 +1,11 @@
 // Google Calendar's quick create: a click or drag on the grid opens it with
-// that time. An Event goes to a Google calendar; a Task is planned in the
-// Planner at that time (a working session) and, as in Google Calendar, added to
-// a Google Tasks list due that day.
+// that time. An Event goes to a Google calendar; a Task, as in Google Calendar,
+// is a Google task on that day in a Google Tasks list, at that time (kept in
+// the Planner, as Google Tasks' API keeps no time), or a Planner task when no
+// list is chosen.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { EventInput } from '../../../src/domain/gevents.ts';
-import { gtaskSource } from '../../../src/domain/google.ts';
+import { KEPT_HINT, TASKS_API_REFERENCE } from '../../../src/domain/gtaskKept.ts';
 import { addDays, instantAt, isDateKey } from '../../../src/domain/dates.ts';
 import { edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
@@ -19,7 +20,7 @@ import { defaultCalendar, defaultList, endChoices, listKeyOf, startChoices, writ
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export const QuickCreate = ({ draft }: { draft: Draft }) => {
-  const { client, google } = usePlanner();
+  const { client, google, host } = usePlanner();
   const view = useView();
   const gv = useGoogle();
   const { prefs } = useCalendarUi();
@@ -76,20 +77,27 @@ export const QuickCreate = ({ draft }: { draft: Draft }) => {
     calendarUi.snack('Event saved');
   };
 
-  /** A Planner task on that day (at that time), added to the chosen Google Tasks list too. */
+  /**
+   * As Google Calendar's Task: a Google task in the chosen list on that day,
+   * its time (and end) kept in the Planner, which Google Tasks' API cannot
+   * take; it shows at that time. With no list, a Planner task on that day
+   * (with a working session at that time).
+   */
   const saveTask = async (): Promise<string> => {
     const name = title.trim();
     if (!name) throw new Error('Give the task a title');
     const chosen = gv.lists.find((item) => listKeyOf(item) === list) ?? null;
-    const created = chosen ? await google.addListTask(chosen.account, chosen.id, { title: name, ...(notes.trim() ? { notes: notes.trim() } : {}), due: date }) : null;
+    calendarUi.prefs({ lastList: list });
+    if (chosen) {
+      await google.addListTask(chosen.account, chosen.id, { title: name, ...(notes.trim() ? { notes: notes.trim() } : {}), due: date }, timed ? { time: start, duration: end - start } : {});
+      calendarUi.snack('Task saved');
+      return '';
+    }
     const id = newId();
     const placement = { kind: 'day' as const, date };
-    const bodies: EventBody[] = [
-      { type: 'task.created', task: { id, title: name, placement, position: edgePosition(view.state, placement, 'bottom'), ...(notes.trim() ? { notes: notes.trim() } : {}), ...(timed ? { plannedMinutes: end - start } : {}), ...(created ? { source: gtaskSource(created), dueDate: date } : {}) } },
-    ];
+    const bodies: EventBody[] = [{ type: 'task.created', task: { id, title: name, placement, position: edgePosition(view.state, placement, 'bottom'), ...(notes.trim() ? { notes: notes.trim() } : {}), ...(timed ? { plannedMinutes: end - start } : {}) } }];
     if (timed) bodies.push({ type: 'block.created', block: { id: newId(), taskId: id, start: instantAt(date, start, zone), end: instantAt(date, end, zone) } });
     await client.dispatch(bodies, { undo: 'Task added' });
-    calendarUi.prefs({ lastList: list });
     return id;
   };
 
@@ -100,7 +108,7 @@ export const QuickCreate = ({ draft }: { draft: Draft }) => {
     (kind === 'event' ? saveEvent().then(() => '') : saveTask())
       .then((taskId) => {
         closeDraft();
-        if (then && taskId) then(taskId);
+        if (then) then(taskId);
       })
       .catch((error) => setProblem(messageOf(error)))
       .finally(() => setBusy(false));
@@ -183,7 +191,14 @@ export const QuickCreate = ({ draft }: { draft: Draft }) => {
               {gv.lists.map((item) => <option key={listKeyOf(item)} value={listKeyOf(item)}>{new Set(gv.lists.map((other) => other.account)).size > 1 ? `${item.title} · ${item.account}` : item.title}</option>)}
             </select>
           </div>
-          <p class="hint qc-hint">{timed ? 'Planned in the Planner at this time' : 'Planned in the Planner on this day'}{list ? ', and due that day in Google Tasks (which keeps no time).' : '.'}</p>
+          {list ? (
+            <p class="hint qc-hint">
+              <Icon name="info" size={14} /> A Google task on this day{timed ? `; its time is ${KEPT_HINT.charAt(0).toLowerCase()}${KEPT_HINT.slice(1)}.` : '.'}{' '}
+              <button class="link" onClick={() => void host.openUrl(TASKS_API_REFERENCE)}>Google's API reference</button>
+            </p>
+          ) : (
+            <p class="hint qc-hint">{timed ? 'A Planner task, with a working session at this time.' : 'A Planner task on this day.'}</p>
+          )}
         </>
       )}
       {problem && <p class="danger" role="alert">{problem}</p>}
@@ -193,7 +208,8 @@ export const QuickCreate = ({ draft }: { draft: Draft }) => {
             More options
           </button>
         ) : (
-          <button class="link" disabled={busy} onClick={() => save((taskId) => setUi({ openTaskId: taskId }))}>More options</button>
+          // A Google task opens in Tasks, where its deadline, repeat and star are set; a Planner task in its details.
+          <button class="link" disabled={busy} onClick={() => save((taskId) => (taskId ? setUi({ openTaskId: taskId }) : calendarUi.prefs({ page: 'tasks' })))}>More options</button>
         )}
         <button class="primary" disabled={busy || (kind === 'event' && !calendar)} onClick={() => save()}>{busy ? 'Saving…' : 'Save'}</button>
       </div>

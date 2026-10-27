@@ -3,13 +3,17 @@
 // tasks, and writing completion and due dates back to Google Tasks the way the
 // Linear integration writes back to Linear (ask, do, or not).
 import type { HostClient } from '@openchamber/sdk';
-import type { Command, EventBody } from '../../src/domain/events.ts';
+import { GOOGLE_NOTES_MAX, type Command, type EventBody, type GoogleTaskKeptPatch } from '../../src/domain/events.ts';
 import {
+  findMovedTask,
+  GONE_STATUS,
   gtaskSource,
   isGoogleTaskItem,
   isMailItem,
   linkedGoogleTasks,
   planGoogleTaskSync,
+  plannerEditTimes,
+  TASK_GONE,
   taskForGoogleTask,
   taskForMail,
   taskFromGoogleTask,
@@ -17,14 +21,29 @@ import {
   type GoogleCalendarInfo,
   type GoogleTaskItem,
   type GoogleTaskList,
+  type GoogleTaskWrite,
   type MailItem,
+  type SyncedField,
 } from '../../src/domain/google.ts';
+import { dueOccurrences, keptFor, madeAlready } from '../../src/domain/gtaskKept.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
+import { addDays, daysBetween } from '../../src/domain/dates.ts';
 import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
-import type { CalendarSubscription, DateKey, Placement, PlannerState, Task } from '../../src/domain/types.ts';
+import type { CalendarSubscription, DateKey, GoogleTaskKept, Placement, PlannerState, Task } from '../../src/domain/types.ts';
 import type { Origin, PlannerClient } from './client.ts';
 import { calendarUi } from './gcal.ts';
+
+/** What a Google task's form sets: Google's own fields, and what the Planner keeps for it. */
+export interface TaskFields {
+  title: string;
+  notes: string;
+  due: DateKey | null;
+  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { rule: string | null };
+}
+
+/** Which tasks of a repeating series a change or a deletion is for, as Google Tasks asks. */
+export type RepeatScope = 'this' | 'all';
 
 export type GoogleFeature = 'calendar' | 'tasks' | 'mail';
 
@@ -132,6 +151,8 @@ export class GoogleStore {
   private signInTimer: ReturnType<typeof setTimeout> | null = null;
   /** First sights of accounts' calendars, one after another (two loads at once must not show a calendar twice). */
   private introductions: Promise<void> = Promise.resolve();
+  /** Repeating tasks whose next occurrence is being made, so it is made once. */
+  private readonly making = new Set<string>();
 
   constructor(private readonly host: HostClient, private readonly client: PlannerClient, private readonly surface: string) {}
 
@@ -394,21 +415,134 @@ export class GoogleStore {
     if (this.view.list?.account === account && this.view.list.id === listId) void this.refreshTasks();
   }
 
-  /** Complete or reopen the Google task behind a linked task, or set its due date. */
-  async writeTask(task: Task, patch: { completed?: boolean; due?: DateKey | null }, quiet = false): Promise<boolean> {
+  /**
+   * Complete or reopen the Google task behind a linked task, set its due date,
+   * or send it the task's title, details or date. Written to the list the link
+   * names; the service looks a task its list no longer has up in the account's
+   * other lists once and writes there, and the link follows. A write that
+   * still fails says so, and the Planner does not keep claiming what Google
+   * does not have: a completion or reopening Google refused is undone here, a
+   * task Google no longer has shows as deleted there.
+   */
+  async writeTask(task: Task, patch: GoogleTaskWrite['patch'] & { completed?: boolean }, quiet = false): Promise<boolean> {
     const source = task.source;
     if (source?.kind !== 'gtask' || !source.account || !source.listId) return false;
     try {
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { account: source.account, listId: source.listId, id: source.id, ...patch });
-      if (answer.task) await this.client.dispatch([{ type: 'task.sourceSynced', taskId: task.id, source: gtaskSource(answer.task) }], { origin: 'google' });
-      if (answer.task) this.remember(answer.task);
+      const item = answer.task;
+      if (item) {
+        const current = this.client.getView().state.tasks[task.id] ?? task;
+        // What was written is what both sides now agree on; a date set from the plan becomes the task's date here too.
+        const planner = patch.due !== undefined && current.dueDate !== item.due ? { dueDate: item.due } : {};
+        await this.client.dispatch([{ type: 'task.sourceSynced', taskId: task.id, source: gtaskSource(item), ...planner }], { origin: 'google' });
+        if (item.listId !== source.listId) await this.followMove({ account: source.account, listId: source.listId, id: source.id }, item);
+        this.remember(item);
+        if (patch.completed) await this.makeNextOccurrences([item]);
+      }
       if (!quiet && patch.completed !== undefined) this.client.notify(patch.completed ? `Completed "${task.title}" in Google Tasks` : `Reopened "${task.title}" in Google Tasks`);
-      if (this.view.list?.account === source.account && this.view.list.id === source.listId) void this.refreshTasks();
+      if (this.view.list?.account === source.account && (this.view.list.id === source.listId || this.view.list.id === item?.listId)) void this.refreshTasks();
       calendarUi.refresh();
       return true;
     } catch (error) {
-      this.client.notify(`Couldn't update "${task.title}" in Google Tasks: ${messageOf(error)}`);
+      const message = messageOf(error);
+      const current = this.client.getView().state.tasks[task.id];
+      if (message === TASK_GONE) {
+        this.client.notify(`"${task.title}" is no longer in Google Tasks`);
+        if (current?.source?.kind === 'gtask') await this.client.dispatch([{ type: 'task.sourceSynced', taskId: task.id, source: { ...current.source, status: GONE_STATUS } }], { origin: 'google' });
+      } else if (patch.completed === true && current?.completedAt) {
+        this.client.notify(`Google Tasks did not complete "${task.title}" (${message}), so it stays open here too`);
+        await this.client.dispatch([{ type: 'task.reopened', taskId: task.id }], { origin: 'google' });
+      } else if (patch.completed === false && current && !current.completedAt) {
+        this.client.notify(`Google Tasks did not reopen "${task.title}" (${message}), so it stays completed here too`);
+        await this.client.dispatch([{ type: 'task.completed', taskId: task.id, on: current.completedOn ?? this.client.getView().today }], { origin: 'google' });
+      } else this.client.notify(`Couldn't update "${task.title}" in Google Tasks: ${message}`);
       return false;
+    }
+  }
+
+  /**
+   * A Google task moved to another list (and, when Google gave it a new id,
+   * under that id): the Planner tasks linked to it and what the Planner keeps
+   * for it follow.
+   */
+  private async followMove(from: { account: string; listId: string; id: string }, to: GoogleTaskItem): Promise<void> {
+    const state = this.client.getView().state;
+    const bodies: EventBody[] = [];
+    for (const task of Object.values(state.tasks)) {
+      const source = task.source;
+      if (source?.kind !== 'gtask' || source.id !== from.id || (source.account && source.account !== from.account) || task.deletedAt) continue;
+      if (source.listId === to.listId && source.id === to.id) continue;
+      bodies.push({ type: 'task.sourceSynced', taskId: task.id, source: gtaskSource(to) });
+    }
+    const kept = keptFor(state, { account: from.account, id: from.id });
+    if (kept && (kept.listId !== to.listId || from.id !== to.id)) bodies.push({ type: 'gtask.moved', account: from.account, taskId: from.id, listId: to.listId, ...(to.id !== from.id ? { newTaskId: to.id } : {}) });
+    if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
+  }
+
+  /** What the Planner keeps for a Google task (a time, a deadline, a repeat, a star): set at once. */
+  setKept(item: Pick<GoogleTaskItem, 'account' | 'listId' | 'id'>, patch: GoogleTaskKeptPatch): Promise<void> {
+    return this.client.dispatch([{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch }]);
+  }
+
+  /** Google Tasks' star: on, or off. */
+  toggleStar(item: Pick<GoogleTaskItem, 'account' | 'listId' | 'id'>): Promise<void> {
+    return this.setKept(item, { starred: !keptFor(this.client.getView().state, item)?.starredAt });
+  }
+
+  /**
+   * A timed Google task dragged on the grid: a new time is kept here; a new
+   * day is Google's date (the task keeps its time).
+   */
+  async moveTimedTask(item: GoogleTaskItem, date: DateKey, time: number): Promise<void> {
+    const kept = keptFor(this.client.getView().state, item);
+    if (kept?.time !== time) await this.setKept(item, { time });
+    if (item.due !== date) await this.setTaskDue(item, date);
+  }
+
+  /**
+   * The next occurrence of each repeating task just completed (here, in
+   * Google, or found so on a read): a new Google task in the same list on the
+   * rule's next date, with the series' title, details, time and deadline, as
+   * Google Tasks makes it. One Google's own repeat (or another window) made
+   * already is taken instead of making a second. A series that ends there
+   * stops repeating.
+   */
+  async makeNextOccurrences(items: readonly GoogleTaskItem[]): Promise<void> {
+    for (const { item, kept, date } of dueOccurrences(this.client.getView().state, items)) {
+      const key = `${item.account}\n${item.id}`;
+      if (this.making.has(key) || !kept.repeat) continue;
+      this.making.add(key);
+      try {
+        if (!date) {
+          await this.client.dispatch([{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch: { repeat: null } }], { origin: 'google' });
+          continue;
+        }
+        const list = await this.client.call<{ tasks: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}`);
+        // Read again: another window may have made it while this one asked.
+        const now = keptFor(this.client.getView().state, item);
+        if (now?.repeat?.next) continue;
+        let next = madeAlready(list.tasks, item.title, date, item.id);
+        if (!next) {
+          const created = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account: item.account, listId: item.listId, title: item.title, ...(item.notes ? { notes: item.notes } : {}), due: date });
+          next = created.task;
+        }
+        if (!next) throw new Error('Google did not return the task');
+        const shift = item.due ? daysBetween(item.due, date) : 0;
+        await this.client.dispatch(
+          [
+            { type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch: { repeat: { ...kept.repeat, next: next.id } } },
+            { type: 'gtask.kept', account: next.account, listId: next.listId, taskId: next.id, patch: { time: kept.time, duration: kept.duration, deadline: kept.deadline ? addDays(kept.deadline, shift) : null, repeat: { rule: kept.repeat.rule, seriesId: kept.repeat.seriesId, index: kept.repeat.index + 1, next: null } } },
+          ],
+          { origin: 'google' },
+        );
+        this.remember(next, true);
+        if (this.view.board[listKey(next.account, next.listId)]) void this.loadBoard(next.account, next.listId);
+        calendarUi.refresh();
+      } catch (error) {
+        this.client.notify(`Google Tasks did not take the next "${item.title}": ${messageOf(error)}`);
+      } finally {
+        this.making.delete(key);
+      }
     }
   }
 
@@ -421,27 +555,93 @@ export class GoogleStore {
     if (task) void this.writeTask(task, { completed: true });
   }
 
-  /** Bring linked tasks up to date with their Google tasks, asked for in parts the service answers in time. */
+  /**
+   * Bring linked tasks and their Google tasks into step, asked for in parts
+   * the service answers in time: links follow tasks moved to other lists,
+   * changes on either side reach the other (`planGoogleTaskSync`), repeating
+   * tasks completed in Google get their next occurrence, and links to tasks
+   * Google no longer has say so.
+   */
   async sync(): Promise<void> {
     const parts = linkedGoogleTasks(this.client.getView().state).flatMap((group) => Array.from({ length: Math.ceil(group.ids.length / SYNC_IDS) }, (_, index) => ({ ...group, ids: group.ids.slice(index * SYNC_IDS, (index + 1) * SYNC_IDS) })));
     if (!parts.length) return;
     try {
       const tasks: GoogleTaskItem[] = [];
+      const missing: { account: string; listId: string; id: string }[] = [];
       for (let index = 0; index < parts.length; index += SYNC_GROUPS) {
-        const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('POST', '/google/tasks/linked', { groups: parts.slice(index, index + SYNC_GROUPS) });
+        const answer = await this.client.call<{ tasks: GoogleTaskItem[]; missing?: { account: string; listId: string; id: string }[] }>('POST', '/google/tasks/linked', { groups: parts.slice(index, index + SYNC_GROUPS) });
         tasks.push(...answer.tasks);
+        missing.push(...(answer.missing ?? []));
       }
-      const { state, today } = this.client.getView();
-      const bodies = planGoogleTaskSync(state, new Map(tasks.map((item) => [item.id, item])), { today, importCompletion: state.settings.googleTasksImportCompletion });
-      if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
+      await this.syncItems(tasks);
+      if (missing.length) await this.relink(missing);
     } catch (error) {
       console.warn(`[planner] Google Tasks sync skipped: ${messageOf(error)}`);
     }
   }
 
+  /**
+   * Linked tasks against these Google tasks, field by field: what changed in
+   * Google comes in, what changed here goes out, and a field changed on both
+   * sides takes the newer change (the Planner's from the task's activity).
+   */
+  async syncItems(items: readonly GoogleTaskItem[]): Promise<void> {
+    if (!items.length) return;
+    const { state, today } = this.client.getView();
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const options = { today, importCompletion: state.settings.googleTasksImportCompletion };
+    let plan = planGoogleTaskSync(state, byId, options);
+    if (plan.conflicts.length) {
+      const times = new Map<string, Partial<Record<SyncedField, string>>>();
+      for (const { taskId } of plan.conflicts) times.set(taskId, plannerEditTimes(await this.client.activity(taskId).catch(() => [])));
+      plan = planGoogleTaskSync(state, byId, { ...options, editedAt: (taskId, field) => times.get(taskId)?.[field] ?? null });
+    }
+    if (plan.bodies.length) await this.client.dispatch(plan.bodies, { origin: 'google' });
+    for (const write of plan.writes) {
+      const task = this.client.getView().state.tasks[write.taskId];
+      if (task) await this.writeTask(task, write.patch, true);
+    }
+    await this.makeNextOccurrences(items);
+  }
+
+  /**
+   * Linked tasks whose Google task is in none of the account's lists under its
+   * id: one Google's own apps moved under a new id is found by what it last
+   * said (`findMovedTask`); the rest show as deleted in Google.
+   */
+  private async relink(missing: readonly { account: string; listId: string; id: string }[]): Promise<void> {
+    const candidates: GoogleTaskItem[] = [];
+    for (const account of new Set(missing.map((item) => item.account))) {
+      for (const list of this.view.lists.filter((item) => item.account === account)) {
+        const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(list.id)}`).catch(() => ({ tasks: [] }));
+        candidates.push(...answer.tasks);
+      }
+    }
+    const state = this.client.getView().state;
+    const bodies: EventBody[] = [];
+    for (const gone of missing) {
+      const found = Object.values(state.tasks).find((task) => task.source?.kind === 'gtask' && task.source.id === gone.id && task.source.account === gone.account && !task.deletedAt);
+      const moved = found?.source ? findMovedTask(found.source, candidates, state) : null;
+      if (moved) {
+        await this.followMove(gone, moved);
+        continue;
+      }
+      for (const task of Object.values(state.tasks)) {
+        if (task.source?.kind !== 'gtask' || task.source.id !== gone.id || task.source.account !== gone.account || task.deletedAt || task.source.status?.name === GONE_STATUS.name) continue;
+        bodies.push({ type: 'task.sourceSynced', taskId: task.id, source: { ...task.source, status: GONE_STATUS } });
+      }
+      if (keptFor(state, gone)) bodies.push({ type: 'gtask.dropped', account: gone.account, taskId: gone.id });
+    }
+    if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
+  }
+
   // ── The Tasks view, as the Google Tasks app ──────────────────────────────
 
-  /** Read a list with its completed tasks. */
+  /**
+   * Read a list with its completed tasks. What the Planner keeps for a task
+   * seen here follows it from another list, and a repeating task completed in
+   * Google gets its next occurrence.
+   */
   async loadBoard(account: string, listId: string): Promise<void> {
     const key = listKey(account, listId);
     const current = this.view.board[key];
@@ -449,6 +649,13 @@ export class GoogleStore {
     try {
       const answer = await this.client.call<{ tasks: GoogleTaskItem[]; complete: boolean }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}`);
       this.setBoard(key, { items: answer.tasks, loading: false, error: null, complete: answer.complete });
+      const state = this.client.getView().state;
+      const moved: EventBody[] = answer.tasks.flatMap((item) => {
+        const kept = keptFor(state, item);
+        return kept && kept.listId !== item.listId ? [{ type: 'gtask.moved' as const, account: item.account, taskId: item.id, listId: item.listId }] : [];
+      });
+      if (moved.length) await this.client.dispatch(moved, { origin: 'google' });
+      await this.makeNextOccurrences(answer.tasks);
     } catch (error) {
       this.setBoard(key, { items: current?.items ?? [], loading: false, error: messageOf(error), complete: true });
     }
@@ -482,8 +689,12 @@ export class GoogleStore {
     calendarUi.refresh();
   }
 
-  /** A new task: at the top of the list, or under `parent` after `previous`. Shown at once. */
-  async addListTask(account: string, listId: string, fields: { title: string; notes?: string; due?: DateKey | null; parent?: string | null; previous?: string | null }): Promise<GoogleTaskItem> {
+  /**
+   * A new task: at the top of the list, or under `parent` after `previous`.
+   * Shown at once. What Google Tasks' API cannot take (a time, a deadline, a
+   * repeat, a star) is kept in the Planner for it.
+   */
+  async addListTask(account: string, listId: string, fields: { title: string; notes?: string; due?: DateKey | null; parent?: string | null; previous?: string | null }, kept: Omit<GoogleTaskKeptPatch, 'repeat'> & { rule?: string | null } = {}): Promise<GoogleTaskItem> {
     const key = listKey(account, listId);
     const temp: GoogleTaskItem = { account, listId, id: `new-${newId()}`, title: fields.title, notes: fields.notes ?? '', due: fields.due ?? null, completed: false, parent: fields.parent ?? null, position: '', url: 'https://tasks.google.com/', updated: new Date().toISOString() };
     const items = this.view.board[key]?.items ?? [];
@@ -491,6 +702,9 @@ export class GoogleStore {
     try {
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account, listId, ...fields, ...(fields.notes ? {} : { notes: undefined }) });
       if (!answer.task) throw new Error('Google did not return the task');
+      const { rule, ...rest } = kept;
+      const patch: GoogleTaskKeptPatch = { ...rest, ...(rule && fields.due ? { repeat: { rule, seriesId: newId(), index: 1, next: null } } : {}) };
+      if (Object.values(patch).some((value) => value !== null && value !== undefined && value !== false)) await this.setKept(answer.task, patch);
       this.patchBoard(key, (this.view.board[key]?.items ?? []).map((item) => (item.id === temp.id ? answer.task! : item)));
       this.afterTaskWrite(account, listId, Boolean(fields.due));
       // Google may renumber the other tasks' places: read the list as Google has it now.
@@ -502,30 +716,78 @@ export class GoogleStore {
     }
   }
 
-  /** Rename a task, change its details or due date (Google Tasks keeps no time). */
+  /** Rename a task, change its details or date; linked Planner tasks take the change at once. */
   async editListTask(item: GoogleTaskItem, patch: { title?: string; notes?: string; due?: DateKey | null }): Promise<void> {
-    await this.writeListTask([item], () => patch, patch.due !== undefined || patch.title !== undefined);
+    const answers = await this.writeListTask([item], () => patch, patch.due !== undefined || patch.title !== undefined);
+    await this.syncItems(answers);
+  }
+
+  /**
+   * A task's form saved: Google's fields written to Google, the rest kept in
+   * the Planner. For a repeating task, `scope` says whether the change is for
+   * this task or all of the series (its rule, time and deadline go to every
+   * open occurrence), as Google Tasks asks.
+   */
+  async saveListTask(item: GoogleTaskItem, fields: TaskFields, scope: RepeatScope = 'this'): Promise<void> {
+    const state = this.client.getView().state;
+    const kept = keptFor(state, item);
+    const google = { ...(fields.title !== item.title ? { title: fields.title } : {}), ...(fields.notes !== item.notes ? { notes: fields.notes } : {}), ...(fields.due !== item.due ? { due: fields.due } : {}) };
+    const repeat = fields.kept.rule && fields.due ? { rule: fields.kept.rule, seriesId: kept?.repeat?.seriesId ?? newId(), index: kept?.repeat?.index ?? 1, next: kept?.repeat?.next ?? null } : null;
+    const patch: GoogleTaskKeptPatch = {};
+    if ((kept?.time ?? null) !== fields.kept.time) patch.time = fields.kept.time;
+    if ((kept?.duration ?? null) !== fields.kept.duration) patch.duration = fields.kept.duration;
+    if ((kept?.deadline ?? null) !== fields.kept.deadline) patch.deadline = fields.kept.deadline;
+    if ((kept?.repeat?.rule ?? null) !== (repeat?.rule ?? null)) patch.repeat = repeat;
+    const bodies: EventBody[] = Object.keys(patch).length ? [{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch }] : [];
+    if (scope === 'all' && kept?.repeat) {
+      // The series' other open occurrences take its rule, time and deadline.
+      for (const other of Object.values(state.googleTasks)) {
+        if (other.repeat?.seriesId !== kept.repeat.seriesId || other.taskId === item.id || other.repeat.next) continue;
+        const { repeat: _repeat, ...rest } = patch;
+        bodies.push({ type: 'gtask.kept', account: other.account, listId: other.listId, taskId: other.taskId, patch: { ...rest, ...(patch.repeat !== undefined ? { repeat: patch.repeat ? { ...patch.repeat, seriesId: kept.repeat.seriesId, index: other.repeat.index, next: null } : null } : {}) } });
+      }
+    }
+    if (bodies.length) await this.client.dispatch(bodies);
+    if (Object.keys(google).length) await this.editListTask(item, google);
+    else calendarUi.refresh();
   }
 
   /**
    * Complete or reopen a task. As in Google Tasks, completing a task completes
-   * its subtasks, and reopening a subtask reopens the task it is under.
+   * its subtasks, and reopening a subtask reopens the task it is under; a
+   * repeating task's next occurrence appears.
    */
   async completeListTask(item: GoogleTaskItem, completed: boolean): Promise<void> {
     const items = this.view.board[listKey(item.account, item.listId)]?.items ?? [item];
     const related = completed ? items.filter((other) => other.parent === item.id && !other.completed) : items.filter((other) => other.id === item.parent && other.completed);
-    await this.writeListTask([item, ...related], () => ({ completed }), true);
+    const answers = await this.writeListTask([item, ...related], () => ({ completed }), true);
+    if (completed) await this.makeNextOccurrences(answers);
     void this.sync();
   }
 
-  /** Delete a task and its subtasks. */
-  async deleteListTask(item: GoogleTaskItem): Promise<void> {
+  /**
+   * Delete a task and its subtasks. A repeating task asks first, as Google
+   * does: "This task" (the series goes on with the next one) or "All future
+   * tasks" (the series ends).
+   */
+  async deleteListTask(item: GoogleTaskItem, scope: RepeatScope = 'this'): Promise<void> {
     const key = listKey(item.account, item.listId);
     const before = this.view.board[key]?.items ?? [];
+    const kept = keptFor(this.client.getView().state, item);
     this.patchBoard(key, before.filter((other) => other.id !== item.id && other.parent !== item.id));
     try {
       await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}&id=${encodeURIComponent(item.id)}`);
+      if (kept?.repeat && scope === 'this' && !item.completed && !kept.repeat.next) {
+        // As when it is done: the series goes on with the next one.
+        await this.makeNextOccurrences([{ ...item, completed: true }]);
+      }
+      const state = this.client.getView().state;
+      const series = kept?.repeat && scope === 'all' ? Object.values(state.googleTasks).filter((other) => other.repeat?.seriesId === kept.repeat!.seriesId && other.taskId !== item.id && !other.repeat.next) : [];
+      for (const other of series) await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(other.account)}&list=${encodeURIComponent(other.listId)}&id=${encodeURIComponent(other.taskId)}`).catch(() => {});
+      const dropped: EventBody[] = [...(keptFor(state, item) ? [item] : []), ...series.map((other) => ({ account: other.account, id: other.taskId }))].map((gone) => ({ type: 'gtask.dropped', account: gone.account, taskId: gone.id }));
+      if (dropped.length) await this.client.dispatch(dropped, { origin: 'google' });
       this.afterTaskWrite(item.account, item.listId, true);
+      if (series.length) void this.loadBoard(item.account, item.listId);
     } catch (error) {
       this.patchBoard(key, before);
       throw error;
@@ -561,7 +823,13 @@ export class GoogleStore {
       this.patchBoard(to, applyMove([...before.to, ...moving], item.id, target));
     }
     try {
-      await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks/move', { account: item.account, listId: item.listId, id: item.id, parent: target.parent, previous: target.previous, ...(to !== from ? { destinationListId } : {}) });
+      const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks/move', { account: item.account, listId: item.listId, id: item.id, parent: target.parent, previous: target.previous, ...(to !== from ? { destinationListId } : {}) });
+      if (to !== from) {
+        // The Planner tasks planning it (and its subtasks), and what is kept for them, follow it to the other list.
+        const movedTask = answer.task ?? { ...item, listId: destinationListId };
+        await this.followMove(item, movedTask);
+        for (const kid of before.from.filter((other) => other.parent === item.id)) await this.followMove(kid, { ...kid, listId: destinationListId });
+      }
       this.afterTaskWrite(item.account, item.listId, to !== from);
       // A move can renumber the places of the tasks around it: read the lists as Google has them now.
       if (this.view.board[from]) void this.loadBoard(item.account, item.listId);
@@ -573,15 +841,16 @@ export class GoogleStore {
     }
   }
 
-  /** A Google task shown on the calendar, due another day (from a drag in the calendar). */
+  /** A Google task shown on the calendar, due another day (from a drag in the calendar); a Planner task planning it takes the date. */
   async setTaskDue(item: GoogleTaskItem, due: DateKey): Promise<void> {
-    await this.writeListTask([item], () => ({ due }), true);
+    await this.syncItems(await this.writeListTask([item], () => ({ due }), true));
   }
 
-  /** Several tasks patched alike: shown at once, put back when Google refuses. */
-  private async writeListTask(items: readonly GoogleTaskItem[], patchOf: (item: GoogleTaskItem) => { title?: string; notes?: string; due?: DateKey | null; completed?: boolean }, calendar: boolean): Promise<void> {
+  /** Several tasks patched alike: shown at once, put back when Google refuses; Google's answers. */
+  private async writeListTask(items: readonly GoogleTaskItem[], patchOf: (item: GoogleTaskItem) => { title?: string; notes?: string; due?: DateKey | null; completed?: boolean }, calendar: boolean): Promise<GoogleTaskItem[]> {
     const first = items[0];
-    if (!first) return;
+    if (!first) return [];
+    const answers: GoogleTaskItem[] = [];
     const key = listKey(first.account, first.listId);
     const before = this.view.board[key]?.items ?? null;
     const now = new Date().toISOString();
@@ -593,9 +862,13 @@ export class GoogleStore {
     try {
       for (const item of items) {
         const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { account: item.account, listId: item.listId, id: item.id, ...patchOf(item) });
-        if (answer.task) this.remember(answer.task);
+        if (answer.task) {
+          this.remember(answer.task);
+          answers.push(answer.task);
+        }
       }
       this.afterTaskWrite(first.account, first.listId, calendar);
+      return answers;
     } catch (error) {
       if (before) this.patchBoard(key, before);
       throw error;
@@ -670,6 +943,19 @@ export class GoogleStore {
           // Only surfaces with room for the question ask it.
           else if (settings.googleTasksOnComplete === 'ask' && this.surface !== 'status') this.set({ prompt: { taskId: task.id, title: task.title } });
         } else if (command.type === 'task.reopened' && doneThere && settings.googleTasksOnComplete === 'complete') void this.writeTask(task, { completed: false });
+        continue;
+      }
+      // Its title, details or date changed here: Google gets them too (a link just made is in step already).
+      if (command.type === 'task.updated' && command.patch.source === undefined) {
+        const task = after.tasks[command.taskId];
+        const previous = before.tasks[command.taskId];
+        if (task?.source?.kind !== 'gtask' || !previous || task.completedAt || task.source.status?.name === GONE_STATUS.name) continue;
+        const patch: GoogleTaskWrite['patch'] = {
+          ...(command.patch.title !== undefined && task.title !== previous.title ? { title: task.title } : {}),
+          ...(command.patch.notes !== undefined && task.notes !== previous.notes ? { notes: task.notes.slice(0, GOOGLE_NOTES_MAX) } : {}),
+          ...(command.patch.dueDate !== undefined && task.dueDate !== previous.dueDate ? { due: task.dueDate } : {}),
+        };
+        if (Object.keys(patch).length) void this.writeTask(task, patch, true);
         continue;
       }
       // Planned on a day: Google Calendar shows the task that day too.

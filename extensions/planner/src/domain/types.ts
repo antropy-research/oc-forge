@@ -50,6 +50,31 @@ export interface TaskSourceRef {
   account?: string;
   /** Google task list the task is in. */
   listId?: string;
+  /** A Google task's details and date last seen there: with `title`, what both sides last agreed on. */
+  notes?: string;
+  due?: DateKey | null;
+}
+
+/**
+ * What the Planner keeps for a Google task that Google Tasks' API does not let
+ * other apps read or write (a time, a deadline, a repeat, a star), by account
+ * and task id, with the list the task is in now (it follows moves).
+ */
+export interface GoogleTaskKept {
+  account: string;
+  listId: string;
+  taskId: string;
+  /** Minutes after midnight on the task's date; null: all day. */
+  time: number | null;
+  /** How long it takes from `time`, in minutes; null: no end time. */
+  duration: number | null;
+  /** The day it must be done by, apart from its date. */
+  deadline: DateKey | null;
+  /** A repeating task: its rule, its series, which occurrence this is, and the task made next (once made). */
+  repeat: { rule: string; seriesId: string; index: number; next: string | null } | null;
+  /** When it was starred; null when it is not. */
+  starredAt: string | null;
+  updatedAt: string;
 }
 
 /** How the Linear page groups and orders issues. */
@@ -372,7 +397,12 @@ export interface PlannerState {
   runs: Record<string, TaskRun>;
   folders: Record<string, Folder>;
   settings: Settings;
+  /** What the Planner keeps for Google tasks, by `googleTaskKey`. */
+  googleTasks: Record<string, GoogleTaskKept>;
 }
+
+/** A Google task's key in `PlannerState.googleTasks`: its account and id (ids are the account's, whatever the list). */
+export const googleTaskKey = (account: string, taskId: string): string => `${account}\n${taskId}`;
 
 export const ritualKey = (ritual: Ritual, date: DateKey): string => `${ritual}:${date}`;
 
@@ -417,4 +447,5 @@ export const emptyState = (): PlannerState => ({
   runs: {},
   folders: {},
   settings: { ...DEFAULT_SETTINGS },
+  googleTasks: {},
 });

@@ -1,0 +1,341 @@
+// A Google task and the Planner task planning it stay in step: the link follows
+// the task to another list (moved here or seen on a read), every write goes to
+// the list it is in now (a stale one is looked up once and the write retried),
+// a write Google refuses leaves the Planner as Google is, and title, details
+// and date merge three ways. What the Planner keeps for Google tasks (time,
+// deadline, repeat, star) follows moves too; a repeating task's next
+// occurrence is made once; a timed block's text fits its height.
+import { describe, expect, test } from 'bun:test';
+import type { HostClient } from '@openchamber/sdk';
+import { GoogleStore } from '../panel/lib/google.ts';
+import type { PlannerClient } from '../panel/lib/client.ts';
+import { GoogleData, toTaskItem } from '../service/googleData.ts';
+import { GoogleError, type GoogleAccounts } from '../service/google.ts';
+import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
+import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
+import { emptyState, googleTaskKey, type PlannerState } from '../src/domain/types.ts';
+import { findMovedTask, GONE_STATUS, gtaskSource, linkedGoogleTasks, mergeGoogleTask, planGoogleTaskSync, plannerEditTimes, TASK_GONE, taskFromGoogleTask, type GoogleTaskItem } from '../src/domain/google.ts';
+import { dueOccurrences, keptFor, madeAlready, nextRepeatDate, starredKept, withTaskTimes } from '../src/domain/gtaskKept.ts';
+import { blockText } from '../src/domain/gcalendar.ts';
+import type { CalendarEvent } from '../src/domain/ics.ts';
+
+const ME = 'me@example.com';
+let clock = Date.parse('2026-10-26T16:00:00Z');
+const ev = (body: EventBody): PlannerEvent => {
+  clock += 1000;
+  return { v: 1, id: `e${clock}`, at: new Date(clock).toISOString(), ...body } as PlannerEvent;
+};
+const item = (patch: Partial<GoogleTaskItem> = {}): GoogleTaskItem => ({
+  account: ME, listId: 'L1', id: 'gt1', title: 'Send the report', notes: 'To Ann', due: '2026-10-26', completed: false, parent: null, position: '0001', url: 'https://tasks.google.com/task/gt1', updated: '2026-10-26T15:00:00.000Z', ...patch,
+});
+const planned = (google = item()) => foldEvents([ev({ type: 'task.created', task: taskFromGoogleTask(google, 't1', { kind: 'day', date: '2026-10-26' }, 1) })]);
+
+/** A Planner client whose dispatch applies (and checks) the events; Google answers through `answer`. */
+const fakeClient = (start: PlannerState, answer: (method: string, path: string, body: any) => unknown = () => ({})) => {
+  let state = start;
+  let n = 0;
+  const calls: { method: string; path: string; body?: any }[] = [];
+  const notes: string[] = [];
+  const dispatched: EventBody[] = [];
+  const log: PlannerEvent[] = [];
+  const client = {
+    getView: () => ({ state, today: '2026-10-26' }),
+    call: async (method: string, path: string, body?: unknown) => {
+      calls.push({ method, path, ...(body === undefined ? {} : { body }) });
+      return answer(method, path, body);
+    },
+    dispatch: async (bodies: EventBody[]) => {
+      for (const body of bodies) expect(validateCommand({ cmd: `c${n}`, ...body }, state)).toBeNull();
+      dispatched.push(...bodies);
+      const events = bodies.map((body) => ev(body));
+      log.push(...events);
+      n += bodies.length;
+      state = applyEvents(state, events);
+    },
+    activity: async (taskId: string) => log.filter((event) => 'taskId' in event && event.taskId === taskId),
+    notify: (message: string) => notes.push(message),
+    onCommitted: () => () => {},
+  } as unknown as PlannerClient;
+  return { client, calls, notes, dispatched, log, state: () => state, setState: (next: PlannerState) => (state = next) };
+};
+const host = { storage: { get: async () => undefined, set: async () => {}, delete: async () => {}, keys: async () => [] } } as unknown as HostClient;
+
+describe('a planned Google task moved to another list', () => {
+  test('moved in the Tasks view: the Planner task and what is kept for it follow, and completing it writes to the new list', async () => {
+    const start = applyEvents(planned(), [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { deadline: '2026-10-30' } })]);
+    const fake = fakeClient(start, (method, path, body) => {
+      if (path === '/google/tasks/move') return { task: item({ listId: 'L2' }) };
+      if (method === 'PATCH' && path === '/google/tasks') return { task: item({ listId: body.listId, completed: true }) };
+      return { tasks: [] };
+    });
+    const store = new GoogleStore(host, fake.client, 'page');
+    await store.moveListTask(item(), { parent: null, previous: null }, 'L2');
+    expect(fake.state().tasks.t1!.source).toMatchObject({ id: 'gt1', listId: 'L2' });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })).toMatchObject({ listId: 'L2', deadline: '2026-10-30' });
+    expect(await store.writeTask(fake.state().tasks.t1!, { completed: true })).toBe(true);
+    expect(fake.calls.filter((call) => call.method === 'PATCH').at(-1)).toMatchObject({ path: '/google/tasks', body: { account: ME, listId: 'L2', id: 'gt1', completed: true } });
+    expect(fake.state().tasks.t1!.source?.status?.type).toBe('completed');
+  });
+
+  test('moved in Google: a read finds it in the other list, and the link and kept time follow', () => {
+    const state = applyEvents(planned(), [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: 14 * 60 } })]);
+    const plan = planGoogleTaskSync(state, new Map([['gt1', item({ listId: 'L2' })]]), { today: '2026-10-26', importCompletion: true });
+    expect(plan.bodies).toEqual([
+      { type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item({ listId: 'L2' })) },
+      { type: 'gtask.moved', account: ME, taskId: 'gt1', listId: 'L2' },
+    ]);
+    const after = applyEvents(state, plan.bodies.map((body) => ev(body)));
+    expect(after.tasks.t1!.source?.listId).toBe('L2');
+    expect(keptFor(after, { account: ME, id: 'gt1' })).toMatchObject({ listId: 'L2', time: 14 * 60 });
+    expect(linkedGoogleTasks(after)).toEqual([{ account: ME, listId: 'L2', ids: ['gt1'] }]);
+  });
+
+  test('moved in Google under a new id: the one open task elsewhere that reads as it did is found; two such are not guessed between', () => {
+    const state = planned();
+    const source = state.tasks.t1!.source!;
+    const moved = item({ id: 'gt9', listId: 'L2' });
+    expect(findMovedTask(source, [moved, item({ id: 'gt8', listId: 'L2', title: 'Other' })], state)?.id).toBe('gt9');
+    expect(findMovedTask(source, [moved, item({ id: 'gt7', listId: 'L3' })], state)).toBeNull();
+    expect(findMovedTask(source, [{ ...moved, completed: true }], state)).toBeNull();
+  });
+});
+
+describe('writes go to the list the task is in now', () => {
+  const raw = (id: string) => ({ id, title: 'Send the report', notes: 'To Ann', due: '2026-10-26T00:00:00.000Z', status: 'needsAction', position: '0001', updated: '2026-10-26T15:00:00.000Z' });
+  const google = (moved: boolean) => {
+    const calls: string[] = [];
+    const accounts = {
+      request: async (_account: string, method: string, url: string, body?: any) => {
+        calls.push(`${method} ${url.replace(/^https:\/\/[^/]+/, '').replace(/\?.*$/, '')}`);
+        if (method === 'PATCH' && url.includes('/lists/L1/tasks/gt1')) throw new GoogleError(404, 'Not Found');
+        if (url.includes('/users/@me/lists/%40default')) return { id: 'L1' };
+        if (url.includes('/users/@me/lists?')) return { items: [{ id: 'L1', title: 'My Tasks' }, { id: 'L2', title: 'Errands' }] };
+        if (method === 'GET' && url.includes('/lists/L2/tasks?')) return { items: moved ? [raw('gt1')] : [] };
+        if (method === 'GET') return { items: [] };
+        if (method === 'PATCH') return { ...raw('gt1'), ...body };
+        return {};
+      },
+    } as unknown as GoogleAccounts;
+    return { data: new GoogleData(accounts), calls };
+  };
+
+  test('a 404 looks the task up across the account’s lists once and writes it there', async () => {
+    const { data, calls } = google(true);
+    const answer = await data.updateTask(ME, 'L1', 'gt1', { completed: true });
+    expect(answer).toMatchObject({ id: 'gt1', listId: 'L2', completed: true });
+    expect(calls.filter((call) => call.startsWith('PATCH'))).toEqual(['PATCH /tasks/v1/lists/L1/tasks/gt1', 'PATCH /tasks/v1/lists/L2/tasks/gt1']);
+  });
+
+  test('a task in none of the lists is gone, said so', async () => {
+    const { data, calls } = google(false);
+    await expect(data.updateTask(ME, 'L1', 'gt1', { completed: true })).rejects.toThrow(TASK_GONE);
+    expect(calls.filter((call) => call.startsWith('PATCH'))).toEqual(['PATCH /tasks/v1/lists/L1/tasks/gt1']);
+  });
+
+  test('a read of linked tasks finds moved ones in other lists and names the missing', async () => {
+    const { data } = google(true);
+    expect(await data.linkedTasks(ME, 'L1', ['gt1', 'gone'])).toMatchObject({ tasks: [{ id: 'gt1', listId: 'L2' }], missing: ['gone'] });
+  });
+
+  test('the link follows the write to the list Google answered from', async () => {
+    const fake = fakeClient(planned(), (method, _path, body) => (method === 'PATCH' ? { task: item({ listId: 'L2', completed: body.completed }) } : { tasks: [] }));
+    const store = new GoogleStore(host, fake.client, 'page');
+    await store.writeTask(fake.state().tasks.t1!, { completed: true }, true);
+    expect(fake.state().tasks.t1!.source).toMatchObject({ listId: 'L2', status: { type: 'completed' } });
+  });
+
+  test('a completion Google refuses is undone here; a task Google no longer has shows as deleted', async () => {
+    const refused = fakeClient(applyEvents(planned(), [ev({ type: 'task.completed', taskId: 't1', on: '2026-10-26' })]), () => {
+      throw new Error('Backend Error');
+    });
+    const store = new GoogleStore(host, refused.client, 'page');
+    expect(await store.writeTask(refused.state().tasks.t1!, { completed: true })).toBe(false);
+    expect(refused.state().tasks.t1!.completedAt).toBeNull();
+    expect(refused.notes.at(-1)).toContain('stays open here too');
+
+    const gone = fakeClient(planned(), () => {
+      throw new Error(TASK_GONE);
+    });
+    await new GoogleStore(host, gone.client, 'page').writeTask(gone.state().tasks.t1!, { completed: true });
+    expect(gone.state().tasks.t1!.source?.status).toEqual(GONE_STATUS);
+    // Not asked for again: Google has nothing there.
+    expect(linkedGoogleTasks(gone.state())).toEqual([]);
+  });
+});
+
+describe('title, details and date, both ways', () => {
+  const options = { today: '2026-10-26', importCompletion: true };
+  test('changed in Google only: the Planner takes notes and date (the reviewer’s case)', () => {
+    const plan = planGoogleTaskSync(planned(), new Map([['gt1', item({ title: 'Send the full report', notes: 'With the numbers', due: '2026-10-27' })]]), options);
+    expect(plan.bodies).toEqual([{ type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item({ title: 'Send the full report', notes: 'With the numbers', due: '2026-10-27' })), title: 'Send the full report', notes: 'With the numbers', dueDate: '2026-10-27' }]);
+    expect(plan.writes).toEqual([]);
+    const after = applyEvents(planned(), plan.bodies.map((body) => ev(body)));
+    expect(after.tasks.t1).toMatchObject({ title: 'Send the full report', notes: 'With the numbers', dueDate: '2026-10-27' });
+    // Read again: nothing left to do.
+    expect(planGoogleTaskSync(after, new Map([['gt1', item({ title: 'Send the full report', notes: 'With the numbers', due: '2026-10-27' })]]), options)).toEqual({ bodies: [], writes: [], conflicts: [] });
+  });
+
+  test('changed in the Planner only: Google gets it', () => {
+    const state = applyEvents(planned(), [ev({ type: 'task.updated', taskId: 't1', patch: { notes: 'To Ann and Bo', dueDate: '2026-10-28' } })]);
+    const plan = planGoogleTaskSync(state, new Map([['gt1', item()]]), options);
+    expect(plan.bodies).toEqual([]);
+    expect(plan.writes).toEqual([{ taskId: 't1', account: ME, listId: 'L1', id: 'gt1', patch: { notes: 'To Ann and Bo', due: '2026-10-28' } }]);
+  });
+
+  test('changed on both sides: the newer change wins, field by field', () => {
+    const state = applyEvents(planned(), [ev({ type: 'task.updated', taskId: 't1', patch: { notes: 'Planner notes' } })]);
+    const edited = state.tasks.t1!.updatedAt;
+    const older = item({ notes: 'Google notes', updated: new Date(Date.parse(edited) - 60_000).toISOString() });
+    const newer = item({ notes: 'Google notes', updated: new Date(Date.parse(edited) + 60_000).toISOString() });
+    const editedAt = () => edited;
+    expect(mergeGoogleTask(state.tasks.t1!, older, editedAt)).toEqual({ planner: {}, google: { notes: 'Planner notes' }, conflicts: ['notes'] });
+    expect(mergeGoogleTask(state.tasks.t1!, newer, editedAt)).toEqual({ planner: { notes: 'Google notes' }, google: {}, conflicts: ['notes'] });
+    // The Planner's edit times come from the task's activity: Google's changes do not count as edits.
+    const times = plannerEditTimes([ev({ type: 'task.created', task: { id: 't1', title: 'x', placement: { kind: 'day', date: '2026-10-26' }, position: 1 } }), ev({ type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item()), notes: 'g' }), ev({ type: 'task.updated', taskId: 't1', patch: { dueDate: '2026-10-29' } })]);
+    expect(Object.keys(times).sort()).toEqual(['due', 'notes', 'title']);
+    expect(times.due! > times.notes!).toBe(true);
+  });
+
+  test('unchanged on both sides: nothing; a link made before the base was kept lets the newer side win', () => {
+    expect(mergeGoogleTask(planned().tasks.t1!, item(), () => null)).toEqual({ planner: {}, google: {}, conflicts: [] });
+    const old = planned();
+    const { notes: _notes, due: _due, ...bare } = old.tasks.t1!.source!;
+    const legacy = { ...old.tasks.t1!, source: bare, createdAt: '2026-10-20T00:00:00.000Z' };
+    expect(mergeGoogleTask(legacy, item({ notes: 'New in Google' }), () => legacy.createdAt).planner).toEqual({ notes: 'New in Google' });
+  });
+
+  test('a completed Planner task keeps what it was done with; only its link follows', () => {
+    const done = applyEvents(planned(), [ev({ type: 'task.completed', taskId: 't1', on: '2026-10-26' })]);
+    const plan = planGoogleTaskSync(done, new Map([['gt1', item({ notes: 'later', completed: true })]]), options);
+    expect(plan.writes).toEqual([]);
+    expect(plan.bodies).toEqual([{ type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item({ notes: 'later', completed: true })) }]);
+  });
+});
+
+describe('what the Planner keeps for Google tasks', () => {
+  const kept = (patch: Record<string, unknown>, listId = 'L1', taskId = 'gt1') => ev({ type: 'gtask.kept', account: ME, listId, taskId, patch } as EventBody);
+  test('times, deadlines, repeats and stars, checked; a task with nothing kept is forgotten', () => {
+    const check = (patch: Record<string, unknown>) => validateCommand({ cmd: 'c', type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch }, emptyState());
+    expect(check({ time: 600, duration: 30, deadline: '2026-10-30', starred: true })).toBeNull();
+    expect(check({ repeat: { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO', seriesId: 's1', index: 1, next: null } })).toBeNull();
+    expect(check({ time: 1440 })).toMatch(/time/);
+    expect(check({ duration: 2 })).toMatch(/duration/);
+    expect(check({ repeat: { rule: 'every monday', seriesId: 's1', index: 1, next: null } })).toMatch(/RRULE/);
+    expect(check({ color: 'red' })).toMatch(/unknown field/);
+    const state = foldEvents([kept({ time: 600, starred: true }), kept({ deadline: '2026-10-30' })]);
+    expect(state.googleTasks[googleTaskKey(ME, 'gt1')]).toMatchObject({ time: 600, deadline: '2026-10-30', listId: 'L1' });
+    expect(keptFor(state, { account: ME, id: 'gt1' })?.starredAt).toBeTruthy();
+    expect(foldEvents([kept({ time: 600 }), kept({ time: null })]).googleTasks).toEqual({});
+  });
+
+  test('they follow the task to another list, and to a new id', () => {
+    const moved = foldEvents([kept({ time: 600 }), ev({ type: 'gtask.moved', account: ME, taskId: 'gt1', listId: 'L2' })]);
+    expect(keptFor(moved, { account: ME, id: 'gt1' })).toMatchObject({ listId: 'L2', time: 600 });
+    const renamed = applyEvents(moved, [ev({ type: 'gtask.moved', account: ME, taskId: 'gt1', listId: 'L3', newTaskId: 'gt9' })]);
+    expect(keptFor(renamed, { account: ME, id: 'gt1' })).toBeNull();
+    expect(keptFor(renamed, { account: ME, id: 'gt9' })).toMatchObject({ listId: 'L3', taskId: 'gt9', time: 600 });
+    expect(applyEvents(renamed, [ev({ type: 'gtask.dropped', account: ME, taskId: 'gt9' })]).googleTasks).toEqual({});
+  });
+
+  test('a list read in the Tasks view moves what is kept for a task it finds there', async () => {
+    const fake = fakeClient(foldEvents([kept({ starred: true })]), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ listId: 'L2' })], complete: true } : {}));
+    await new GoogleStore(host, fake.client, 'page').loadBoard(ME, 'L2');
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.listId).toBe('L2');
+  });
+
+  test('a kept time puts the task on the grid at that time; Google’s date moves it and keeps the time', () => {
+    const state = foldEvents([kept({ time: 14 * 60, duration: 60 })]);
+    const event = (due: string): CalendarEvent => ({ id: 'gtask:L1:gt1', calendarId: 'google-tasks', title: 'Send the report', location: '', start: `${due}T07:00:00.000Z`, end: '', allDay: true, busy: false, googleTask: item({ due }) });
+    expect(withTaskTimes([event('2026-10-26')], state.googleTasks, 'America/Los_Angeles')[0]).toMatchObject({ allDay: false, start: '2026-10-26T21:00:00.000Z', end: '2026-10-26T22:00:00.000Z' });
+    expect(withTaskTimes([event('2026-10-28')], state.googleTasks, 'America/Los_Angeles')[0]).toMatchObject({ allDay: false, start: '2026-10-28T21:00:00.000Z' });
+  });
+
+  test('starred tasks, the newest star first', () => {
+    const state = foldEvents([kept({ starred: true }, 'L1', 'a'), kept({ starred: true }, 'L2', 'b'), kept({ starred: true }, 'L1', 'c'), kept({ starred: false }, 'L1', 'c')]);
+    expect(starredKept(state).map((entry) => entry.taskId)).toEqual(['b', 'a']);
+  });
+});
+
+describe('repeating tasks', () => {
+  test('the next date, as the rule steps', () => {
+    expect(nextRepeatDate('RRULE:FREQ=DAILY', '2026-10-26', 1)).toBe('2026-10-27');
+    expect(nextRepeatDate('RRULE:FREQ=WEEKLY;BYDAY=MO', '2026-10-26', 1)).toBe('2026-11-02');
+    expect(nextRepeatDate('RRULE:FREQ=WEEKLY;BYDAY=MO,TH', '2026-10-26', 1)).toBe('2026-10-29');
+    expect(nextRepeatDate('RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TH', '2026-10-29', 2)).toBe('2026-11-09');
+    expect(nextRepeatDate('RRULE:FREQ=MONTHLY;BYMONTHDAY=31', '2026-10-31', 1)).toBe('2026-12-31');
+    expect(nextRepeatDate('RRULE:FREQ=MONTHLY;BYDAY=-1FR', '2026-10-30', 1)).toBe('2026-11-27');
+    expect(nextRepeatDate('RRULE:FREQ=YEARLY', '2028-02-29', 1)).toBe('2032-02-29');
+    // Ends: after its count, or past its last day.
+    expect(nextRepeatDate('RRULE:FREQ=DAILY;COUNT=3', '2026-10-28', 3)).toBeNull();
+    expect(nextRepeatDate('RRULE:FREQ=DAILY;UNTIL=20261027', '2026-10-27', 2)).toBeNull();
+  });
+
+  const series = (extra: Record<string, unknown> = {}) => foldEvents([ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: 9 * 60, deadline: '2026-10-28', repeat: { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO', seriesId: 's1', index: 1, next: null }, ...extra } })]);
+
+  test('completing an occurrence makes the next one in the same list, a week on, with the series’ time and deadline', async () => {
+    const fake = fakeClient(series(), (method, path, body) => {
+      if (path.startsWith('/google/tasks/all')) return { tasks: [item({ completed: true })], complete: true };
+      if (method === 'POST' && path === '/google/tasks') return { task: item({ id: 'gt2', due: body.due }) };
+      return {};
+    });
+    const store = new GoogleStore(host, fake.client, 'page');
+    expect(dueOccurrences(fake.state(), [item({ completed: true })])).toMatchObject([{ date: '2026-11-02' }]);
+    await store.makeNextOccurrences([item({ completed: true })]);
+    expect(fake.calls.find((call) => call.method === 'POST')).toMatchObject({ path: '/google/tasks', body: { account: ME, listId: 'L1', title: 'Send the report', due: '2026-11-02' } });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.next).toBe('gt2');
+    expect(keptFor(fake.state(), { account: ME, id: 'gt2' })).toMatchObject({ time: 9 * 60, deadline: '2026-11-04', repeat: { seriesId: 's1', index: 2, next: null } });
+    // Seen again (another read, another window): nothing more is made.
+    await store.makeNextOccurrences([item({ completed: true })]);
+    expect(fake.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+  });
+
+  test('no duplicate when Google’s own repeat made the next one already', async () => {
+    const theirs = item({ id: 'g-own', due: '2026-11-02' });
+    expect(madeAlready([item({ completed: true }), theirs], 'Send the report', '2026-11-02', 'gt1')?.id).toBe('g-own');
+    const fake = fakeClient(series(), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ completed: true }), theirs], complete: true } : {}));
+    await new GoogleStore(host, fake.client, 'page').makeNextOccurrences([item({ completed: true })]);
+    expect(fake.calls.some((call) => call.method === 'POST')).toBe(false);
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.next).toBe('g-own');
+    expect(keptFor(fake.state(), { account: ME, id: 'g-own' })?.repeat?.index).toBe(2);
+  });
+
+  test('the last occurrence ends the series', async () => {
+    const fake = fakeClient(series({ repeat: { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=1', seriesId: 's1', index: 1, next: null } }));
+    await new GoogleStore(host, fake.client, 'page').makeNextOccurrences([item({ completed: true })]);
+    expect(fake.calls).toEqual([]);
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat).toBeNull();
+  });
+
+  test('editing All tasks changes the rule of the series; This task leaves the others alone', async () => {
+    const start = applyEvents(series(), [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt3', patch: { repeat: { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO', seriesId: 's1', index: 2, next: null } } })]);
+    const fake = fakeClient(start);
+    const store = new GoogleStore(host, fake.client, 'page');
+    const fields = (rule: string) => ({ title: 'Send the report', notes: 'To Ann', due: '2026-10-26', kept: { time: 9 * 60, duration: null, deadline: '2026-10-28', rule } });
+    await store.saveListTask(item(), fields('RRULE:FREQ=WEEKLY;BYDAY=TU'), 'this');
+    expect(keptFor(fake.state(), { account: ME, id: 'gt3' })?.repeat?.rule).toBe('RRULE:FREQ=WEEKLY;BYDAY=MO');
+    await store.saveListTask(item(), fields('RRULE:FREQ=DAILY'), 'all');
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.rule).toBe('RRULE:FREQ=DAILY');
+    expect(keptFor(fake.state(), { account: ME, id: 'gt3' })?.repeat).toMatchObject({ rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 2 });
+    // Google's own fields did not change, so Google was not written.
+    expect(fake.calls).toEqual([]);
+  });
+});
+
+describe('calendar titles fit their block, as Google Calendar fits them', () => {
+  test('one line reads "Title, 10am"; taller blocks give the title every whole line, the time the one after it', () => {
+    // A 30-minute block at 48 px an hour: 22 px, less its padding.
+    expect(blockText(18, 14)).toEqual({ inline: true, lines: 1 });
+    expect(blockText(6, 14)).toEqual({ inline: true, lines: 1 });
+    // 45 minutes, an hour, two hours.
+    expect(blockText(30, 14)).toEqual({ inline: false, lines: 2 });
+    expect(blockText(42, 14)).toEqual({ inline: false, lines: 3 });
+    expect(blockText(90, 14)).toEqual({ inline: false, lines: 6 });
+  });
+});
+
+describe('the service reads tasks as the Planner shows them', () => {
+  test('toTaskItem keeps what a link compares against', () => {
+    const read = toTaskItem({ id: 'gt1', title: 'Send the report', notes: 'To Ann', due: '2026-10-26T00:00:00.000Z', status: 'needsAction', updated: '2026-10-26T15:00:00.000Z' }, ME, 'L1')!;
+    expect(gtaskSource(read)).toMatchObject({ title: 'Send the report', notes: 'To Ann', due: '2026-10-26', listId: 'L1' });
+  });
+});

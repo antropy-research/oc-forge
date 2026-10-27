@@ -11,6 +11,7 @@ import {
   googleEvent,
   plannerBlockOf,
   PLANNER_BLOCK_KEY,
+  TASK_GONE,
   type GoogleCalendarInfo,
   type GoogleEventDetail,
   type GoogleResponse,
@@ -505,15 +506,51 @@ export class GoogleData {
     return found.filter((item): item is GoogleTaskItem => Boolean(item));
   }
 
-  /** Complete or reopen a task, set or clear its due date, rename it or change its details. */
+  /**
+   * Where tasks are now that their list no longer has them (moved in Google's
+   * own apps): the account's other lists are read for them, once.
+   */
+  async locateTasks(account: string, ids: readonly string[], except: string | null): Promise<GoogleTaskItem[]> {
+    const wanted = new Set(ids);
+    if (!wanted.size) return [];
+    const lists = (await this.taskLists(account)).filter((list) => list.id !== except);
+    const read = await mapLimited(lists, 4, (list) => this.allTasks(account, list.id));
+    return read.flatMap((list) => list.tasks.filter((task) => wanted.has(task.id)));
+  }
+
+  /** Tasks behind linked Planner tasks, where they are now (another list, after a move), and the ones Google no longer has. */
+  async linkedTasks(account: string, listId: string, ids: readonly string[]): Promise<{ tasks: GoogleTaskItem[]; missing: string[] }> {
+    const here = await this.tasksById(account, listId, ids);
+    const gone = ids.filter((id) => !here.some((item) => item.id === id));
+    const moved = await this.locateTasks(account, gone, listId);
+    return { tasks: [...here, ...moved], missing: gone.filter((id) => !moved.some((item) => item.id === id)) };
+  }
+
+  /**
+   * Complete or reopen a task, set or clear its due date, rename it or change
+   * its details. Written to the list the Planner knows it in; when that list
+   * no longer has it (moved in Google's own apps), the task is looked up in
+   * the account's other lists once and written there. Its answer says where
+   * it is now.
+   */
   async updateTask(account: string, listId: string, id: string, patch: { completed?: boolean; due?: DateKey | null; title?: string; notes?: string }): Promise<GoogleTaskItem | null> {
     const body: Record<string, unknown> = {};
     if (patch.completed !== undefined) Object.assign(body, patch.completed ? { status: 'completed' } : { status: 'needsAction', completed: null });
     if (patch.due !== undefined) body.due = patch.due ? `${patch.due}T00:00:00.000Z` : null;
     if (patch.title !== undefined) body.title = patch.title;
     if (patch.notes !== undefined) body.notes = patch.notes;
-    const raw = await this.accounts.request<RawTask>(account, 'PATCH', `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`, body);
-    return raw ? toTaskItem(raw, account, listId) : null;
+    const write = async (list: string) => {
+      const raw = await this.accounts.request<RawTask>(account, 'PATCH', `${TASKS}/lists/${enc(list)}/tasks/${enc(id)}`, body);
+      return raw ? toTaskItem(raw, account, list) : null;
+    };
+    try {
+      return await write(listId);
+    } catch (error) {
+      if (!isGone(error)) throw error;
+      const [moved] = await this.locateTasks(account, [id], listId);
+      if (!moved) throw new GoogleError(404, TASK_GONE);
+      return write(moved.listId);
+    }
   }
 
   /** A new task: at the top of the list, or under `parent`, or right after `previous`. */

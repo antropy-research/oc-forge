@@ -267,13 +267,15 @@ html[data-surface='status'], html[data-surface='status'] body { height: auto; ba
 .now-line { position: absolute; left: 0; right: 0; border-top: 2px solid var(--oc-error, #e03131); z-index: 3; }
 .now-line::before { content: ''; position: absolute; left: -4px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--oc-error, #e03131); }
 .drop-slot { position: absolute; left: 2px; right: 2px; height: 22px; border-radius: 4px; border: 1.5px dashed var(--oc-primary); background: color-mix(in srgb, var(--oc-primary) 10%, transparent); font-size: 11px; padding: 2px 6px; z-index: 4; pointer-events: none; }
-.grid-item { position: absolute; z-index: 2; border-radius: 5px; padding: 2px 6px; overflow: hidden; font-size: 11.5px; line-height: 1.25; display: flex; flex-direction: column; gap: 1px; background: color-mix(in srgb, var(--item-color) 16%, var(--pl-surface)); border-left: 3px solid var(--item-color); }
+.grid-item { position: absolute; z-index: 2; border-radius: 5px; padding: 2px 6px; overflow: hidden; font-size: 12px; line-height: 14px; display: flex; flex-direction: column; gap: 0; background: color-mix(in srgb, var(--item-color) 16%, var(--pl-surface)); border-left: 3px solid var(--item-color); }
 .grid-item.is-event { background: color-mix(in srgb, var(--item-color) 10%, var(--pl-surface)); border-left-style: solid; opacity: 0.9; }
 .grid-item.is-block { cursor: grab; box-shadow: 0 1px 2px color-mix(in srgb, var(--oc-fg) 10%, transparent); touch-action: none; user-select: none; }
 .grid-item.is-block.is-dragging { cursor: grabbing; opacity: 0.85; z-index: 5; box-shadow: 0 6px 16px color-mix(in srgb, var(--oc-fg) 18%, transparent); }
 .grid-item.is-done .item-title { text-decoration: line-through; color: var(--oc-muted); }
-.item-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.item-time { color: var(--oc-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* As Google Calendar: a title wraps over the whole lines its block has room for (TimeGrid sets --lines), cut with an ellipsis after them; the time takes the next line when one is left. */
+.item-text { display: flex; flex-direction: column; min-width: 0; max-height: calc(var(--lines, 1) * 14px); overflow: hidden; }
+.item-title { font-weight: 600; overflow: hidden; overflow-wrap: break-word; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--lines, 1); line-clamp: var(--lines, 1); flex: none; }
+.item-time { color: var(--oc-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
 .item-remove { position: absolute; top: 1px; right: 2px; background: none; border: 0; padding: 0 3px; color: var(--oc-muted); opacity: 0; }
 .grid-item:hover .item-remove { opacity: 1; }
 .resize-handle { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; cursor: ns-resize; }
@@ -1135,7 +1137,7 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .bar-badge { margin-left: auto; flex: none; font-size: 11px; font-weight: 700; opacity: 0.9; white-space: nowrap; }
 .all-day-more { position: relative; z-index: 1; margin: 0 6px 0 2px; border: 0; background: none; text-align: left; font-size: 12px; font-weight: 500; color: var(--oc-fg); padding: 0 6px; border-radius: 4px; }
 .all-day-more:hover { background: var(--pl-soft); }
-.gcal-grid .grid-item.is-event { background: var(--item-color); color: var(--item-ink); border-left: 0; opacity: 1; border-radius: 5px; padding: 2px 6px; box-shadow: 0 0 0 1px var(--pl-surface); cursor: pointer; }
+.gcal-grid .grid-item.is-event { background: var(--item-color); color: var(--item-ink); border-left: 0; opacity: 1; border-radius: 5px; padding: 2px 4px 2px 5px; box-shadow: 0 0 0 1px var(--pl-surface); cursor: pointer; }
 .gcal-grid .grid-item.is-event .item-time { color: inherit; opacity: 0.88; }
 .gcal-grid .grid-item.is-event.is-movable { cursor: grab; touch-action: none; }
 .gcal-grid .grid-item.is-event.is-dragging { cursor: grabbing; z-index: 5; box-shadow: 0 6px 16px color-mix(in srgb, var(--oc-fg) 24%, transparent); }
@@ -1451,3 +1453,47 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .lin-adv-add { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .lin-adv-add-button { padding: 2px 8px; font-size: 12px; color: var(--oc-muted); }
 /* ==== end Linear page at narrow widths, and advanced filters ==== */
+
+/* ── Google tasks as Google Tasks and Google Calendar have them (planner-google2): a time kept in the
+   Planner (timed tasks on the grid, with their check circle), deadlines, repeats, stars and the
+   Starred view, the "kept in the Planner" hint, and block titles that wrap by height. ── */
+.gcal-grid .grid-item.is-inline .item-title { font-weight: 500; }
+.gcal-grid .grid-item.is-task { background: var(--item-color); color: var(--item-ink); border-left: 0; border-radius: 5px; padding: 2px 4px 2px 5px; box-shadow: 0 0 0 1px var(--pl-surface); cursor: grab; touch-action: none; user-select: none; }
+.gcal-grid .grid-item.is-task .item-time { color: inherit; opacity: 0.88; }
+.gcal-grid .grid-item.is-task.is-dragging { cursor: grabbing; z-index: 5; box-shadow: 0 6px 16px color-mix(in srgb, var(--oc-fg) 24%, transparent); }
+.gcal-grid .grid-item.is-task.is-done { opacity: 0.75; }
+.gcal-grid .grid-item.is-task.is-done .item-title { color: inherit; }
+.gcal-grid .grid-item.is-task:focus-visible { outline: 2px solid var(--oc-fg); outline-offset: 1px; }
+.task-check { display: inline-grid; place-items: center; width: 15px; height: 15px; margin: 0 4px 0 -2px; padding: 0; border: 0; border-radius: 50%; background: none; color: inherit; vertical-align: -3px; cursor: pointer; }
+.task-check:hover { background: color-mix(in srgb, var(--item-ink, var(--oc-fg)) 22%, transparent); }
+.task-deadline { flex: none; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.all-day-bar .task-deadline, .month-chip .task-deadline { margin-left: auto; }
+.task-deadline.is-overdue { color: var(--oc-error-text, #c92a2a); background: var(--pl-surface); border-radius: 3px; padding: 0 2px; }
+.gcal-grid .task-deadline { font-size: 10px; }
+.gt-star { cursor: pointer; }
+.gt-star.is-on, .gt-row:hover .gt-star.is-on { opacity: 1; color: var(--oc-primary-text, var(--oc-primary)); }
+.pop-star.is-on { color: var(--oc-primary-text, var(--oc-primary)); }
+.gt-due { display: inline-flex; align-items: center; gap: 4px; }
+.gt-repeat { display: inline-flex; align-items: center; }
+.gt-deadline { display: inline-flex; align-items: center; gap: 3px; border: 1px solid var(--pl-line); border-radius: 12px; padding: 0 8px; font-size: 12px; }
+.gt-deadline.is-overdue { color: var(--oc-error-text, #c92a2a); border-color: color-mix(in srgb, var(--oc-error-text, #c92a2a) 45%, transparent); }
+.gt-list-chip { font-size: 12px; color: var(--oc-muted); }
+.gt-form-label { font-size: 12.5px; color: var(--oc-muted); }
+.gt-form-row select { background: var(--pl-soft); border: 0; border-radius: 12px; padding: 2px 8px; font-size: 12px; color: var(--oc-fg); max-width: 100%; }
+.gt-form-repeat .ee-custom { flex-basis: 100%; }
+.gt-star-toggle { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 2px 8px 2px 2px; border-radius: 12px; color: var(--oc-muted); font-size: 12.5px; }
+.gt-star-toggle:hover { background: var(--pl-soft); }
+.gt-star-toggle.is-on { color: var(--oc-primary-text, var(--oc-primary)); font-weight: 600; }
+.gt-kept-hint { margin: 2px 0; font-size: 12px; line-height: 1.4; }
+.gt-kept-hint .icon { vertical-align: -2px; margin-right: 4px; }
+.gt-kept-hint .link { font-size: 12px; margin-left: 4px; padding: 0; }
+.gt-list > .gt-kept-hint { padding: 0 18px 6px; }
+.qc-hint .icon { vertical-align: -2px; }
+.gtask-kept { font-size: 12px; white-space: nowrap; }
+.gtask-kept.is-overdue { color: var(--oc-error-text, #c92a2a); font-weight: 600; }
+.gtask-kept.is-starred { color: var(--oc-primary-text, var(--oc-primary)); }
+/* A narrow week (OpenChamber's sidebar open at 1024 px leaves the Planner 700 px): Google's medium weight and a
+   pixel less, so common words fit a day's column whole; a task's deadline shows as its flag (the date is in its label). */
+.gcal-view.is-narrow .gcal-grid .grid-item { font-size: 11px; padding: 2px 3px 2px 4px; }
+.gcal-view.is-narrow .gcal-grid .grid-item .item-title { font-weight: 500; }
+.gcal-view.is-narrow .gcal-grid .task-deadline-date { display: none; }

@@ -1,8 +1,8 @@
 // Google as a source: Calendar events beside the plan, Google Tasks and Gmail
 // messages that become tasks, and the rules that keep a linked task in step.
 import type { CalendarEvent } from './ics.ts';
-import type { DateKey, Placement, PlannerState, Task, TaskSourceRef } from './types.ts';
-import type { EventBody, NewTask } from './events.ts';
+import { googleTaskKey, type DateKey, type Placement, type PlannerState, type Task, type TaskSourceRef } from './types.ts';
+import { GOOGLE_NOTES_MAX, type EventBody, type NewTask, type PlannerEvent } from './events.ts';
 import { addDays, instantAt, isDateKey } from './dates.ts';
 
 /** A calendar of a connected account, as Google lists it. */
@@ -330,16 +330,26 @@ export const dueTaskEvent = (item: GoogleTaskItem & { due: DateKey }, zone: stri
 
 const OPEN = { name: 'Open', type: 'open', color: '#1a73e8' };
 const DONE = { name: 'Completed', type: 'completed', color: '#188038' };
+/** A link whose Google task is in none of the account's lists any more: deleted in Google. */
+export const GONE_STATUS = { name: 'Deleted', type: 'canceled', color: '#80868b' };
+/** What the service says when a task is in none of the account's lists. */
+export const TASK_GONE = 'This task is no longer in Google Tasks';
 
+/** A Planner title holds at most this much of a Google task's (Google allows 1024 characters). */
+const TITLE_MAX = 500;
+
+/** A Google task as a link: where it is now, and its title, details and date as last seen (what a three-way merge compares against). */
 export const gtaskSource = (item: GoogleTaskItem): TaskSourceRef => ({
   kind: 'gtask',
   id: item.id,
   key: 'Google Tasks',
   url: item.url,
-  title: item.title,
+  title: item.title.slice(0, TITLE_MAX),
   status: item.completed ? DONE : OPEN,
   account: item.account,
   listId: item.listId,
+  notes: item.notes.slice(0, GOOGLE_NOTES_MAX),
+  due: item.due,
 });
 
 export const taskFromGoogleTask = (item: GoogleTaskItem, id: string, placement: Placement, position: number): NewTask => ({
@@ -387,46 +397,163 @@ export const taskForMail = (state: PlannerState, item: Pick<MailItem, 'id'>): Ta
   return linked.find((task) => !task.completedAt) ?? linked[0] ?? null;
 };
 
-/** Open tasks linked to Google tasks, by account and list, for reading their current state. */
+/**
+ * Google tasks to read again, by account and list: those behind open linked
+ * tasks, and repeating ones whose next occurrence is not made yet (so a
+ * completion in Google is seen).
+ */
 export const linkedGoogleTasks = (state: PlannerState): { account: string; listId: string; ids: string[] }[] => {
   const groups = new Map<string, { account: string; listId: string; ids: string[] }>();
+  const add = (account: string, listId: string, id: string) => {
+    const key = `${account}\n${listId}`;
+    const group = groups.get(key) ?? { account, listId, ids: [] };
+    if (!group.ids.includes(id)) group.ids.push(id);
+    groups.set(key, group);
+  };
   for (const task of Object.values(state.tasks)) {
     const source = task.source;
-    if (source?.kind !== 'gtask' || !source.account || !source.listId || !live(task) || task.completedAt) continue;
-    const key = `${source.account}\n${source.listId}`;
-    const group = groups.get(key) ?? { account: source.account, listId: source.listId, ids: [] };
-    if (!group.ids.includes(source.id)) group.ids.push(source.id);
-    groups.set(key, group);
+    if (source?.kind !== 'gtask' || !source.account || !source.listId || !live(task) || task.completedAt || source.status?.name === GONE_STATUS.name) continue;
+    add(source.account, source.listId, source.id);
   }
+  for (const kept of Object.values(state.googleTasks ?? {})) if (kept.repeat && !kept.repeat.next) add(kept.account, kept.listId, kept.taskId);
   return [...groups.values()];
+};
+
+/** What a linked task and its Google task keep in step, both ways. */
+export type SyncedField = 'title' | 'notes' | 'due';
+const SYNCED: readonly SyncedField[] = ['title', 'notes', 'due'];
+
+/** Changes for Google, from a linked task changed in the Planner. */
+export interface GoogleTaskWrite {
+  /** The Planner task. */
+  taskId: string;
+  account: string;
+  listId: string;
+  id: string;
+  patch: { title?: string; notes?: string; due?: DateKey | null };
+}
+
+export interface GoogleMerge {
+  /** Fields the Planner task takes from Google. */
+  planner: { title?: string; notes?: string; dueDate?: DateKey | null };
+  /** Fields Google takes from the Planner task. */
+  google: GoogleTaskWrite['patch'];
+  /** Fields changed on both sides since they last agreed. */
+  conflicts: SyncedField[];
+}
+
+const plannerSide = (task: Task, field: SyncedField): string | null => (field === 'title' ? task.title : field === 'notes' ? task.notes.slice(0, GOOGLE_NOTES_MAX) : task.dueDate);
+const googleSide = (item: GoogleTaskItem, field: SyncedField): string | null => (field === 'title' ? item.title.slice(0, TITLE_MAX) : field === 'notes' ? item.notes.slice(0, GOOGLE_NOTES_MAX) : item.due);
+const agreed = (source: TaskSourceRef, field: SyncedField): string | null | undefined => (field === 'title' ? source.title : field === 'notes' ? source.notes : source.due);
+
+/**
+ * A linked task against its Google task, field by field (title, details,
+ * date), with what both last agreed on (the link's base): a field changed on
+ * one side only takes that side's value; a field changed on both takes the
+ * newer change, Google's `updated` against the Planner's last edit of that
+ * field (`editedAt`); an unchanged field is left alone. A link made before
+ * the base was kept counts as changed on both sides, so the newer side wins.
+ */
+export const mergeGoogleTask = (task: Task, item: GoogleTaskItem, editedAt: (field: SyncedField) => string | null): GoogleMerge => {
+  const merge: GoogleMerge = { planner: {}, google: {}, conflicts: [] };
+  const source = task.source?.kind === 'gtask' ? task.source : null;
+  for (const field of SYNCED) {
+    const mine = plannerSide(task, field);
+    const theirs = googleSide(item, field);
+    if (mine === theirs) continue;
+    const base = source ? agreed(source, field) : undefined;
+    const plannerChanged = base === undefined || mine !== base;
+    const googleChanged = base === undefined || theirs !== base;
+    let planner = plannerChanged && !googleChanged;
+    if (plannerChanged && googleChanged) {
+      merge.conflicts.push(field);
+      const edited = editedAt(field);
+      planner = Boolean(edited && item.updated && Date.parse(edited) > Date.parse(item.updated));
+    }
+    if (planner) {
+      if (field === 'title') merge.google.title = task.title;
+      else if (field === 'notes') merge.google.notes = mine ?? '';
+      else merge.google.due = task.dueDate;
+    } else if (field === 'title') merge.planner.title = theirs ?? task.title;
+    else if (field === 'notes') merge.planner.notes = theirs ?? '';
+    else merge.planner.dueDate = theirs;
+  }
+  return merge;
+};
+
+/** When the Planner last changed each synced field of a task, from its activity (changes that came from Google do not count). */
+export const plannerEditTimes = (events: readonly PlannerEvent[]): Partial<Record<SyncedField, string>> => {
+  const times: Partial<Record<SyncedField, string>> = {};
+  for (const event of events) {
+    if (event.type === 'task.created') for (const field of SYNCED) times[field] = event.at;
+    if (event.type !== 'task.updated') continue;
+    if (event.patch.title !== undefined) times.title = event.at;
+    if (event.patch.notes !== undefined) times.notes = event.at;
+    if (event.patch.dueDate !== undefined) times.due = event.at;
+  }
+  return times;
 };
 
 export interface GoogleSyncOptions {
   today: DateKey;
   /** Complete the task when its Google task is completed. */
   importCompletion: boolean;
+  /** When the Planner last changed a field of a task, for a field changed on both sides; else the task's last change. */
+  editedAt?: (taskId: string, field: SyncedField) => string | null;
+}
+
+export interface GoogleSyncPlan {
+  /** Events for the Planner: links that follow their Google task (a new list, title, details, date, state), and completions. */
+  bodies: EventBody[];
+  /** Planner changes Google has not seen yet. */
+  writes: GoogleTaskWrite[];
+  /** Linked tasks with a field changed on both sides, decided by `editedAt`. */
+  conflicts: { taskId: string; fields: SyncedField[] }[];
 }
 
 /**
- * Events that bring linked tasks up to date with their Google tasks. As with
- * Linear, a title follows a rename in Google only while the task still has the
- * title last seen there; a due date likewise.
+ * Bring linked tasks and their Google tasks into step (`mergeGoogleTask`
+ * decides each field): a link follows its task to another list, takes what
+ * changed in Google and sends back what changed in the Planner; a completion
+ * in Google completes the task when asked to. What the Planner keeps for a
+ * Google task follows it to another list too.
  */
-export const planGoogleTaskSync = (state: PlannerState, items: ReadonlyMap<string, GoogleTaskItem>, options: GoogleSyncOptions): EventBody[] => {
-  const bodies: EventBody[] = [];
+export const planGoogleTaskSync = (state: PlannerState, items: ReadonlyMap<string, GoogleTaskItem>, options: GoogleSyncOptions): GoogleSyncPlan => {
+  const plan: GoogleSyncPlan = { bodies: [], writes: [], conflicts: [] };
   for (const task of Object.values(state.tasks)) {
     const source = task.source;
     if (source?.kind !== 'gtask' || !live(task)) continue;
     const item = items.get(source.id);
-    if (!item) continue;
+    if (!item || (source.account && item.account !== source.account)) continue;
     const next = gtaskSource(item);
-    const titleFollows = source.title !== undefined && task.title === source.title && item.title !== source.title;
-    if (source.title !== next.title || source.status?.type !== next.status?.type || source.url !== next.url) {
-      bodies.push({ type: 'task.sourceSynced', taskId: task.id, source: next, ...(titleFollows ? { title: item.title } : {}) });
-    }
-    if (options.importCompletion && item.completed && !task.completedAt) bodies.push({ type: 'task.completed', taskId: task.id, on: options.today });
+    // A completed task keeps what it was done with; only its link follows.
+    const merge = task.completedAt ? { planner: {}, google: {}, conflicts: [] } : mergeGoogleTask(task, item, (field) => options.editedAt?.(task.id, field) ?? task.updatedAt);
+    const moved = source.listId !== next.listId || source.url !== next.url;
+    const seen = source.title !== next.title || source.notes !== next.notes || source.due !== next.due || source.status?.type !== next.status?.type;
+    if (moved || seen || Object.keys(merge.planner).length) plan.bodies.push({ type: 'task.sourceSynced', taskId: task.id, source: next, ...merge.planner });
+    if (Object.keys(merge.google).length) plan.writes.push({ taskId: task.id, account: item.account, listId: item.listId, id: item.id, patch: merge.google });
+    if (merge.conflicts.length) plan.conflicts.push({ taskId: task.id, fields: merge.conflicts });
+    if (options.importCompletion && item.completed && !task.completedAt) plan.bodies.push({ type: 'task.completed', taskId: task.id, on: options.today });
   }
-  return bodies;
+  for (const item of items.values()) {
+    const kept = state.googleTasks?.[googleTaskKey(item.account, item.id)];
+    if (kept && kept.listId !== item.listId) plan.bodies.push({ type: 'gtask.moved', account: item.account, taskId: item.id, listId: item.listId });
+  }
+  return plan;
+};
+
+/**
+ * Where a linked Google task went when Google no longer has it under its id
+ * (Google's own apps may give a task moved to another list a new id): the one
+ * open task elsewhere with the title, details and date last seen, that no
+ * other Planner task links. Null when there is not exactly one.
+ */
+export const findMovedTask = (source: TaskSourceRef, candidates: readonly GoogleTaskItem[], state: PlannerState): GoogleTaskItem | null => {
+  if (source.kind !== 'gtask' || source.title === undefined) return null;
+  const matches = candidates.filter(
+    (item) => !item.completed && item.account === source.account && item.id !== source.id && item.title.slice(0, TITLE_MAX) === source.title && (source.notes === undefined || item.notes.slice(0, GOOGLE_NOTES_MAX) === source.notes) && (source.due === undefined || item.due === source.due) && !taskForGoogleTask(state, item),
+  );
+  return matches.length === 1 ? matches[0]! : null;
 };
 
 // ── Drag payloads ────────────────────────────────────────────────────────────

@@ -65,6 +65,9 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'channel.updated': return `Edit channel: ${event.channelId}`;
     case 'channel.deleted': return `Delete channel: ${event.channelId}`;
     case 'settings.updated': return `Update settings: ${Object.keys(event.patch).join(', ')}`;
+    case 'gtask.kept': return `Keep for a Google task: ${Object.keys(event.patch).join(', ')}`;
+    case 'gtask.moved': return 'A Google task moved';
+    case 'gtask.dropped': return 'Forget a Google task';
   }
 };
 

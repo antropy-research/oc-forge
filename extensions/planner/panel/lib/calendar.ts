@@ -2,6 +2,7 @@ import { useEffect, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import type { DateKey } from '../../src/domain/types.ts';
 import { addDays, instantAt } from '../../src/domain/dates.ts';
+import { withTaskTimes } from '../../src/domain/gtaskKept.ts';
 import { useGoogle, usePlanner, useView } from './context.ts';
 import { calendarUi, useCalendarUi, withPending } from './gcal.ts';
 
@@ -57,6 +58,7 @@ export const useCalendarEvents = (from: DateKey, to: DateKey, options: { decline
   }, [client, from, to, signature, view.state.settings.timezone, ui.tick]);
 
   const zone = view.state.settings.timezone ?? 'UTC';
-  const events = withPending(feed.events, ui.pending, ui.added, instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone));
+  // A Google task with a time kept in the Planner shows at that time, as Google Calendar shows timed tasks.
+  const events = withPending(withTaskTimes(feed.events, view.state.googleTasks, zone), ui.pending, ui.added, instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone));
   return { ...feed, events: options.declined ? events : events.filter((event) => event.google?.response !== 'declined') };
 };

@@ -8,6 +8,7 @@ import { MAIL_SEARCHES, type GoogleDrag } from '../lib/google.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { PlanActions } from './PlanActions.tsx';
 import { TasksView } from './TasksView.tsx';
+import { CalendarOverlays } from './calendar/Overlays.tsx';
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -177,6 +178,8 @@ export const GooglePage = () => {
         <>
           {tabs}
           <TasksView />
+          {/* Its questions ("Delete repeating task") and snackbar, as on the calendar. */}
+          <CalendarOverlays />
         </>
       ) : (
         <div class="view-scroll linear-page">

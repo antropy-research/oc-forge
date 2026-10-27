@@ -23,6 +23,8 @@ var LINEAR_ORDERS = ["priority", "updated", "due", "identifier", "status", "manu
 var LINEAR_COMPLETED = ["all", "day", "week", "month", "3months", "6months", "year", "none"];
 var LINEAR_PROPERTIES = ["id", "status", "priority", "assignee", "labels", "project", "cycle", "estimate", "due", "created", "updated"];
 var RITUALS = ["planning", "shutdown", "highlights", "weeklyPlanning", "weeklyReview"];
+var googleTaskKey = (account, taskId) => `${account}
+${taskId}`;
 var ritualKey = (ritual, date) => `${ritual}:${date}`;
 var DEFAULT_SETTINGS = {
   timezone: null,
@@ -63,7 +65,8 @@ var emptyState = () => ({
   series: {},
   runs: {},
   folders: {},
-  settings: { ...DEFAULT_SETTINGS }
+  settings: { ...DEFAULT_SETTINGS },
+  googleTasks: {}
 });
 
 // src/domain/dates.ts
@@ -296,7 +299,13 @@ var applyInto = (state, event) => {
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: null, archivedAt: null }));
       return;
     case "task.sourceSynced":
-      touch(state, event.taskId, event.at, (task) => ({ ...task, source: event.source, ...event.title !== undefined ? { title: event.title.trim() } : {} }));
+      touch(state, event.taskId, event.at, (task) => ({
+        ...task,
+        source: event.source,
+        ...event.title !== undefined ? { title: event.title.trim() } : {},
+        ...event.notes !== undefined ? { notes: event.notes } : {},
+        ...event.dueDate !== undefined ? { dueDate: event.dueDate } : {}
+      }));
       return;
     case "task.archived":
       stopTimerFor(state, event.taskId, event);
@@ -511,6 +520,31 @@ var applyInto = (state, event) => {
     case "settings.updated":
       state.settings = { ...state.settings, ...event.patch };
       return;
+    case "gtask.kept": {
+      const key = googleTaskKey(event.account, event.taskId);
+      const { starred, ...patch } = event.patch;
+      const before = state.googleTasks[key] ?? { account: event.account, listId: event.listId, taskId: event.taskId, time: null, duration: null, deadline: null, repeat: null, starredAt: null, updatedAt: event.at };
+      const starredAt = starred === undefined ? before.starredAt : starred ? before.starredAt ?? event.at : null;
+      const next = { ...before, ...patch, listId: event.listId, starredAt, updatedAt: event.at };
+      if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null)
+        delete state.googleTasks[key];
+      else
+        state.googleTasks[key] = next;
+      return;
+    }
+    case "gtask.moved": {
+      const key = googleTaskKey(event.account, event.taskId);
+      const kept = state.googleTasks[key];
+      if (!kept)
+        return;
+      const taskId = event.newTaskId ?? event.taskId;
+      delete state.googleTasks[key];
+      state.googleTasks[googleTaskKey(event.account, taskId)] = { ...kept, listId: event.listId, taskId, updatedAt: event.at };
+      return;
+    }
+    case "gtask.dropped":
+      delete state.googleTasks[googleTaskKey(event.account, event.taskId)];
+      return;
   }
 };
 var applyEvents = (state, events) => {
@@ -528,7 +562,8 @@ var applyEvents = (state, events) => {
     series: { ...state.series },
     runs: { ...state.runs },
     folders: { ...state.folders },
-    settings: { ...state.settings }
+    settings: { ...state.settings },
+    googleTasks: { ...state.googleTasks }
   };
   for (const event of events)
     applyInto(next, event);
@@ -755,6 +790,143 @@ ${stderr}${stdout}`)) : resolve(stdout));
   }
 }
 
+// src/domain/rrule.ts
+var WEEKDAY_CODES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+var FREQUENCIES = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
+var KNOWN = new Set(["FREQ", "INTERVAL", "BYDAY", "BYMONTHDAY", "BYMONTH", "COUNT", "UNTIL"]);
+var BYDAY = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/;
+var UNTIL = /^\d{8}(T\d{6}Z?)?$/;
+var parseRRule = (line) => {
+  const body = line.trim().replace(/^RRULE:/i, "");
+  if (!body)
+    return null;
+  const parts = new Map;
+  const other = [];
+  for (const part of body.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0)
+      return null;
+    const key = part.slice(0, eq).toUpperCase();
+    const value = part.slice(eq + 1).toUpperCase();
+    if (KNOWN.has(key))
+      parts.set(key, value);
+    else
+      other.push([key, value]);
+  }
+  const freq = parts.get("FREQ") ?? "";
+  if (!FREQUENCIES.includes(freq))
+    return null;
+  const interval = Number(parts.get("INTERVAL") ?? "1");
+  if (!Number.isInteger(interval) || interval < 1 || interval > 999)
+    return null;
+  const byDay = (parts.get("BYDAY") ?? "").split(",").filter(Boolean);
+  if (!byDay.every((code) => BYDAY.test(code)))
+    return null;
+  const numbers = (key, low, high) => {
+    const values = (parts.get(key) ?? "").split(",").filter(Boolean).map(Number);
+    return values.every((value) => Number.isInteger(value) && value !== 0 && value >= low && value <= high) ? values : null;
+  };
+  const byMonthDay = numbers("BYMONTHDAY", -31, 31);
+  const byMonth = numbers("BYMONTH", 1, 12);
+  if (!byMonthDay || !byMonth)
+    return null;
+  const count = parts.has("COUNT") ? Number(parts.get("COUNT")) : null;
+  if (count !== null && (!Number.isInteger(count) || count < 1))
+    return null;
+  const until = parts.get("UNTIL") ?? null;
+  if (until !== null && !UNTIL.test(until))
+    return null;
+  return { freq, interval, byDay, byMonthDay, byMonth, count, until, other };
+};
+var formatRRule = (rule) => {
+  const parts = [`FREQ=${rule.freq}`];
+  if (rule.interval > 1)
+    parts.push(`INTERVAL=${rule.interval}`);
+  if (rule.byDay.length)
+    parts.push(`BYDAY=${rule.byDay.join(",")}`);
+  if (rule.byMonthDay.length)
+    parts.push(`BYMONTHDAY=${rule.byMonthDay.join(",")}`);
+  if (rule.byMonth.length)
+    parts.push(`BYMONTH=${rule.byMonth.join(",")}`);
+  for (const [key, value] of rule.other)
+    parts.push(`${key}=${value}`);
+  if (rule.count !== null)
+    parts.push(`COUNT=${rule.count}`);
+  else if (rule.until !== null)
+    parts.push(`UNTIL=${rule.until}`);
+  return `RRULE:${parts.join(";")}`;
+};
+var splitRecurrence = (lines) => {
+  const rules = lines.filter((line) => /^RRULE:/i.test(line.trim()));
+  const rest = lines.filter((line) => !/^RRULE:/i.test(line.trim()));
+  if (rules.length !== 1)
+    return { rule: null, line: rules[0] ?? null, rest };
+  return { rule: parseRRule(rules[0]), line: rules[0], rest };
+};
+var daysInMonth = (date) => {
+  const [y, m] = date.split("-").map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+};
+var weekdayOrdinal = (date) => {
+  const day = Number(date.slice(8));
+  return { nth: Math.ceil(day / 7), last: day + 7 > daysInMonth(date) };
+};
+var utcStamp = (instant) => new Date(instant).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+var untilBefore = (occurrence) => {
+  if (occurrence.date && isDateKey(occurrence.date))
+    return addDays(occurrence.date, -1).replace(/-/g, "");
+  const instant = Date.parse(occurrence.dateTime ?? "");
+  return Number.isNaN(instant) ? null : utcStamp(instant - 1000);
+};
+var shiftCode = (code, days) => {
+  const match = BYDAY.exec(code);
+  if (!match || match[1])
+    return null;
+  const index = WEEKDAY_CODES.indexOf(match[2]);
+  return WEEKDAY_CODES[((index + days) % 7 + 7) % 7];
+};
+var shiftRule = (rule, from, to) => {
+  const days = daysBetween(from, to);
+  if (days === 0)
+    return rule;
+  if (rule.other.some(([key]) => key !== "WKST"))
+    return null;
+  const code = WEEKDAY_CODES[weekday(to)];
+  switch (rule.freq) {
+    case "DAILY":
+    case "WEEKLY": {
+      if (rule.byMonthDay.length || rule.byMonth.length)
+        return null;
+      const byDay = rule.byDay.map((item) => shiftCode(item, days));
+      return byDay.every(Boolean) ? { ...rule, byDay: [...new Set(byDay)] } : null;
+    }
+    case "MONTHLY": {
+      if (rule.byMonth.length || rule.byDay.length && rule.byMonthDay.length)
+        return null;
+      if (rule.byMonthDay.length)
+        return rule.byMonthDay.length === 1 ? { ...rule, byMonthDay: [Number(to.slice(8))] } : null;
+      if (rule.byDay.length === 1 && BYDAY.exec(rule.byDay[0])?.[1]) {
+        const { nth, last } = weekdayOrdinal(to);
+        const wasLast = rule.byDay[0].startsWith("-1");
+        return { ...rule, byDay: [`${wasLast && last ? -1 : nth >= 5 ? -1 : nth}${code}`] };
+      }
+      if (rule.byDay.length) {
+        const byDay = rule.byDay.map((item) => shiftCode(item, days));
+        return byDay.every(Boolean) ? { ...rule, byDay } : null;
+      }
+      return rule;
+    }
+    case "YEARLY":
+      if (rule.byDay.length)
+        return null;
+      return {
+        ...rule,
+        byMonth: rule.byMonth.length ? [Number(to.slice(5, 7))] : [],
+        byMonthDay: rule.byMonthDay.length ? [Number(to.slice(8))] : []
+      };
+  }
+};
+
 // src/domain/linearDisplay.ts
 var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var oneOf = (list, value) => typeof value === "string" && list.includes(value);
@@ -833,7 +1005,39 @@ var isPlacement = (value) => {
 };
 var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
-var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0);
+var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due));
+var GOOGLE_NOTES_MAX = 8192;
+var isGoogleTaskId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
+var validateKeptPatch = (patch) => {
+  if (!isRecord2(patch))
+    return "patch must be an object";
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === "time" && !(value === null || Number.isInteger(value) && value >= 0 && value < 24 * 60))
+      return "time must be minutes after midnight, or null";
+    else if (key === "duration" && !(value === null || Number.isInteger(value) && value >= 5 && value <= 24 * 60))
+      return "duration must be 5 to 1440 minutes, or null";
+    else if (key === "deadline" && !(value === null || isDateKey(value)))
+      return "deadline must be a date or null";
+    else if (key === "starred" && typeof value !== "boolean")
+      return "starred must be true or false";
+    else if (key === "repeat") {
+      if (value === null)
+        continue;
+      if (!isRecord2(value) || typeof value.rule !== "string" || value.rule.length > 500 || !parseRRule(value.rule))
+        return "repeat needs an RRULE";
+      if (!isId(value.seriesId))
+        return "repeat needs a series id";
+      if (!(Number.isInteger(value.index) && value.index >= 1 && value.index <= 1e5))
+        return "repeat index must be a count";
+      if (!(value.next === null || isGoogleTaskId(value.next)))
+        return "repeat next must be a task id or null";
+      if (Object.keys(value).some((field) => !["rule", "seriesId", "index", "next"].includes(field)))
+        return "repeat has an unknown field";
+    } else if (!["time", "duration", "deadline", "starred", "repeat"].includes(key))
+      return `unknown field ${key}`;
+  }
+  return null;
+};
 var PRIORITY_VALUES = new Set(["urgent", "high", "medium", "low"]);
 var isPriority = (value) => value === null || typeof value === "string" && PRIORITY_VALUES.has(value);
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
@@ -1099,6 +1303,10 @@ var validateCommand = (command, context) => {
         return "source is invalid";
       if (command.title !== undefined && !isTitle(command.title))
         return "title must be 1-500 characters";
+      if (command.notes !== undefined && !(typeof command.notes === "string" && command.notes.length <= NOTES_MAX))
+        return "notes are too long";
+      if (command.dueDate !== undefined && !(command.dueDate === null || isDateKey(command.dueDate)))
+        return "dueDate must be a date or null";
       return needTask();
     case "timer.started":
       return needTask();
@@ -1303,6 +1511,16 @@ var validateCommand = (command, context) => {
       return needChannel();
     case "settings.updated":
       return validateSettingsPatch(command.patch);
+    case "gtask.kept":
+      if (!isGoogleAccount(command.account) || !isGoogleTaskId(command.listId) || !isGoogleTaskId(command.taskId))
+        return "a Google account, list and task are required";
+      return validateKeptPatch(command.patch);
+    case "gtask.moved":
+      if (!isGoogleAccount(command.account) || !isGoogleTaskId(command.taskId) || !isGoogleTaskId(command.listId))
+        return "a Google account, task and list are required";
+      return command.newTaskId === undefined || isGoogleTaskId(command.newTaskId) ? null : "newTaskId must be a task id";
+    case "gtask.dropped":
+      return isGoogleAccount(command.account) && isGoogleTaskId(command.taskId) ? null : "a Google account and task are required";
     default:
       return `unknown command type ${String(type)}`;
   }
@@ -1315,7 +1533,7 @@ var commandBody = (command) => {
 // src/domain/recurrence.ts
 var RECURRENCE_HORIZON_DAYS = 7;
 var parts = (date) => date.split("-").map(Number);
-var daysInMonth = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+var daysInMonth2 = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
 var occursOn = (rule, startDate, date) => {
   if (date < startDate)
     return false;
@@ -1333,7 +1551,7 @@ var occursOn = (rule, startDate, date) => {
       const [y, m, d] = parts(date);
       if (((y - sy) * 12 + (m - sm)) % interval !== 0)
         return false;
-      const total = daysInMonth(y, m);
+      const total = daysInMonth2(y, m);
       const wanted = rule.monthDay ?? sd;
       const target = wanted < 0 ? total + wanted + 1 : Math.min(wanted, total);
       return d === target;
@@ -1341,7 +1559,7 @@ var occursOn = (rule, startDate, date) => {
     case "yearly": {
       const [sy, sm, sd] = parts(startDate);
       const [y, m, d] = parts(date);
-      return (y - sy) % interval === 0 && m === sm && d === Math.min(sd, daysInMonth(y, m));
+      return (y - sy) % interval === 0 && m === sm && d === Math.min(sd, daysInMonth2(y, m));
     }
   }
 };
@@ -1520,6 +1738,12 @@ var summarize = (events, titleOf) => {
       return `Delete channel: ${event.channelId}`;
     case "settings.updated":
       return `Update settings: ${Object.keys(event.patch).join(", ")}`;
+    case "gtask.kept":
+      return `Keep for a Google task: ${Object.keys(event.patch).join(", ")}`;
+    case "gtask.moved":
+      return "A Google task moved";
+    case "gtask.dropped":
+      return "Forget a Google task";
   }
 };
 var DEFAULT_CHANNELS = [
@@ -1834,12 +2058,12 @@ var parseIcs = (text) => {
   return events;
 };
 var icsInstant = (time, userZone) => Date.parse(instantAt(time.date, time.allDay ? 0 : time.minutes, time.allDay ? userZone : time.zone ?? userZone));
-var WEEKDAY_CODES = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+var WEEKDAY_CODES2 = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
 var MAX_OCCURRENCES = 5000;
-var daysInMonth2 = (year, month) => new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+var daysInMonth3 = (year, month) => new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
 var keyOf = (year, month, day) => `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 var nthWeekdayOfMonth = (year, month, day, n) => {
-  const total = daysInMonth2(year, month);
+  const total = daysInMonth3(year, month);
   const matches = [];
   for (let d = 1;d <= total; d++)
     if (new Date(Date.UTC(year, month, d)).getUTCDay() === day)
@@ -1875,7 +2099,7 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
       break;
     case "WEEKLY": {
       const weekStartsOn = rule.WKST === "SU" ? 0 : 1;
-      const days = byDay.length ? byDay.map((code) => WEEKDAY_CODES[code.slice(-2)]).filter((day) => day !== undefined) : [weekday(start.date)];
+      const days = byDay.length ? byDay.map((code) => WEEKDAY_CODES2[code.slice(-2)]).filter((day) => day !== undefined) : [weekday(start.date)];
       const offsets = [...new Set(days.map((day) => (day - weekStartsOn + 7) % 7))].sort((a, b) => a - b);
       for (let week = startOfWeek(start.date, weekStartsOn), guard = 0;!done && guard < MAX_OCCURRENCES; week = addDays(week, 7 * interval), guard++) {
         for (const offset of offsets)
@@ -1894,21 +2118,21 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
             const match = /^([+-]?\d+)?([A-Z]{2})$/.exec(code);
             if (!match)
               continue;
-            const day = WEEKDAY_CODES[match[2]];
+            const day = WEEKDAY_CODES2[match[2]];
             const nth = match[1] ? Number(match[1]) : null;
             if (nth) {
               const date = nthWeekdayOfMonth(year, month, day, nth);
               if (date)
                 candidates.push(date);
             } else {
-              for (let d = 1;d <= daysInMonth2(year, month); d++)
+              for (let d = 1;d <= daysInMonth3(year, month); d++)
                 if (new Date(Date.UTC(year, month, d)).getUTCDay() === day)
                   candidates.push(keyOf(year, month, d));
             }
           }
         } else {
           for (const value of monthDays.length ? monthDays : [startDay]) {
-            const total = daysInMonth2(year, month);
+            const total = daysInMonth3(year, month);
             const day = value < 0 ? total + value + 1 : value;
             if (day >= 1 && day <= total)
               candidates.push(keyOf(year, month, day));
@@ -1924,7 +2148,7 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
     case "YEARLY":
       for (let year = startYear, guard = 0;!done && guard < MAX_OCCURRENCES; year += interval, guard++) {
         const month = startMonth - 1;
-        if (startDay <= daysInMonth2(year, month))
+        if (startDay <= daysInMonth3(year, month))
           take(keyOf(year, month, startDay));
         if (keyOf(year, 0, 1) > lastDate)
           done = true;
@@ -3181,144 +3405,8 @@ var dueTaskEvent = (item, zone) => ({
   busy: false,
   googleTask: item
 });
+var TASK_GONE = "This task is no longer in Google Tasks";
 var gmailUrl = (account, threadId) => `https://mail.google.com/mail/u/${encodeURIComponent(account)}/#all/${encodeURIComponent(threadId)}`;
-
-// src/domain/rrule.ts
-var WEEKDAY_CODES2 = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
-var FREQUENCIES = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
-var KNOWN = new Set(["FREQ", "INTERVAL", "BYDAY", "BYMONTHDAY", "BYMONTH", "COUNT", "UNTIL"]);
-var BYDAY = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/;
-var UNTIL = /^\d{8}(T\d{6}Z?)?$/;
-var parseRRule = (line) => {
-  const body = line.trim().replace(/^RRULE:/i, "");
-  if (!body)
-    return null;
-  const parts = new Map;
-  const other = [];
-  for (const part of body.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq <= 0)
-      return null;
-    const key = part.slice(0, eq).toUpperCase();
-    const value = part.slice(eq + 1).toUpperCase();
-    if (KNOWN.has(key))
-      parts.set(key, value);
-    else
-      other.push([key, value]);
-  }
-  const freq = parts.get("FREQ") ?? "";
-  if (!FREQUENCIES.includes(freq))
-    return null;
-  const interval = Number(parts.get("INTERVAL") ?? "1");
-  if (!Number.isInteger(interval) || interval < 1 || interval > 999)
-    return null;
-  const byDay = (parts.get("BYDAY") ?? "").split(",").filter(Boolean);
-  if (!byDay.every((code) => BYDAY.test(code)))
-    return null;
-  const numbers = (key, low, high) => {
-    const values = (parts.get(key) ?? "").split(",").filter(Boolean).map(Number);
-    return values.every((value) => Number.isInteger(value) && value !== 0 && value >= low && value <= high) ? values : null;
-  };
-  const byMonthDay = numbers("BYMONTHDAY", -31, 31);
-  const byMonth = numbers("BYMONTH", 1, 12);
-  if (!byMonthDay || !byMonth)
-    return null;
-  const count = parts.has("COUNT") ? Number(parts.get("COUNT")) : null;
-  if (count !== null && (!Number.isInteger(count) || count < 1))
-    return null;
-  const until = parts.get("UNTIL") ?? null;
-  if (until !== null && !UNTIL.test(until))
-    return null;
-  return { freq, interval, byDay, byMonthDay, byMonth, count, until, other };
-};
-var formatRRule = (rule) => {
-  const parts = [`FREQ=${rule.freq}`];
-  if (rule.interval > 1)
-    parts.push(`INTERVAL=${rule.interval}`);
-  if (rule.byDay.length)
-    parts.push(`BYDAY=${rule.byDay.join(",")}`);
-  if (rule.byMonthDay.length)
-    parts.push(`BYMONTHDAY=${rule.byMonthDay.join(",")}`);
-  if (rule.byMonth.length)
-    parts.push(`BYMONTH=${rule.byMonth.join(",")}`);
-  for (const [key, value] of rule.other)
-    parts.push(`${key}=${value}`);
-  if (rule.count !== null)
-    parts.push(`COUNT=${rule.count}`);
-  else if (rule.until !== null)
-    parts.push(`UNTIL=${rule.until}`);
-  return `RRULE:${parts.join(";")}`;
-};
-var splitRecurrence = (lines) => {
-  const rules = lines.filter((line) => /^RRULE:/i.test(line.trim()));
-  const rest = lines.filter((line) => !/^RRULE:/i.test(line.trim()));
-  if (rules.length !== 1)
-    return { rule: null, line: rules[0] ?? null, rest };
-  return { rule: parseRRule(rules[0]), line: rules[0], rest };
-};
-var daysInMonth3 = (date) => {
-  const [y, m] = date.split("-").map(Number);
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
-};
-var weekdayOrdinal = (date) => {
-  const day = Number(date.slice(8));
-  return { nth: Math.ceil(day / 7), last: day + 7 > daysInMonth3(date) };
-};
-var utcStamp = (instant) => new Date(instant).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-var untilBefore = (occurrence) => {
-  if (occurrence.date && isDateKey(occurrence.date))
-    return addDays(occurrence.date, -1).replace(/-/g, "");
-  const instant = Date.parse(occurrence.dateTime ?? "");
-  return Number.isNaN(instant) ? null : utcStamp(instant - 1000);
-};
-var shiftCode = (code, days) => {
-  const match = BYDAY.exec(code);
-  if (!match || match[1])
-    return null;
-  const index = WEEKDAY_CODES2.indexOf(match[2]);
-  return WEEKDAY_CODES2[((index + days) % 7 + 7) % 7];
-};
-var shiftRule = (rule, from, to) => {
-  const days = daysBetween(from, to);
-  if (days === 0)
-    return rule;
-  if (rule.other.some(([key]) => key !== "WKST"))
-    return null;
-  const code = WEEKDAY_CODES2[weekday(to)];
-  switch (rule.freq) {
-    case "DAILY":
-    case "WEEKLY": {
-      if (rule.byMonthDay.length || rule.byMonth.length)
-        return null;
-      const byDay = rule.byDay.map((item) => shiftCode(item, days));
-      return byDay.every(Boolean) ? { ...rule, byDay: [...new Set(byDay)] } : null;
-    }
-    case "MONTHLY": {
-      if (rule.byMonth.length || rule.byDay.length && rule.byMonthDay.length)
-        return null;
-      if (rule.byMonthDay.length)
-        return rule.byMonthDay.length === 1 ? { ...rule, byMonthDay: [Number(to.slice(8))] } : null;
-      if (rule.byDay.length === 1 && BYDAY.exec(rule.byDay[0])?.[1]) {
-        const { nth, last } = weekdayOrdinal(to);
-        const wasLast = rule.byDay[0].startsWith("-1");
-        return { ...rule, byDay: [`${wasLast && last ? -1 : nth >= 5 ? -1 : nth}${code}`] };
-      }
-      if (rule.byDay.length) {
-        const byDay = rule.byDay.map((item) => shiftCode(item, days));
-        return byDay.every(Boolean) ? { ...rule, byDay } : null;
-      }
-      return rule;
-    }
-    case "YEARLY":
-      if (rule.byDay.length)
-        return null;
-      return {
-        ...rule,
-        byMonth: rule.byMonth.length ? [Number(to.slice(5, 7))] : [],
-        byMonthDay: rule.byMonthDay.length ? [Number(to.slice(8))] : []
-      };
-  }
-};
 
 // src/domain/gevents.ts
 var EDIT_SCOPES = ["this", "following", "all"];
@@ -3952,6 +4040,20 @@ ${calendarId}`;
     });
     return found.filter((item) => Boolean(item));
   }
+  async locateTasks(account, ids, except) {
+    const wanted = new Set(ids);
+    if (!wanted.size)
+      return [];
+    const lists = (await this.taskLists(account)).filter((list) => list.id !== except);
+    const read = await mapLimited(lists, 4, (list) => this.allTasks(account, list.id));
+    return read.flatMap((list) => list.tasks.filter((task) => wanted.has(task.id)));
+  }
+  async linkedTasks(account, listId, ids) {
+    const here = await this.tasksById(account, listId, ids);
+    const gone = ids.filter((id) => !here.some((item) => item.id === id));
+    const moved = await this.locateTasks(account, gone, listId);
+    return { tasks: [...here, ...moved], missing: gone.filter((id) => !moved.some((item) => item.id === id)) };
+  }
   async updateTask(account, listId, id, patch) {
     const body = {};
     if (patch.completed !== undefined)
@@ -3962,8 +4064,20 @@ ${calendarId}`;
       body.title = patch.title;
     if (patch.notes !== undefined)
       body.notes = patch.notes;
-    const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`, body);
-    return raw ? toTaskItem(raw, account, listId) : null;
+    const write = async (list) => {
+      const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc(list)}/tasks/${enc(id)}`, body);
+      return raw ? toTaskItem(raw, account, list) : null;
+    };
+    try {
+      return await write(listId);
+    } catch (error) {
+      if (!isGone(error))
+        throw error;
+      const [moved] = await this.locateTasks(account, [id], listId);
+      if (!moved)
+        throw new GoogleError(404, TASK_GONE);
+      return write(moved.listId);
+    }
   }
   async createTask(account, listId, task) {
     const query = new URLSearchParams({ ...task.parent ? { parent: task.parent } : {}, ...task.previous ? { previous: task.previous } : {} });
@@ -5025,15 +5139,18 @@ var googleRoute = async (req, url) => {
     if (groups.length > 10 || groups.some((group) => group.ids.length > 50))
       return { status: 400, body: { error: "at most 10 lists of 50 tasks per request" } };
     const tasks = [];
+    const missing = [];
     const errors = [];
     await Promise.all(groups.map(async (group) => {
       try {
-        tasks.push(...await googleData.tasksById(group.account, group.listId, group.ids));
+        const found = await googleData.linkedTasks(group.account, group.listId, group.ids);
+        tasks.push(...found.tasks);
+        missing.push(...found.missing.map((id) => ({ account: group.account, listId: group.listId, id })));
       } catch (error) {
         errors.push({ account: group.account, message: error instanceof Error ? error.message : String(error) });
       }
     }));
-    return ok({ tasks, errors });
+    return ok({ tasks, missing, errors });
   }
   if (path === "/google/tasks" && (req.method === "PATCH" || req.method === "POST")) {
     const body = await readJson(req);
@@ -5041,8 +5158,8 @@ var googleRoute = async (req, url) => {
       return { status: 400, body: { error: "account and listId are required" } };
     if (body.due !== undefined && body.due !== null && !isDateKey(body.due))
       return { status: 400, body: { error: "due must be a date or null" } };
-    if (body.notes !== undefined && (typeof body.notes !== "string" || body.notes.length > 8000))
-      return { status: 400, body: { error: "notes must be text" } };
+    if (body.notes !== undefined && (typeof body.notes !== "string" || body.notes.length > 8192))
+      return { status: 400, body: { error: "notes must be text, at most 8192 characters (as Google Tasks keeps)" } };
     if (body.title !== undefined && (typeof body.title !== "string" || !body.title.trim() || body.title.length > 1024))
       return { status: 400, body: { error: "title must be 1 to 1024 characters" } };
     if (req.method === "PATCH") {

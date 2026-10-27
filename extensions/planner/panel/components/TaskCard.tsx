@@ -12,6 +12,7 @@ import { autoTimebox } from '../lib/autoSchedule.ts';
 import { setHoveredTask } from '../lib/hover.ts';
 import { isClosedType } from '../../src/domain/linear.ts';
 import { shortKey } from '../../src/domain/github.ts';
+import { KEPT_HINT, keptFor, keptTimeLabel } from '../../src/domain/gtaskKept.ts';
 import { AgentChip } from './Agents.tsx';
 import { AssignPopover } from './AssigneePicker.tsx';
 import type { PlaylistEntry } from '../../src/domain/schedule.ts';
@@ -146,7 +147,9 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
   const timebox = dayKey ? blocksFor(view.state, task.id).find((block) => zonedDateMinutes(block.start, zone).date === dayKey) : undefined;
   const objective = task.objectiveId ? view.state.objectives[task.objectiveId] : null;
   const hasRuns = Object.values(view.state.runs).some((run) => run.taskId === task.id);
-  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox || objective || task.recurrence || task.source || hasRuns;
+  // What the Planner keeps for the Google task this plans: its time, deadline, repeat and star.
+  const kept = task.source?.kind === 'gtask' && task.source.account ? keptFor(view.state, { account: task.source.account, id: task.source.id }) : null;
+  const hasMeta = channel || task.rolloverCount > 0 || task.priority || due || task.subtasks.length > 0 || task.notes || timebox || objective || task.recurrence || task.source || hasRuns || kept;
   const sourceClosed = isClosedType(task.source?.status?.type);
 
   const toggle = () =>
@@ -193,6 +196,10 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
             {task.priority && <span class={`priority priority-${task.priority}`}>{PRIORITY_LABEL[task.priority]}</span>}
             {objective && !objective.deletedAt && <span class="objective-badge" title={`Objective: ${objective.title}`}>◎ {objective.title}</span>}
             {due && <span class={`due${dueClass}`}>Due {due === view.today ? 'today' : monthDay(due)}</span>}
+            {kept && kept.time !== null && <span class="gtask-kept" title={`Google task at ${keptTimeLabel(kept)} (${KEPT_HINT})`}>◷ {keptTimeLabel(kept)}</span>}
+            {kept?.deadline && <span class={`gtask-kept${kept.deadline < view.today && !done ? ' is-overdue' : ''}`} title={`Deadline (${KEPT_HINT})`}>⚑ {monthDay(kept.deadline)}</span>}
+            {kept?.repeat && <span class="repeats" title={`Repeats in Google Tasks' way (${KEPT_HINT})`}>⟳</span>}
+            {kept?.starredAt && <span class="gtask-kept is-starred" title={`Starred (${KEPT_HINT})`}>★</span>}
             {task.subtasks.length > 0 && <span class="subtask-count" title="Subtasks">☑ {subtasksDone}/{task.subtasks.length}</span>}
             {task.notes && <span class="has-notes" title="Has notes">≡</span>}
             {task.recurrence && <span class="repeats" title="Repeats">⟳</span>}

@@ -1,10 +1,12 @@
+import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import type { DateKey, Placement, WorkBlock } from '../../src/domain/types.ts';
 import { addDays, clockLabel, daysBetween, instantAt, zonedDateMinutes } from '../../src/domain/dates.ts';
 import { blocksOnDay, edgePosition } from '../../src/domain/selectors.ts';
 import { isGoogleTaskItem } from '../../src/domain/google.ts';
-import { compactClock, compactRange, eventSpan, fitRow, layoutRow, longDay, weekdayShort, type RowItem } from '../../src/domain/gcalendar.ts';
+import { keptFor } from '../../src/domain/gtaskKept.ts';
+import { blockText, compactClock, compactRange, eventSpan, fitRow, layoutRow, longDay, weekdayShort, type RowItem } from '../../src/domain/gcalendar.ts';
 import { layoutLanes } from '../../src/domain/schedule.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
@@ -14,24 +16,42 @@ import { useUi } from '../lib/ui.ts';
 import { useNow } from '../lib/time.ts';
 import { useCalendarEvents } from '../lib/calendar.ts';
 import { anchorOf, boxAnchor, calendarUi, changeEventTimes, useCalendarUi, type Anchor } from '../lib/gcal.ts';
-import { answerClass, eventColor, eventLabel, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isTaskEvent, plannedTask } from './calendar/items.ts';
+import { answerClass, deadlineOf, eventColor, eventLabel, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isTaskEvent, plannedTask, taskEventLabel } from './calendar/items.ts';
 import { CalendarOverlays } from './calendar/Overlays.tsx';
+import { Icon } from './calendar/Icon.tsx';
 
 const HOUR_PX = 48;
 const PX_PER_MIN = HOUR_PX / 60;
 const SNAP = 15;
 const DAY_MIN = 24 * 60;
 const ALL_DAY_LINES = 3;
+/** A block's line of text (the grid's line height, styles.css); a block's title wraps over as many as fit. */
+const LINE_PX = 14;
 const snap = (minutes: number): number => Math.round(minutes / SNAP) * SNAP;
 const clamp = (value: number, low: number, high: number): number => Math.min(high, Math.max(low, value));
 
-/** A pointer drag on the grid: a session or a Google event moved or resized, or a new event drawn. */
+/** A pointer drag on the grid: a session, a Google event or a timed Google task moved or resized, or a new event drawn. */
 type Drag =
-  | { kind: 'block' | 'event'; block?: WorkBlock; event?: CalendarEvent; mode: 'move' | 'resize'; date: DateKey; startMinutes: number; endMinutes: number; pointerX: number; pointerY: number; deltaMinutes: number; targetDate: DateKey; moved: boolean; anchor: Anchor }
+  | { kind: 'block' | 'event' | 'task'; block?: WorkBlock; event?: CalendarEvent; mode: 'move' | 'resize'; date: DateKey; startMinutes: number; endMinutes: number; pointerX: number; pointerY: number; deltaMinutes: number; targetDate: DateKey; moved: boolean; anchor: Anchor }
   | { kind: 'create'; date: DateKey; from: number; to: number; pointerY: number; moved: boolean };
 
+/**
+ * A block's text, as Google Calendar fits it (`blockText`): "Title, 10am" on
+ * a block with room for one line; else the title over the whole lines it has,
+ * then the time on the line after it when the title leaves one.
+ */
+const BlockText = ({ text, time, timeLine, children }: { text: { inline: boolean; lines: number }; time: string; timeLine: string; children: ComponentChildren }) => (
+  <span class="item-text" style={{ '--lines': String(text.lines) }}>
+    <span class="item-title">
+      {children}
+      {text.inline && <span class="item-time">, {time}</span>}
+    </span>
+    {!text.inline && <span class="item-time">{timeLine}</span>}
+  </span>
+);
+
 interface Item {
-  kind: 'block' | 'event';
+  kind: 'block' | 'event' | 'task';
   id: string;
   start: number;
   end: number;
@@ -148,7 +168,7 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
     }
     if (!current.moved) {
       if (current.kind === 'block' && current.block) setUi({ openTaskId: current.block.taskId });
-      else if (current.event) calendarUi.open({ kind: 'event', event: current.event, anchor: current.anchor });
+      else if (current.event) calendarUi.open({ kind: current.kind === 'task' ? 'task' : 'event', event: current.event, anchor: current.anchor });
       return;
     }
     const length = current.endMinutes - current.startMinutes;
@@ -159,6 +179,19 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
       end = start + length;
     } else end = clamp(current.endMinutes + current.deltaMinutes, current.startMinutes + SNAP, DAY_MIN);
     if (start === current.startMinutes && end === current.endMinutes && current.targetDate === current.date) return;
+    if (current.kind === 'task' && current.event?.googleTask) {
+      // A new time is kept in the Planner; a new day is Google's date, as dragging a task in Google Calendar.
+      const event = current.event;
+      calendarUi.hold(event.id, { start: instantAt(current.targetDate, start, zone), end: instantAt(current.targetDate, end, zone), allDay: false });
+      void google
+        .moveTimedTask(event.googleTask!, current.targetDate, start)
+        .then(() => calendarUi.confirm([event.id]))
+        .catch((error) => {
+          calendarUi.drop([event.id]);
+          client.notify(`Google Tasks did not move "${event.title}": ${error instanceof Error ? error.message : String(error)}`);
+        });
+      return;
+    }
     if (current.kind === 'event' && current.event) {
       void changeEventTimes(client, current.event, { allDay: false, start: instantAt(current.targetDate, start, zone), end: instantAt(current.targetDate, end, zone) }, zone);
       return;
@@ -181,19 +214,21 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
       items.push({ kind: 'block', id: block.id, start, end: Math.max(end, start + SNAP), title: task.title, color: channel?.color ?? 'var(--oc-primary)', detail: `${clockLabel(start)} – ${clockLabel(end)}`, block, done: Boolean(task.completedAt) });
     }
     for (const event of events) {
-      if (event.allDay || isTaskEvent(event)) continue;
+      if (event.allDay) continue;
       const startLocal = zonedDateMinutes(event.start, zone);
       const endLocal = zonedDateMinutes(event.end, zone);
       if (startLocal.date > date || endLocal.date < date || (endLocal.date === date && endLocal.minutes === 0 && startLocal.date < date)) continue;
       const start = startLocal.date < date ? 0 : startLocal.minutes;
       const end = endLocal.date > date ? DAY_MIN : endLocal.minutes;
-      items.push({ kind: 'event', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: `${compactRange(start, end)}${event.location ? `, ${event.location}` : ''}`, event, clipped: startLocal.date < date || endLocal.date > date });
+      // A Google task with a time kept in the Planner, as Google Calendar shows a timed task.
+      if (isTaskEvent(event)) items.push({ kind: 'task', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: compactClock(start), event, done: Boolean(event.googleTask?.completed) });
+      else items.push({ kind: 'event', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: `${compactRange(start, end)}${event.location ? `, ${event.location}` : ''}`, event, clipped: startLocal.date < date || endLocal.date > date });
     }
     return items;
   };
 
-  // The all-day row: all-day events as bars across their days, and Google tasks on their due day.
-  const allDayItems: RowItem<CalendarEvent>[] = events.filter((event) => event.allDay || isTaskEvent(event)).map((event) => ({ item: event, span: eventSpan(event, zone), bar: true, startMs: Date.parse(event.start) }));
+  // The all-day row: all-day events as bars across their days, and Google tasks without a time on their day.
+  const allDayItems: RowItem<CalendarEvent>[] = events.filter((event) => event.allDay).map((event) => ({ item: event, span: eventSpan(event, zone), bar: true, startMs: Date.parse(event.start) }));
   const row = layoutRow(allDayItems, dates);
   const fitted = allDayOpen ? { shown: row.placements, more: dates.map(() => 0) } : fitRow(row.placements, dates.length, ALL_DAY_LINES);
   const allDayLines = Math.max(1, allDayOpen ? row.lines : Math.min(row.lines, ALL_DAY_LINES));
@@ -305,7 +340,8 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
           const task = isTaskEvent(event) ? event.googleTask! : null;
           const planned = task ? plannedTask(view.state, event) : null;
           const style = { gridColumn: `${col + 2} / span ${span}`, gridRow: `${slot + 1}`, '--item-color': color, '--item-ink': inkOn(color) };
-          const label = task ? `Google task ${event.title}, due ${longDay(task.due ?? event.start.slice(0, 10))}${task.completed ? ', completed' : ''}${planned ? ', planned in the Planner' : ''}` : eventLabel(event, zone);
+          const label = task ? taskEventLabel(event, view.state, view.today) : eventLabel(event, zone);
+          const deadline = task ? deadlineOf(event, view.state, view.today) : null;
           return (
             <button
               key={event.id}
@@ -327,6 +363,7 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
             >
               {task && <span class="task-box" aria-hidden="true">{task.completed ? '☑' : '☐'}</span>}
               <span class="bar-title">{event.title}</span>
+              {deadline && <span class={`task-deadline${deadline.overdue ? ' is-overdue' : ''}`} aria-hidden="true">⚑ {deadline.label}</span>}
               {planned && <span class="bar-badge" aria-hidden="true" title="Planned in the Planner">✓</span>}
             </button>
           );
@@ -376,6 +413,18 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                   event.preventDefault();
                   setDropHint(null);
                   const start = minutesAt(date, event.clientY);
+                  // A Google task from the all-day row gets that time (kept in the Planner) and day, as in Google Calendar.
+                  const chipData = event.dataTransfer?.getData(GCAL_TASK_TYPE);
+                  if (chipData) {
+                    let item: unknown = null;
+                    try {
+                      item = JSON.parse(chipData);
+                    } catch {
+                      return;
+                    }
+                    if (isGoogleTaskItem(item)) void google.moveTimedTask(item, date, start).catch((error) => client.notify(`Google Tasks did not move it: ${error instanceof Error ? error.message : String(error)}`));
+                    return;
+                  }
                   const issueData = event.dataTransfer?.getData(LINEAR_DRAG_TYPE);
                   if (issueData) {
                     let issue: unknown = null;
@@ -444,15 +493,68 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                       end = start + (moving.endMinutes - moving.startMinutes);
                     } else end = clamp(moving.endMinutes + moving.deltaMinutes, moving.startMinutes + SNAP, DAY_MIN);
                   }
+                  const height = Math.max(14, (end - start) * PX_PER_MIN - 2);
+                  // As Google Calendar: the title wraps over the lines the block has room for, the time on its own line when there is one to spare.
+                  const text = blockText(height - 4, LINE_PX);
                   const style = {
                     top: `${start * PX_PER_MIN}px`,
-                    height: `${Math.max(14, (end - start) * PX_PER_MIN - 2)}px`,
+                    height: `${height}px`,
                     left: `calc(${(lane / total) * 100}% + 2px)`,
                     width: `calc(${100 / total}% - 4px)`,
                     '--item-color': item.color,
                     '--item-ink': inkOn(item.color),
                   };
-                  const short = end - start < 45;
+                  if (item.kind === 'task' && item.event?.googleTask) {
+                    const event = item.event;
+                    const task = event.googleTask!;
+                    const label = taskEventLabel(event, view.state, view.today);
+                    const deadline = deadlineOf(event, view.state, view.today);
+                    return (
+                      <div
+                        key={item.id}
+                        class={`grid-item is-task${task.completed ? ' is-done' : ''}${text.inline ? ' is-inline' : ''}${dragging ? ' is-dragging' : ''}`}
+                        style={style}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={label}
+                        title={label}
+                        onPointerDown={(pointer) => {
+                          if (pointer.button !== 0 || (pointer.target as HTMLElement).closest('button')) return;
+                          pointer.preventDefault();
+                          pointer.stopPropagation();
+                          beginDrag({ kind: 'task', event, mode: 'move', date, startMinutes: item.start, endMinutes: item.end, pointerX: pointer.clientX, pointerY: pointer.clientY, deltaMinutes: 0, targetDate: date, moved: false, anchor: anchorOf(pointer.currentTarget as HTMLElement) });
+                        }}
+                        onKeyDown={(key) => {
+                          if (key.key !== 'Enter' && key.key !== ' ') return;
+                          key.preventDefault();
+                          calendarUi.open({ kind: 'task', event, anchor: anchorOf(key.currentTarget) });
+                        }}
+                      >
+                        <BlockText text={text} time={compactClock(start)} timeLine={keptFor(view.state, task)?.duration ? compactRange(start, end) : compactClock(start)}>
+                          <button
+                            class="task-check"
+                            role="checkbox"
+                            aria-checked={task.completed}
+                            aria-label={`Mark ${event.title} ${task.completed ? 'not complete' : 'complete'}`}
+                            onPointerDown={(pointer) => pointer.stopPropagation()}
+                            onClick={(click) => {
+                              click.stopPropagation();
+                              void google.completeListTask(task, !task.completed).catch((error) => client.notify(`Google Tasks did not take it: ${error instanceof Error ? error.message : String(error)}`));
+                            }}
+                          >
+                            <Icon name={task.completed ? 'done' : 'circle'} size={13} />
+                          </button>
+                          {/* The deadline first, so a long title never hides it (its date is in the label and tooltip). */}
+                          {deadline && (
+                            <span class={`task-deadline${deadline.overdue ? ' is-overdue' : ''}`} aria-hidden="true">
+                              ⚑<span class="task-deadline-date"> {deadline.label}</span>
+                            </span>
+                          )}
+                          {deadline ? ` ${event.title}` : event.title}
+                        </BlockText>
+                      </div>
+                    );
+                  }
                   if (item.kind === 'event' && item.event) {
                     const event = item.event;
                     const movable = Boolean(event.google?.editable) && !item.clipped;
@@ -466,7 +568,7 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                     return (
                       <div
                         key={item.id}
-                        class={`grid-item is-event${movable ? ' is-movable' : ''}${short ? ' is-short' : ''}${dragging ? ' is-dragging' : ''}${answerClass(event)}`}
+                        class={`grid-item is-event${movable ? ' is-movable' : ''}${text.inline ? ' is-inline' : ''}${dragging ? ' is-dragging' : ''}${answerClass(event)}`}
                         style={style}
                         role="button"
                         tabIndex={0}
@@ -489,8 +591,7 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                           calendarUi.open({ kind: 'event', event, anchor: anchorOf(key.currentTarget) });
                         }}
                       >
-                        <span class="item-title">{item.title}{short ? <span class="item-time">, {compactClock(start)}</span> : null}</span>
-                        {!short && <span class="item-time">{dragging ? compactRange(start, end) : item.detail}</span>}
+                        <BlockText text={text} time={compactClock(start)} timeLine={dragging ? compactRange(start, end) : item.detail}>{item.title}</BlockText>
                         {!inPlan(item.title, date) && (
                           <button class="item-add" aria-label={`Add ${item.title} as a task`} title="Add it to this day as a task, its length as planned time" onClick={() => addEventAsTask(item.title, date, item.end - item.start, `${item.detail}, from the calendar`)}>+</button>
                         )}
@@ -501,10 +602,11 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                   return (
                     <div
                       key={item.id}
-                      class={`grid-item is-block${item.done ? ' is-done' : ''}${dragging ? ' is-dragging' : ''}`}
+                      class={`grid-item is-block${item.done ? ' is-done' : ''}${text.inline ? ' is-inline' : ''}${dragging ? ' is-dragging' : ''}`}
                       style={style}
                       role="button"
                       aria-label={`${item.title}, ${item.detail}`}
+                      title={`${item.title}\n${item.detail}`}
                       onPointerDown={(event) => {
                         if (event.button !== 0 || !item.block) return;
                         event.preventDefault();
@@ -513,8 +615,7 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                         beginDrag({ kind: 'block', block: item.block, mode: 'move', date, startMinutes, endMinutes: startMinutes + (Date.parse(item.block.end) - Date.parse(item.block.start)) / 60_000, pointerX: event.clientX, pointerY: event.clientY, deltaMinutes: 0, targetDate: date, moved: false, anchor: boxAnchor(event.currentTarget.getBoundingClientRect()) });
                       }}
                     >
-                      <span class="item-title">{item.title}</span>
-                      <span class="item-time">{item.detail}</span>
+                      <BlockText text={text} time={compactClock(start)} timeLine={item.detail}>{item.title}</BlockText>
                       <button
                         class="item-remove"
                         aria-label={`Remove working session for ${item.title}`}
