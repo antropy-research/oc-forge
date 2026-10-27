@@ -479,6 +479,12 @@ try {
   // Sort by date, as Google Tasks has it: under each day, then those with no date.
   const listOptions = myTasks.getByRole('button', { name: 'List options for My Tasks' });
   await listOptions.click();
+  // The menu opens under its button, as Google Tasks' does (a placement without units was dropped and it sat in a corner).
+  const optionsButtonBox = await listOptions.boundingBox();
+  const optionsMenuBox = await myTasks.getByRole('menu', { name: 'List options for My Tasks' }).boundingBox();
+  check("a list's menu opens under its button, right-aligned with it",
+    Boolean(optionsButtonBox && optionsMenuBox) && Math.abs(optionsMenuBox.y - (optionsButtonBox.y + optionsButtonBox.height + 4)) <= 6 && Math.abs(optionsMenuBox.x + optionsMenuBox.width - (optionsButtonBox.x + optionsButtonBox.width)) <= 12,
+    JSON.stringify({ button: optionsButtonBox, menu: optionsMenuBox }));
   await myTasks.getByRole('menuitemradio', { name: /Date$/ }).click();
   const byDate = myTasks.getByRole('list', { name: 'My Tasks tasks by date' });
   await byDate.waitFor();
