@@ -79,18 +79,20 @@ const rowIndex = (rows: readonly TaskRow[], id: string): number => rows.findInde
  * Where a dragged task lands when dropped before `rows[index]` of the list
  * shown without it (and without its subtasks, which travel with it). With
  * `asSubtask` (dragged to the right, as in Google Tasks) it goes under the
- * task above; a task that has subtasks stays at the top level.
+ * task above; a task that has subtasks stays at the top level. So does a
+ * repeating task, and one dropped under a repeating task (`repeats`): as in
+ * Google Tasks, a repeating task has no subtasks and is none.
  */
-export const dropTarget = (allRows: readonly TaskRow[], draggedId: string, index: number, asSubtask: boolean): MoveTarget => {
+export const dropTarget = (allRows: readonly TaskRow[], draggedId: string, index: number, asSubtask: boolean, repeats: (id: string) => boolean = () => false): MoveTarget => {
   const rows = allRows.filter((row) => row.item.id !== draggedId && row.item.parent !== draggedId);
   const dragged = allRows.find((row) => row.item.id === draggedId);
-  const canNest = (dragged?.children ?? 0) === 0;
+  const canNest = (dragged?.children ?? 0) === 0 && !repeats(draggedId);
   const at = Math.max(0, Math.min(index, rows.length));
   const above = rows[at - 1];
   const below = rows[at];
-  if (canNest && above && (asSubtask || below?.depth === 1)) {
-    if (above.depth === 1) return { parent: above.item.parent, previous: above.item.id };
-    return { parent: above.item.id, previous: null };
+  const parent = above ? (above.depth === 1 ? above.item.parent : above.item.id) : null;
+  if (canNest && above && parent && !repeats(parent) && (asSubtask || below?.depth === 1)) {
+    return above.depth === 1 ? { parent, previous: above.item.id } : { parent, previous: null };
   }
   // At the top level: after the nearest top-level task above.
   for (let scan = at - 1; scan >= 0; scan--) if (rows[scan]!.depth === 0) return { parent: null, previous: rows[scan]!.item.id };

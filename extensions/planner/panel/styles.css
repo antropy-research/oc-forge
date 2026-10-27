@@ -1503,3 +1503,8 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gcal-view.is-narrow .gcal-grid .grid-item { font-size: 11px; padding: 2px 3px 2px 4px; }
 .gcal-view.is-narrow .gcal-grid .grid-item .item-title { font-weight: 500; }
 .gcal-view.is-narrow .gcal-grid .task-deadline-date { display: none; }
+
+/* The Tasks form: why a control is unavailable (a repeating task and subtasks never go together, as in Google Tasks). */
+.gt-form-note { font-size: 12px; color: var(--oc-muted); }
+.gt-form-row select:disabled { opacity: 0.6; cursor: not-allowed; }
+.gt-form-actions .link[aria-disabled='true'] { color: var(--oc-muted); cursor: help; }

@@ -44,6 +44,11 @@ export interface TaskFields {
 
 /** Why a repeating task cannot go to another list: Google Tasks keeps it in its own. */
 export const REPEATING_STAYS = 'A repeating task stays in its list, as in Google Tasks';
+/** Why a repeating task takes no subtasks, and does not become one; and why a subtask, or a task with subtasks, does not repeat. */
+export const REPEATING_NO_SUBTASKS = "A repeating task can't have subtasks, as in Google Tasks";
+export const REPEATING_NOT_SUBTASK = "A repeating task can't be a subtask, as in Google Tasks";
+export const SUBTASKS_NO_REPEAT = "A task with subtasks can't repeat, as in Google Tasks";
+export const SUBTASK_NO_REPEAT = "A subtask can't repeat, as in Google Tasks";
 
 /** Which tasks of a repeating series a change or a deletion is for, as Google Tasks asks. */
 export type RepeatScope = 'this' | 'all';
@@ -615,6 +620,13 @@ export class GoogleStore {
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
   }
 
+  /** Whether a task has subtasks (open or done) in Google: from the Tasks view's copy of its list, else read. */
+  private async hasSubtasks(item: GoogleTaskItem): Promise<boolean> {
+    const known = this.view.board[listKey(item.account, item.listId)]?.items;
+    const items = known ?? (await this.client.call<{ tasks?: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}`)).tasks ?? [];
+    return items.some((other) => other.parent === item.id);
+  }
+
   /**
    * Linked tasks whose Google task is in none of the account's lists under its
    * id: one Google's own apps moved under a new id is found by what it last
@@ -705,8 +717,12 @@ export class GoogleStore {
    * A new task: at the top of the list, or under `parent` after `previous`.
    * Shown at once. What Google Tasks' API cannot take (a time, a deadline, a
    * repeat with its series' template, a star) is kept in the Planner for it.
+   * As in Google Tasks, a repeating task takes no subtask and a subtask does
+   * not repeat: refused before anything changes.
    */
   async addListTask(account: string, listId: string, fields: { title: string; notes?: string; due?: DateKey | null; parent?: string | null; previous?: string | null }, kept: Omit<GoogleTaskKeptPatch, 'repeat'> & { rule?: string | null } = {}): Promise<GoogleTaskItem> {
+    if (fields.parent && keptFor(this.client.getView().state, { account, id: fields.parent })?.repeat) throw new Error(REPEATING_NO_SUBTASKS);
+    if (fields.parent && kept.rule) throw new Error(SUBTASK_NO_REPEAT);
     const key = listKey(account, listId);
     const temp: GoogleTaskItem = { account, listId, id: `new-${newId()}`, title: fields.title, notes: fields.notes ?? '', due: fields.due ?? null, completed: false, parent: fields.parent ?? null, position: '', url: 'https://tasks.google.com/', updated: new Date().toISOString() };
     const items = this.view.board[key]?.items ?? [];
@@ -743,11 +759,15 @@ export class GoogleStore {
    * kept for it; the series' template and schedule stay. "All tasks" changes
    * the template (and the series' other open occurrences), then this
    * occurrence to match; a new rule or a new date starts the schedule there.
+   * A subtask, or a task with subtasks, does not repeat, as in Google Tasks:
+   * refused before anything changes.
    */
   async saveListTask(item: GoogleTaskItem, fields: TaskFields, scope: RepeatScope = 'this'): Promise<void> {
     const kept = keptFor(this.client.getView().state, item);
     const repeat = kept?.repeat ?? null;
     const rule = fields.kept.rule && fields.due ? fields.kept.rule : null;
+    if (rule && !repeat && item.parent) throw new Error(SUBTASK_NO_REPEAT);
+    if (rule && !repeat && (await this.hasSubtasks(item))) throw new Error(SUBTASKS_NO_REPEAT);
     const state = this.client.getView().state;
     const google = { ...(fields.title !== item.title ? { title: fields.title } : {}), ...(fields.notes !== item.notes ? { notes: fields.notes } : {}), ...(fields.due !== item.due ? { due: fields.due } : {}) };
     const patch: GoogleTaskKeptPatch = {};
@@ -847,10 +867,17 @@ export class GoogleStore {
     }
   }
 
-  /** Put a task under `parent` after `previous`, in its list or another of the same account. Shown at once. */
+  /**
+   * Put a task under `parent` after `previous`, in its list or another of the
+   * same account. Shown at once. As in Google Tasks, a repeating task stays in
+   * its list, takes no subtasks and is no subtask: such a move is refused
+   * before anything moves.
+   */
   async moveListTask(item: GoogleTaskItem, target: MoveTarget, destinationListId: string = item.listId): Promise<void> {
-    // As in Google Tasks, a repeating task stays in its list.
-    if (destinationListId !== item.listId && keptFor(this.client.getView().state, item)?.repeat) throw new Error(REPEATING_STAYS);
+    const state = this.client.getView().state;
+    if (destinationListId !== item.listId && keptFor(state, item)?.repeat) throw new Error(REPEATING_STAYS);
+    if (target.parent && keptFor(state, item)?.repeat) throw new Error(REPEATING_NOT_SUBTASK);
+    if (target.parent && keptFor(state, { account: item.account, id: target.parent })?.repeat) throw new Error(REPEATING_NO_SUBTASKS);
     const from = listKey(item.account, item.listId);
     const to = listKey(item.account, destinationListId);
     const before = { from: this.view.board[from]?.items ?? [], to: this.view.board[to]?.items ?? [] };

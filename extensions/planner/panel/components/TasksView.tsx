@@ -15,7 +15,7 @@ import { KEPT_HINT, TASKS_API_REFERENCE, keptFor, keptTimeLabel, starredKept, ta
 import { completedItems, dateGroups, dropTarget, indentTarget, moveDownTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
-import { REPEATING_STAYS, listKey, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, listKey, type RepeatScope, type TaskFields } from '../lib/google.ts';
 import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
@@ -24,6 +24,8 @@ import { endChoices, startChoices } from './calendar/form.ts';
 
 /** A task row dragged within or between lists: account, list and task ids. */
 const ROW_DRAG_TYPE = 'application/x-planner-gtask-row';
+/** The task row being dragged, which a drop marker cannot read from the drag while it is over a list. */
+let draggedRow: string | null = null;
 const REFRESH_MS = 2 * 60_000;
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -83,9 +85,24 @@ const placed = (place: MenuPlace | null) => (place ? { position: 'fixed', ...pla
  * Title, details, date and time (or all day), deadline, repeat and star of a
  * task, edited in place, as Google Tasks' task form. A new task's form stays
  * open after Enter for the next one, as Google Tasks keeps adding. Subtasks,
- * and tasks with subtasks, do not repeat (nor in Google Tasks).
+ * and tasks with subtasks, do not repeat, nor does a repeating task take
+ * subtasks (nor in Google Tasks): those controls are unavailable, with the
+ * reason.
  */
-const TaskForm = ({ item, kept, depth, canRepeat, onSave, onCancel, onSubtask, keepOpen = false }: { item: Partial<GoogleTaskItem>; kept: GoogleTaskKept | null; depth: 0 | 1; canRepeat: boolean; onSave: (fields: TaskFields, starred: boolean) => void; onCancel: () => void; onSubtask?: () => void; keepOpen?: boolean }) => {
+const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false }: {
+  item: Partial<GoogleTaskItem>;
+  kept: GoogleTaskKept | null;
+  depth: 0 | 1;
+  canRepeat: boolean;
+  /** Why it cannot repeat, on the unavailable Repeat control. */
+  repeatNote?: string | null;
+  onSave: (fields: TaskFields, starred: boolean) => void;
+  onCancel: () => void;
+  onSubtask?: () => void;
+  /** Why it takes no subtasks, on the unavailable "Add subtask". */
+  subtaskNote?: string | null;
+  keepOpen?: boolean;
+}) => {
   const view = useView();
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [title, setTitle] = useState(item.title ?? '');
@@ -159,6 +176,15 @@ const TaskForm = ({ item, kept, depth, canRepeat, onSave, onCancel, onSubtask, k
         <input type="date" aria-label="Deadline" value={deadline ?? ''} onChange={(event) => setDeadline(isDateKey(event.currentTarget.value) ? event.currentTarget.value : null)} />
         {deadline && <button class="link" aria-label="Remove the deadline" onClick={() => setDeadline(null)}>Clear</button>}
       </div>
+      {!canRepeat && repeatNote && (
+        <div class="gt-form-row gt-form-repeat" title={repeatNote}>
+          <Icon name="repeat" size={16} />
+          <select aria-label="Repeat" disabled title={repeatNote}>
+            <option>Does not repeat</option>
+          </select>
+          <span class="gt-form-note">{repeatNote}</span>
+        </div>
+      )}
       {canRepeat && (
         <div class="gt-form-row gt-form-repeat">
           <Icon name="repeat" size={16} />
@@ -209,7 +235,11 @@ const TaskForm = ({ item, kept, depth, canRepeat, onSave, onCancel, onSubtask, k
       </div>
       <KeptHint />
       <div class="gt-form-row gt-form-actions">
-        {onSubtask && <button class="link" onClick={onSubtask}><Icon name="indent" size={16} /> Add subtask</button>}
+        {(onSubtask || subtaskNote) && (
+          <button class="link" aria-disabled={subtaskNote ? 'true' : undefined} title={subtaskNote ?? undefined} onClick={() => !subtaskNote && onSubtask?.()}>
+            <Icon name="indent" size={16} /> Add subtask
+          </button>
+        )}
         <span class="nav-spacer" />
         <button class="link" onClick={onCancel}>Cancel</button>
         <button class="primary" onClick={save}>{item.id ? 'Done' : 'Add'}</button>
@@ -295,6 +325,9 @@ const useTaskSave = () => {
   };
 };
 
+/** Why a task cannot repeat, as Google Tasks has it: a subtask, or a task with subtasks (open or done); null when it can. */
+export const repeatBlock = (item: GoogleTaskItem, items: readonly GoogleTaskItem[]): string | null => (item.parent ? SUBTASK_NO_REPEAT : items.some((other) => other.parent === item.id) ? SUBTASKS_NO_REPEAT : null);
+
 /** A task's ⋮ menu; sorted by date, the list's order is not on screen, so nothing moves in it. */
 const RowMenu = ({ row, rows, list, lists, ordered, place, onClose, onEdit, onSubtask }: { row: TaskRow; rows: TaskRow[]; list: GoogleTaskList; lists: GoogleTaskList[]; ordered: boolean; place: MenuPlace | null; onClose: () => void; onEdit: () => void; onSubtask: () => void }) => {
   const { google, client, host } = usePlanner();
@@ -310,6 +343,9 @@ const RowMenu = ({ row, rows, list, lists, ordered, place, onClose, onEdit, onSu
   const move = (target: MoveTarget | null) => target && act(() => google.moveListTask(item, target));
   const elsewhere = lists.filter((other) => other.account === list.account && other.id !== list.id);
   const repeating = Boolean(keptFor(view.state, item)?.repeat);
+  // As in Google Tasks, a repeating task takes no subtasks and is no subtask: those actions are unavailable, with the reason.
+  const indent = ordered ? indentTarget(rows, item.id) : null;
+  const indentBlock = !indent ? null : repeating ? REPEATING_NOT_SUBTASK : indent.parent && keptFor(view.state, { account: item.account, id: indent.parent })?.repeat ? REPEATING_NO_SUBTASKS : null;
   const remove = async () => {
     const scope = keptFor(view.state, item)?.repeat ? await askRepeat('delete') : 'this';
     if (scope) await google.deleteListTask(item, scope);
@@ -317,8 +353,16 @@ const RowMenu = ({ row, rows, list, lists, ordered, place, onClose, onEdit, onSu
   return (
     <div class="menu gt-menu" ref={ref} role="menu" aria-label={`Actions for ${item.title}`} style={placed(place)}>
       <button role="menuitem" onClick={() => { onClose(); onEdit(); }}>Edit</button>
-      {row.depth === 0 && !item.parent && <button role="menuitem" onClick={() => { onClose(); onSubtask(); }}>Add a subtask</button>}
-      {ordered && indentTarget(rows, item.id) && <button role="menuitem" onClick={() => move(indentTarget(rows, item.id))}>Indent</button>}
+      {row.depth === 0 && !item.parent && (
+        <button role="menuitem" aria-disabled={repeating ? 'true' : undefined} title={repeating ? REPEATING_NO_SUBTASKS : undefined} onClick={() => !repeating && (onClose(), onSubtask())}>
+          Add a subtask
+        </button>
+      )}
+      {indent && (
+        <button role="menuitem" aria-disabled={indentBlock ? 'true' : undefined} title={indentBlock ?? undefined} onClick={() => !indentBlock && move(indent)}>
+          Indent
+        </button>
+      )}
       {ordered && row.depth === 1 && <button role="menuitem" onClick={() => move(outdentTarget(rows, item.id))}>Unindent</button>}
       {ordered && moveUpTarget(rows, item.id) && <button role="menuitem" onClick={() => move(moveUpTarget(rows, item.id))}>Move up</button>}
       {ordered && moveDownTarget(rows, item.id) && <button role="menuitem" onClick={() => move(moveDownTarget(rows, item.id))}>Move down</button>}
@@ -381,6 +425,8 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
     setClearing(false);
   });
   const run = (work: () => Promise<unknown>) => work().catch((error) => client.notify(`Google Tasks did not take it: ${messageOf(error)}`));
+  /** A repeating task of this account: it takes no subtasks and is no subtask. */
+  const repeats = (id: string | null): boolean => Boolean(id && keptFor(view.state, { account: list.account, id })?.repeat);
 
   const dropIndex = (clientY: number): number => {
     const elements = Array.from(listRef.current?.querySelectorAll<HTMLElement>(':scope > li[data-task]') ?? []);
@@ -413,9 +459,11 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
             item={item}
             kept={kept}
             depth={row.depth}
-            canRepeat={row.depth === 0 && !item.parent && row.children === 0}
+            canRepeat={Boolean(kept?.repeat) || (row.depth === 0 && !repeatBlock(item, items))}
+            repeatNote={repeatBlock(item, items)}
             onCancel={() => setEditing(null)}
             onSubtask={row.depth === 0 && !item.parent && !kept?.repeat ? () => subtaskOf(item) : undefined}
+            subtaskNote={row.depth === 0 && !item.parent && kept?.repeat ? REPEATING_NO_SUBTASKS : null}
             onSave={(fields, starred) => {
               setEditing(null);
               void saveTask(item, fields, starred);
@@ -431,7 +479,9 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
         class={`gt-row depth-${row.depth}${menu === item.id ? ' has-menu' : ''}`}
         draggable
         aria-label={item.title}
+        onDragEnd={() => (draggedRow = null)}
         onDragStart={(event) => {
+          draggedRow = item.id;
           event.dataTransfer?.setData(ROW_DRAG_TYPE, `${item.account}\n${item.listId}\n${item.id}`);
           // Onto the calendar or a day, the task is planned there.
           event.dataTransfer?.setData(GOOGLE_DRAG_TYPE, JSON.stringify({ kind: 'gtask', item }));
@@ -577,7 +627,12 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
           if (sort !== 'mine' || !event.dataTransfer?.types.includes(ROW_DRAG_TYPE)) return;
           event.preventDefault();
           const box = listRef.current?.getBoundingClientRect();
-          setDrop({ index: dropIndex(event.clientY), child: Boolean(box && event.clientX - box.left > 56) });
+          const index = dropIndex(event.clientY);
+          // Dragged to the right it nests under the task above, unless one of the two repeats (as in Google Tasks).
+          const shown = rows.filter((row) => row.item.id !== draggedRow);
+          const above = shown[index - (rows.slice(0, index).some((row) => row.item.id === draggedRow) ? 2 : 1)];
+          const parent = above ? (above.depth === 1 ? above.item.parent : above.item.id) : null;
+          setDrop({ index, child: Boolean(box && event.clientX - box.left > 56) && Boolean(parent) && !repeats(parent) && !(draggedRow && repeats(draggedRow)) });
         }}
         onDragLeave={(event) => {
           if (!listRef.current?.contains(event.relatedTarget as Node | null)) setDrop(null);
@@ -594,7 +649,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
           // The index counts rows as shown, the dragged one still among them; its subtasks travel with it.
           const before = rows.slice(0, at.index).filter((row) => row.item.id !== id && row.item.parent !== id).length;
           const dragged: TaskRow = { item: source, depth: source.parent ? 1 : 0, children: sourceItems.filter((item) => item.parent === id && !item.completed).length };
-          const target = dropTarget([...rows.filter((row) => row.item.id !== id), dragged], id, before, at.child);
+          const target = dropTarget([...rows.filter((row) => row.item.id !== id), dragged], id, before, at.child, repeats);
           void run(() => google.moveListTask(source, target, list.id));
         }}
       >
@@ -691,7 +746,8 @@ const StarredColumn = ({ lists }: { lists: GoogleTaskList[] }) => {
                 item={item}
                 kept={kept}
                 depth={0}
-                canRepeat={!item.parent}
+                canRepeat={Boolean(kept.repeat) || !repeatBlock(item, gv.board[listKey(item.account, item.listId)]?.items ?? [])}
+                repeatNote={repeatBlock(item, gv.board[listKey(item.account, item.listId)]?.items ?? [])}
                 onCancel={() => setEditing(null)}
                 onSave={(fields, star) => {
                   setEditing(null);

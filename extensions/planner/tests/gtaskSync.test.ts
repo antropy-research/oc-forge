@@ -7,7 +7,8 @@
 // occurrence is made once; a timed block's text fits its height.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore } from '../panel/lib/google.ts';
+import { GoogleStore, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
+import { dropTarget } from '../src/domain/gtasks.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { GoogleData, toTaskItem } from '../service/googleData.ts';
 import { GoogleError, type GoogleAccounts } from '../service/google.ts';
@@ -444,6 +445,38 @@ describe("a repeating task's series", () => {
     await new GoogleStore(host, fake.client, 'page').makeNextOccurrences([done]);
     expect(fake.calls.find((call) => call.method === 'POST')?.body).toMatchObject({ title: 'Water the plants', notes: 'Balcony', due: '2026-10-27' });
     expect(keptFor(fake.state(), { account: ME, id: 'gt2' })).toMatchObject({ time: 600, deadline: '2026-10-28', repeat: { index: 4, on: '2026-10-27', template: { title: 'Water the plants' } } });
+  });
+});
+
+describe('a repeating task and subtasks never go together, as in Google Tasks', () => {
+  const repeating = () => foldEvents([ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 1, next: null } } })]);
+  const row = (id: string, depth: 0 | 1 = 0, parent: string | null = null) => ({ item: item({ id, parent }), depth, children: 0 });
+
+  test('dragged right under a repeating task, a task stays at the top level; a repeating task does not nest', () => {
+    const repeats = (id: string) => id === 'gt1';
+    const rows = [row('gt1'), row('gt2'), row('gt3')];
+    expect(dropTarget(rows, 'gt3', 1, true, repeats)).toEqual({ parent: null, previous: 'gt1' });
+    expect(dropTarget(rows, 'gt3', 2, true, repeats)).toEqual({ parent: 'gt2', previous: null });
+    expect(dropTarget(rows, 'gt1', 2, true, repeats)).toEqual({ parent: null, previous: 'gt3' });
+    expect(dropTarget(rows, 'gt3', 1, true)).toEqual({ parent: 'gt1', previous: null });
+  });
+
+  test('a subtask under a repeating task, a repeating task under another, or a repeat on a task with subtasks: refused before anything changes', async () => {
+    const fake = fakeClient(repeating(), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ id: 'gt2' }), item({ id: 'gt3', parent: 'gt2' })], complete: true } : {}));
+    const store = new GoogleStore(host, fake.client, 'page');
+    const refused = (work: Promise<unknown>) => work.then(() => null, (error: Error) => error.message);
+    expect(await refused(store.addListTask(ME, 'L1', { title: 'Child', parent: 'gt1' }))).toBe(REPEATING_NO_SUBTASKS);
+    expect(await refused(store.moveListTask(item({ id: 'gt2' }), { parent: 'gt1', previous: null }))).toBe(REPEATING_NO_SUBTASKS);
+    expect(await refused(store.moveListTask(item({ id: 'gt1' }), { parent: 'gt2', previous: null }))).toBe(REPEATING_NOT_SUBTASK);
+    const daily = { title: 'Send the report', notes: 'To Ann', due: '2026-10-26', kept: { time: null, duration: null, deadline: null, rule: 'RRULE:FREQ=DAILY' } };
+    expect(await refused(store.saveListTask(item({ id: 'gt2' }), daily))).toBe(SUBTASKS_NO_REPEAT);
+    expect(await refused(store.saveListTask(item({ id: 'gt3', parent: 'gt2' }), daily))).toBe(SUBTASK_NO_REPEAT);
+    // Nothing reached Google but a read of the list, and nothing was kept.
+    expect(fake.calls.every((call) => call.method === 'GET')).toBe(true);
+    expect(fake.dispatched).toEqual([]);
+    // A task without subtasks still takes a repeat, and a repeating one keeps its series on other edits.
+    await store.saveListTask(item({ id: 'gt1' }), { ...daily, title: 'Send the full report' });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.rule).toBe('RRULE:FREQ=DAILY');
   });
 });
 
