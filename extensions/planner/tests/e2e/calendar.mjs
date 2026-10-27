@@ -111,6 +111,10 @@ try {
   const others = await f.getByRole('list', { name: 'Other calendars' }).innerText();
   check('"My calendars" lists the account and Tasks, "Other calendars" the shared ones', mine.includes(ME) && mine.includes('Tasks') && others.includes('Team') && others.includes('Holidays'), `${mine} | ${others}`);
   check('the week is read from Google page by page', requests('GET', EVENTS).some((request) => request.query.pageToken));
+  // Google Calendar's red current-time line is drawn over events but never in their way: one it crosses is pressed,
+  // dragged or opened as anywhere else (a press on it started a new event instead, so a drag there moved nothing).
+  check("the current-time line never takes a press from an item it crosses",
+    await f.locator('.now-line').first().evaluate((line) => getComputedStyle(line).pointerEvents === 'none' && getComputedStyle(line, '::before').pointerEvents === 'none').catch(() => false));
   await shot('cal-01-week');
 
   // Day, Week, Month and Schedule, as Google Calendar switches them.

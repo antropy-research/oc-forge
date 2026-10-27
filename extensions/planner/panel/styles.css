@@ -264,7 +264,8 @@ html[data-surface='status'], html[data-surface='status'] body { height: auto; ba
 .hour-label { position: absolute; right: 6px; transform: translateY(-50%); font-size: 10.5px; color: var(--oc-muted); white-space: nowrap; }
 .day-lane { position: relative; border-left: 1px solid var(--pl-line); }
 .hour-line { position: absolute; left: 0; right: 0; border-top: 1px solid color-mix(in srgb, var(--oc-fg) 7%, transparent); }
-.now-line { position: absolute; left: 0; right: 0; border-top: 2px solid var(--oc-error, #e03131); z-index: 3; }
+/* Drawn over the items, as Google Calendar's red line, but never in their way: an item it crosses is pressed, dragged or opened as anywhere else. */
+.now-line { position: absolute; left: 0; right: 0; border-top: 2px solid var(--oc-error, #e03131); z-index: 3; pointer-events: none; }
 .now-line::before { content: ''; position: absolute; left: -4px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--oc-error, #e03131); }
 .drop-slot { position: absolute; left: 2px; right: 2px; height: 22px; border-radius: 4px; border: 1.5px dashed var(--oc-primary); background: color-mix(in srgb, var(--oc-primary) 10%, transparent); font-size: 11px; padding: 2px 6px; z-index: 4; pointer-events: none; }
 .grid-item { position: absolute; z-index: 2; border-radius: 5px; padding: 2px 6px; overflow: hidden; font-size: 12px; line-height: 14px; display: flex; flex-direction: column; gap: 0; background: color-mix(in srgb, var(--item-color) 16%, var(--pl-surface)); border-left: 3px solid var(--item-color); }
