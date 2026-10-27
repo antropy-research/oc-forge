@@ -82,15 +82,19 @@ try {
     await lane(date).waitFor();
   };
 
-  // Google tasks due show with no calendar subscribed.
+  // As in Google Calendar, the account's own calendar shows from the start, with the tasks due.
   const reportChip = f.getByRole('button', { name: /^Google task Send the report, due/ });
-  check('a Google task due today shows in the all-day row, with no calendar subscribed yet', await reportChip.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
+  check('a Google task due today shows in the all-day row', await reportChip.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
+  const planning = f.locator('.grid-item.is-event', { hasText: 'Quarter planning' });
+  const ownShown = await planning.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+  const ownChecked = await rail.getByRole('checkbox', { name: ME }).isChecked({ timeout: 15_000 }).catch(() => false);
+  const teamChecked = await rail.getByRole('checkbox', { name: 'Team' }).isChecked().catch(() => true);
+  check("the account's own calendar shows from the start, without ticking it; shared ones wait to be ticked", ownShown && ownChecked && !teamChecked, `own event ${ownShown}, own ticked ${ownChecked}, Team ticked ${teamChecked}`);
 
   // The rail: Create, the mini month, My calendars and Other calendars.
-  await rail.getByRole('checkbox', { name: ME }).check({ timeout: 15_000 });
   await rail.getByRole('checkbox', { name: 'Team' }).check();
-  const planning = f.locator('.grid-item.is-event', { hasText: 'Quarter planning' });
-  check('checking calendars in the rail shows their events', await planning.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
+  const teamRead = await until(() => requests('GET', /^\/calendar\/v3\/calendars\/team@group\.calendar\.google\.com\/events$/).length > 0, 15_000);
+  check('ticking a calendar in the rail reads its events from Google', Boolean(teamRead));
   const mine = await f.getByRole('list', { name: 'My calendars' }).innerText();
   const others = await f.getByRole('list', { name: 'Other calendars' }).innerText();
   check('"My calendars" lists the account and Tasks, "Other calendars" the shared ones', mine.includes(ME) && mine.includes('Tasks') && others.includes('Team') && others.includes('Holidays'), `${mine} | ${others}`);

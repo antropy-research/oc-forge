@@ -130,6 +130,8 @@ export class GoogleStore {
   private readonly listeners = new Set<() => void>();
   private started = false;
   private signInTimer: ReturnType<typeof setTimeout> | null = null;
+  /** First sights of accounts' calendars, one after another (two loads at once must not show a calendar twice). */
+  private introductions: Promise<void> = Promise.resolve();
 
   constructor(private readonly host: HostClient, private readonly client: PlannerClient, private readonly surface: string) {}
 
@@ -160,6 +162,9 @@ export class GoogleStore {
     try {
       const status = await this.client.call<GoogleStatusView>('GET', '/google/status');
       this.set({ status, error: null });
+      // An account the Planner has not seen yet gets its own calendar shown (loadCalendars), wherever the user is.
+      const seen = this.client.getView().state.settings.googleCalendarsIntroduced ?? [];
+      if (status.accounts.some((account) => account.features.includes('calendar') && !seen.includes(account.email))) void this.loadCalendars();
       const mailAccounts = status.accounts.filter((account) => account.features.includes('mail'));
       if (!mailAccounts.some((account) => account.email === this.view.mailAccount)) this.set({ mailAccount: mailAccounts[0]?.email ?? null, mail: [] });
       if (status.accounts.some((account) => account.features.includes('tasks'))) {
@@ -230,9 +235,30 @@ export class GoogleStore {
     try {
       const answer = await this.client.call<{ calendars: GoogleCalendarInfo[]; errors: { account: string; message: string }[] }>('GET', '/google/calendars');
       this.set({ calendars: answer.calendars, calendarErrors: answer.errors });
+      this.introductions = this.introductions.then(() => this.introduce(answer.calendars)).catch(() => {});
+      await this.introductions;
     } catch (error) {
       this.set({ calendarErrors: [{ account: '', message: messageOf(error) }] });
     }
+  }
+
+  /**
+   * Google Calendar shows your own calendar from the start: the first time the
+   * Planner sees an account's calendars, its primary calendar is shown, unless
+   * one of that account's calendars already is. Once per account, so a calendar
+   * hidden or removed later stays as the user left it.
+   */
+  private async introduce(calendars: readonly GoogleCalendarInfo[]): Promise<void> {
+    const state = this.client.getView().state;
+    const seen = state.settings.googleCalendarsIntroduced ?? [];
+    const accounts = [...new Set(calendars.map((calendar) => calendar.account))].filter((account) => !seen.includes(account));
+    if (!accounts.length) return;
+    for (const account of accounts) {
+      const shown = Object.values(state.calendars).some((item) => item.google?.account === account);
+      const primary = calendars.find((calendar) => calendar.account === account && calendar.primary);
+      if (!shown && primary) await this.showCalendar(primary, true);
+    }
+    await this.client.dispatch([{ type: 'settings.updated', patch: { googleCalendarsIntroduced: [...seen, ...accounts].slice(-50) } }]);
   }
 
   /** Show a Google calendar beside the plan (a calendar subscription read through its account), or stop. */

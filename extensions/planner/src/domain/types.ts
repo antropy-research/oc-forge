@@ -347,6 +347,11 @@ export interface Settings {
   googleTasksDueFromPlan: boolean;
   /** Show Google tasks that are due on the calendar, as Google Calendar does, until they are planned. */
   googleTasksOnCalendar: boolean;
+  /**
+   * Google accounts whose own calendar was shown when the Planner first saw them, as Google
+   * Calendar shows yours from the start; once per account, so hiding it later stays hidden.
+   */
+  googleCalendarsIntroduced: string[];
   /** Named agents (an OpenCode agent and a model) to assign tasks to. */
   agentPresets: AgentPreset[];
 }
@@ -394,6 +399,7 @@ export const DEFAULT_SETTINGS: Settings = {
   googleTasksImportCompletion: true,
   googleTasksDueFromPlan: true,
   googleTasksOnCalendar: true,
+  googleCalendarsIntroduced: [],
   agentPresets: [],
 };
 

@@ -61,11 +61,14 @@ const cleanUp = async (final) => {
     const display = { linearLayout: 'list', linearGroupBy: 'status', linearOrderBy: 'priority', linearImportCompletion: false };
     // The Google phase's fake account must not stay the calendar sessions are written to.
     const googleLeft = state.settings.googleTimebox?.account === 'e2e@example.com';
+    // The Planner shows a new account's own calendar once; the journey's fake account must not stay remembered.
+    const introduced = state.settings.googleCalendarsIntroduced ?? [];
     const displayChanged = Object.entries(display).some(([key, value]) => state.settings[key] !== undefined && state.settings[key] !== value);
     const commands = [
       // The Linear page's layout is a setting; put it back so the next run starts from the list.
       ...(displayChanged ? [{ cmd: `cleanup-display-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: display }] : []),
       ...(googleLeft ? [{ cmd: `cleanup-google-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: { googleTimebox: null } }] : []),
+      ...(introduced.includes('e2e@example.com') ? [{ cmd: `cleanup-introduced-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: { googleCalendarsIntroduced: introduced.filter((email) => email !== 'e2e@example.com') } }] : []),
       ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
       ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
       ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
