@@ -72,6 +72,18 @@ export class GoogleError extends Error {
 
 export type Fetcher = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<{ status: number; text(): Promise<string> }>;
 
+/**
+ * Tests point the service at a fake Google on this machine with
+ * PLANNER_GOOGLE_API_BASE=http://127.0.0.1:<port>/: every *.googleapis.com
+ * request then goes there, path kept. Only a loopback address is taken.
+ */
+export const testFetcher = (base: string | undefined): Fetcher | null => {
+  if (!base || !/^http:\/\/127\.0\.0\.1:\d{2,5}\/$/.test(base)) return null;
+  return (url, init) => fetch(url.replace(/^https:\/\/[a-z0-9-]+\.googleapis\.com\//, base), init);
+};
+
+const defaultFetcher: Fetcher = testFetcher(process.env.PLANNER_GOOGLE_API_BASE) ?? (fetch as unknown as Fetcher);
+
 /** Start a callback listener for one sign-in; it answers each request with the page `onRequest` returns. */
 export type Listen = (onRequest: (url: URL) => Promise<string>) => Promise<{ port: number; close(): void }>;
 
@@ -123,6 +135,19 @@ const googleMessage = (body: string, status: number): string => {
   return `Google answered HTTP ${status}`;
 };
 
+/**
+ * The status the service answers a refused Google request with: what the user
+ * can fix (a bad value, no right to change it, a clash) keeps Google's
+ * meaning; 410 is Google's answer for an event deleted a while ago; the rest
+ * is Google's trouble.
+ */
+export const googleStatus = (status: number): number => {
+  if (status === 404 || status === 410) return 404;
+  if (status === 400 || status === 403 || status === 409) return status;
+  if (status === 412) return 409;
+  return 502;
+};
+
 const isStoredAccount = (value: unknown): value is StoredAccount => {
   const item = value as Record<string, unknown> | null;
   return Boolean(item) && typeof item!.email === 'string' && typeof item!.refreshToken === 'string' && typeof item!.addedAt === 'string' && Array.isArray(item!.scopes) && item!.scopes.every((scope) => typeof scope === 'string');
@@ -149,7 +174,7 @@ export class GoogleAccounts {
 
   constructor(
     private readonly file: string,
-    private readonly fetcher: Fetcher = fetch as unknown as Fetcher,
+    private readonly fetcher: Fetcher = defaultFetcher,
     private readonly listen: Listen = loopbackListen,
     private readonly log: (message: string) => void = () => {},
   ) {}
@@ -290,8 +315,7 @@ export class GoogleAccounts {
     if (response.status >= 400) {
       const message = googleMessage(text, response.status);
       if (response.status === 403 && /insufficient|scope/i.test(message)) throw new GoogleError(403, `${email} has not allowed this; connect it again with that feature turned on`);
-      // 410: Google's answer for an event deleted a while ago.
-      throw new GoogleError(response.status === 404 || response.status === 410 ? 404 : 502, message);
+      throw new GoogleError(googleStatus(response.status), message);
     }
     return text ? (JSON.parse(text) as T) : null;
   }

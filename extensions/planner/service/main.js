@@ -2710,6 +2710,12 @@ class GoogleError extends Error {
     this.status = status;
   }
 }
+var testFetcher = (base) => {
+  if (!base || !/^http:\/\/127\.0\.0\.1:\d{2,5}\/$/.test(base))
+    return null;
+  return (url, init) => fetch(url.replace(/^https:\/\/[a-z0-9-]+\.googleapis\.com\//, base), init);
+};
+var defaultFetcher = testFetcher(process.env.PLANNER_GOOGLE_API_BASE) ?? fetch;
 var loopbackListen = (onRequest) => new Promise((resolve, reject) => {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -2748,6 +2754,15 @@ var googleMessage = (body, status) => {
   } catch {}
   return `Google answered HTTP ${status}`;
 };
+var googleStatus = (status) => {
+  if (status === 404 || status === 410)
+    return 404;
+  if (status === 400 || status === 403 || status === 409)
+    return status;
+  if (status === 412)
+    return 409;
+  return 502;
+};
 var isStoredAccount = (value) => {
   const item = value;
   return Boolean(item) && typeof item.email === "string" && typeof item.refreshToken === "string" && typeof item.addedAt === "string" && Array.isArray(item.scopes) && item.scopes.every((scope) => typeof scope === "string");
@@ -2765,7 +2780,7 @@ class GoogleAccounts {
   writes = Promise.resolve();
   signIns = new Map;
   tokens = new Map;
-  constructor(file, fetcher = fetch, listen = loopbackListen, log = () => {}) {
+  constructor(file, fetcher = defaultFetcher, listen = loopbackListen, log = () => {}) {
     this.file = file;
     this.fetcher = fetcher;
     this.listen = listen;
@@ -2892,7 +2907,7 @@ class GoogleAccounts {
       const message = googleMessage(text, response.status);
       if (response.status === 403 && /insufficient|scope/i.test(message))
         throw new GoogleError(403, `${email} has not allowed this; connect it again with that feature turned on`);
-      throw new GoogleError(response.status === 404 || response.status === 410 ? 404 : 502, message);
+      throw new GoogleError(googleStatus(response.status), message);
     }
     return text ? JSON.parse(text) : null;
   }
@@ -3040,14 +3055,54 @@ class GoogleAccounts {
 
 // src/domain/google.ts
 var PLANNER_BLOCK_KEY = "plannerBlockId";
-var googleEvent = (event, calendarId, zone) => {
+var RESPONSES = ["needsAction", "declined", "tentative", "accepted"];
+var EVENT_COLORS = {
+  "1": { name: "Lavender", color: "#7986cb" },
+  "2": { name: "Sage", color: "#33b679" },
+  "3": { name: "Grape", color: "#8e24aa" },
+  "4": { name: "Flamingo", color: "#e67c73" },
+  "5": { name: "Banana", color: "#f6bf26" },
+  "6": { name: "Tangerine", color: "#f4511e" },
+  "7": { name: "Peacock", color: "#039be5" },
+  "8": { name: "Graphite", color: "#616161" },
+  "9": { name: "Blueberry", color: "#3f51b5" },
+  "10": { name: "Basil", color: "#0b8043" },
+  "11": { name: "Tomato", color: "#d50000" }
+};
+var meetLink = (event) => {
+  const video = event.conferenceData?.entryPoints?.find((point) => point.entryPointType === "video" && point.uri && /^https:\/\//.test(point.uri))?.uri;
+  return video ?? (event.hangoutLink && /^https:\/\//.test(event.hangoutLink) ? event.hangoutLink : null);
+};
+var writableRole = (role) => role === "owner" || role === "writer";
+var eventEditable = (event, accessRole) => {
+  if (!writableRole(accessRole) || event.locked || event.privateCopy)
+    return false;
+  if (event.eventType && !["default", "focusTime", "outOfOffice"].includes(event.eventType))
+    return false;
+  return !event.organizer || event.organizer.self === true || Boolean(event.guestsCanModify);
+};
+var eventRef = (event, source) => {
+  const self = event.attendees?.find((attendee) => attendee.self);
+  return {
+    account: source.account,
+    calendarId: source.calendarId,
+    eventId: event.id,
+    recurringEventId: event.recurringEventId ?? null,
+    editable: eventEditable(event, source.accessRole),
+    response: self && !self.organizer && RESPONSES.includes(self.responseStatus ?? "") ? self.responseStatus : null,
+    guests: (event.attendees ?? []).some((attendee) => !attendee.self && !attendee.resource),
+    color: event.colorId ? EVENT_COLORS[event.colorId]?.color ?? null : null,
+    htmlLink: event.htmlLink && /^https:\/\//.test(event.htmlLink) ? event.htmlLink : "",
+    meet: meetLink(event)
+  };
+};
+var googleEvent = (event, calendarId, zone, source) => {
   if (!event.id || event.status === "cancelled")
     return null;
   if (event.extendedProperties?.private?.[PLANNER_BLOCK_KEY])
     return null;
-  if (event.attendees?.some((attendee) => attendee.self && attendee.responseStatus === "declined"))
-    return null;
-  const base = { id: `${calendarId}:${event.id}`, calendarId, title: event.summary?.trim() || "(No title)", location: event.location ?? "" };
+  const declined = Boolean(event.attendees?.some((attendee) => attendee.self && attendee.responseStatus === "declined"));
+  const base = { id: `${calendarId}:${event.id}`, calendarId, title: event.summary?.trim() || "(No title)", location: event.location ?? "", ...source ? { google: eventRef(event, source) } : {} };
   if (event.start?.date && isDateKey(event.start.date)) {
     const endDate = event.end?.date && isDateKey(event.end.date) && event.end.date > event.start.date ? event.end.date : null;
     const start = instantAt(event.start.date, 0, zone);
@@ -3058,7 +3113,48 @@ var googleEvent = (event, calendarId, zone) => {
   const endMs = Date.parse(event.end?.dateTime ?? "");
   if (Number.isNaN(startMs))
     return null;
-  return { ...base, start: new Date(startMs).toISOString(), end: new Date(Number.isNaN(endMs) ? startMs : Math.max(endMs, startMs)).toISOString(), allDay: false, busy: event.transparency !== "transparent" };
+  return { ...base, start: new Date(startMs).toISOString(), end: new Date(Number.isNaN(endMs) ? startMs : Math.max(endMs, startMs)).toISOString(), allDay: false, busy: event.transparency !== "transparent" && !declined };
+};
+var eventDetail = (event, source, seriesRecurrence) => {
+  const ref = eventRef(event, source);
+  const conference = meetLink(event);
+  const visibility = event.visibility === "public" || event.visibility === "private" || event.visibility === "confidential" ? event.visibility : "default";
+  return {
+    account: source.account,
+    calendarId: source.calendarId,
+    id: event.id,
+    recurringEventId: event.recurringEventId ?? null,
+    title: event.summary?.trim() || "(No title)",
+    description: event.description ?? "",
+    location: event.location ?? "",
+    start: event.start ?? {},
+    end: event.end ?? {},
+    allDay: Boolean(event.start?.date),
+    recurrence: [...event.recurrence ?? seriesRecurrence ?? []],
+    attendees: (event.attendees ?? []).flatMap((attendee) => attendee.email ? [{
+      email: attendee.email,
+      name: attendee.displayName?.trim() || attendee.email,
+      response: RESPONSES.includes(attendee.responseStatus ?? "") ? attendee.responseStatus : "needsAction",
+      self: Boolean(attendee.self),
+      organizer: Boolean(attendee.organizer),
+      optional: Boolean(attendee.optional),
+      resource: Boolean(attendee.resource)
+    }] : []),
+    attendeesOmitted: Boolean(event.attendeesOmitted),
+    organizer: event.organizer?.email ? { email: event.organizer.email, name: event.organizer.displayName?.trim() || event.organizer.email, self: Boolean(event.organizer.self) } : null,
+    meet: conference ? { url: conference, label: event.conferenceData?.conferenceSolution?.name ?? "Google Meet" } : null,
+    reminders: {
+      useDefault: event.reminders?.useDefault !== false,
+      overrides: (event.reminders?.overrides ?? []).flatMap((item) => typeof item.minutes === "number" ? [{ method: item.method === "email" ? "email" : "popup", minutes: item.minutes }] : [])
+    },
+    colorId: event.colorId ?? null,
+    transparency: event.transparency === "transparent" ? "transparent" : "opaque",
+    visibility,
+    htmlLink: ref.htmlLink,
+    editable: ref.editable,
+    response: ref.response,
+    eventType: event.eventType ?? "default"
+  };
 };
 var plannerBlockOf = (event) => event.extendedProperties?.private?.[PLANNER_BLOCK_KEY] ?? null;
 var GOOGLE_TASKS_CALENDAR = "google-tasks";
@@ -3075,12 +3171,412 @@ var dueTaskEvent = (item, zone) => ({
 });
 var gmailUrl = (account, threadId) => `https://mail.google.com/mail/u/${encodeURIComponent(account)}/#all/${encodeURIComponent(threadId)}`;
 
+// src/domain/rrule.ts
+var WEEKDAY_CODES2 = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+var FREQUENCIES = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
+var KNOWN = new Set(["FREQ", "INTERVAL", "BYDAY", "BYMONTHDAY", "BYMONTH", "COUNT", "UNTIL"]);
+var BYDAY = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/;
+var UNTIL = /^\d{8}(T\d{6}Z?)?$/;
+var parseRRule = (line) => {
+  const body = line.trim().replace(/^RRULE:/i, "");
+  if (!body)
+    return null;
+  const parts = new Map;
+  const other = [];
+  for (const part of body.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0)
+      return null;
+    const key = part.slice(0, eq).toUpperCase();
+    const value = part.slice(eq + 1).toUpperCase();
+    if (KNOWN.has(key))
+      parts.set(key, value);
+    else
+      other.push([key, value]);
+  }
+  const freq = parts.get("FREQ") ?? "";
+  if (!FREQUENCIES.includes(freq))
+    return null;
+  const interval = Number(parts.get("INTERVAL") ?? "1");
+  if (!Number.isInteger(interval) || interval < 1 || interval > 999)
+    return null;
+  const byDay = (parts.get("BYDAY") ?? "").split(",").filter(Boolean);
+  if (!byDay.every((code) => BYDAY.test(code)))
+    return null;
+  const numbers = (key, low, high) => {
+    const values = (parts.get(key) ?? "").split(",").filter(Boolean).map(Number);
+    return values.every((value) => Number.isInteger(value) && value !== 0 && value >= low && value <= high) ? values : null;
+  };
+  const byMonthDay = numbers("BYMONTHDAY", -31, 31);
+  const byMonth = numbers("BYMONTH", 1, 12);
+  if (!byMonthDay || !byMonth)
+    return null;
+  const count = parts.has("COUNT") ? Number(parts.get("COUNT")) : null;
+  if (count !== null && (!Number.isInteger(count) || count < 1))
+    return null;
+  const until = parts.get("UNTIL") ?? null;
+  if (until !== null && !UNTIL.test(until))
+    return null;
+  return { freq, interval, byDay, byMonthDay, byMonth, count, until, other };
+};
+var formatRRule = (rule) => {
+  const parts = [`FREQ=${rule.freq}`];
+  if (rule.interval > 1)
+    parts.push(`INTERVAL=${rule.interval}`);
+  if (rule.byDay.length)
+    parts.push(`BYDAY=${rule.byDay.join(",")}`);
+  if (rule.byMonthDay.length)
+    parts.push(`BYMONTHDAY=${rule.byMonthDay.join(",")}`);
+  if (rule.byMonth.length)
+    parts.push(`BYMONTH=${rule.byMonth.join(",")}`);
+  for (const [key, value] of rule.other)
+    parts.push(`${key}=${value}`);
+  if (rule.count !== null)
+    parts.push(`COUNT=${rule.count}`);
+  else if (rule.until !== null)
+    parts.push(`UNTIL=${rule.until}`);
+  return `RRULE:${parts.join(";")}`;
+};
+var splitRecurrence = (lines) => {
+  const rules = lines.filter((line) => /^RRULE:/i.test(line.trim()));
+  const rest = lines.filter((line) => !/^RRULE:/i.test(line.trim()));
+  if (rules.length !== 1)
+    return { rule: null, line: rules[0] ?? null, rest };
+  return { rule: parseRRule(rules[0]), line: rules[0], rest };
+};
+var daysInMonth3 = (date) => {
+  const [y, m] = date.split("-").map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+};
+var weekdayOrdinal = (date) => {
+  const day = Number(date.slice(8));
+  return { nth: Math.ceil(day / 7), last: day + 7 > daysInMonth3(date) };
+};
+var utcStamp = (instant) => new Date(instant).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+var untilBefore = (occurrence) => {
+  if (occurrence.date && isDateKey(occurrence.date))
+    return addDays(occurrence.date, -1).replace(/-/g, "");
+  const instant = Date.parse(occurrence.dateTime ?? "");
+  return Number.isNaN(instant) ? null : utcStamp(instant - 1000);
+};
+var shiftCode = (code, days) => {
+  const match = BYDAY.exec(code);
+  if (!match || match[1])
+    return null;
+  const index = WEEKDAY_CODES2.indexOf(match[2]);
+  return WEEKDAY_CODES2[((index + days) % 7 + 7) % 7];
+};
+var shiftRule = (rule, from, to) => {
+  const days = daysBetween(from, to);
+  if (days === 0)
+    return rule;
+  if (rule.other.some(([key]) => key !== "WKST"))
+    return null;
+  const code = WEEKDAY_CODES2[weekday(to)];
+  switch (rule.freq) {
+    case "DAILY":
+    case "WEEKLY": {
+      if (rule.byMonthDay.length || rule.byMonth.length)
+        return null;
+      const byDay = rule.byDay.map((item) => shiftCode(item, days));
+      return byDay.every(Boolean) ? { ...rule, byDay: [...new Set(byDay)] } : null;
+    }
+    case "MONTHLY": {
+      if (rule.byMonth.length || rule.byDay.length && rule.byMonthDay.length)
+        return null;
+      if (rule.byMonthDay.length)
+        return rule.byMonthDay.length === 1 ? { ...rule, byMonthDay: [Number(to.slice(8))] } : null;
+      if (rule.byDay.length === 1 && BYDAY.exec(rule.byDay[0])?.[1]) {
+        const { nth, last } = weekdayOrdinal(to);
+        const wasLast = rule.byDay[0].startsWith("-1");
+        return { ...rule, byDay: [`${wasLast && last ? -1 : nth >= 5 ? -1 : nth}${code}`] };
+      }
+      if (rule.byDay.length) {
+        const byDay = rule.byDay.map((item) => shiftCode(item, days));
+        return byDay.every(Boolean) ? { ...rule, byDay } : null;
+      }
+      return rule;
+    }
+    case "YEARLY":
+      if (rule.byDay.length)
+        return null;
+      return {
+        ...rule,
+        byMonth: rule.byMonth.length ? [Number(to.slice(5, 7))] : [],
+        byMonthDay: rule.byMonthDay.length ? [Number(to.slice(8))] : []
+      };
+  }
+};
+
+// src/domain/gevents.ts
+var EDIT_SCOPES = ["this", "following", "all"];
+var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isText = (value, max) => typeof value === "string" && value.length <= max;
+var isEmailAddress = (value) => typeof value === "string" && value.length <= 254 && /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/.test(value);
+var timeKind = (time) => {
+  if (!isRecord3(time))
+    return null;
+  if (time.date !== undefined)
+    return isDateKey(time.date) && time.dateTime === undefined ? "date" : null;
+  if (typeof time.dateTime !== "string" || Number.isNaN(Date.parse(time.dateTime)))
+    return null;
+  if (time.timeZone !== undefined && !isValidTimeZone(time.timeZone))
+    return null;
+  return "dateTime";
+};
+var startMs = (time) => time.date ? Date.parse(`${time.date}T00:00:00Z`) : Date.parse(time.dateTime ?? "");
+var checkEventInput = (input, creating) => {
+  if (!isRecord3(input))
+    return "event must be an object";
+  const allowed = new Set(["summary", "description", "location", "start", "end", "recurrence", "attendees", "reminders", "colorId", "transparency", "visibility", "meet"]);
+  for (const key of Object.keys(input))
+    if (!allowed.has(key))
+      return `unknown event field ${key}`;
+  if (input.summary !== undefined && !isText(input.summary, 1024))
+    return "the title is too long";
+  if (input.description !== undefined && !isText(input.description, 8000))
+    return "the description is too long";
+  if (input.location !== undefined && !isText(input.location, 1024))
+    return "the location is too long";
+  if (creating && (input.start === undefined || input.end === undefined))
+    return "a new event needs a start and an end";
+  if (input.start === undefined !== (input.end === undefined))
+    return "start and end change together";
+  if (input.start !== undefined) {
+    const kinds = [timeKind(input.start), timeKind(input.end)];
+    if (!kinds[0] || kinds[0] !== kinds[1])
+      return "start and end must both be days, or both be times";
+    if (startMs(input.end) <= startMs(input.start))
+      return "the event must end after it starts";
+  }
+  if (input.recurrence !== undefined) {
+    if (!Array.isArray(input.recurrence) || input.recurrence.length > 10)
+      return "recurrence must be at most 10 lines";
+    if (!input.recurrence.every((line) => isText(line, 1000) && /^(RRULE|EXRULE|RDATE|EXDATE)[:;]/i.test(line)))
+      return "recurrence lines must be RRULE, RDATE or EXDATE";
+  }
+  if (input.attendees !== undefined) {
+    if (!Array.isArray(input.attendees) || input.attendees.length > 200)
+      return "at most 200 guests";
+    if (!input.attendees.every((guest) => isRecord3(guest) && isEmailAddress(guest.email) && (guest.optional === undefined || typeof guest.optional === "boolean")))
+      return "a guest is not an email address";
+  }
+  if (input.reminders !== undefined) {
+    const reminders = input.reminders;
+    if (!isRecord3(reminders) || typeof reminders.useDefault !== "boolean")
+      return "reminders must say whether to use the calendar default";
+    const overrides = reminders.overrides ?? [];
+    if (!Array.isArray(overrides) || overrides.length > 5)
+      return "at most 5 notifications";
+    if (!overrides.every((item) => isRecord3(item) && (item.method === "popup" || item.method === "email") && Number.isInteger(item.minutes) && item.minutes >= 0 && item.minutes <= 40320))
+      return "a notification must be 0 to 40320 minutes before";
+  }
+  if (input.colorId !== undefined && input.colorId !== null && !(typeof input.colorId === "string" && EVENT_COLORS[input.colorId]))
+    return "unknown event color";
+  if (input.transparency !== undefined && input.transparency !== "opaque" && input.transparency !== "transparent")
+    return "transparency must be opaque or transparent";
+  if (input.visibility !== undefined && !["default", "public", "private"].includes(input.visibility))
+    return "visibility must be default, public or private";
+  if (input.meet !== undefined && typeof input.meet !== "boolean")
+    return "meet must be true or false";
+  return null;
+};
+var sameTime = (a, b) => Boolean(a && b) && (a.date ? a.date === b.date : Date.parse(a.dateTime ?? "") === Date.parse(b.dateTime ?? ""));
+var eventBody = (input, existing, requestId) => {
+  const body = {};
+  let conference = false;
+  if (input.summary !== undefined)
+    body.summary = input.summary;
+  if (input.description !== undefined)
+    body.description = input.description;
+  if (input.location !== undefined)
+    body.location = input.location;
+  if (input.start !== undefined)
+    body.start = input.start;
+  if (input.end !== undefined)
+    body.end = input.end;
+  if (input.recurrence !== undefined)
+    body.recurrence = input.recurrence;
+  if (input.attendees !== undefined) {
+    const before = new Map((existing?.attendees ?? []).filter((attendee) => attendee.email).map((attendee) => [attendee.email.toLowerCase(), attendee]));
+    const kept = input.attendees.map((guest) => {
+      const known = before.get(guest.email.toLowerCase());
+      return known ? { ...known, ...guest.optional !== undefined ? { optional: guest.optional } : {} } : { email: guest.email, ...guest.optional ? { optional: true } : {} };
+    });
+    const wanted = new Set(kept.map((guest) => guest.email.toLowerCase()));
+    const staying = (existing?.attendees ?? []).filter((attendee) => attendee.email && !wanted.has(attendee.email.toLowerCase()) && (attendee.organizer || attendee.self || attendee.resource));
+    body.attendees = [...staying, ...kept];
+  }
+  if (input.reminders !== undefined)
+    body.reminders = input.reminders.useDefault ? { useDefault: true } : { useDefault: false, overrides: input.reminders.overrides ?? [] };
+  if (input.colorId !== undefined)
+    body.colorId = input.colorId;
+  if (input.transparency !== undefined)
+    body.transparency = input.transparency;
+  if (input.visibility !== undefined)
+    body.visibility = input.visibility;
+  if (input.meet === true && !existing?.conferenceData && !existing?.hangoutLink) {
+    body.conferenceData = { createRequest: { requestId, conferenceSolutionKey: { type: "hangoutsMeet" } } };
+    conference = true;
+  } else if (input.meet === false && (existing?.conferenceData || existing?.hangoutLink)) {
+    body.conferenceData = null;
+    conference = true;
+  }
+  return { body, conference };
+};
+var localOf = (time, zone) => {
+  if (!time)
+    return null;
+  if (time.date)
+    return isDateKey(time.date) ? { date: time.date, minutes: 0 } : null;
+  const ms = Date.parse(time.dateTime ?? "");
+  return Number.isNaN(ms) ? null : zonedDateMinutes(ms, zone);
+};
+var seriesTimes = (instance, series, start, end, zone) => {
+  const original = localOf(instance.originalStartTime ?? instance.start, zone);
+  const moved = localOf(start, zone);
+  const first = localOf(series.start, zone);
+  if (!original || !moved || !first)
+    return null;
+  const days = daysBetween(original.date, moved.date);
+  const firstDay = addDays(first.date, days);
+  if (start.date && end.date) {
+    return { start: { date: firstDay }, end: { date: addDays(firstDay, Math.max(1, daysBetween(start.date, end.date))) }, from: original.date, to: moved.date };
+  }
+  const length = Date.parse(end.dateTime ?? "") - Date.parse(start.dateTime ?? "");
+  const zoneOf = series.start?.timeZone ?? start.timeZone ?? zone;
+  const begin = instantAt(firstDay, moved.minutes, zone);
+  return {
+    start: { dateTime: begin, timeZone: zoneOf },
+    end: { dateTime: new Date(Date.parse(begin) + length).toISOString(), timeZone: zoneOf },
+    from: original.date,
+    to: moved.date
+  };
+};
+var sameLines = (a, b) => JSON.stringify([...a ?? []].sort()) === JSON.stringify([...b ?? []].sort());
+var seriesCopy = (series) => {
+  const copy = {};
+  for (const key of ["summary", "description", "location", "colorId", "transparency", "visibility", "guestsCanModify", "guestsCanInviteOthers", "guestsCanSeeOtherGuests", "reminders", "conferenceData"]) {
+    if (series[key] !== undefined)
+      copy[key] = series[key];
+  }
+  if (series.attendees)
+    copy.attendees = series.attendees.map(({ email, displayName, optional, resource, organizer, self }) => ({ email, ...displayName ? { displayName } : {}, ...optional ? { optional } : {}, ...resource ? { resource } : {}, ...organizer ? { organizer } : {}, ...self ? { self } : {} }));
+  return copy;
+};
+var planEdit = (args) => {
+  const { scope, instance, series, input, zone, requestId } = args;
+  if (!instance.recurringEventId) {
+    const { body, conference } = eventBody(input, instance, requestId);
+    return { ops: [{ method: "PATCH", eventId: instance.id, body, conference, role: "change" }] };
+  }
+  if (!series)
+    return { error: "The series this event belongs to is gone from Google Calendar" };
+  const changesRule = input.recurrence !== undefined && !sameLines(input.recurrence, series.recurrence);
+  if (scope === "this") {
+    if (changesRule)
+      return { error: 'One event of a series cannot repeat on its own: choose "This and following events" or "All events"' };
+    const { recurrence: _drop, ...rest } = input;
+    const { body, conference } = eventBody(rest, instance, requestId);
+    return { ops: [{ method: "PATCH", eventId: instance.id, body, conference, role: "change" }] };
+  }
+  const original = instance.originalStartTime ?? instance.start;
+  const first = sameTime(original, series.start);
+  const start = input.start ?? instance.start;
+  const end = input.end ?? instance.end;
+  const timesChanged = input.start !== undefined && start && end && !(sameTime(start, instance.start) && sameTime(end, instance.end));
+  const { rule, rest } = splitRecurrence(series.recurrence ?? []);
+  if (scope === "all" || first) {
+    const next = { ...input };
+    if (timesChanged) {
+      const moved = seriesTimes(instance, series, start, end, zone);
+      if (!moved)
+        return { error: "Google did not say when this series starts" };
+      next.start = moved.start;
+      next.end = moved.end;
+      if (moved.from !== moved.to && !changesRule) {
+        const shifted = rule ? shiftRule(rule, moved.from, moved.to) : null;
+        if (!shifted)
+          return { error: 'This series repeats in a way the Planner cannot move to another day: move "This event" only, or change the repeat rule in the editor' };
+        next.recurrence = [formatRRule(shifted), ...rest];
+      }
+    } else {
+      delete next.start;
+      delete next.end;
+    }
+    const { body, conference } = eventBody(next, series, requestId);
+    return { ops: [{ method: "PATCH", eventId: series.id, body, conference, role: "change" }] };
+  }
+  if (!rule)
+    return { error: 'This series repeats in a way the Planner cannot split: change "This event" or "All events"' };
+  const until = untilBefore(original ?? {});
+  if (!until)
+    return { error: "Google did not say when this event first was" };
+  let lines;
+  if (changesRule)
+    lines = input.recurrence ?? [];
+  else {
+    let next = rule;
+    if (rule.count !== null) {
+      if (args.priorCount === undefined)
+        return { error: "How many events come before this one is needed to split the series", needs: "priorCount" };
+      const remaining = rule.count - args.priorCount;
+      if (remaining < 1)
+        return { error: "This series has no events from this one on" };
+      next = { ...rule, count: remaining };
+    }
+    if (timesChanged) {
+      const from = localOf(original, zone);
+      const to = localOf(start, zone);
+      const shifted = from && to ? shiftRule(next, from.date, to.date) : null;
+      if (!shifted)
+        return { error: 'This series repeats in a way the Planner cannot move to another day: move "This event" only' };
+      next = shifted;
+    }
+    lines = [formatRRule(next), ...rest];
+  }
+  const copied = seriesCopy(series);
+  const created = eventBody({ ...input, start, end, recurrence: lines }, copied, requestId);
+  const body = { ...copied, ...created.body };
+  if (body.conferenceData === null)
+    delete body.conferenceData;
+  const conference = created.conference || Boolean(body.conferenceData);
+  return {
+    ops: [
+      { method: "POST", eventId: null, body, conference, role: "create" },
+      { method: "PATCH", eventId: series.id, body: { recurrence: [formatRRule({ ...rule, count: null, until }), ...rest] }, role: "truncate" }
+    ]
+  };
+};
+var planDelete = (args) => {
+  const { scope, instance, series } = args;
+  if (!instance.recurringEventId || scope === "this")
+    return { ops: [{ method: "DELETE", eventId: instance.id, role: "delete" }] };
+  if (!series)
+    return { error: "The series this event belongs to is gone from Google Calendar" };
+  const original = instance.originalStartTime ?? instance.start;
+  if (scope === "all" || sameTime(original, series.start))
+    return { ops: [{ method: "DELETE", eventId: series.id, role: "delete" }] };
+  const { rule, rest } = splitRecurrence(series.recurrence ?? []);
+  const until = untilBefore(original ?? {});
+  if (!rule || !until)
+    return { error: 'This series repeats in a way the Planner cannot end early: delete "This event" or "All events"' };
+  return { ops: [{ method: "PATCH", eventId: series.id, body: { recurrence: [formatRRule({ ...rule, count: null, until }), ...rest] }, role: "truncate" }] };
+};
+var planRsvp = (args) => {
+  const target = args.scope === "all" && args.series ? args.series : args.instance;
+  const attendees = target.attendees ?? [];
+  if (!attendees.some((attendee) => attendee.self))
+    return { error: "You are not on this event's guest list" };
+  return { ops: [{ method: "PATCH", eventId: target.id, body: { attendees: attendees.map((attendee) => attendee.self ? { ...attendee, responseStatus: args.response } : attendee) }, role: "change" }] };
+};
+
 // service/googleData.ts
 var CALENDAR = "https://www.googleapis.com/calendar/v3";
 var TASKS = "https://tasks.googleapis.com/tasks/v1";
 var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
-var EVENT_FIELDS = "items(id,status,summary,location,transparency,start,end,attendees(self,responseStatus),extendedProperties,htmlLink),nextPageToken";
-var MAX_EVENT_PAGES = 2;
+var EVENT_FIELDS = "accessRole,nextPageToken,items(id,status,summary,location,transparency,colorId,eventType,start,end,recurringEventId,originalStartTime,attendees(email,self,organizer,resource,responseStatus),organizer(email,self),guestsCanModify,locked,privateCopy,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),extendedProperties,htmlLink)";
+var LIMITS = { calendars: 10, events: 8, lists: 5, tasks: 40, due: 20 };
 var MAIL_MAX = 25;
 var enc = encodeURIComponent;
 var mapLimited = async (items, limit, fn) => {
@@ -3108,6 +3604,7 @@ var toTaskItem = (raw, account, listId) => {
     notes: raw.notes ?? "",
     due: dueDate(raw.due),
     completed: raw.status === "completed",
+    ...raw.status === "completed" ? { completedAt: raw.completed ?? null } : {},
     parent: raw.parent ?? null,
     position: raw.position ?? "",
     url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc(raw.id)}`,
@@ -3135,32 +3632,55 @@ var toMailItem = (raw, account) => {
 
 class GoogleData {
   accounts;
+  roles = new Map;
   constructor(accounts) {
     this.accounts = accounts;
   }
+  async pages(account, url, limit) {
+    const items = [];
+    let pageToken;
+    let first = null;
+    for (let page = 0;page < limit; page++) {
+      const data = await this.accounts.request(account, "GET", url(pageToken));
+      first ??= data;
+      items.push(...data?.items ?? []);
+      pageToken = data?.nextPageToken;
+      if (!pageToken)
+        return { items, complete: true, first };
+    }
+    return { items, complete: false, first };
+  }
   async calendars(account) {
-    const data = await this.accounts.request(account, "GET", `${CALENDAR}/users/me/calendarList?minAccessRole=reader&maxResults=250`);
-    return (data?.items ?? []).flatMap((item) => item.id ? [{ account, id: item.id, name: item.summaryOverride ?? item.summary ?? item.id, color: color(item.backgroundColor), primary: Boolean(item.primary), writable: item.accessRole === "owner" || item.accessRole === "writer" }] : []);
+    const { items, complete } = await this.pages(account, (token) => `${CALENDAR}/users/me/calendarList?${new URLSearchParams({ minAccessRole: "reader", maxResults: "250", ...token ? { pageToken: token } : {} })}`, LIMITS.calendars);
+    if (!complete)
+      throw new GoogleError(502, `${account} has more than ${LIMITS.calendars * 250} calendars; the Planner reads at most that many`);
+    return items.flatMap((item) => {
+      if (!item.id)
+        return [];
+      if (item.accessRole)
+        this.roles.set(`${account}
+${item.id}`, item.accessRole);
+      return [{ account, id: item.id, name: item.summaryOverride ?? item.summary ?? item.id, color: color(item.backgroundColor), primary: Boolean(item.primary), writable: item.accessRole === "owner" || item.accessRole === "writer", accessRole: item.accessRole ?? "reader" }];
+    });
   }
   async events(account, calendarId, timeMin, timeMax, zone, subscriptionId) {
     const events = [];
     const sessions = [];
-    let pageToken;
-    for (let page = 0;page < MAX_EVENT_PAGES; page++) {
-      const query = new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: EVENT_FIELDS, ...pageToken ? { pageToken } : {} });
-      const data = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/${enc(calendarId)}/events?${query}`);
-      for (const raw of data?.items ?? []) {
-        const blockId = plannerBlockOf(raw);
-        if (blockId && raw.id && raw.status !== "cancelled" && raw.start?.dateTime && raw.end?.dateTime) {
-          sessions.push({ blockId, eventId: raw.id, start: new Date(raw.start.dateTime).toISOString(), end: new Date(raw.end.dateTime).toISOString() });
-        }
-        const event = googleEvent(raw, subscriptionId, zone);
-        if (event)
-          events.push(event);
+    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "2500", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, LIMITS.events);
+    if (!complete)
+      throw new GoogleError(502, `More than ${LIMITS.events * 2500} events in this range; the Planner reads at most that many`);
+    const accessRole = typeof first?.accessRole === "string" ? first.accessRole : undefined;
+    if (accessRole)
+      this.roles.set(`${account}
+${calendarId}`, accessRole);
+    for (const raw of items) {
+      const blockId = plannerBlockOf(raw);
+      if (blockId && raw.id && raw.status !== "cancelled" && raw.start?.dateTime && raw.end?.dateTime) {
+        sessions.push({ blockId, eventId: raw.id, start: new Date(raw.start.dateTime).toISOString(), end: new Date(raw.end.dateTime).toISOString() });
       }
-      pageToken = data?.nextPageToken;
-      if (!pageToken)
-        break;
+      const event = googleEvent(raw, subscriptionId, zone, { account, calendarId, accessRole });
+      if (event)
+        events.push(event);
     }
     return { events, sessions };
   }
@@ -3196,25 +3716,171 @@ class GoogleData {
       throw error;
     }
   }
+  async mustEvent(account, calendarId, eventId) {
+    const raw = await this.event(account, calendarId, eventId);
+    if (!raw?.id)
+      throw new GoogleError(404, "This event is no longer in Google Calendar");
+    return raw;
+  }
+  async role(account, calendarId) {
+    const key = `${account}
+${calendarId}`;
+    if (!this.roles.has(key)) {
+      try {
+        await this.calendars(account);
+      } catch {}
+    }
+    return this.roles.get(key);
+  }
+  async eventDetail(account, calendarId, eventId) {
+    const raw = await this.mustEvent(account, calendarId, eventId);
+    let rule = null;
+    if (raw.recurringEventId)
+      rule = (await this.event(account, calendarId, raw.recurringEventId))?.recurrence ?? [];
+    return eventDetail(raw, { account, calendarId, accessRole: await this.role(account, calendarId) }, rule);
+  }
+  async insertEvent(account, calendarId, input, sendUpdates) {
+    const problem = checkEventInput(input, true);
+    if (problem)
+      throw new GoogleError(400, problem);
+    const { body, conference } = eventBody(input, null, newId());
+    const query = new URLSearchParams({ sendUpdates, ...conference ? { conferenceDataVersion: "1" } : {} });
+    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc(calendarId)}/events?${query}`, body);
+    if (!raw?.id)
+      throw new GoogleError(502, "Google did not return the event");
+    return eventDetail(raw, { account, calendarId, accessRole: await this.role(account, calendarId) }, null);
+  }
+  async priorCount(account, calendarId, series, instance) {
+    const before = instance.originalStartTime?.dateTime ?? (instance.originalStartTime?.date ? `${instance.originalStartTime.date}T00:00:00Z` : null);
+    const from = series.start?.dateTime ?? (series.start?.date ? `${series.start.date}T00:00:00Z` : null);
+    if (!before || !from)
+      throw new GoogleError(502, "Google did not say when this series starts");
+    const { items, complete } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(series.id)}/instances?${new URLSearchParams({ timeMin: new Date(Date.parse(from) - 1000).toISOString(), timeMax: new Date(Date.parse(before)).toISOString(), showDeleted: "true", maxResults: "2500", fields: "nextPageToken,items(id,originalStartTime)", ...token ? { pageToken: token } : {} })}`, LIMITS.events);
+    if (!complete)
+      throw new GoogleError(502, "This series is too long to split here");
+    return items.filter((item) => Date.parse(item.originalStartTime?.dateTime ?? `${item.originalStartTime?.date ?? ""}T00:00:00Z`) < Date.parse(before)).length;
+  }
+  async run(account, calendarId, plan, sendUpdates) {
+    if ("error" in plan)
+      throw new GoogleError(400, plan.error);
+    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
+    const created = [];
+    for (const op of plan.ops) {
+      const query = new URLSearchParams({ sendUpdates, ...op.conference ? { conferenceDataVersion: "1" } : {} });
+      try {
+        if (op.method === "POST") {
+          const raw = await this.accounts.request(account, "POST", `${base}?${query}`, op.body);
+          if (!raw?.id)
+            throw new GoogleError(502, "Google did not return the new series");
+          created.push(raw.id);
+        } else if (op.method === "PATCH")
+          await this.accounts.request(account, "PATCH", `${base}/${enc(op.eventId)}?${query}`, op.body);
+        else {
+          try {
+            await this.accounts.request(account, "DELETE", `${base}/${enc(op.eventId)}?${query}`);
+          } catch (error) {
+            if (!isGone(error))
+              throw error;
+          }
+        }
+      } catch (error) {
+        for (const id of created)
+          await this.accounts.request(account, "DELETE", `${base}/${enc(id)}?sendUpdates=none`).catch(() => {});
+        throw error;
+      }
+    }
+    return plan.ops.length;
+  }
+  async withSeries(account, calendarId, eventId) {
+    const instance = await this.mustEvent(account, calendarId, eventId);
+    const series = instance.recurringEventId ? await this.event(account, calendarId, instance.recurringEventId) : null;
+    return { instance, series };
+  }
+  async updateEvent(account, calendarId, eventId, input, scope, sendUpdates, zone) {
+    const problem = checkEventInput(input, false);
+    if (problem)
+      throw new GoogleError(400, problem);
+    const { instance, series } = await this.withSeries(account, calendarId, eventId);
+    const requestId = newId();
+    let plan = planEdit({ scope, instance, series, input, zone, requestId });
+    if ("needs" in plan && plan.needs === "priorCount" && series)
+      plan = planEdit({ scope, instance, series, input, zone, requestId, priorCount: await this.priorCount(account, calendarId, series, instance) });
+    return this.run(account, calendarId, plan, sendUpdates);
+  }
+  async deleteEvent(account, calendarId, eventId, scope, sendUpdates) {
+    let found;
+    try {
+      found = await this.withSeries(account, calendarId, eventId);
+    } catch (error) {
+      if (isGone(error))
+        return 0;
+      throw error;
+    }
+    return this.run(account, calendarId, planDelete({ scope, ...found }), sendUpdates);
+  }
+  async respond(account, calendarId, eventId, response, scope) {
+    const found = await this.withSeries(account, calendarId, eventId);
+    return this.run(account, calendarId, planRsvp({ scope, response, ...found }), "all");
+  }
+  async moveEvent(account, calendarId, eventId, destination, sendUpdates) {
+    const instance = await this.mustEvent(account, calendarId, eventId);
+    const target = instance.recurringEventId ?? instance.id;
+    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(target)}/move?${new URLSearchParams({ destination, sendUpdates })}`);
+    if (!raw?.id)
+      throw new GoogleError(502, "Google did not return the event");
+    return eventDetail(raw, { account, calendarId: destination, accessRole: await this.role(account, destination) }, raw.recurrence ?? null);
+  }
   async taskLists(account) {
-    const data = await this.accounts.request(account, "GET", `${TASKS}/users/@me/lists?maxResults=100`);
-    return (data?.items ?? []).flatMap((item) => item.id ? [{ account, id: item.id, title: item.title?.trim() || "Tasks" }] : []);
+    const [{ items, complete }, fallback] = await Promise.all([
+      this.pages(account, (token) => `${TASKS}/users/@me/lists?${new URLSearchParams({ maxResults: "1000", ...token ? { pageToken: token } : {} })}`, LIMITS.lists),
+      this.accounts.request(account, "GET", `${TASKS}/users/@me/lists/%40default`).catch(() => null)
+    ]);
+    if (!complete)
+      throw new GoogleError(502, `${account} has more than ${LIMITS.lists * 1000} task lists; the Planner reads at most that many`);
+    return items.flatMap((item) => item.id ? [{ account, id: item.id, title: item.title?.trim() || "Tasks", isDefault: item.id === fallback?.id }] : []);
+  }
+  async createTaskList(account, title) {
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/users/@me/lists`, { title });
+    if (!raw?.id)
+      throw new GoogleError(502, "Google did not return the list");
+    return { account, id: raw.id, title: raw.title?.trim() || title, isDefault: false };
+  }
+  async renameTaskList(account, listId, title) {
+    const raw = await this.accounts.request(account, "PATCH", `${TASKS}/users/@me/lists/${enc(listId)}`, { title });
+    return { account, id: listId, title: raw?.title?.trim() || title };
+  }
+  async deleteTaskList(account, listId) {
+    try {
+      await this.accounts.request(account, "DELETE", `${TASKS}/users/@me/lists/${enc(listId)}`);
+    } catch (error) {
+      if (!isGone(error))
+        throw error;
+    }
   }
   async tasks(account, listId) {
-    const data = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(listId)}/tasks?showCompleted=false&showHidden=false&maxResults=100`);
-    return (data?.items ?? []).map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item)).sort((a, b) => a.position.localeCompare(b.position));
+    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(listId)}/tasks?${new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
+    if (!complete)
+      throw new GoogleError(502, `This list has more than ${LIMITS.tasks * 100} open tasks; the Planner reads at most that many`);
+    return items.map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item)).sort((a, b) => a.position.localeCompare(b.position));
+  }
+  async allTasks(account, listId) {
+    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(listId)}/tasks?${new URLSearchParams({ showCompleted: "true", showHidden: "true", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
+    const tasks = items.map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item));
+    return { tasks: tasks.sort((a, b) => a.position.localeCompare(b.position)), complete };
   }
   async dueTasks(account, from, to) {
     const lists = await this.taskLists(account);
-    const query = new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` });
+    const range = { showCompleted: "true", showHidden: "true", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` };
     const perList = await mapLimited(lists, 4, async (list) => {
-      const data = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(list.id)}/tasks?${query}`);
-      return (data?.items ?? []).map((raw) => toTaskItem(raw, account, list.id)).filter((item) => Boolean(item && item.due && !item.completed && item.due >= from && item.due <= to));
+      const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(list.id)}/tasks?${new URLSearchParams({ ...range, ...token ? { pageToken: token } : {} })}`, LIMITS.due);
+      if (!complete)
+        throw new GoogleError(502, `"${list.title}" has more than ${LIMITS.due * 100} tasks due in these days; the Planner reads at most that many`);
+      return items.map((raw) => toTaskItem(raw, account, list.id)).filter((item) => Boolean(item && item.due && item.due >= from && item.due <= to));
     });
     return perList.flat();
   }
   async tasksById(account, listId, ids) {
-    const found = await mapLimited(ids.slice(0, 50), 5, async (id) => {
+    const found = await mapLimited(ids, 5, async (id) => {
       try {
         const raw = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`);
         return raw ? toTaskItem(raw, account, listId) : null;
@@ -3232,23 +3898,48 @@ class GoogleData {
       Object.assign(body, patch.completed ? { status: "completed" } : { status: "needsAction", completed: null });
     if (patch.due !== undefined)
       body.due = patch.due ? `${patch.due}T00:00:00.000Z` : null;
+    if (patch.title !== undefined)
+      body.title = patch.title;
+    if (patch.notes !== undefined)
+      body.notes = patch.notes;
     const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`, body);
     return raw ? toTaskItem(raw, account, listId) : null;
   }
   async createTask(account, listId, task) {
-    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks`, {
+    const query = new URLSearchParams({ ...task.parent ? { parent: task.parent } : {}, ...task.previous ? { previous: task.previous } : {} });
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks${query.size ? `?${query}` : ""}`, {
       title: task.title,
       ...task.notes ? { notes: task.notes } : {},
       ...task.due ? { due: `${task.due}T00:00:00.000Z` } : {}
     });
     return raw ? toTaskItem(raw, account, listId) : null;
   }
-  async mail(account, query) {
-    const list = await this.accounts.request(account, "GET", `${GMAIL}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX) })}`);
+  async deleteTask(account, listId, id) {
+    try {
+      await this.accounts.request(account, "DELETE", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`);
+    } catch (error) {
+      if (!isGone(error))
+        throw error;
+    }
+  }
+  async moveTask(account, listId, id, target) {
+    const query = new URLSearchParams({
+      ...target.parent ? { parent: target.parent } : {},
+      ...target.previous ? { previous: target.previous } : {},
+      ...target.destination && target.destination !== listId ? { destinationTasklist: target.destination } : {}
+    });
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}/move${query.size ? `?${query}` : ""}`);
+    return raw ? toTaskItem(raw, account, target.destination ?? listId) : null;
+  }
+  async mail(account, query, pageToken) {
+    const list = await this.accounts.request(account, "GET", `${GMAIL}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX), ...pageToken ? { pageToken } : {} })}`);
     const ids = (list?.messages ?? []).flatMap((message) => message.id ? [message.id] : []);
     const metadata = "format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date";
     const messages = await mapLimited(ids, 5, (id) => this.accounts.request(account, "GET", `${GMAIL}/messages/${enc(id)}?${metadata}`));
-    return messages.map((raw) => raw ? toMailItem(raw, account) : null).filter((item) => Boolean(item)).sort((a, b) => b.date.localeCompare(a.date));
+    return {
+      messages: messages.map((raw) => raw ? toMailItem(raw, account) : null).filter((item) => Boolean(item)).sort((a, b) => b.date.localeCompare(a.date)),
+      nextPageToken: list?.nextPageToken ?? null
+    };
   }
 }
 
@@ -3522,6 +4213,137 @@ class GoogleTimeboxes {
     }
   }
 }
+
+// service/googleRoutes.ts
+var isEmail = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+var isId2 = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
+var isTitle2 = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 1024;
+var ok = (body) => ({ status: 200, body });
+var bad = (error) => ({ status: 400, body: { error } });
+var sendOf = (value) => value === "all" ? "all" : "none";
+var scopeOf = (value) => value === undefined ? "this" : EDIT_SCOPES.includes(value) ? value : null;
+var RESPONSES2 = ["accepted", "declined", "tentative"];
+var googleWriteRoute = async (req, url, ctx) => {
+  const path = url.pathname;
+  const method = req.method;
+  const query = (name) => url.searchParams.get(name);
+  const body = async () => await ctx.readJson(req);
+  if (path === "/google/event" && method === "GET") {
+    const [account, calendar, id] = [query("account"), query("calendar"), query("id")];
+    if (!isEmail(account) || !isId2(calendar) || !isId2(id))
+      return bad("account, calendar and id are required");
+    return ok({ event: await ctx.data.eventDetail(account, calendar, id) });
+  }
+  if (path === "/google/events" && (method === "POST" || method === "PATCH")) {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.calendarId))
+      return bad("account and calendarId are required");
+    if (typeof input.event !== "object" || input.event === null)
+      return bad("event is required");
+    if (method === "POST") {
+      const event = await ctx.data.insertEvent(input.account, input.calendarId, input.event, sendOf(input.sendUpdates));
+      ctx.changed("calendar");
+      return ok({ event });
+    }
+    const scope = scopeOf(input.scope);
+    if (!isId2(input.eventId) || !scope)
+      return bad("eventId and a scope (this, following or all) are required");
+    try {
+      return ok({ requests: await ctx.data.updateEvent(input.account, input.calendarId, input.eventId, input.event, scope, sendOf(input.sendUpdates), ctx.zone()) });
+    } finally {
+      ctx.changed("calendar");
+    }
+  }
+  if (path === "/google/events" && method === "DELETE") {
+    const [account, calendar, id, scope] = [query("account"), query("calendar"), query("id"), scopeOf(query("scope") ?? undefined)];
+    if (!isEmail(account) || !isId2(calendar) || !isId2(id) || !scope)
+      return bad("account, calendar, id and a scope are required");
+    try {
+      return ok({ requests: await ctx.data.deleteEvent(account, calendar, id, scope, sendOf(query("sendUpdates"))) });
+    } finally {
+      ctx.changed("calendar");
+    }
+  }
+  if (path === "/google/events/respond" && method === "POST") {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.calendarId) || !isId2(input.eventId))
+      return bad("account, calendarId and eventId are required");
+    if (!RESPONSES2.includes(input.response))
+      return bad("response must be accepted, declined or tentative");
+    const scope = input.scope === "all" ? "all" : "this";
+    try {
+      return ok({ requests: await ctx.data.respond(input.account, input.calendarId, input.eventId, input.response, scope) });
+    } finally {
+      ctx.changed("calendar");
+    }
+  }
+  if (path === "/google/events/move" && method === "POST") {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.calendarId) || !isId2(input.eventId) || !isId2(input.destination))
+      return bad("account, calendarId, eventId and destination are required");
+    try {
+      return ok({ event: await ctx.data.moveEvent(input.account, input.calendarId, input.eventId, input.destination, sendOf(input.sendUpdates)) });
+    } finally {
+      ctx.changed("calendar");
+    }
+  }
+  if (path === "/google/tasklists" && method === "POST") {
+    const input = await body();
+    if (!isEmail(input.account) || !isTitle2(input.title))
+      return bad("account and a title (at most 1024 characters) are required");
+    const list = await ctx.data.createTaskList(input.account, input.title.trim());
+    return ok({ list });
+  }
+  if (path === "/google/tasklists" && method === "PATCH") {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.listId) || !isTitle2(input.title))
+      return bad("account, listId and a title are required");
+    return ok({ list: await ctx.data.renameTaskList(input.account, input.listId, input.title.trim()) });
+  }
+  if (path === "/google/tasklists" && method === "DELETE") {
+    const [account, list] = [query("account"), query("list")];
+    if (!isEmail(account) || !isId2(list))
+      return bad("account and list are required");
+    try {
+      await ctx.data.deleteTaskList(account, list);
+      return ok({ deleted: true });
+    } finally {
+      ctx.changed("tasks");
+    }
+  }
+  if (path === "/google/tasks/all" && method === "GET") {
+    const [account, list] = [query("account"), query("list")];
+    if (!isEmail(account) || !isId2(list))
+      return bad("account and list are required");
+    return ok(await ctx.data.allTasks(account, list));
+  }
+  if (path === "/google/tasks" && method === "DELETE") {
+    const [account, list, id] = [query("account"), query("list"), query("id")];
+    if (!isEmail(account) || !isId2(list) || !isId2(id))
+      return bad("account, list and id are required");
+    try {
+      await ctx.data.deleteTask(account, list, id);
+      return ok({ deleted: true });
+    } finally {
+      ctx.changed("tasks");
+    }
+  }
+  if (path === "/google/tasks/move" && method === "POST") {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
+      return bad("account, listId and id are required");
+    for (const key of ["parent", "previous", "destinationListId"])
+      if (input[key] !== undefined && input[key] !== null && !isId2(input[key]))
+        return bad(`${key} must be a task or list id`);
+    try {
+      const task = await ctx.data.moveTask(input.account, input.listId, input.id, { parent: input.parent ?? null, previous: input.previous ?? null, destination: input.destinationListId ?? null });
+      return ok({ task });
+    } finally {
+      ctx.changed("tasks");
+    }
+  }
+  return null;
+};
 
 // service/agents.ts
 import { execFile as execFile3 } from "node:child_process";
@@ -4031,7 +4853,7 @@ var mapLimited2 = async (items, limit, fn) => {
   }));
   return results;
 };
-var isEmail = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+var isEmail2 = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
 var isGoogleId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
 var perAccount = async (feature, ask) => {
   const accounts = (await google.status()).accounts.filter((account) => account.features.includes(feature));
@@ -4049,6 +4871,9 @@ var perAccount = async (feature, ask) => {
 var googleRoute = async (req, url) => {
   const path = url.pathname;
   const ok = (body) => ({ status: 200, body });
+  const written = await googleWriteRoute(req, url, { data: googleData, readJson, zone: () => planner.state.settings.timezone ?? "UTC", changed: (what) => (what === "calendar" ? googleCalendars : googleDueTasks).forget() });
+  if (written)
+    return written;
   if (path === "/google/status" && req.method === "GET")
     return ok({ ...await google.status(), timeboxError: timeboxes.lastError });
   if (path === "/google/client" && req.method === "PUT") {
@@ -4087,13 +4912,15 @@ var googleRoute = async (req, url) => {
   if (path === "/google/tasks" && req.method === "GET") {
     const email = url.searchParams.get("account");
     const list = url.searchParams.get("list");
-    if (!isEmail(email) || !isGoogleId(list))
+    if (!isEmail2(email) || !isGoogleId(list))
       return { status: 400, body: { error: "account and list are required" } };
     return ok({ tasks: await googleData.tasks(email, list) });
   }
   if (path === "/google/tasks/linked" && req.method === "POST") {
     const body = await readJson(req);
-    const groups = (Array.isArray(body.groups) ? body.groups : []).filter((group) => isEmail(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId)).slice(0, 10);
+    const groups = (Array.isArray(body.groups) ? body.groups : []).filter((group) => isEmail2(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId));
+    if (groups.length > 10 || groups.some((group) => group.ids.length > 50))
+      return { status: 400, body: { error: "at most 10 lists of 50 tasks per request" } };
     const tasks = [];
     const errors = [];
     await Promise.all(groups.map(async (group) => {
@@ -4107,30 +4934,39 @@ var googleRoute = async (req, url) => {
   }
   if (path === "/google/tasks" && (req.method === "PATCH" || req.method === "POST")) {
     const body = await readJson(req);
-    if (!isEmail(body.account) || !isGoogleId(body.listId))
+    if (!isEmail2(body.account) || !isGoogleId(body.listId))
       return { status: 400, body: { error: "account and listId are required" } };
     if (body.due !== undefined && body.due !== null && !isDateKey(body.due))
       return { status: 400, body: { error: "due must be a date or null" } };
+    if (body.notes !== undefined && (typeof body.notes !== "string" || body.notes.length > 8000))
+      return { status: 400, body: { error: "notes must be text" } };
+    if (body.title !== undefined && (typeof body.title !== "string" || !body.title.trim() || body.title.length > 1024))
+      return { status: 400, body: { error: "title must be 1 to 1024 characters" } };
     if (req.method === "PATCH") {
       if (!isGoogleId(body.id))
         return { status: 400, body: { error: "id is required" } };
       if (body.completed !== undefined && typeof body.completed !== "boolean")
         return { status: 400, body: { error: "completed must be true or false" } };
-      const patch = { ...body.completed !== undefined ? { completed: body.completed } : {}, ...body.due !== undefined ? { due: body.due } : {} };
-      return ok({ task: await googleData.updateTask(body.account, body.listId, body.id, patch) });
+      const patch = { ...body.completed !== undefined ? { completed: body.completed } : {}, ...body.due !== undefined ? { due: body.due } : {}, ...body.title !== undefined ? { title: body.title.trim() } : {}, ...body.notes !== undefined ? { notes: body.notes } : {} };
+      const task = await googleData.updateTask(body.account, body.listId, body.id, patch);
+      googleDueTasks.forget();
+      return ok({ task });
     }
-    if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 1024)
+    if (typeof body.title !== "string")
       return { status: 400, body: { error: "title is required" } };
-    if (body.notes !== undefined && (typeof body.notes !== "string" || body.notes.length > 8000))
-      return { status: 400, body: { error: "notes must be text" } };
-    return ok({ task: await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...body.notes ? { notes: body.notes } : {}, ...body.due ? { due: body.due } : {} }) });
+    if (body.parent !== undefined && body.parent !== null && !isGoogleId(body.parent) || body.previous !== undefined && body.previous !== null && !isGoogleId(body.previous))
+      return { status: 400, body: { error: "parent and previous must be task ids" } };
+    const task = await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...body.notes ? { notes: body.notes } : {}, ...body.due ? { due: body.due } : {}, parent: body.parent ?? null, previous: body.previous ?? null });
+    googleDueTasks.forget();
+    return ok({ task });
   }
   if (path === "/google/mail" && req.method === "GET") {
     const email = url.searchParams.get("account");
     const query = url.searchParams.get("q") ?? "in:inbox";
-    if (!isEmail(email) || query.length > 500)
+    const pageToken = url.searchParams.get("pageToken") ?? undefined;
+    if (!isEmail2(email) || query.length > 500 || pageToken !== undefined && pageToken.length > 500)
       return { status: 400, body: { error: "account is required, and the search must be shorter" } };
-    return ok({ messages: await googleData.mail(email, query) });
+    return ok(await googleData.mail(email, query, pageToken));
   }
   return null;
 };
@@ -4313,8 +5149,7 @@ var server = http2.createServer(async (req, res) => {
         googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
         googleDueTasks.read(taskAccounts, from, to, refresh)
       ]);
-      const planned = new Set(Object.values(planner.state.tasks).flatMap((task) => task.source?.kind === "gtask" && !task.deletedAt && !task.archivedAt ? [task.source.id] : []));
-      const dueEvents = due.items.flatMap((item) => item.due && !planned.has(item.id) ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
+      const dueEvents = due.items.flatMap((item) => item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
       json(res, 200, {
         events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
         errors: [...feed.errors, ...fromGoogle.errors, ...due.errors.map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]

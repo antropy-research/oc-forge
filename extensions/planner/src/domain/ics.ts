@@ -1,6 +1,6 @@
 // Read-only iCalendar (RFC 5545) support: parse VEVENTs and expand them into
 // concrete occurrences for a date range in the user's zone.
-import type { GoogleTaskItem } from './google.ts';
+import type { GoogleEventRef, GoogleTaskItem } from './google.ts';
 import type { DateKey } from './types.ts';
 import { addDays, daysBetween, instantAt, isDateKey, isValidTimeZone, startOfWeek, weekday } from './dates.ts';
 
@@ -40,6 +40,8 @@ export interface CalendarEvent {
   busy: boolean;
   /** A Google task due that day, shown the way Google Calendar shows tasks; planning it links it. */
   googleTask?: GoogleTaskItem;
+  /** A Google Calendar event: where it lives, and what may be done with it. */
+  google?: GoogleEventRef;
 }
 
 // Windows zone names that Outlook writes into TZID.

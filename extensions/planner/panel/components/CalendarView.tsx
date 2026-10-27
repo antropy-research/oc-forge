@@ -1,16 +1,25 @@
-import { useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { GOOGLE_TASKS_CALENDAR } from '../../src/domain/google.ts';
-import { addDays, monthDay, startOfWeek } from '../../src/domain/dates.ts';
+import type { DateKey } from '../../src/domain/types.ts';
 import { blocksFor, tasksForDay } from '../../src/domain/selectors.ts';
 import { zonedDateMinutes } from '../../src/domain/dates.ts';
-import { useView } from '../lib/context.ts';
+import { CALENDAR_MODES, monthWeeks, rangeTitle, stepAnchor, viewDays, type CalendarMode } from '../../src/domain/gcalendar.ts';
+import { usePlanner, useView } from '../lib/context.ts';
 import { useCalendarEvents } from '../lib/calendar.ts';
+import { calendarUi, useCalendarUi } from '../lib/gcal.ts';
 import { matchesFilter, useUi } from '../lib/ui.ts';
 import { BacklogBuckets } from './Backlog.tsx';
 import { ChannelFilter } from './ChannelFilter.tsx';
 import { TaskList } from './TaskList.tsx';
 import { TimeGrid } from './TimeGrid.tsx';
 import { LinearIssues } from './LinearPanel.tsx';
+import { TasksView } from './TasksView.tsx';
+import { CalendarRail } from './calendar/Rail.tsx';
+import { MonthView } from './calendar/MonthView.tsx';
+import { ScheduleView } from './calendar/ScheduleView.tsx';
+import { CalendarOverlays } from './calendar/Overlays.tsx';
+import { Icon } from './calendar/Icon.tsx';
+import { isTaskEvent } from './calendar/items.ts';
 
 /** Today's tasks that have no working session today yet. */
 export const UnscheduledToday = () => {
@@ -23,50 +32,193 @@ export const UnscheduledToday = () => {
   return <TaskList placement={{ kind: 'day', date: view.today }} tasks={tasks} empty="Everything today has a time" />;
 };
 
-/** Calendar: the day or week as a time grid, with unscheduled work beside it to drag in. */
+const MODE_LABELS: Record<CalendarMode, string> = { day: 'Day', week: 'Week', month: 'Month', schedule: 'Schedule' };
+/** Google Calendar's view keys; its A for Schedule adds a task in the Planner, so Schedule keeps Google's other key, 5. */
+const MODE_KEYS: Record<CalendarMode, string> = { day: 'D', week: 'W', month: 'M', schedule: '5' };
+const MODE_DIGITS: Record<string, CalendarMode> = { '1': 'day', '2': 'week', '3': 'month', '5': 'schedule' };
+const STEP_NAMES: Record<CalendarMode, string> = { day: 'day', week: 'week', month: 'month', schedule: 'stretch' };
+/** The rail takes this much, and the grid needs this much to stay readable. */
+const RAIL_PX = 236;
+const SIDE_PX = 280;
+const GRID_MIN_PX = 640;
+
+/** The width an element has, kept up to date. */
+const useWidth = (ref: { current: HTMLElement | null }): number => {
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => setWidth(element.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return width;
+};
+
+const ViewMenu = ({ mode }: { mode: CalendarMode }) => {
+  const { prefs } = useCalendarUi();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => !ref.current?.contains(event.target as Node) && setOpen(false);
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const pick = (patch: Parameters<typeof calendarUi.prefs>[0]) => {
+    setOpen(false);
+    calendarUi.prefs(patch);
+  };
+  return (
+    <div class="menu-anchor" ref={ref}>
+      <button class="gcal-view-button" aria-haspopup="menu" aria-expanded={open} aria-label={`View: ${MODE_LABELS[mode]}`} onClick={() => setOpen(!open)}>
+        <span>{MODE_LABELS[mode]}</span>
+        <Icon name="down" size={18} />
+      </button>
+      {open && (
+        <div class="menu gcal-view-menu" role="menu" aria-label="View">
+          {CALENDAR_MODES.map((item) => (
+            <button key={item} role="menuitemradio" aria-checked={item === mode} onClick={() => pick({ mode: item })}>
+              <span>{MODE_LABELS[item]}</span>
+              <kbd>{MODE_KEYS[item]}</kbd>
+            </button>
+          ))}
+          <hr />
+          <button role="menuitemcheckbox" aria-checked={prefs.weekends} onClick={() => pick({ weekends: !prefs.weekends })}>
+            <span class="menu-check">{prefs.weekends ? '✓' : ''}</span>Show weekends
+          </button>
+          <button role="menuitemcheckbox" aria-checked={prefs.declined} onClick={() => pick({ declined: !prefs.declined })}>
+            <span class="menu-check">{prefs.declined ? '✓' : ''}</span>Show declined events
+          </button>
+          <button role="menuitemcheckbox" aria-checked={prefs.completedTasks} onClick={() => pick({ completedTasks: !prefs.completedTasks })}>
+            <span class="menu-check">{prefs.completedTasks ? '✓' : ''}</span>Show completed tasks
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * The calendar as Google Calendar lays it out: Create, the mini month and the
+ * calendars in a rail; Today, the arrows, the range and the view (Day, Week,
+ * Month, Schedule) above the grid; Calendar or Tasks. Beside it, the
+ * Planner's unscheduled work to drag in. The rail and that panel fold away
+ * when the grid would get too narrow.
+ */
 export const CalendarView = () => {
   const view = useView();
-  const [mode, setMode] = useState<'day' | 'week'>('week');
-  const [side, setSide] = useState<'unscheduled' | 'backlog' | 'linear'>('unscheduled');
-  const [anchor, setAnchor] = useState(view.today);
-  const dates = mode === 'day' ? [anchor] : Array.from({ length: 7 }, (_, index) => addDays(startOfWeek(anchor, view.state.settings.weekStartsOn), index));
-  const feed = useCalendarEvents(dates[0]!, dates[dates.length - 1]!);
-  const step = mode === 'day' ? 1 : 7;
+  const { google } = usePlanner();
+  const { prefs } = useCalendarUi();
+  const root = useRef<HTMLElement>(null);
+  const width = useWidth(root);
+  const anchor = prefs.anchor ?? view.today;
+  const mode = prefs.mode;
+  const weekStartsOn = view.state.settings.weekStartsOn;
+  const days = viewDays(mode, anchor, weekStartsOn, prefs.weekends);
+  const monthDays = mode === 'month' ? monthWeeks(anchor, weekStartsOn).flat() : days;
+  const feed = useCalendarEvents(monthDays[0]!, monthDays[monthDays.length - 1]!, { declined: prefs.declined });
+  const events = prefs.completedTasks ? feed.events : feed.events.filter((event) => !(isTaskEvent(event) && event.googleTask?.completed));
+
+  // What fits beside the grid: the rail first, as in Google Calendar; both when there is room.
+  const roomy = width === 0 || width >= RAIL_PX + SIDE_PX + GRID_MIN_PX;
+  const railWanted = prefs.rail ?? (width === 0 || width >= RAIL_PX + GRID_MIN_PX);
+  const sideWanted = prefs.side ?? roomy;
+  const showRail = railWanted && (roomy || !sideWanted || prefs.lastOpened !== 'side');
+  const showSide = sideWanted && (roomy || !railWanted || prefs.lastOpened === 'side');
+  const tasksAccounts = google.accountsWith('tasks').length;
+
+  const setAnchor = (date: DateKey) => calendarUi.prefs({ anchor: date });
+  const goDay = (date: DateKey) => calendarUi.prefs({ mode: 'day', anchor: date, page: 'calendar' });
+
+  // Google Calendar's keys: D, W, M (or 1, 2, 3), 5 for Schedule, J and K for next and previous.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.metaKey || event.ctrlKey || event.altKey || (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable))) return;
+      const ui = calendarUi.get();
+      if (ui.popover || ui.draft || ui.editor || ui.question || ui.prefs.page !== 'calendar' || document.querySelector('.modal-backdrop')) return;
+      const key = event.key.toLowerCase();
+      const next = MODE_DIGITS[key] ?? (Object.keys(MODE_KEYS) as CalendarMode[]).find((item) => MODE_KEYS[item].toLowerCase() === key);
+      if (next) calendarUi.prefs({ mode: next });
+      else if (key === 'j') calendarUi.prefs({ anchor: stepAnchor(ui.prefs.mode, ui.prefs.anchor ?? view.today, 1) });
+      else if (key === 'k') calendarUi.prefs({ anchor: stepAnchor(ui.prefs.mode, ui.prefs.anchor ?? view.today, -1) });
+      else return;
+      event.preventDefault();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [view.today]);
+
+  const errors = feed.errors.map((error) => `${error.calendarId === GOOGLE_TASKS_CALENDAR ? 'Google Tasks' : view.state.calendars[error.calendarId]?.name ?? 'Calendar'}: ${error.message}`);
+  const tasksPage = prefs.page === 'tasks';
   return (
-    <section class="view">
-      <header class="view-header">
-        <h1>Calendar</h1>
-        <span class="view-sub">{mode === 'day' ? monthDay(dates[0]!) : `${monthDay(dates[0]!)} – ${monthDay(dates[6]!)}`}{feed.loading ? ' · syncing…' : ''}</span>
-        <div class="date-nav">
-          <ChannelFilter />
-          <div class="tabs" role="tablist" aria-label="Calendar range">
-            <button role="tab" aria-selected={mode === 'day'} onClick={() => setMode('day')}>Day</button>
-            <button role="tab" aria-selected={mode === 'week'} onClick={() => setMode('week')}>Week</button>
-          </div>
-          <button aria-label="Earlier" onClick={() => setAnchor(addDays(anchor, -step))}>‹</button>
-          <button onClick={() => setAnchor(view.today)}>Today</button>
-          <button aria-label="Later" onClick={() => setAnchor(addDays(anchor, step))}>›</button>
+    <section class={`view gcal-view${width && width < 720 ? ' is-narrow' : ''}`} ref={root}>
+      <header class="gcal-header">
+        {!tasksPage && (
+          <button class="icon-button gcal-menu" aria-label="Main menu" aria-expanded={showRail} title={showRail ? 'Hide the calendars' : 'Show the calendars'} onClick={() => calendarUi.prefs({ rail: !showRail, ...(showRail ? {} : { lastOpened: 'rail' }) })}>
+            <Icon name="menu" size={20} />
+          </button>
+        )}
+        <h1 class="gcal-brand">{tasksPage ? 'Tasks' : 'Calendar'}</h1>
+        {!tasksPage && (
+          <>
+            <button class="gcal-today" onClick={() => setAnchor(view.today)} title={`Today, ${view.today}`}>Today</button>
+            <div class="gcal-arrows">
+              <button class="icon-button" aria-label={`Previous ${STEP_NAMES[mode]}`} title={`Previous ${STEP_NAMES[mode]} (K)`} onClick={() => setAnchor(stepAnchor(mode, anchor, -1))}><Icon name="left" size={20} /></button>
+              <button class="icon-button" aria-label={`Next ${STEP_NAMES[mode]}`} title={`Next ${STEP_NAMES[mode]} (J)`} onClick={() => setAnchor(stepAnchor(mode, anchor, 1))}><Icon name="right" size={20} /></button>
+            </div>
+            <h2 class="gcal-title" aria-live="polite">{rangeTitle(mode, anchor, days)}</h2>
+            {feed.loading && <span class="gcal-sync hint">Syncing…</span>}
+          </>
+        )}
+        <div class="gcal-actions">
+          {!tasksPage && <ViewMenu mode={mode} />}
+          {tasksAccounts > 0 && (
+            <div class="segmented gcal-switch" role="radiogroup" aria-label="Calendar or Tasks">
+              <button role="radio" aria-checked={!tasksPage} aria-label="Calendar" title="Calendar" onClick={() => calendarUi.prefs({ page: 'calendar' })}><Icon name="calendar" size={20} /></button>
+              <button role="radio" aria-checked={tasksPage} aria-label="Tasks" title="Tasks" onClick={() => calendarUi.prefs({ page: 'tasks' })}><Icon name="task" size={20} /></button>
+            </div>
+          )}
+          {!tasksPage && (
+            <button class={`icon-button gcal-side-toggle${showSide ? ' is-on' : ''}`} aria-label={showSide ? 'Hide the task panel' : 'Show the task panel'} aria-expanded={showSide} title={showSide ? 'Hide unscheduled work' : 'Show unscheduled work, to drag onto the calendar'} onClick={() => calendarUi.prefs({ side: !showSide, ...(showSide ? {} : { lastOpened: 'side' }) })}>
+              <Icon name="panel" size={20} />
+            </button>
+          )}
         </div>
       </header>
-      {feed.errors.length > 0 && (
-        <p class="feed-errors" role="alert">
-          {feed.errors.map((error) => `${error.calendarId === GOOGLE_TASKS_CALENDAR ? 'Google Tasks' : view.state.calendars[error.calendarId]?.name ?? 'Calendar'}: ${error.message}`).join(' · ')}
-        </p>
-      )}
-      <div class="calendar-layout">
-        <TimeGrid dates={dates} events={feed.events} />
-        <aside class="side-panel" aria-label="Unscheduled work">
-          <div class="tabs side-tabs" role="tablist">
-            <button role="tab" aria-selected={side === 'unscheduled'} onClick={() => setSide('unscheduled')}>Unscheduled</button>
-            <button role="tab" aria-selected={side === 'backlog'} onClick={() => setSide('backlog')}>Backlog</button>
-            <button role="tab" aria-selected={side === 'linear'} onClick={() => setSide('linear')}>Linear</button>
+      {errors.length > 0 && !tasksPage && <p class="feed-errors" role="alert">{errors.join(' · ')}</p>}
+      {tasksPage ? (
+        <TasksView />
+      ) : (
+        <div class="gcal-body">
+          {showRail && <CalendarRail anchor={anchor} shown={days} onPick={setAnchor} />}
+          <div class="gcal-main">
+            {(mode === 'day' || mode === 'week') && <TimeGrid dates={days} events={events} onDay={mode === 'week' ? goDay : undefined} />}
+            {mode === 'month' && <MonthView anchor={anchor} events={events} onDay={goDay} />}
+            {mode === 'schedule' && <ScheduleView from={days[0]!} to={days[days.length - 1]!} events={events} onDay={goDay} />}
           </div>
-          <p class="hint">Drag onto the calendar to timebox.</p>
-          {side === 'unscheduled' && <UnscheduledToday />}
-          {side === 'backlog' && <BacklogBuckets compact />}
-          {side === 'linear' && <LinearIssues />}
-        </aside>
-      </div>
+          {showSide && (
+            <aside class="side-panel gcal-side" aria-label="Unscheduled work">
+              <div class="tabs side-tabs" role="tablist">
+                <button role="tab" aria-selected={prefs.sideTab === 'unscheduled'} onClick={() => calendarUi.prefs({ sideTab: 'unscheduled' })}>Unscheduled</button>
+                <button role="tab" aria-selected={prefs.sideTab === 'backlog'} onClick={() => calendarUi.prefs({ sideTab: 'backlog' })}>Backlog</button>
+                <button role="tab" aria-selected={prefs.sideTab === 'linear'} onClick={() => calendarUi.prefs({ sideTab: 'linear' })}>Linear</button>
+              </div>
+              <div class="gcal-side-tools">
+                <span class="hint">Drag onto the calendar to timebox, or onto a day to plan it then.</span>
+                {prefs.sideTab === 'unscheduled' && <ChannelFilter />}
+              </div>
+              {prefs.sideTab === 'unscheduled' && <UnscheduledToday />}
+              {prefs.sideTab === 'backlog' && <BacklogBuckets compact />}
+              {prefs.sideTab === 'linear' && <LinearIssues />}
+            </aside>
+          )}
+        </div>
+      )}
+      <CalendarOverlays onDay={goDay} />
     </section>
   );
 };

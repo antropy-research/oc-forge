@@ -317,6 +317,9 @@ try {
   await meeting.waitFor({ timeout: 15_000 });
   check('subscribed calendar event shows on the grid', true);
 
+  // Where the week would get too narrow, the unscheduled tasks fold away until asked for.
+  const showPanel = frame.getByRole('button', { name: 'Show the task panel' });
+  if (await showPanel.count()) await showPanel.click();
   const dragSource = frame.locator('aside li.task-card', { hasText: `${run} sort-low` });
   await dragSource.dragTo(lane, { targetPosition: { x: 40, y: 10 * 48 + 4 } });
   const lowBlock = lane.locator('.grid-item.is-block', { hasText: `${run} sort-low` });
@@ -1592,12 +1595,14 @@ try {
   await nav('Home').click();
   await nav('Today').click();
   await frame.getByRole('tab', { name: 'Calendar' }).click();
-  const dueChip = frame.getByRole('button', { name: new RegExp(`^Plan the Google task ${run} renew library card on `) });
+  const dueChip = frame.getByRole('button', { name: new RegExp(`^Google task ${run} renew library card, due `) });
   check('a Google task due today shows on the calendar, as in Google Calendar', await dueChip.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
   await dueChip.click();
+  await frame.getByRole('dialog', { name: `Google task: ${run} renew library card` }).getByRole('button', { name: /^Plan on today/ }).click();
   const fromDue = await waitForState((latest) => taskTitled(latest, `${run} renew library card`)?.source?.kind === 'gtask');
-  check('one click plans it today, linked to the Google task', taskTitled(fromDue, `${run} renew library card`)?.placement.date === todayKey && taskTitled(fromDue, `${run} renew library card`)?.source?.id === 'gt9');
-  check('a planned Google task leaves the all-day row', await dueChip.waitFor({ state: 'detached', timeout: 5000 }).then(() => true).catch(() => false));
+  check('its details plan it today, linked to the Google task', taskTitled(fromDue, `${run} renew library card`)?.placement.date === todayKey && taskTitled(fromDue, `${run} renew library card`)?.source?.id === 'gt9');
+  const plannedChip = frame.getByRole('button', { name: new RegExp(`^Google task ${run} renew library card, due .*planned in the Planner`) });
+  check('a planned Google task stays on its due day, as Google Calendar shows it, marked planned', await plannedChip.waitFor({ timeout: 5000 }).then(() => true).catch(() => false));
   const reviewEvent = frame.locator('.grid-item.is-event', { hasText: `${run} design review` });
   await reviewEvent.hover();
   await reviewEvent.getByRole('button', { name: `Add ${run} design review as a task` }).click();

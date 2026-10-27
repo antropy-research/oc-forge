@@ -7,6 +7,7 @@ import { useUi } from '../lib/ui.ts';
 import { MAIL_SEARCHES, type GoogleDrag } from '../lib/google.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { PlanActions } from './PlanActions.tsx';
+import { TasksView } from './TasksView.tsx';
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -146,6 +147,11 @@ export const GmailItems = () => {
       {gv.mailLoading && gv.mail.length === 0 && <p class="hint">Loading…</p>}
       {!gv.mailLoading && gv.mail.length === 0 && !gv.mailError && <p class="hint">No messages here.</p>}
       <ul class="issue-list">{gv.mail.map((item) => <MailRow key={item.id} item={item} />)}</ul>
+      {gv.mailNext && (
+        <button class="link load-more" disabled={gv.mailLoading} onClick={() => void google.searchMail(gv.mailQuery, true)}>
+          {gv.mailLoading ? 'Loading…' : 'Load more messages'}
+        </button>
+      )}
     </div>
   );
 };
@@ -155,19 +161,29 @@ export const GooglePage = () => {
   const gv = useGoogle();
   const [tab, setTab] = useState<'tasks' | 'mail'>('tasks');
   const accounts = gv.status?.accounts ?? [];
+  const tabs = (
+    <div class="tabs linear-modes" role="tablist" aria-label="Google">
+      <button role="tab" aria-selected={tab === 'tasks'} onClick={() => setTab('tasks')}>Google Tasks</button>
+      <button role="tab" aria-selected={tab === 'mail'} onClick={() => { setTab('mail'); if (google.accountsWith('mail').length && !gv.mail.length) void google.searchMail(); }}>Gmail</button>
+    </div>
+  );
   return (
     <section class="view">
       <header class="view-header">
         <h1>Google</h1>
         <span class="view-sub">{accounts.length ? accounts.map((account) => account.email).join(', ') : 'Connect an account in Settings → Google'}</span>
       </header>
-      <div class="view-scroll linear-page">
-        <div class="tabs linear-modes" role="tablist" aria-label="Google">
-          <button role="tab" aria-selected={tab === 'tasks'} onClick={() => setTab('tasks')}>Google Tasks</button>
-          <button role="tab" aria-selected={tab === 'mail'} onClick={() => { setTab('mail'); if (google.accountsWith('mail').length && !gv.mail.length) void google.searchMail(); }}>Gmail</button>
+      {tab === 'tasks' ? (
+        <>
+          {tabs}
+          <TasksView />
+        </>
+      ) : (
+        <div class="view-scroll linear-page">
+          {tabs}
+          <GmailItems />
         </div>
-        {tab === 'tasks' ? <GoogleTasksItems /> : <GmailItems />}
-      </div>
+      )}
     </section>
   );
 };

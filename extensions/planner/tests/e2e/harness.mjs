@@ -10,6 +10,8 @@
 // - Linear (the host integration route) answers from an in-memory fixture world (`h.linear`), never a real workspace.
 // - GitHub service paths answer from fixtures (`h.github`) unless you pass `serviceOverride`.
 // - The Small Model (`/generate`) answers from `generate` (default: an empty JSON array).
+// - Google: start tests/e2e/fakeGoogle.mjs and pass `serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base }` and
+//   `homeFiles: { 'google-accounts.json': fake.accountsFile() }`; your service then signs in to the fake (see calendar.mjs).
 //
 // Usage (node >= 22, run on the host, from any checkout of this repository):
 //   import { startHarness } from './harness.mjs';
@@ -28,7 +30,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodS
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const freePort = () => new Promise((resolve, reject) => {
   const server = createServer();
@@ -135,6 +137,10 @@ export async function startHarness({
   /** (request) => text the Small Model answers. */
   generate = () => '[]',
   timezoneId = 'America/Los_Angeles',
+  /** Extra environment for your private service, e.g. PLANNER_GOOGLE_API_BASE from tests/e2e/fakeGoogle.mjs. */
+  serviceEnv = {},
+  /** Files written into the private service's temporary HOME before it starts, by path under HOME (e.g. 'google-accounts.json'). */
+  homeFiles = {},
 } = {}) {
   const planner = join(worktree, 'extensions/planner');
   for (const file of ['panel/main.js', 'service/main.js']) if (!existsSync(join(planner, file))) throw new Error(`build first: ${file} is missing`);
@@ -151,8 +157,12 @@ export async function startHarness({
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, 'gh'), '#!/bin/sh\necho "gh: not logged in (planner harness)" >&2\nexit 4\n');
   chmodSync(join(bin, 'gh'), 0o755);
+  for (const [path, text] of Object.entries(homeFiles)) {
+    mkdirSync(dirname(join(home, path)), { recursive: true });
+    writeFileSync(join(home, path), text, { mode: 0o600 });
+  }
   const child = spawn(process.execPath, [join(planner, 'service/main.js')], {
-    env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, TZ: process.env.TZ ?? '', LANG: 'C.UTF-8', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: token, PLANNER_DATA_DIR: join(home, 'data') },
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, TZ: process.env.TZ ?? '', LANG: 'C.UTF-8', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: token, PLANNER_DATA_DIR: join(home, 'data'), ...serviceEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const serviceLog = [];
