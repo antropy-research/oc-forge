@@ -78,6 +78,18 @@ try {
   const session = await sessionIn(project);
 
   const page = await context.newPage();
+  /**
+   * The current chat's menu in OpenChamber's header: its "Open session actions" button, or, with sessions shown as
+   * tabs in the header (an OpenChamber setting), the selected tab's "Session tab actions" (shown on hover).
+   */
+  const openChatMenu = async () => {
+    const button = page.locator('header button[aria-label="Open session actions"]').first();
+    const tab = page.locator('header [role="tab"][aria-selected="true"]').first();
+    await button.or(tab).first().waitFor({ timeout: 20_000 });
+    if (await button.isVisible().catch(() => false)) return button.click();
+    await tab.hover();
+    await tab.getByRole('button', { name: 'Session tab actions' }).click({ timeout: 10_000 });
+  };
   context.on('page', (opened) => popups.push(opened.url()));
   page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
   page.on('console', (message) => {
@@ -258,7 +270,7 @@ try {
   await page.goto(`${base}/`, { waitUntil: 'load' });
   await page.getByText(`${run} chat planner-demo-b`, { exact: true }).first().click({ timeout: 20_000 });
   // The chat's own menu in the header (the sidebar has one per chat).
-  await page.locator('header button[aria-label="Open session actions"]').first().click({ timeout: 20_000 });
+  await openChatMenu();
   await page.getByRole('menuitem', { name: 'Open in VS Code' }).click({ timeout: 10_000 });
   const panelOther = page.frameLocator('iframe[title="VS Code"][src*="/workbench/index.html"]').first();
   const switched = await until(async () => (await panelOther.locator('.explorer-folders-view').innerText()).includes('planner-demo-b') || (await panelOther.locator('.explorer-viewlet').innerText()).toLowerCase().includes('planner-demo-b'), 60_000);

@@ -144,6 +144,19 @@ const openPlanner = async () => {
 
 const shot = (name) => page.screenshot({ path: join(out, `${name}.png`) });
 
+/**
+ * The current chat's menu in OpenChamber's header: its "Open session actions" button, or, with sessions shown as
+ * tabs in the header (an OpenChamber setting), the selected tab's "Session tab actions" (shown on hover).
+ */
+const openChatMenu = async () => {
+  const button = page.locator('header button[aria-label="Open session actions"]').first();
+  const tab = page.locator('header [role="tab"][aria-selected="true"]').first();
+  await button.or(tab).first().waitFor({ timeout: 20_000 });
+  if (await button.isVisible().catch(() => false)) return button.click();
+  await tab.hover();
+  await tab.getByRole('button', { name: 'Session tab actions' }).click({ timeout: 10_000 });
+};
+
 try {
   let frame = await openPlanner();
   check('page opens and the service answers', true);
@@ -1272,7 +1285,7 @@ try {
   const slashed = await waitForState((latest) => Boolean(taskTitled(latest, `${run} from slash`)), 15_000);
   const slashTask = taskTitled(slashed, `${run} from slash`);
   check('/task in a chat adds a task linked to that chat', slashTask?.plannedMinutes === 15 && slashTask?.sessionRef?.sessionId === agentRun.sessionId, JSON.stringify(slashTask ? [slashTask.plannedMinutes, slashTask.sessionRef?.sessionId] : null));
-  await page.getByRole('button', { name: 'Open session actions' }).click();
+  await openChatMenu();
   await page.getByRole('menuitem', { name: 'Track chat in Planner' }).click();
   const tracked = await waitForState((latest) => Object.values(latest.state.runs).filter((item) => item.sessionId === agentRun.sessionId).length >= 2, 15_000);
   check('"Track chat in Planner" links the chat to a new task as its run', Object.values(tracked.state.runs).filter((item) => item.sessionId === agentRun.sessionId).length >= 2);
