@@ -1389,3 +1389,21 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gcal-snack-action { border: 0; background: none; padding: 6px 10px; border-radius: 4px; font-weight: 600; color: color-mix(in srgb, var(--oc-primary) 55%, var(--oc-bg)); }
 .gcal-snack-close { width: 32px; height: 32px; display: grid; place-items: center; border: 0; padding: 0; border-radius: 50%; background: none; color: inherit; }
 .gcal-snack-action:hover, .gcal-snack-close:hover { background: color-mix(in srgb, var(--oc-bg) 16%, transparent); }
+
+/* ==== Narrow Planner page (planner-polish) ====
+   OpenChamber's own sidebar open in a 1024 px window leaves the Planner page about 700 px.
+   The menu folds into a rail with a button and opens over the page, as Sunsama and Linear fold
+   their sidebars; headers wrap instead of clipping; Home keeps a whole day beside its sources. */
+.nav-rail { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 0; background: var(--pl-softer); border-right: 1px solid var(--pl-line); min-height: 0; }
+.nav-rail-button { width: 32px; height: 32px; display: inline-grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--oc-muted); }
+.nav-rail-button:hover, .nav-rail-button[aria-expanded='true'] { background: var(--pl-soft); color: var(--oc-fg); }
+.nav-rail-button svg { width: 20px; height: 20px; fill: currentColor; }
+.app.is-narrow { grid-template-columns: 48px minmax(0, 1fr); }
+.app.is-narrow > .nav { position: fixed; top: 0; bottom: 0; left: 48px; width: 232px; z-index: 40; background: var(--pl-surface); box-shadow: 0 10px 32px color-mix(in srgb, var(--oc-fg) 22%, transparent); }
+.nav-scrim { position: fixed; top: 0; right: 0; bottom: 0; left: 48px; z-index: 39; background: color-mix(in srgb, var(--oc-fg) 10%, transparent); }
+.app.is-narrow .view-header { flex-wrap: wrap; row-gap: 6px; padding: 12px 16px 8px; }
+.app.is-narrow .view-sub { white-space: nowrap; }
+.app.is-narrow .date-nav { flex-wrap: wrap; justify-content: flex-end; }
+.app.is-narrow .source-panel { width: 280px; }
+.app.is-narrow .board { gap: 12px; padding: 4px 14px 20px; }
+.app.is-narrow .sunsama-layout.is-today { gap: 14px; padding-left: 14px; }

@@ -11,7 +11,7 @@ import { Highlights } from './rituals/Highlights.tsx';
 import { WeeklyPlanning, WeeklyReview } from './rituals/Weekly.tsx';
 import { FocusView } from './FocusView.tsx';
 import { Settings } from './Settings.tsx';
-import { Nav, ServiceGate, Toasts, type Route } from './Shell.tsx';
+import { Nav, NavRail, ServiceGate, Toasts, useNarrow, type Route } from './Shell.tsx';
 import { StatusSection } from './StatusSection.tsx';
 import { TaskDetail } from './TaskDetail.tsx';
 import { CompactToday, TodayView } from './TodayView.tsx';
@@ -32,6 +32,23 @@ export const App = ({ surface }: { surface: string }) => {
   const { client, host, linear, agents, github, google } = usePlanner();
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
+  // A narrow page folds the menu into a rail; it opens over the page and closes on a pick.
+  const narrow = useNarrow();
+  const [navOpen, setNavOpen] = useState(false);
+  useEffect(() => {
+    if (!narrow) setNavOpen(false);
+  }, [narrow]);
+  useEffect(() => {
+    if (navOpen) (document.querySelector<HTMLElement>('#planner-nav .nav-item.is-active') ?? document.querySelector<HTMLElement>('#planner-nav .nav-item'))?.focus();
+  }, [navOpen]);
+  const closeNav = () => {
+    setNavOpen(false);
+    document.querySelector<HTMLElement>('.nav-rail-button[aria-controls="planner-nav"]')?.focus();
+  };
+  const go = (next: Route) => {
+    setRoute(next);
+    setNavOpen(false);
+  };
   const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null, agentForm: null });
   const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | 'ask' | null>(null);
@@ -116,8 +133,18 @@ export const App = ({ surface }: { surface: string }) => {
       {surface === 'panel' ? (
         <CompactToday />
       ) : (
-        <div class="app">
-          <Nav route={route} onRoute={setRoute} onSearch={() => setOverlay('palette')} onAsk={() => { setAskText(''); setOverlay('ask'); }} />
+        <div class={`app${narrow ? ' is-narrow' : ''}${navOpen ? ' is-nav-open' : ''}`}>
+          {narrow && <NavRail open={navOpen} onToggle={() => (navOpen ? closeNav() : setNavOpen(true))} onSearch={() => setOverlay('palette')} />}
+          {(!narrow || navOpen) && (
+            <Nav
+              route={route}
+              onRoute={go}
+              onSearch={() => { setNavOpen(false); setOverlay('palette'); }}
+              onAsk={() => { setNavOpen(false); setAskText(''); setOverlay('ask'); }}
+              onClose={narrow ? closeNav : undefined}
+            />
+          )}
+          {narrow && navOpen && <div class="nav-scrim" aria-hidden="true" onClick={closeNav} />}
           <main class="main">
             {route === 'home' && <Board />}
             {route === 'today' && <TodayView onShutdown={() => setRoute('shutdown')} />}

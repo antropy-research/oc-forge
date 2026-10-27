@@ -432,6 +432,63 @@ try {
   check('with gh signed out, the GitHub source shows where to run gh auth login', said.includes('Sign in to GitHub') && said.includes('gh auth login') && (await signIn.getByRole('button', { name: 'Copy' }).count()) === 1, said.replace(/\s+/g, ' ').slice(0, 140));
   await shot('20-github-signin');
   realGitHubStatus = false;
+
+  // Phase 9: a narrow page, OpenChamber's own sidebar open in a 1024×768 window. The menu folds into a rail and opens
+  // over the page; Home's header stays whole; a source stays open beside a whole day, and dragging to the board's
+  // edge scrolls the days so the drop reaches tomorrow.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await h.openPlanner();
+  const frameBox = await page.locator('.inset-0 > iframe[title="Planner"]').boundingBox();
+  const plannerNav = frame.getByRole('navigation', { name: 'Planner' });
+  const menuButton = frame.getByRole('button', { name: 'Planner menu' });
+  const menuFolded = (await menuButton.isVisible()) && (await plannerNav.count()) === 0;
+  await menuButton.click();
+  const opened = await plannerNav.getByRole('button', { name: 'Today', exact: true }).isVisible();
+  await shot('21-narrow-menu');
+  await page.keyboard.press('Escape');
+  const escaped = (await plannerNav.count()) === 0;
+  await menuButton.click();
+  await plannerNav.getByRole('button', { name: 'Home', exact: true }).click();
+  const picked = (await plannerNav.count()) === 0 && (await frame.getByRole('heading', { name: 'Home' }).isVisible());
+  check(`in a narrow page (${Math.round(frameBox?.width ?? 0)} px) the menu folds into a rail and opens over the page; Escape and a pick close it`, menuFolded && opened && escaped && picked, JSON.stringify({ menuFolded, opened, escaped, picked }));
+
+  const header = frame.locator('section.view > header.view-header').first();
+  const inPage = (box) => Boolean(box && frameBox && box.x >= frameBox.x - 1 && box.x + box.width <= frameBox.x + frameBox.width + 1);
+  const headerControls = [header.getByRole('button', { name: 'Earlier' }), header.getByRole('button', { name: 'Today', exact: true }), header.getByRole('button', { name: 'Later' }), header.getByRole('textbox', { name: 'Jump to date' }).or(header.locator('input.date-jump')), header.locator('select').first()];
+  const boxes = await Promise.all(headerControls.map((control) => control.first().boundingBox()));
+  const rangeBox = await header.locator('.view-sub').boundingBox();
+  check("Home's header keeps every control inside the page, the dates on one line", boxes.every(inPage) && (rangeBox?.height ?? 99) < 28, JSON.stringify(boxes.map((box) => box && Math.round(box.x + box.width))));
+
+  await railTab('Gmail').click();
+  await row(`${run} mail 4`).waitFor();
+  const board = frame.locator('.sunsama-layout .board');
+  const boardBox = await board.boundingBox();
+  const within = (box) => Boolean(box && boardBox && box.x >= boardBox.x - 1 && box.x + box.width <= boardBox.x + boardBox.width + 1);
+  const todayCard = column('Today').locator('li.task-card').first();
+  const titleCut = await todayCard.locator('.task-title').first().evaluate((element) => element.scrollWidth > element.clientWidth + 1).catch(() => true);
+  check('with Gmail open beside it, today is a whole column and its cards read in full', within(await column('Today').boundingBox()) && within(await todayCard.boundingBox()) && !titleCut, JSON.stringify({ board: boardBox && Math.round(boardBox.width), titleCut }));
+  await shot('22-narrow-home-gmail');
+
+  const tomorrowBefore = await column('Tomorrow').boundingBox();
+  const source = await row(`${run} mail 4`).boundingBox();
+  await page.mouse.move(source.x + 24, source.y + 12);
+  await page.mouse.down();
+  const edgeX = boardBox.x + boardBox.width - 10;
+  const middleY = boardBox.y + Math.min(boardBox.height / 2, 260);
+  await page.mouse.move(edgeX, middleY, { steps: 8 });
+  for (let i = 0; i < 40 && (await board.evaluate((element) => element.scrollLeft)) < 160; i++) await page.mouse.move(edgeX - (i % 2), middleY + (i % 3));
+  const scrolled = await board.evaluate((element) => element.scrollLeft);
+  const target = await column('Tomorrow').locator('ul.task-list').boundingBox();
+  await page.mouse.move(target.x + Math.min(target.width / 2, 80), target.y + 24, { steps: 5 });
+  await page.mouse.up();
+  latest = await waitFor((s) => placedOn(titled(s, `${run} mail 4`)) === tomorrow);
+  check(
+    'dragging a message to the edge of the board scrolls the days, and it lands on tomorrow',
+    !within(tomorrowBefore) && scrolled > 0 && placedOn(titled(latest, `${run} mail 4`)) === tomorrow,
+    JSON.stringify({ tomorrowWasWhole: within(tomorrowBefore), scrolled, placed: placedOn(titled(latest, `${run} mail 4`)) }),
+  );
+  await shot('23-narrow-dropped-tomorrow');
+  await page.setViewportSize({ width: 1440, height: 900 });
   console.log(`problems: ${h.problems.slice(0, 5).join(' | ') || 'none'}`);
 } finally {
   await cleanUp();

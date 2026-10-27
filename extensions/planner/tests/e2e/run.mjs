@@ -1197,7 +1197,8 @@ try {
   await assignForm.getByRole('button', { name: 'Edit the instructions' }).click();
   const instructions = await assignForm.getByRole('textbox', { name: 'Agent prompt' }).inputValue();
   check('the assignment asks for a pull request from its branch', instructions.includes(`branch \`${assignBranch}\``) && instructions.includes('gh pr create'), instructions.slice(-240).replace(/\s+/g, ' '));
-  // The demo project has nowhere to push to; the dev container's free model only has to answer.
+  // Kept quick here: the dev container's free model only has to answer, and the lookup is answered below.
+  // tests/e2e/agentpr.mjs runs the whole thing: the agent pushes and opens the pull request with gh (a fake GitHub).
   await assignForm.getByRole('textbox', { name: 'Agent prompt' }).fill(TRIVIAL);
   // Pull requests are looked up with gh through the service; answer for this run's branch.
   let fakePull = null;

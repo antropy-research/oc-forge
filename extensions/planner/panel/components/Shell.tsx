@@ -1,5 +1,5 @@
 import type { ComponentChildren } from 'preact';
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { newId } from '../../src/domain/ids.ts';
 import { useUi } from '../lib/ui.ts';
 import { actualMinutes, archivedTasks, tasksForDay } from '../../src/domain/selectors.ts';
@@ -36,7 +36,40 @@ const TimerBar = ({ onRoute }: { onRoute: (route: Route) => void }) => {
   );
 };
 
-export const Nav = ({ route, onRoute, onSearch, onAsk }: { route: Route; onRoute: (route: Route) => void; onSearch: () => void; onAsk: () => void }) => {
+/**
+ * Where the Planner's menu folds into a rail with a button, as Sunsama and Linear fold their
+ * sidebars in a narrow window: OpenChamber's own sidebar open in a 1024 px window leaves the
+ * Planner page about 700 px.
+ */
+export const NARROW_QUERY = '(max-width: 900px)';
+
+/** Whether the Planner page is that narrow, following the window as it changes. */
+export const useNarrow = (query: string = NARROW_QUERY): boolean => {
+  const [narrow, setNarrow] = useState(() => typeof matchMedia === 'function' && matchMedia(query).matches);
+  useEffect(() => {
+    if (typeof matchMedia !== 'function') return;
+    const list = matchMedia(query);
+    const update = () => setNarrow(list.matches);
+    update();
+    list.addEventListener('change', update);
+    return () => list.removeEventListener('change', update);
+  }, [query]);
+  return narrow;
+};
+
+/** The folded menu: its button (the menu opens over the page) and Search. */
+export const NavRail = ({ open, onToggle, onSearch }: { open: boolean; onToggle: () => void; onSearch: () => void }) => (
+  <div class="nav-rail">
+    <button class="nav-rail-button" aria-label="Planner menu" aria-expanded={open} aria-controls="planner-nav" title="Menu" onClick={onToggle}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" /></svg>
+    </button>
+    <button class="nav-rail-button" aria-label="Search the Planner" title="Search and commands (⌘K)" onClick={onSearch}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" /></svg>
+    </button>
+  </div>
+);
+
+export const Nav = ({ route, onRoute, onSearch, onAsk, onClose }: { route: Route; onRoute: (route: Route) => void; onSearch: () => void; onAsk: () => void; onClose?: () => void }) => {
   const view = useView();
   const open = tasksForDay(view.state, view.today).filter((task) => !task.completedAt).length;
   const archived = archivedTasks(view.state).length;
@@ -46,7 +79,18 @@ export const Nav = ({ route, onRoute, onSearch, onAsk }: { route: Route; onRoute
   const [addingFolder, setAddingFolder] = useState(false);
   const folders = Object.values(view.state.folders).filter((folder) => !folder.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   return (
-    <nav class="nav" aria-label="Planner">
+    <nav
+      class="nav"
+      id="planner-nav"
+      aria-label="Planner"
+      onKeyDown={(event) => {
+        // Folded, the menu closes on Escape and gives focus back to its button.
+        if (event.key === 'Escape' && onClose) {
+          event.stopPropagation();
+          onClose();
+        }
+      }}
+    >
       <div class="brand">Planner</div>
       <button class="nav-search" onClick={onSearch} aria-label="Search and commands">
         <span>Search</span>

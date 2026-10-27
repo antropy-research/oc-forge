@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import { addDays, isDateKey, monthDay } from '../../src/domain/dates.ts';
 import { useView } from '../lib/context.ts';
 import { DayColumn } from './DayColumn.tsx';
@@ -13,6 +13,18 @@ export const Board = () => {
   const view = useView();
   const [anchor, setAnchor] = useState(view.today);
   const days = Array.from({ length: DAYS }, (_, index) => addDays(anchor, index));
+  const board = useRef<HTMLDivElement>(null);
+  /** Dragging near the board's edge scrolls the days, so a later day can take the drop even when only one fits. */
+  const edgeScroll = (event: DragEvent) => {
+    const element = board.current;
+    if (!element || element.scrollWidth <= element.clientWidth) return;
+    const box = element.getBoundingClientRect();
+    const edge = Math.min(72, box.width / 4);
+    const right = event.clientX - (box.right - edge);
+    const left = box.left + edge - event.clientX;
+    if (right > 0) element.scrollLeft += Math.ceil(right / 3) + 4;
+    else if (left > 0) element.scrollLeft -= Math.ceil(left / 3) + 4;
+  };
   return (
     <section class="view">
       <header class="view-header">
@@ -27,7 +39,7 @@ export const Board = () => {
         </div>
       </header>
       <div class="sunsama-layout">
-        <div class="board">
+        <div class="board" ref={board} onDragOver={edgeScroll}>
           {days.map((date) => <DayColumn key={date} date={date} />)}
         </div>
         <SourcePanel {...boardTargets(days, view.today)} />

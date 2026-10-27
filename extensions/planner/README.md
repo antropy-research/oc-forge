@@ -17,7 +17,7 @@ Plan and progress live in the zmemory project: `.tasks/1024-planner-sunsama-feat
 | Domain | `src/domain/` | Types, events and validation, reducer, rollover, recurrence, scheduling (free slots, lanes, playlist), ICS parsing, Linear/GitHub mapping, agent runs, rituals, suggestions, Braindump and assistant parsing. Pure; shared by service and panel. |
 | Service | `service/` → `service/main.js` | Local Node service the host starts on the first `serviceRequest`: validates commands, appends events, folds state, commits history, syncs with a git remote, fetches ICS feeds, reads GitHub through `gh` (issues, and the pull requests agents open), keeps the API keys of extra Linear workspaces and runs the Planner's Linear queries with them, signs in Google accounts and talks to Google Calendar, Google Tasks and Gmail, writes working sessions to Google Calendar, finds OpenCode's agents (its config folders, and its running server when it is up) and models (`opencode models`), and writes one OpenCode command per agent a task can be assigned to. |
 | Panel | `panel/` → `panel/main.js` | Preact UI bundled as a classic IIFE. One bundle serves the full page, the rail panel, the Work Status section and a hidden background frame (message actions and slash commands). Markdown is parsed with `marked`'s lexer and drawn as plain elements (`panel/lib/markdown.ts`): raw HTML stays text, only http(s) and mailto links, images become links, never `innerHTML`. |
-| Tests | `tests/*.test.ts`, `tests/e2e/` | `bun test` for domain, service and panel helpers (Google writes through a mocked `fetch`, and the service run against `tests/e2e/fakeGoogle.mjs`); Playwright journeys against the dev container (`containers/openchamber-dev`): `run.mjs` on the installed extension, and `harness.mjs` journeys on this checkout's build: `smoke.mjs`, `sunsama.mjs`, `linear.mjs` and `calendar.mjs` (its service signed in to the fake Google). |
+| Tests | `tests/*.test.ts`, `tests/e2e/` | `bun test` for domain, service and panel helpers (Google writes through a mocked `fetch`, and the service run against `tests/e2e/fakeGoogle.mjs`); `fakeGithub.test.ts` runs the real `gh` against `tests/e2e/fakeGithub.mjs`. Playwright journeys against the dev container (`containers/openchamber-dev`): `run.mjs` and `agentpr.mjs` on the installed extension (`agentpr.mjs`: a real agent opens a pull request against the fake GitHub), and `harness.mjs` journeys on this checkout's build: `smoke.mjs`, `sunsama.mjs`, `linear.mjs` and `calendar.mjs` (its service signed in to the fake Google). |
 
 **Data.** An append-only event log, `events/YYYY-MM.jsonl`, in a git repository at
 `~/.local/share/openchamber-planner/data` on the machine running OpenChamber. State is
@@ -63,7 +63,7 @@ URL names.
 
 | Area | In the Planner |
 |---|---|
-| Home / Today / Focus | Multi-day board with a date jump and Sunsama's right-hand panel: a vertical rail of sources (Calendar, Backlog, Linear, GitHub, Gmail, Google Tasks) beside the chosen one's list, folding down to the rail. A source's items drag onto any day column on screen, or onto the calendar shown under the list; each row plans with a click on the first days on screen, or on any visible day, the backlog or a date from its menu. Today has the same panel beside today's list. Focus with timer, subtasks, notes, up/down, Pomodoro, Done for the day; rail-panel Today. |
+| Home / Today / Focus | Multi-day board with a date jump and Sunsama's right-hand panel: a vertical rail of sources (Calendar, Backlog, Linear, GitHub, Gmail, Google Tasks) beside the chosen one's list, folding down to the rail. A source's items drag onto any day column on screen, or onto the calendar shown under the list; each row plans with a click on the first days on screen, or on any visible day, the backlog or a date from its menu. Today has the same panel beside today's list. In a narrow page (OpenChamber's own sidebar open in a 1024 px window leaves about 700 px) the Planner's menu folds into a rail and opens over the page, as Sunsama and Linear fold theirs; the panel narrows so a whole day stays beside it, and dragging to the board's edge scrolls on to later days. Focus with timer, subtasks, notes, up/down, Pomodoro, Done for the day; rail-panel Today. |
 | Tasks | Title, notes, subtasks (a subtask can become a task), planned and actual time, channel, priority, start (day or backlog bucket), due date, objective, folder, repeat, activity log, duplicate, archive, trash, undo. |
 | Add Task syntax | `~30m`, `@tomorrow` / `@fri` / `@oct 30` / `@backlog` / `@someday`, `#channel`, `!high`, `$objective`; a pasted Linear issue URL links the issue; `A` opens the Add task window. |
 | Backlog | Six time buckets, folders, search, channel and context filters, Braindump (line by line, or organized by the Small Model and reviewed before adding). |
@@ -143,7 +143,20 @@ node ../../extensions/planner/tests/e2e/run.mjs http://<bind>:35310     # on the
 node ../../extensions/planner/tests/e2e/sunsama.mjs                       # on the host, this checkout's build
 node ../../extensions/planner/tests/e2e/linear.mjs /tmp/opencode/planner-linear  # the Linear page on this checkout's build (harness.mjs)
 node ../../extensions/planner/tests/e2e/calendar.mjs /tmp/planner-calendar   # this build, a fake Google
+node ../../extensions/planner/tests/e2e/agentpr.mjs http://<bind>:35310   # the installed extension, a real agent, a fake GitHub
 ```
+
+`agentpr.mjs` assigns a task to OpenCode's build agent on the installed Planner and follows
+it to a pull request: the agent commits in its new worktree, pushes, and runs
+`gh pr create`; the service finds the pull request with `gh`, the task shows it, and a merge
+offers to complete the task. Only GitHub is fake. `tests/e2e/fakeGithub.mjs` runs in the
+container, and its `gh` (the agent's and the service's) reaches it through a Unix socket
+(`http_unix_socket` in a `~/.config/gh` written for the run, with a fake token).
+`planner-demo-a` gets an origin with two URLs:
+- its fetch URL is `https://github.com/harness-org/planner-demo-a` (what `gh` reads);
+- its push URL is the fake's git server (`git http-backend` over a bare repository).
+
+The journey puts the container back as it was at the end.
 
 `sunsama.mjs` runs this checkout's panel and a private copy of its service in the dev
 container's OpenChamber (`tests/e2e/harness.mjs`): the sources panel, drags onto days and the
