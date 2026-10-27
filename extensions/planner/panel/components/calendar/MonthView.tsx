@@ -13,7 +13,7 @@ import { edgePosition } from '../../../src/domain/selectors.ts';
 import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
 import { anchorOf, calendarUi, changeEventTimes, useCalendarUi } from '../../lib/gcal.ts';
-import { answerClass, calendarItems, eventColor, eventLabel, GCAL_BLOCK_TYPE, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isTaskEvent, itemKey, plannedTask, startLabel, type CalItem } from './items.ts';
+import { answerClass, calendarItems, deadlineOf, eventColor, eventLabel, GCAL_BLOCK_TYPE, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isTaskEvent, itemKey, plannedTask, startLabel, taskEventLabel, type CalItem } from './items.ts';
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATE_ROW = 26;
@@ -148,14 +148,17 @@ export const MonthView = ({ anchor, events, onDay }: { anchor: DateKey; events: 
     const color = eventColor(event, view.state.calendars);
     const task = isTaskEvent(event) ? event.googleTask! : null;
     const planned = task ? plannedTask(view.state, event) : null;
+    const deadline = task ? deadlineOf(event, view.state, view.today) : null;
     const draggable = Boolean(task) || Boolean(event.google?.editable);
+    const label = task ? taskEventLabel(event, view.state, view.today) : eventLabel(event, zone);
     return (
       <button
         key={itemKey(item)}
         class={`month-chip${entry.bar ? ' is-bar' : ''}${task ? ' is-task' : ''}${task?.completed ? ' is-done' : ''}${answerClass(event)}${extraClass}`}
         style={{ ...style, '--item-color': color, '--item-ink': inkOn(color) }}
         draggable={draggable}
-        aria-label={task ? `Google task ${event.title}, due ${longDay(task.due ?? entry.span.first)}${task.completed ? ', completed' : ''}${planned ? ', planned in the Planner' : ''}` : eventLabel(event, zone)}
+        aria-label={label}
+        title={label}
         onDragStart={(drag) => {
           if (!drag.dataTransfer) return;
           if (task) {
@@ -170,6 +173,7 @@ export const MonthView = ({ anchor, events, onDay }: { anchor: DateKey; events: 
         {!entry.bar && <span class="chip-time">{startLabel(event.start, zone)}</span>}
         {task && <span class="task-box" aria-hidden="true">{task.completed ? '☑' : '☐'}</span>}
         <span class="chip-title">{event.title}</span>
+        {deadline && <span class={`task-deadline${deadline.overdue ? ' is-overdue' : ''}`} aria-hidden="true">⚑ {deadline.label}</span>}
         {planned && <span class="bar-badge" aria-hidden="true">✓</span>}
       </button>
     );

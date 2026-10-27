@@ -168,4 +168,17 @@ describe('Google Tasks through the service', () => {
     expect((await call('POST', '/google/tasks/linked', { groups })).status).toBe(400);
     expect((await call('POST', '/google/tasks/linked', { groups: [{ account: ME, listId: 'L1', ids: ['t-report', 't-gone'] }] })).body.tasks.map((task: any) => task.id)).toEqual(['t-report']);
   });
+
+  test('a task moved in Google: a read finds it in its new list, a write to its old one is looked up and goes there; a deleted one says so', async () => {
+    expect((await call('POST', '/google/tasks/move', { account: ME, listId: 'L1', id: 't-report', parent: null, previous: null, destinationListId: 'L2' })).body.task.listId).toBe('L2');
+    const linked = await call('POST', '/google/tasks/linked', { groups: [{ account: ME, listId: 'L1', ids: ['t-report', 't-gone'] }] });
+    expect(linked.body.tasks.map((task: any) => [task.id, task.listId])).toEqual([['t-report', 'L2']]);
+    expect(linked.body.missing).toEqual([{ account: ME, listId: 'L1', id: 't-gone' }]);
+    const before = fake.requests.length;
+    const done = await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id: 't-report', completed: true });
+    expect(done.body.task).toMatchObject({ id: 't-report', listId: 'L2', completed: true });
+    expect(fake.requests.slice(before).filter((request) => request.method === 'PATCH').map((request) => request.path)).toEqual(['/tasks/v1/lists/L1/tasks/t-report', '/tasks/v1/lists/L2/tasks/t-report']);
+    expect(fake.tasks.get('L2')!.find((task) => task.id === 't-report')!.status).toBe('completed');
+    expect(await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id: 't-gone', completed: true })).toEqual({ status: 404, body: { error: 'This task is no longer in Google Tasks' } });
+  });
 });

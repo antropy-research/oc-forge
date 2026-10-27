@@ -9,6 +9,7 @@ import { compactClock, compactRange, eventSpan, longDay, weekdayShort } from '..
 import { describeRecurrence } from '../../../src/domain/rrule.ts';
 import { descriptionText } from '../../../src/domain/gevents.ts';
 import { taskForGoogleTask, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google.ts';
+import { KEPT_HINT, keptFor, keptTimeLabel } from '../../../src/domain/gtaskKept.ts';
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
@@ -275,6 +276,14 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   const list = gv.lists.find((other) => other.account === item.account && other.id === item.listId);
   const planned = taskForGoogleTask(view.state, item);
   const due = item.due ?? event.start.slice(0, 10);
+  const kept = keptFor(view.state, item);
+  const time = keptTimeLabel(kept);
+  const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const remove = async () => {
+    // A repeating task asks, as Google does: this one (the series goes on) or all future ones.
+    const scope = kept?.repeat ? await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All future tasks' }] }) : 'this';
+    if (scope === 'this' || scope === 'all') run(() => google.deleteListTask(item, scope), 'Task deleted');
+  };
   const run = (work: () => Promise<unknown>, done?: string) => {
     setBusy(true);
     work()
@@ -288,7 +297,10 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   return (
     <Popover anchor={anchor} label={`Google task: ${item.title}`} onClose={close} className="task-popover">
       <div class="pop-tools">
-        <button class="icon-button" aria-label="Delete task" title="Delete task" disabled={busy} onClick={() => run(() => google.deleteListTask(item), 'Task deleted')}>
+        <button class={`icon-button pop-star${kept?.starredAt ? ' is-on' : ''}`} aria-label={`Star ${item.title}`} aria-pressed={Boolean(kept?.starredAt)} title={KEPT_HINT} onClick={() => void google.toggleStar(item)}>
+          <Icon name={kept?.starredAt ? 'starred' : 'star'} />
+        </button>
+        <button class="icon-button" aria-label="Delete task" title="Delete task" disabled={busy} onClick={() => void remove()}>
           <Icon name="delete" />
         </button>
         <button class="icon-button" aria-label="Open in Google Tasks" title="Open in Google Tasks" onClick={() => void host.openUrl(item.url)}>
@@ -302,10 +314,22 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
         <span class="pop-icon" style={{ color: GOOGLE_TASKS_COLOR }}><Icon name={item.completed ? 'done' : 'circle'} /></span>
         <div class="pop-main">
           <h2 class={`pop-title${item.completed ? ' is-done' : ''}`}>{item.title}</h2>
-          <div class="pop-when">{longDay(due)}</div>
-          <div class="muted pop-small" title="Google Tasks' API reads and writes a task's date only, never its time">Date only: Google Tasks shares no time for its tasks</div>
+          <div class="pop-when">{longDay(due)}{time ? ` ⋅ ${time}` : ''}</div>
+          {kept?.repeat && <div class="pop-when">{describeRecurrence([kept.repeat.rule], due, zone)}</div>}
         </div>
       </div>
+      {kept?.deadline && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name="flag" /></span>
+          <div class={`pop-main${kept.deadline < view.today && !item.completed ? ' danger' : ''}`}>Deadline: {longDay(kept.deadline)}</div>
+        </div>
+      )}
+      {(time || kept?.deadline || kept?.repeat || kept?.starredAt) && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name="info" /></span>
+          <div class="muted pop-small">{KEPT_HINT}.</div>
+        </div>
+      )}
       {item.notes && (
         <div class="pop-row">
           <span class="pop-icon"><Icon name="notes" /></span>

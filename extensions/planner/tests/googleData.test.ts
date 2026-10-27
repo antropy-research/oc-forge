@@ -119,14 +119,18 @@ describe('Google Tasks', () => {
     expect(taskForGoogleTask(state, { id: 'gt1' })?.id).toBe('t1');
     expect(linkedGoogleTasks(state)).toEqual([{ account: 'me@x.com', listId: 'L1', ids: ['gt1'] }]);
     const options = { today: '2026-10-25', importCompletion: true };
-    expect(planGoogleTaskSync(state, new Map([['gt1', item()]]), options)).toEqual([]);
+    expect(planGoogleTaskSync(state, new Map([['gt1', item()]]), options)).toEqual({ bodies: [], writes: [], conflicts: [] });
     const renamed = planGoogleTaskSync(state, new Map([['gt1', item({ title: 'Buy oat milk' })]]), options);
-    expect(renamed).toEqual([{ type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item({ title: 'Buy oat milk' })), title: 'Buy oat milk' }]);
+    expect(renamed.bodies).toEqual([{ type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item({ title: 'Buy oat milk' })), title: 'Buy oat milk' }]);
     const done = planGoogleTaskSync(state, new Map([['gt1', item({ completed: true })]]), options);
-    expect(done.map((body) => body.type)).toEqual(['task.sourceSynced', 'task.completed']);
-    expect(planGoogleTaskSync(state, new Map([['gt1', item({ completed: true })]]), { ...options, importCompletion: false }).map((body) => body.type)).toEqual(['task.sourceSynced']);
+    expect(done.bodies.map((body) => body.type)).toEqual(['task.sourceSynced', 'task.completed']);
+    expect(planGoogleTaskSync(state, new Map([['gt1', item({ completed: true })]]), { ...options, importCompletion: false }).bodies.map((body) => body.type)).toEqual(['task.sourceSynced']);
+    // Renamed on both sides: the newer change wins, here the Planner's (made after Google's), which goes to Google.
     const mine = applyEvents(state, [ev({ type: 'task.updated', taskId: 't1', patch: { title: 'My milk' } })]);
-    expect(planGoogleTaskSync(mine, new Map([['gt1', item({ title: 'Buy oat milk' })]]), options)).toEqual([{ type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item({ title: 'Buy oat milk' })) }]);
+    const both = planGoogleTaskSync(mine, new Map([['gt1', item({ title: 'Buy oat milk' })]]), { ...options, editedAt: () => mine.tasks.t1!.updatedAt });
+    expect(both.bodies).toEqual([{ type: 'task.sourceSynced', taskId: 't1', source: gtaskSource(item({ title: 'Buy oat milk' })) }]);
+    expect(both.writes).toEqual([{ taskId: 't1', account: 'me@x.com', listId: 'L1', id: 'gt1', patch: { title: 'My milk' } }]);
+    expect(both.conflicts).toEqual([{ taskId: 't1', fields: ['title'] }]);
   });
 });
 

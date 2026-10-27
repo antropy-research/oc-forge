@@ -156,23 +156,27 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     // The panel sends them in parts this size, so the request ends in time; more is refused, not cut.
     if (groups.length > 10 || groups.some((group) => group.ids.length > 50)) return { status: 400, body: { error: 'at most 10 lists of 50 tasks per request' } };
     const tasks: unknown[] = [];
+    // Not in their list nor any other of the account's: deleted in Google.
+    const missing: { account: string; listId: string; id: string }[] = [];
     const errors: { account: string; message: string }[] = [];
     await Promise.all(
       groups.map(async (group) => {
         try {
-          tasks.push(...(await googleData.tasksById(group.account, group.listId, group.ids)));
+          const found = await googleData.linkedTasks(group.account, group.listId, group.ids);
+          tasks.push(...found.tasks);
+          missing.push(...found.missing.map((id) => ({ account: group.account, listId: group.listId, id })));
         } catch (error) {
           errors.push({ account: group.account, message: error instanceof Error ? error.message : String(error) });
         }
       }),
     );
-    return ok({ tasks, errors });
+    return ok({ tasks, missing, errors });
   }
   if (path === '/google/tasks' && (req.method === 'PATCH' || req.method === 'POST')) {
     const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown; parent?: unknown; previous?: unknown };
     if (!isEmail(body.account) || !isGoogleId(body.listId)) return { status: 400, body: { error: 'account and listId are required' } };
     if (body.due !== undefined && body.due !== null && !isDateKey(body.due)) return { status: 400, body: { error: 'due must be a date or null' } };
-    if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8000)) return { status: 400, body: { error: 'notes must be text' } };
+    if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8192)) return { status: 400, body: { error: 'notes must be text, at most 8192 characters (as Google Tasks keeps)' } };
     if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 1024)) return { status: 400, body: { error: 'title must be 1 to 1024 characters' } };
     if (req.method === 'PATCH') {
       if (!isGoogleId(body.id)) return { status: 400, body: { error: 'id is required' } };

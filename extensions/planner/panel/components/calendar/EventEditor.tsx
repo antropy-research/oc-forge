@@ -108,8 +108,8 @@ const FREQ_UNITS = [
 const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-/** Google Calendar's "Custom recurrence" dialog, inline. */
-const CustomRepeat = ({ start, allDay, zone, lines, onDone, onCancel }: { start: DateKey; allDay: boolean; zone: string; lines: string[]; onDone: (rule: string) => void; onCancel: () => void }) => {
+/** Google Calendar's "Custom recurrence" dialog, inline (Google tasks use it too). */
+export const CustomRepeat = ({ start, allDay, zone, lines, onDone, onCancel }: { start: DateKey; allDay: boolean; zone: string; lines: string[]; onDone: (rule: string) => void; onCancel: () => void }) => {
   const [custom, setCustom] = useState<CustomRecurrence>(customOf(lines, start, zone));
   const set = (patch: Partial<CustomRecurrence>) => setCustom({ ...custom, ...patch });
   const monthly = monthlyLabels(start);

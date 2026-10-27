@@ -1,5 +1,5 @@
 // Fold events into state. Pure apart from mutating the batch-local copy it creates.
-import { emptyState, ritualKey, type PlannerState, type Task } from './types.ts';
+import { emptyState, googleTaskKey, ritualKey, type GoogleTaskKept, type PlannerState, type Task } from './types.ts';
 import type { NewTask, PlannerEvent } from './events.ts';
 import { daysBetween, zonedDateMinutes } from './dates.ts';
 import { samePlacement } from './selectors.ts';
@@ -132,7 +132,13 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: null, archivedAt: null }));
       return;
     case 'task.sourceSynced':
-      touch(state, event.taskId, event.at, (task) => ({ ...task, source: event.source, ...(event.title !== undefined ? { title: event.title.trim() } : {}) }));
+      touch(state, event.taskId, event.at, (task) => ({
+        ...task,
+        source: event.source,
+        ...(event.title !== undefined ? { title: event.title.trim() } : {}),
+        ...(event.notes !== undefined ? { notes: event.notes } : {}),
+        ...(event.dueDate !== undefined ? { dueDate: event.dueDate } : {}),
+      }));
       return;
     case 'task.archived':
       stopTimerFor(state, event.taskId, event);
@@ -326,6 +332,29 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
     case 'settings.updated':
       state.settings = { ...state.settings, ...event.patch };
       return;
+    case 'gtask.kept': {
+      const key = googleTaskKey(event.account, event.taskId);
+      const { starred, ...patch } = event.patch;
+      const before = state.googleTasks[key] ?? { account: event.account, listId: event.listId, taskId: event.taskId, time: null, duration: null, deadline: null, repeat: null, starredAt: null, updatedAt: event.at };
+      const starredAt = starred === undefined ? before.starredAt : starred ? before.starredAt ?? event.at : null;
+      const next: GoogleTaskKept = { ...before, ...patch, listId: event.listId, starredAt, updatedAt: event.at };
+      // Nothing kept any more: the task is Google's alone again.
+      if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null) delete state.googleTasks[key];
+      else state.googleTasks[key] = next;
+      return;
+    }
+    case 'gtask.moved': {
+      const key = googleTaskKey(event.account, event.taskId);
+      const kept = state.googleTasks[key];
+      if (!kept) return;
+      const taskId = event.newTaskId ?? event.taskId;
+      delete state.googleTasks[key];
+      state.googleTasks[googleTaskKey(event.account, taskId)] = { ...kept, listId: event.listId, taskId, updatedAt: event.at };
+      return;
+    }
+    case 'gtask.dropped':
+      delete state.googleTasks[googleTaskKey(event.account, event.taskId)];
+      return;
   }
 };
 
@@ -345,6 +374,8 @@ export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]
     runs: { ...state.runs },
     folders: { ...state.folders },
     settings: { ...state.settings },
+    // A state from before the Planner kept anything for Google tasks has none.
+    googleTasks: { ...state.googleTasks },
   };
   for (const event of events) applyInto(next, event);
   return next;

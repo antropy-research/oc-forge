@@ -8,7 +8,7 @@ import { compactRange, longDay, scheduleDays, shortDay, weekdayShort } from '../
 import { usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
 import { anchorOf, calendarUi, searchEvents, useCalendarUi } from '../../lib/gcal.ts';
-import { answerClass, calendarItems, eventColor, isTaskEvent, itemKey, plannedTask } from './items.ts';
+import { answerClass, calendarItems, eventColor, isTaskEvent, itemKey, plannedTask, taskEventLabel } from './items.ts';
 
 const range = (start: string, end: string, zone: string, day: DateKey): string => {
   const from = zonedDateMinutes(start, zone);
@@ -55,10 +55,10 @@ export const ScheduleView = ({ from, to, events, onDay }: { from: DateKey; to: D
                   <button
                     class={`schedule-item${task ? ' is-task' : ''}${task?.completed ? ' is-done' : ''}${answerClass(event)}`}
                     style={{ '--item-color': eventColor(event, view.state.calendars) }}
-                    aria-label={`${event.title}, ${task ? 'task' : event.allDay ? 'all day' : range(event.start, event.end, zone, day.date)}`}
+                    aria-label={task ? taskEventLabel(event, view.state, view.today) : `${event.title}, ${event.allDay ? 'all day' : range(event.start, event.end, zone, day.date)}`}
                     onClick={(click) => calendarUi.open({ kind: task ? 'task' : 'event', event, anchor: anchorOf(click.currentTarget) })}
                   >
-                    <span class="schedule-time">{task || event.allDay ? 'All day' : range(event.start, event.end, zone, day.date)}</span>
+                    <span class="schedule-time">{event.allDay ? 'All day' : range(event.start, event.end, zone, day.date)}</span>
                     <span class="chip-dot" aria-hidden="true" />
                     <span class="schedule-title">{task ? (task.completed ? '☑ ' : '☐ ') : ''}{event.title}</span>
                     {event.location && <span class="schedule-where muted">{event.location}</span>}

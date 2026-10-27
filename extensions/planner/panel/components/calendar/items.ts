@@ -5,8 +5,9 @@ import type { CalendarEvent } from '../../../src/domain/ics.ts';
 import type { CalendarSubscription, DateKey, PlannerState, Task, WorkBlock } from '../../../src/domain/types.ts';
 import { blocksOnDay } from '../../../src/domain/selectors.ts';
 import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { compactClock, compactRange, eventSpan, longDay, type RowItem } from '../../../src/domain/gcalendar.ts';
+import { compactClock, compactRange, eventSpan, longDay, shortDay, type RowItem } from '../../../src/domain/gcalendar.ts';
 import { GOOGLE_TASKS_CALENDAR, taskForGoogleTask } from '../../../src/domain/google.ts';
+import { keptFor, keptTimeLabel } from '../../../src/domain/gtaskKept.ts';
 
 /** Google Calendar's color for tasks. */
 export const GOOGLE_TASKS_COLOR = '#1a73e8';
@@ -48,8 +49,29 @@ export const answerClass = (event: CalendarEvent): string => {
 export const eventLabel = (event: CalendarEvent, zone: string): string => {
   const start = zonedDateMinutes(event.start, zone);
   const end = zonedDateMinutes(event.end, zone);
-  if (event.allDay || isTaskEvent(event)) return `${event.title}, all day, ${longDay(start.date)}`;
+  if (event.allDay) return `${event.title}, all day, ${longDay(start.date)}`;
   return `${event.title}, ${compactRange(start.minutes, end.date > start.date && end.minutes === 0 ? 1440 : end.minutes)}, ${longDay(start.date)}`;
+};
+
+/**
+ * "Google task Send the report, due Monday, October 26 at 2pm, planned in the
+ * Planner, deadline Friday, October 30, repeats": a task chip's full text, for
+ * its label and tooltip.
+ */
+export const taskEventLabel = (event: CalendarEvent, state: PlannerState, today: DateKey): string => {
+  const task = event.googleTask!;
+  const kept = keptFor(state, task);
+  const time = keptTimeLabel(kept);
+  const planned = taskForGoogleTask(state, task);
+  const deadline = kept?.deadline ?? null;
+  return `Google task ${event.title}, due ${longDay(task.due ?? event.start.slice(0, 10))}${time ? ` at ${time}` : ''}${task.completed ? ', completed' : ''}${planned ? ', planned in the Planner' : ''}${deadline ? `, deadline ${longDay(deadline)}${deadline < today && !task.completed ? ', overdue' : ''}` : ''}${kept?.repeat ? ', repeats' : ''}`;
+};
+
+/** A task's deadline on its chip, red once it has passed; null without one. */
+export const deadlineOf = (event: CalendarEvent, state: PlannerState, today: DateKey): { date: DateKey; label: string; overdue: boolean } | null => {
+  const task = event.googleTask;
+  const deadline = task ? keptFor(state, task)?.deadline ?? null : null;
+  return deadline ? { date: deadline, label: shortDay(deadline), overdue: deadline < today && !task!.completed } : null;
 };
 
 /** One thing on the calendar: an event (or a Google task due that day) or a working session. */
@@ -63,7 +85,8 @@ export const calendarItems = (state: PlannerState, events: readonly CalendarEven
   for (const event of events) {
     if (isTaskEvent(event) && event.googleTask?.completed && !options.completedTasks) continue;
     const span = eventSpan(event, zone);
-    out.push({ item: { kind: 'event', event }, span, bar: event.allDay || isTaskEvent(event) || span.last > span.first, startMs: event.allDay ? Date.parse(event.start) - 1 : Date.parse(event.start) });
+    // A task with a kept time is timed, as an event is; the rest show all day.
+    out.push({ item: { kind: 'event', event }, span, bar: event.allDay || span.last > span.first, startMs: event.allDay ? Date.parse(event.start) - 1 : Date.parse(event.start) });
   }
   for (let date = from; date <= to; date = addDays(date, 1)) {
     for (const block of blocksOnDay(state, date)) {

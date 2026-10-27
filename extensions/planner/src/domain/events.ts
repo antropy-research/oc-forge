@@ -1,6 +1,7 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
+import { parseRRule } from './rrule.ts';
 import { linearDisplayProblem } from './linearDisplay.ts';
 import { isAgentPreset, isRunAssignee } from './assignees.ts';
 
@@ -48,7 +49,7 @@ export type EventBody =
   | { type: 'task.deleted'; taskId: string }
   | { type: 'task.restored'; taskId: string }
   | { type: 'task.archived'; taskId: string }
-  | { type: 'task.sourceSynced'; taskId: string; source: TaskSourceRef; title?: string }
+  | { type: 'task.sourceSynced'; taskId: string; source: TaskSourceRef; title?: string; notes?: string; dueDate?: DateKey | null }
   | { type: 'tasks.rolledOver'; date: DateKey; moved: RolledTask[]; archived: string[]; superseded?: string[] }
   | { type: 'tasks.recurred'; instances: NewTask[] }
   | { type: 'series.created'; series: Pick<Series, 'id' | 'rule' | 'startDate' | 'template'>; taskId: string }
@@ -80,7 +81,13 @@ export type EventBody =
   | { type: 'channel.created'; channel: NewChannel }
   | { type: 'channel.updated'; channelId: string; patch: ChannelPatch }
   | { type: 'channel.deleted'; channelId: string }
-  | { type: 'settings.updated'; patch: Partial<Settings> };
+  | { type: 'settings.updated'; patch: Partial<Settings> }
+  | { type: 'gtask.kept'; account: string; listId: string; taskId: string; patch: GoogleTaskKeptPatch }
+  | { type: 'gtask.moved'; account: string; taskId: string; listId: string; newTaskId?: string }
+  | { type: 'gtask.dropped'; account: string; taskId: string };
+
+/** What a user sets on a Google task that the Planner keeps (Google Tasks' API cannot): `starred` stars or unstars it. */
+export type GoogleTaskKeptPatch = Partial<Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline' | 'repeat'> & { starred: boolean }>;
 
 export type EventType = EventBody['type'];
 
@@ -127,7 +134,34 @@ const isSource = (value: unknown): value is TaskSourceRef =>
   (value.workspaceId === undefined || (isShortText(value.workspaceId, 200) && (value.workspaceId as string).length > 0)) &&
   (value.branch === undefined || isShortText(value.branch, 200)) &&
   (value.account === undefined || (typeof value.account === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account))) &&
-  (value.listId === undefined || (isShortText(value.listId, 200) && (value.listId as string).length > 0));
+  (value.listId === undefined || (isShortText(value.listId, 200) && (value.listId as string).length > 0)) &&
+  (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) &&
+  (value.due === undefined || value.due === null || isDateKey(value.due));
+
+/** Google Tasks keeps at most this much of a task's details. */
+export const GOOGLE_NOTES_MAX = 8192;
+
+const isGoogleTaskId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024;
+
+/** What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule, a star. */
+const validateKeptPatch = (patch: unknown): string | null => {
+  if (!isRecord(patch)) return 'patch must be an object';
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'time' && !(value === null || (Number.isInteger(value) && (value as number) >= 0 && (value as number) < 24 * 60))) return 'time must be minutes after midnight, or null';
+    else if (key === 'duration' && !(value === null || (Number.isInteger(value) && (value as number) >= 5 && (value as number) <= 24 * 60))) return 'duration must be 5 to 1440 minutes, or null';
+    else if (key === 'deadline' && !(value === null || isDateKey(value))) return 'deadline must be a date or null';
+    else if (key === 'starred' && typeof value !== 'boolean') return 'starred must be true or false';
+    else if (key === 'repeat') {
+      if (value === null) continue;
+      if (!isRecord(value) || typeof value.rule !== 'string' || value.rule.length > 500 || !parseRRule(value.rule)) return 'repeat needs an RRULE';
+      if (!isId(value.seriesId)) return 'repeat needs a series id';
+      if (!(Number.isInteger(value.index) && (value.index as number) >= 1 && (value.index as number) <= 100_000)) return 'repeat index must be a count';
+      if (!(value.next === null || isGoogleTaskId(value.next))) return 'repeat next must be a task id or null';
+      if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next'].includes(field))) return 'repeat has an unknown field';
+    } else if (!['time', 'duration', 'deadline', 'starred', 'repeat'].includes(key)) return `unknown field ${key}`;
+  }
+  return null;
+};
 
 const PRIORITY_VALUES = new Set(['urgent', 'high', 'medium', 'low']);
 const isPriority = (value: unknown): boolean => value === null || (typeof value === 'string' && PRIORITY_VALUES.has(value));
@@ -349,6 +383,8 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     case 'task.sourceSynced':
       if (!isSource(command.source)) return 'source is invalid';
       if (command.title !== undefined && !isTitle(command.title)) return 'title must be 1-500 characters';
+      if (command.notes !== undefined && !(typeof command.notes === 'string' && command.notes.length <= NOTES_MAX)) return 'notes are too long';
+      if (command.dueDate !== undefined && !(command.dueDate === null || isDateKey(command.dueDate))) return 'dueDate must be a date or null';
       return needTask();
     case 'timer.started':
       return needTask();
@@ -498,6 +534,14 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return needChannel();
     case 'settings.updated':
       return validateSettingsPatch(command.patch);
+    case 'gtask.kept':
+      if (!isGoogleAccount(command.account) || !isGoogleTaskId(command.listId) || !isGoogleTaskId(command.taskId)) return 'a Google account, list and task are required';
+      return validateKeptPatch(command.patch);
+    case 'gtask.moved':
+      if (!isGoogleAccount(command.account) || !isGoogleTaskId(command.taskId) || !isGoogleTaskId(command.listId)) return 'a Google account, task and list are required';
+      return command.newTaskId === undefined || isGoogleTaskId(command.newTaskId) ? null : 'newTaskId must be a task id';
+    case 'gtask.dropped':
+      return isGoogleAccount(command.account) && isGoogleTaskId(command.taskId) ? null : 'a Google account and task are required';
     default:
       return `unknown command type ${String(type)}`;
   }
