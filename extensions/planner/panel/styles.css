@@ -1508,3 +1508,8 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gt-form-note { font-size: 12px; color: var(--oc-muted); }
 .gt-form-row select:disabled { opacity: 0.6; cursor: not-allowed; }
 .gt-form-actions .link[aria-disabled='true'] { color: var(--oc-muted); cursor: help; }
+/* Edit from the calendar: the Tasks view's form in a dialog over the calendar. */
+.modal.gt-task-editor { width: min(520px, 100%); padding: 10px 8px 14px; }
+.gt-editor-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 4px 20px; }
+.gt-editor-bar h2 { margin: 0; font-size: 18px; font-weight: 400; }
+.gt-task-editor .gt-form { padding: 6px 16px 4px 20px; }

@@ -1,6 +1,6 @@
 // Google Calendar's popovers: an event's details (with Edit, Delete, Duplicate,
-// RSVP and the Planner's "Plan as task"), a Google task's (complete, delete,
-// plan it), and a month day's "N more" list.
+// RSVP and the Planner's "Plan as task"), a Google task's (edit, complete,
+// delete, plan it), and a month day's "N more" list.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/ics.ts';
 import type { DateKey, Task } from '../../../src/domain/types.ts';
@@ -265,7 +265,7 @@ export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: 
   );
 };
 
-/** A Google task on the calendar: complete it, delete it, open it in Google Tasks, or plan it. */
+/** A Google task on the calendar: edit it, complete it, delete it, open it in Google Tasks, or plan it. */
 export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: Anchor }) => {
   const { client, google, host } = usePlanner();
   const view = useView();
@@ -299,6 +299,9 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
       <div class="pop-tools">
         <button class={`icon-button pop-star${kept?.starredAt ? ' is-on' : ''}`} aria-label={`Star ${item.title}`} aria-pressed={Boolean(kept?.starredAt)} title={KEPT_HINT} onClick={() => void google.toggleStar(item)}>
           <Icon name={kept?.starredAt ? 'starred' : 'star'} />
+        </button>
+        <button class="icon-button" aria-label="Edit task" title="Edit task" disabled={busy} onClick={() => calendarUi.editTask({ item, series: false })}>
+          <Icon name="edit" />
         </button>
         <button class="icon-button" aria-label="Delete task" title="Delete task" disabled={busy} onClick={() => void remove()}>
           <Icon name="delete" />

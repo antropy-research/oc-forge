@@ -1,6 +1,7 @@
 // What opens over the calendar: details popovers, quick create, the event
-// editor, Google Calendar's questions ("Edit recurring event", "Send update
-// emails?") and its snackbar. Mounted once by each calendar surface.
+// editor, a Google task's editor, Google Calendar's questions ("Edit recurring
+// event", "Send update emails?") and its snackbar. Mounted once by each
+// calendar surface.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { DateKey } from '../../../src/domain/types.ts';
 import { calendarUi, useCalendarUi, type Question, type Snack } from '../../lib/gcal.ts';
@@ -8,6 +9,7 @@ import { EventEditor } from './EventEditor.tsx';
 import { Icon } from './Icon.tsx';
 import { DayPopover, EventPopover, TaskPopover } from './Popovers.tsx';
 import { QuickCreate } from './QuickCreate.tsx';
+import { TaskEditor } from './TaskEditor.tsx';
 
 /** "Event saved · Undo ✕", bottom left, as Google Calendar says it. */
 const Snackbar = ({ snack }: { snack: Snack }) => {
@@ -84,7 +86,7 @@ const QuestionDialog = ({ question }: { question: Question }) => {
 export const CalendarOverlays = ({ onDay }: { onDay?: (date: DateKey) => void }) => {
   const ui = useCalendarUi();
   // Leaving the calendar closes what was open on it.
-  useEffect(() => () => calendarUi.set({ popover: null, draft: null, editor: null }), []);
+  useEffect(() => () => calendarUi.set({ popover: null, draft: null, editor: null, taskEditor: null }), []);
   const popover = ui.popover;
   return (
     <>
@@ -93,6 +95,7 @@ export const CalendarOverlays = ({ onDay }: { onDay?: (date: DateKey) => void })
       {popover?.kind === 'day' && <DayPopover key={popover.date} date={popover.date} events={popover.events} anchor={popover.anchor} onDay={onDay} />}
       {ui.draft && <QuickCreate key={`${ui.draft.anchor.x}:${ui.draft.anchor.y}`} draft={ui.draft} />}
       {ui.editor && <EventEditor key={ui.editor.mode === 'edit' ? ui.editor.event.id : 'new'} target={ui.editor} />}
+      {ui.taskEditor && <TaskEditor key={`${ui.taskEditor.item.id}:${ui.taskEditor.series}`} target={ui.taskEditor} />}
       {ui.question && <QuestionDialog question={ui.question} />}
       {/* Always there, so screen readers hear each new message. */}
       <div class="gcal-snack-region" role="status">

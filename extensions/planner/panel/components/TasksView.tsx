@@ -83,20 +83,22 @@ const placed = (place: MenuPlace | null) => (place ? { position: 'fixed', ...pla
 
 /**
  * Title, details, date and time (or all day), deadline, repeat and star of a
- * task, edited in place, as Google Tasks' task form. A new task's form stays
- * open after Enter for the next one, as Google Tasks keeps adding. Subtasks,
- * and tasks with subtasks, do not repeat, nor does a repeating task take
- * subtasks (nor in Google Tasks): those controls are unavailable, with the
- * reason.
+ * task, edited in place, as Google Tasks' task form (and, over the calendar,
+ * its list). A new task's form stays open after Enter for the next one, as
+ * Google Tasks keeps adding. Subtasks, and tasks with subtasks, do not repeat,
+ * nor does a repeating task take subtasks (nor in Google Tasks): those
+ * controls are unavailable, with the reason.
  */
-const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false }: {
+export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, lists, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false }: {
   item: Partial<GoogleTaskItem>;
   kept: GoogleTaskKept | null;
   depth: 0 | 1;
   canRepeat: boolean;
   /** Why it cannot repeat, on the unavailable Repeat control. */
   repeatNote?: string | null;
-  onSave: (fields: TaskFields, starred: boolean) => void;
+  /** The lists it may go to (over the calendar), and why it stays in its own. */
+  lists?: { lists: GoogleTaskList[]; locked: string | null };
+  onSave: (fields: TaskFields, starred: boolean, listId?: string) => void;
   onCancel: () => void;
   onSubtask?: () => void;
   /** Why it takes no subtasks, on the unavailable "Add subtask". */
@@ -113,6 +115,7 @@ const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, onSave, onC
   const [deadline, setDeadline] = useState<DateKey | null>(kept?.deadline ?? null);
   const [rule, setRule] = useState<string | null>(kept?.repeat?.rule ?? null);
   const [starred, setStarred] = useState(Boolean(kept?.starredAt));
+  const [listId, setListId] = useState(item.listId ?? '');
   const [custom, setCustom] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   useEffect(() => titleRef.current?.focus(), []);
@@ -126,7 +129,7 @@ const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, onSave, onC
   const save = () => {
     if (!title.trim()) return onCancel();
     // Google Calendar's repeating tasks have no end time.
-    onSave({ title: title.trim(), notes, due, kept: { time: due ? time : null, duration: due && time !== null && !rule ? duration : null, deadline, rule: due && canRepeat ? rule : null } }, starred);
+    onSave({ title: title.trim(), notes, due, kept: { time: due ? time : null, duration: due && time !== null && !rule ? duration : null, deadline, rule: due && canRepeat ? rule : null } }, starred, listId || undefined);
     if (!keepOpen) return;
     setTitle('');
     setNotes('');
@@ -228,6 +231,15 @@ const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, onSave, onC
           )}
         </div>
       )}
+      {lists && (
+        <div class="gt-form-row" title={lists.locked ?? undefined}>
+          <Icon name="task" size={16} />
+          <select aria-label="List" value={listId} disabled={Boolean(lists.locked)} onChange={(event) => setListId(event.currentTarget.value)}>
+            {lists.lists.map((list) => <option key={list.id} value={list.id}>{list.title}</option>)}
+          </select>
+          {lists.locked && <span class="gt-form-note">{lists.locked}</span>}
+        </div>
+      )}
       <div class="gt-form-row">
         <button class={`gt-star-toggle${starred ? ' is-on' : ''}`} aria-pressed={starred} aria-label="Star" onClick={() => setStarred(!starred)}>
           <Icon name={starred ? 'starred' : 'star'} size={18} /> {starred ? 'Starred' : 'Star'}
@@ -304,23 +316,30 @@ const askRepeat = async (action: 'edit' | 'delete', ruleChanged = false): Promis
   return choice === 'this' || choice === 'all' ? choice : null;
 };
 
-/** Save a task's form: a repeating one asks which tasks the change is for; the star is kept at once. */
-const useTaskSave = () => {
+/**
+ * Save a task's form: a repeating one asks which tasks the change is for
+ * (unless `scope` says), the star is kept at once, and a new list moves it
+ * there. False when it was cancelled or Google refused.
+ */
+export const useTaskSave = () => {
   const { google, client } = usePlanner();
   const view = useView();
-  return async (item: GoogleTaskItem, fields: TaskFields, starred: boolean) => {
+  return async (item: GoogleTaskItem, fields: TaskFields, starred: boolean, scope?: RepeatScope, listId?: string): Promise<boolean> => {
     const kept = keptFor(view.state, item);
     const changed =
       fields.title !== item.title || fields.notes !== item.notes || fields.due !== item.due || fields.kept.time !== (kept?.time ?? null) || fields.kept.duration !== (kept?.duration ?? null) || fields.kept.deadline !== (kept?.deadline ?? null) || fields.kept.rule !== (kept?.repeat?.rule ?? null);
     try {
       if (changed) {
-        const scope = kept?.repeat ? await askRepeat('edit', fields.kept.rule !== kept.repeat.rule) : 'this';
-        if (!scope) return;
-        await google.saveListTask(item, fields, scope);
+        const chosen = scope ?? (kept?.repeat ? await askRepeat('edit', fields.kept.rule !== kept.repeat.rule) : 'this');
+        if (!chosen) return false;
+        await google.saveListTask(item, fields, chosen);
       }
       if (Boolean(kept?.starredAt) !== starred) await google.setKept(item, { starred });
+      if (listId && listId !== item.listId) await google.moveListTask(item, { parent: null, previous: null }, listId);
+      return true;
     } catch (error) {
       client.notify(`Google Tasks did not take it: ${messageOf(error)}`);
+      return false;
     }
   };
 };
