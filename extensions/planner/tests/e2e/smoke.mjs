@@ -6,7 +6,7 @@ const h = await startHarness({ out: process.argv[2] ?? '/tmp/opencode/planner-ha
 try {
   await h.openPlanner();
   await h.nav('Linear').click();
-  await h.frame.locator('li.issue-row').first().waitFor({ timeout: 15_000 });
+  await h.frame.locator('.linear-page li.lin-row').first().waitFor({ timeout: 15_000 });
   await h.shot('smoke-linear');
   const state = await h.call('GET', '/state');
   console.log(`PASS the Planner page opens on this checkout's build (${Object.keys(state.json.state.tasks).length} tasks in the private plan; Linear: ${[...new Set(h.linearCalls.map((c) => c.op))].join(', ')})`);
