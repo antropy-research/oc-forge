@@ -899,8 +899,7 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .iv-link-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .iv-side-meta, .iv-keys { margin: 0; font-size: 11.5px; line-height: 1.7; }
 @media (max-width: 900px) {
-  .lin-shell { grid-template-columns: 1fr; }
-  .lin-sidebar { display: none; }
+  /* The Linear page's sidebar folds by the page's own width (LinearPage), not the window's. */
   .iv-body { grid-template-columns: 1fr; }
   .iv-side { border-left: 0; border-top: 1px solid var(--pl-line); }
 }
@@ -1389,3 +1388,29 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gcal-snack-action { border: 0; background: none; padding: 6px 10px; border-radius: 4px; font-weight: 600; color: color-mix(in srgb, var(--oc-primary) 55%, var(--oc-bg)); }
 .gcal-snack-close { width: 32px; height: 32px; display: grid; place-items: center; border: 0; padding: 0; border-radius: 50%; background: none; color: inherit; }
 .gcal-snack-action:hover, .gcal-snack-close:hover { background: color-mix(in srgb, var(--oc-bg) 16%, transparent); }
+
+/* ==== Linear page at narrow widths, and Linear's advanced filters (planner-linear2) ==== */
+/* A narrow page: the sidebar folds behind the header's toggle and opens over the list. */
+.lin-shell.is-narrow, .lin-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
+.lin-shell.is-narrow { position: relative; }
+.lin-scrim { position: absolute; inset: 0; z-index: 44; background: color-mix(in srgb, var(--oc-fg) 16%, transparent); }
+.lin-sidebar.is-overlay { position: absolute; top: 0; bottom: 0; left: 0; z-index: 45; width: min(280px, calc(100% - 48px)); border-right: 1px solid var(--pl-line); background-color: var(--oc-bg); background-image: linear-gradient(var(--pl-softer), var(--pl-softer)); box-shadow: 8px 0 28px color-mix(in srgb, var(--oc-fg) 18%, transparent); }
+.lin-brand-row { display: flex; align-items: center; gap: 6px; }
+.lin-brand-row h2 { flex: 1; }
+.lin-sidebar-hide { min-width: 22px; height: 22px; padding: 0 4px; border-color: transparent; background: none; color: var(--oc-muted); }
+.lin-sidebar-hide:hover { background: var(--pl-soft); color: var(--oc-fg); }
+.lin-sidebar-toggle { flex: none; color: var(--oc-muted); }
+.lin-sidebar-toggle:hover { color: var(--oc-fg); }
+.lin-head-search { flex: 0 1 220px; min-width: 120px; }
+.lin-head-search-icon { color: var(--oc-muted); }
+.lin-shell.is-narrow .lin-head, .lin-shell.is-narrow .lin-bar { padding-left: 12px; padding-right: 12px; }
+.lin-shell.is-narrow .lin-description { margin-left: 12px; margin-right: 12px; }
+.lin-shell.is-narrow .lin-crumbs { flex: 0 1 auto; overflow: hidden; }
+.lin-shell.is-narrow .lin-crumb { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lin-shell.is-narrow .lin-content { padding-left: 6px; padding-right: 6px; }
+/* A row keeps room for its title; properties that do not fit move under it, to the right. */
+.lin-shell.is-narrow .lin-row { flex-wrap: wrap; row-gap: 3px; padding-top: 4px; padding-bottom: 4px; }
+.lin-shell.is-narrow .lin-row-title { flex: 1 1 160px; min-width: min(160px, 100%); }
+.lin-shell.is-narrow .lin-props { flex: 0 1 auto; max-width: 100%; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+
+/* ==== end Linear page at narrow widths, and advanced filters ==== */

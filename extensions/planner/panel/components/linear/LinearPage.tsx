@@ -2,12 +2,14 @@
 // Favorites, Views, Projects), and the open list with its name, filters and
 // Display options; projects and the issues already planned here. Keys as in
 // Linear: F filter, Shift V display, Cmd/Ctrl B list or board, / search,
-// G then I (my issues), V (views) or P (projects).
-import { useEffect, useRef, useState } from 'preact/hooks';
+// [ the sidebar, G then I (my issues), V (views) or P (projects). Where the
+// page is narrow the sidebar folds behind a toggle and opens over the list.
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { isProjectView, viewUrl } from '../../../src/domain/linear.ts';
 import { useLinear, usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
-import { displayOf, type IssueList, type LinearView } from '../../lib/linear.ts';
+import { displayOf, sameSource, type IssueList, type LinearView } from '../../lib/linear.ts';
+import { HeadSearch, LinearChromeContext, SidebarToggle, type LinearChrome } from './chrome.tsx';
 import { ConnectLinear, LinearErrors, needsConnect, workspaceLabel } from './common.tsx';
 import { ViewIcon } from './icons.tsx';
 import { IssueCollection } from './IssueCollection.tsx';
@@ -52,6 +54,7 @@ const IssuesPane = ({ menus }: { menus: MenuState }) => {
   return (
     <>
       <header class="lin-head">
+        <SidebarToggle />
         <div class="lin-crumbs">
           <span class="lin-crumb">{title.crumb}</span>
           <span class="lin-crumb-sep" aria-hidden="true">›</span>
@@ -60,6 +63,7 @@ const IssuesPane = ({ menus }: { menus: MenuState }) => {
           {favorite && <span class="lin-star" title="In your favorites">★</span>}
         </div>
         <span class="grow" />
+        <HeadSearch />
         {source.kind === 'view' && workspace && list.view && (
           <button class="lin-button" onClick={() => void host.openUrl(viewUrl(workspace.urlKey, list.view!))} title="Open this view in Linear">Open in Linear ↗</button>
         )}
@@ -85,6 +89,9 @@ const IssuesPane = ({ menus }: { menus: MenuState }) => {
   );
 };
 
+/** Below this width the sidebar does not fit beside the list; it opens over it. */
+const NARROW_PX = 760;
+
 export const LinearPage = () => {
   const { linear } = usePlanner();
   const lv = useLinear();
@@ -96,6 +103,75 @@ export const LinearPage = () => {
   const findRef = useRef<HTMLInputElement | null>(null);
   const menus: MenuState = { filterOpen, setFilterOpen, displayOpen, setDisplayOpen };
   const listShown = lv.mode === 'issues' || (lv.mode === 'projects' && Boolean(lv.project));
+
+  // The sidebar: beside the list where the page is wide enough (folded with "["), else over it on demand.
+  const shellRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement | null>(null);
+  const [narrow, setNarrow] = useState(false);
+  const [docked, setDocked] = useState(true);
+  const [overlay, setOverlay] = useState(false);
+  const [openFocus, setOpenFocus] = useState<'nav' | 'find' | null>(null);
+  const sidebarShown = narrow ? overlay : docked;
+  useLayoutEffect(() => {
+    const element = shellRef.current;
+    if (!element) return;
+    const measure = () => setNarrow(element.getBoundingClientRect().width < NARROW_PX);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!narrow) setOverlay(false);
+  }, [narrow]);
+  // The sidebar reads where to put the focus as it opens; then it is spent.
+  useEffect(() => {
+    if (openFocus) setOpenFocus(null);
+  }, [openFocus]);
+  const showSidebar = (focus: 'nav' | 'find') => {
+    setOpenFocus(focus);
+    if (narrow) setOverlay(true);
+    else setDocked(true);
+  };
+  const hideSidebar = (restoreFocus = true) => {
+    if (narrow) setOverlay(false);
+    else setDocked(false);
+    if (restoreFocus) requestAnimationFrame(() => toggleRef.current?.focus());
+  };
+  const toggleSidebar = () => (sidebarShown ? hideSidebar() : showSidebar('nav'));
+
+  // Search, from the sidebar or the header: Linear searches as one types.
+  const [term, setTerm] = useState('');
+  const [headOpen, setHeadOpen] = useState(false);
+  const headRef = useRef<HTMLInputElement | null>(null);
+  const typed = useRef(false);
+  const search = (query: string) => {
+    const source = { kind: 'search' as const, term: query };
+    if (query && (lv.mode !== 'issues' || !sameSource(linear.list('page').source, source))) linear.setSource(source);
+  };
+  useEffect(() => {
+    const query = term.trim();
+    if (!typed.current || !query) return;
+    const timer = setTimeout(() => search(query), 350);
+    return () => clearTimeout(timer);
+  }, [term]);
+  useEffect(() => {
+    if (headOpen) headRef.current?.focus();
+  }, [headOpen]);
+  const setTyped = (next: string) => {
+    typed.current = true;
+    setTerm(next);
+  };
+  const submit = () => {
+    search(term.trim());
+    if (narrow && overlay) hideSidebar();
+  };
+  const chrome: LinearChrome = { narrow, sidebarShown, toggleSidebar, toggleRef, search: { term, setTerm: setTyped, submit, open: headOpen, setOpen: setHeadOpen, inputRef: headRef } };
+  // The key handler below reads these as they are now.
+  const live = useRef(chrome);
+  live.current = chrome;
+  const showRef = useRef(showSidebar);
+  showRef.current = showSidebar;
 
   useEffect(() => {
     linear.use('page');
@@ -117,8 +193,14 @@ export const LinearPage = () => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = Boolean(target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable));
-      if (typing || event.defaultPrevented || ui.openTaskId || ui.openIssue || document.querySelector('.modal-backdrop')) return;
+      // An open menu or filter builder keeps its keys.
+      if (typing || event.defaultPrevented || target?.closest('.lin-popover') || ui.openTaskId || ui.openIssue || document.querySelector('.modal-backdrop')) return;
       const key = event.key.toLowerCase();
+      if (event.key === '[' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        live.current.toggleSidebar();
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && key === 'b' && listShown) {
         event.preventDefault();
         const list = linear.list('page');
@@ -129,8 +211,10 @@ export const LinearPage = () => {
       if (state.current.g && Date.now() - state.current.g < 1500) {
         state.current.g = 0;
         if (key === 'i') linear.setSource({ kind: 'assigned' });
-        else if (key === 'v') findRef.current?.focus();
-        else if (key === 'p') linear.setMode('projects');
+        else if (key === 'v') {
+          if (live.current.sidebarShown) findRef.current?.focus();
+          else showRef.current('find');
+        } else if (key === 'p') linear.setMode('projects');
         else return;
         event.preventDefault();
         return;
@@ -155,9 +239,13 @@ export const LinearPage = () => {
         setDisplayOpen(true);
         return;
       }
+      // "/" lands in a search box on screen: the sidebar's, or the header's while the sidebar is folded.
       if (event.key === '/') {
         event.preventDefault();
-        searchRef.current?.focus();
+        const { sidebarShown: shown, search: header } = live.current;
+        if (shown) searchRef.current?.focus();
+        else if (header.open) header.inputRef.current?.focus();
+        else header.setOpen(true);
       }
     };
     document.addEventListener('keydown', onKey, true);
@@ -166,20 +254,35 @@ export const LinearPage = () => {
 
   return (
     <section class="view linear-view">
-      <div class="lin-shell">
-        <LinearSidebar searchRef={searchRef} findRef={findRef} />
-        <div class="lin-main linear-page">
-          {needsConnect(lv) ? (
-            <div class="lin-content"><ConnectLinear /></div>
-          ) : lv.mode === 'planned' ? (
-            <PlannedPane />
-          ) : lv.mode === 'projects' ? (
-            lv.project ? <ProjectPage key={lv.project.project.id} open={lv.project} menus={menus} /> : <ProjectsPane />
-          ) : (
-            <IssuesPane menus={menus} />
+      <LinearChromeContext.Provider value={chrome}>
+        <div class={`lin-shell${narrow ? ' is-narrow' : ''}${!narrow && !docked ? ' is-collapsed' : ''}`} ref={shellRef}>
+          {narrow && overlay && <div class="lin-scrim" aria-hidden="true" onClick={() => hideSidebar(false)} />}
+          {sidebarShown && (
+            <LinearSidebar
+              searchRef={searchRef}
+              findRef={findRef}
+              overlay={narrow}
+              focus={openFocus}
+              search={{ term, setTerm: setTyped, submit }}
+              onHide={hideSidebar}
+              onPicked={() => {
+                if (narrow) hideSidebar();
+              }}
+            />
           )}
+          <div class="lin-main linear-page">
+            {needsConnect(lv) ? (
+              <div class="lin-content"><ConnectLinear /></div>
+            ) : lv.mode === 'planned' ? (
+              <PlannedPane />
+            ) : lv.mode === 'projects' ? (
+              lv.project ? <ProjectPage key={lv.project.project.id} open={lv.project} menus={menus} /> : <ProjectsPane />
+            ) : (
+              <IssuesPane menus={menus} />
+            )}
+          </div>
         </div>
-      </div>
+      </LinearChromeContext.Provider>
     </section>
   );
 };

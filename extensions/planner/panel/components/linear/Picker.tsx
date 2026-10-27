@@ -48,6 +48,38 @@ export const useDismiss = (root: { current: HTMLElement | null }, onClose: () =>
   }, []);
 };
 
+/** The horizontal room a popover has: the nearest ancestor that clips it, within the window. */
+const roomOf = (element: HTMLElement): { left: number; right: number } => {
+  let left = 0;
+  let right = document.documentElement.clientWidth;
+  for (let node = element.parentElement; node && node !== document.body; node = node.parentElement) {
+    if (getComputedStyle(node).overflowX === 'visible') continue;
+    const box = node.getBoundingClientRect();
+    left = Math.max(left, box.left);
+    right = Math.min(right, box.right);
+    break;
+  }
+  return { left, right };
+};
+
+/** Shift a popover sideways, after each render, so all of it shows (a narrow page, a control near an edge). */
+export const useKeepInView = (root: { current: HTMLElement | null }): void => {
+  useLayoutEffect(() => {
+    const element = root.current;
+    if (!element) return;
+    element.style.removeProperty('translate');
+    const box = element.getBoundingClientRect();
+    const room = roomOf(element);
+    const margin = 8;
+    // Wider than the room: left as it is laid out.
+    if (box.width > room.right - room.left - 2 * margin) return;
+    let shift = 0;
+    if (box.right > room.right - margin) shift = room.right - margin - box.right;
+    if (box.left + shift < room.left + margin) shift = room.left + margin - box.left;
+    if (shift) element.style.setProperty('translate', `${Math.round(shift)}px 0`);
+  });
+};
+
 export const Picker = ({
   label,
   placeholder,
@@ -93,6 +125,7 @@ export const Picker = ({
   const chosen = new Set(selected);
 
   useDismiss(root, onClose);
+  useKeepInView(root);
   // Before the next key arrives: what is typed right after the menu opens goes into it.
   useLayoutEffect(() => input.current?.focus(), []);
 
@@ -188,7 +221,7 @@ export const Picker = ({
               onClick={() => pick(option)}
             >
               {multi && <span class={`lin-check${isOn ? ' is-on' : ''}`} aria-hidden="true">{isOn ? '✓' : ''}</span>}
-              {option.icon && <span class="lin-option-icon">{option.icon}</span>}
+              {option.icon && <span class="lin-option-icon" aria-hidden="true">{option.icon}</span>}
               <span class="lin-option-label">{option.label}</span>
               {option.hint && <span class="lin-option-hint">{option.hint}</span>}
               {!multi && isOn && <span class="lin-option-tick" aria-hidden="true">✓</span>}

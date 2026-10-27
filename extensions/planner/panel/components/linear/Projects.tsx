@@ -7,6 +7,7 @@ import { HEALTH_LABELS, groupProjects } from '../../../src/domain/linearDisplay.
 import type { LinearProject, LinearProjectDetail } from '../../../src/domain/linear.ts';
 import { useLinear, usePlanner, useView } from '../../lib/context.ts';
 import { displayOf, type OpenProject } from '../../lib/linear.ts';
+import { HeadSearch, SidebarToggle } from './chrome.tsx';
 import { LinearErrors, excerpt, workspaceLabel } from './common.tsx';
 import { Avatar, ProjectIcon } from './icons.tsx';
 import { IssueCollection } from './IssueCollection.tsx';
@@ -65,8 +66,10 @@ export const ProjectsPane = () => {
   return (
     <>
       <header class="lin-head">
+        <SidebarToggle />
         <div class="lin-crumbs"><h1>Projects</h1></div>
         <span class="grow" />
+        <HeadSearch />
         <span class="lin-count">{lv.projectsLoaded ? countText(lv.projects.length, false, 'open project') : ''}</span>
         <button class="lin-icon-button" aria-label="Refresh projects" title="Refresh" onClick={() => void linear.loadProjects()}>↻</button>
       </header>
@@ -158,12 +161,14 @@ export const ProjectPage = ({ open, menus }: { open: OpenProject; menus: MenuSta
   return (
     <div class="project-detail lin-project-page" aria-label={`Project ${project.name}`}>
       <header class="lin-head">
+        <SidebarToggle />
         <button class="link lin-back" onClick={() => linear.closeProject()}>{open.from ? `← ${open.from.name}` : '← All projects'}</button>
         <span class="lin-crumb-sep" aria-hidden="true">›</span>
         <ProjectIcon color={project.color} />
         <h2>{project.name}</h2>
         {workspace && <span class="ws-badge">{workspace}</span>}
         <span class="grow" />
+        <HeadSearch />
         <button class="lin-button" onClick={() => void host.openUrl(project.url)}>Open in Linear ↗</button>
       </header>
       <div class="lin-project-top">
