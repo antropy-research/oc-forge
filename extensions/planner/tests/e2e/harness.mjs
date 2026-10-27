@@ -88,6 +88,12 @@ export const answerLinear = (o, op, variables = {}) => {
     case 'PlannerAssigned': return { viewer: { ...o.viewer, assignedIssues: page(o.issues.filter((i) => i.assigned && open(i)).map(strip)) } };
     case 'PlannerViews': return { customViews: page(o.views) };
     case 'PlannerFavoriteViews': return { favorites: { nodes: o.favorites } };
+    case 'PlannerSaveViewFilter': {
+      const found = o.views.find((v) => v.id === variables.id);
+      if (!found) return { customViewUpdate: null };
+      found.filterData = variables.filterData;
+      return { customViewUpdate: { success: true, customView: { id: found.id, updatedAt: new Date().toISOString() } } };
+    }
     case 'PlannerViewIssues': {
       const saved = o.viewIssues[variables.id];
       if (!o.views.some((v) => v.id === variables.id)) return { customView: null };
@@ -97,7 +103,8 @@ export const answerLinear = (o, op, variables = {}) => {
     case 'PlannerIssue': case 'PlannerIssueDetail': return { issue: find(variables.id) ? strip(find(variables.id)) : null };
     case 'PlannerTeamStates': return { team: { id: variables.id, states: { nodes: o.states } } };
     case 'PlannerTeams': return { viewer: { id: o.viewer.id }, teams: { nodes: o.teams } };
-    case 'PlannerSearch': return { searchIssues: { nodes: o.issues.filter((i) => i.title.includes(variables.term ?? '')).map(strip) } };
+    // Linear's search is a page like any list (the Planner reads pageInfo), and ignores case.
+    case 'PlannerSearch': return { searchIssues: page(o.issues.filter((i) => i.title.toLowerCase().includes(String(variables.term ?? '').toLowerCase())).map(strip)) };
     case 'PlannerProjects': return { projects: page(o.projects) };
     case 'PlannerTeamOptions': return { team: { id: variables.id, states: { nodes: o.states }, members: { nodes: o.members }, labels: { nodes: o.labels } }, issueLabels: { nodes: o.workspaceLabels } };
     case 'PlannerSetState': {

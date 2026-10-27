@@ -603,9 +603,9 @@ const MatchSwitch = ({ match, onChange }: { match: FilterJoin; onChange: (match:
   );
 };
 
-/** Filters of a list: the match switch, chips, the Filter button and its menu, Clear (and Reset for a changed view). `open` lets F open the menu. */
+/** Filters of a list: the match switch, chips, the Filter button and its menu, Clear (and Reset and Save for a changed view). `open` lets F open the menu. */
 export const FilterBar = ({ listId, open, onOpenChange, compact = false }: { listId: ListId; open: boolean; onOpenChange: (open: boolean) => void; compact?: boolean }) => {
-  const { linear } = usePlanner();
+  const { linear, client } = usePlanner();
   const lv = useLinear();
   const list = lv.lists[listId];
   const tree: LinearFilterGroup = { join: list.match, items: list.filters };
@@ -659,6 +659,19 @@ export const FilterBar = ({ listId, open, onOpenChange, compact = false }: { lis
       </span>
       {list.filters.length > 0 && <button key="clear" type="button" class="link lin-clear" aria-label="Clear filters" onClick={() => change({ join: 'and', items: [] })}>Clear</button>}
       {changed && <button key="reset" type="button" class="link lin-clear" aria-label="Reset the view's filters" title="The view's filters as saved in Linear" onClick={() => linear.resetFilters(listId)}>Reset</button>}
+      {changed && (
+        <button
+          key="save"
+          type="button"
+          class="link lin-clear"
+          aria-label="Save the filters to the view"
+          title={linear.canSaveFilters(listId) ? 'Save these filters to the view in Linear, as its Save does' : 'A due date of today or this week would be saved as fixed dates; change it to save the view'}
+          disabled={!linear.canSaveFilters(listId)}
+          onClick={() => void linear.saveFilters(listId).catch((error) => client.notify(`Linear did not save the view: ${error instanceof Error ? error.message : String(error)}`))}
+        >
+          Save
+        </button>
+      )}
     </div>
   );
 };

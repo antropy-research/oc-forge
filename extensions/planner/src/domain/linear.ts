@@ -473,7 +473,13 @@ export const CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueC
   issueCreate(input: $input) { success issue { ${ISSUE_FIELDS} } }
 }`;
 
+/** A saved view's filters written back, as Linear's "Save" does after its filters were changed. */
+export const SAVE_VIEW_FILTER_MUTATION = `mutation PlannerSaveViewFilter($id: String!, $filterData: IssueFilter!) {
+  customViewUpdate(id: $id, input: { filterData: $filterData }) { success customView { id updatedAt } }
+}`;
+
 export const ALL_DOCUMENTS = [
+  SAVE_VIEW_FILTER_MUTATION,
   ASSIGNED_QUERY,
   CREATED_QUERY,
   ISSUES_QUERY,

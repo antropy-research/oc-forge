@@ -14,6 +14,7 @@ import {
   ASSIGNED_QUERY,
   CREATED_QUERY,
   CREATE_ISSUE_MUTATION,
+  SAVE_VIEW_FILTER_MUTATION,
   FAVORITE_VIEWS_QUERY,
   FILTER_CYCLES_QUERY,
   FILTER_LABELS_QUERY,
@@ -408,6 +409,32 @@ export class LinearStore {
   resetFilters(id: ListId = 'page'): void {
     const saved = this.list(id).viewFilters;
     if (saved) this.setFilters(saved, id, 'and');
+  }
+
+  /**
+   * Whether an open view's changed filters can be saved to it as they mean: not when they
+   * depend on today's date here (a due date of "today" or "this week" compiles to dates, and
+   * would stay those dates in Linear).
+   */
+  canSaveFilters(id: ListId = 'page'): boolean {
+    const list = this.list(id);
+    if (list.source.kind !== 'view') return false;
+    const { state } = this.client.getView();
+    const at = (today: string) => JSON.stringify(compileFilter(list.filters, { today, weekStartsOn: state.settings.weekStartsOn }, list.match));
+    return at('2001-01-01') === at('2001-03-15');
+  }
+
+  /** An open view's filters, as changed here, saved to the view in Linear (Linear's "Save"); the view then reads as saved. */
+  async saveFilters(id: ListId = 'page'): Promise<void> {
+    const list = this.list(id);
+    if (list.source.kind !== 'view' || !this.canSaveFilters(id)) return;
+    const { state, today } = this.client.getView();
+    const filterData = compileFilter(list.filters, { today, weekStartsOn: state.settings.weekStartsOn }, list.match) ?? {};
+    const data = await this.graphqlIn<{ customViewUpdate: { success: boolean } | null }>(list.source.workspaceId, SAVE_VIEW_FILTER_MUTATION, { id: list.source.id, filterData });
+    if (!data.customViewUpdate?.success) throw new Error('Linear did not save the view');
+    // Read the view again: its saved filters are now these.
+    this.patchList(id, { view: null });
+    await this.loadList(id);
   }
 
   setMode(mode: LinearMode): void {

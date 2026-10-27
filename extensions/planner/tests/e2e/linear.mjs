@@ -132,6 +132,14 @@ const answer = (op, variables) => {
       const held = found.holds ? issues.filter(found.holds) : [];
       return { customView: { id: found.id, issues: page(filtered(held, variables.filter).map(listed), 100, variables.after) } };
     }
+    case 'PlannerSaveViewFilter': {
+      // Linear's Save: the view keeps the filters sent, and holds what they match (within its team).
+      const found = views.find((item) => item.id === variables.id);
+      if (!found) return { customViewUpdate: null };
+      found.filterData = variables.filterData;
+      found.holds = (item) => (!found.team || item.team.id === found.team.id) && matchIssue(item, variables.filterData);
+      return { customViewUpdate: { success: true, customView: { id: found.id, updatedAt: new Date().toISOString() } } };
+    }
     case 'PlannerViewProjects': {
       const found = views.find((item) => item.id === variables.id);
       if (!found) return { customView: null };
@@ -722,6 +730,24 @@ try {
   await bar.getByRole('button', { name: "Reset the view's filters" }).click();
   await until(async () => (await rowKeys()).sort().join() === savedRows.join());
   check('Reset brings the view’s own filter back', (await rowKeys()).sort().join() === savedRows.join() && (await savedChip.count()) === 1);
+
+  // …and Save writes a changed filter to the view, as Linear's Save does: the view then reads as saved, without Reset or Save.
+  await savedChip.getByRole('button', { name: 'Edit filter group: Any of 2 filters' }).click();
+  await groupBuilder.waitFor({ timeout: 5000 });
+  await groupBuilder.getByRole('group', { name: 'All of 2 filters: Assignee is Me and Labels include Bug' }).getByRole('button', { name: /^All of these filters/ }).click();
+  await groupBuilder.getByRole('group', { name: 'Any of 2 filters: Assignee is Me or Labels include Bug' }).waitFor({ timeout: 5000 });
+  await browserPage.keyboard.press('Escape');
+  await bar.getByRole('button', { name: 'Save the filters to the view' }).click();
+  const saveCall = await until(() => calls('PlannerSaveViewFilter').at(-1));
+  const nowSaved = keysOf(issues.filter((item) => item.team.id === har.id && matchIssue(item, changedFilter.and[1])));
+  await until(async () => (await bar.getByRole('button', { name: "Reset the view's filters" }).count()) === 0 && (await rowKeys()).sort().join() === nowSaved.join());
+  check(
+    "Save writes the changed filter to the view in Linear; the view then reads as saved (no Reset, Linear applies it)",
+    saveCall?.variables.id === 'v-or' && JSON.stringify(saveCall.variables.filterData) === JSON.stringify(changedFilter.and[1])
+      && (await bar.getByRole('button', { name: "Reset the view's filters" }).count()) === 0 && (await bar.getByRole('group', { name: /^Any of \d filters/ }).count()) >= 1
+      && (await rowKeys()).sort().join() === nowSaved.join() && viewOr().at(-1)?.variables.filter === null,
+    `${JSON.stringify(saveCall?.variables.filterData ?? null)} · ${(await rowKeys()).length} rows (fake ${nowSaved.length})`,
+  );
 
   // 14. The page at 1024×768 with OpenChamber's sidebar open (the Planner gets about 700 px): Linear's sidebar folds
   // behind a toggle in the header and opens over the list; views, projects, My issues and Favorites are reachable by

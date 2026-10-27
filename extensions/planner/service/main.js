@@ -2735,7 +2735,11 @@ var SET_STATE_MUTATION = `mutation PlannerSetState($id: String!, $stateId: Strin
 var CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { ${ISSUE_FIELDS} } }
 }`;
+var SAVE_VIEW_FILTER_MUTATION = `mutation PlannerSaveViewFilter($id: String!, $filterData: IssueFilter!) {
+  customViewUpdate(id: $id, input: { filterData: $filterData }) { success customView { id updatedAt } }
+}`;
 var ALL_DOCUMENTS = [
+  SAVE_VIEW_FILTER_MUTATION,
   ASSIGNED_QUERY,
   CREATED_QUERY,
   ISSUES_QUERY,

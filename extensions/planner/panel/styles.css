@@ -1409,6 +1409,12 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .app.is-narrow .board { gap: 12px; padding: 4px 14px 20px; }
 .app.is-narrow .sunsama-layout.is-today { gap: 14px; padding-left: 14px; }
 
+/* Linear rows keep their title readable at every width: when a row's properties would leave the title
+   less than 240 px, they wrap to a second line, on the right (planner-polish). */
+.lin-row { flex-wrap: wrap; row-gap: 3px; }
+.lin-row-title { flex: 1 1 240px; min-width: min(240px, 100%); }
+.lin-props { flex: 0 1 auto; max-width: 100%; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
+
 /* ==== Linear page at narrow widths, and Linear's advanced filters (planner-linear2) ==== */
 /* A narrow page: the sidebar folds behind the header's toggle and opens over the list. */
 .lin-shell.is-narrow, .lin-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
