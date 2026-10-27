@@ -247,7 +247,10 @@ export async function startHarness({
   const page = await context.newPage();
   page.setDefaultTimeout(15_000);
   await page.addLocatorHandler(page.getByText('OpenCode update'), async () => {
-    await page.getByRole('button', { name: 'Dismiss' }).first().click({ timeout: 2000 }).catch(() => {});
+    // The toast's own Close (an older host had Dismiss); never its Update, which would change the container.
+    await page.locator('li.toast', { hasText: 'OpenCode update' }).getByRole('button', { name: 'Close', exact: true }).first().click({ timeout: 2000 })
+      .catch(() => page.getByRole('button', { name: 'Dismiss' }).first().click({ timeout: 2000 }))
+      .catch(() => {});
   });
   const problems = [];
   page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));

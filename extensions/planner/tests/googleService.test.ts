@@ -75,6 +75,16 @@ describe('Google tasks on the calendar', () => {
     expect(due).toEqual(expect.arrayContaining([['t-report', today, false], ['t-trip', addDays(today, 3), false], ['t-old', addDays(today, -1), true]]));
   });
 
+  test('a deadline kept in the Planner brings its task to the calendar of its days, dated or not', async () => {
+    const keep = (listId: string, taskId: string, deadline: string) => ({ type: 'gtask.kept', account: ME, listId, taskId, patch: { deadline } });
+    expect((await commands(keep('L2', 't-stamps', addDays(today, 2)), keep('L1', 't-trip', addDays(today, 5)), keep('L1', 't-report', addDays(today, 30)))).status).toBe(200);
+    const { status, body } = await week();
+    expect(status).toBe(200);
+    expect(body.deadlineTasks.map((task: any) => [task.id, task.due]).sort()).toEqual([['t-stamps', null], ['t-trip', addDays(today, 3)]]);
+    expect(fake.requests.some((request) => request.method === 'GET' && request.path === '/tasks/v1/lists/L2/tasks/t-stamps')).toBe(true);
+    await commands(keep('L2', 't-stamps', null as unknown as string), keep('L1', 't-trip', null as unknown as string), keep('L1', 't-report', null as unknown as string));
+  });
+
   test('a planned Google task stays on its due day, where the panel shows its link', async () => {
     const source = { kind: 'gtask', id: 't-report', key: 'Google Tasks', url: 'https://tasks.google.com/task/t-report', title: 'Send the report', status: { name: 'Open', type: 'open', color: '#1a73e8' }, account: ME, listId: 'L1' };
     expect((await commands({ type: 'task.created', task: { id: 'planned1', title: 'Send the report', placement: { kind: 'day', date: today }, position: 1024, dueDate: today, source } })).status).toBe(200);

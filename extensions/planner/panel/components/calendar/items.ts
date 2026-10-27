@@ -8,6 +8,7 @@ import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
 import { compactClock, compactRange, eventSpan, longDay, shortDay, type RowItem } from '../../../src/domain/gcalendar.ts';
 import { GOOGLE_TASKS_CALENDAR, taskForGoogleTask } from '../../../src/domain/google.ts';
 import { keptFor, keptTimeLabel } from '../../../src/domain/gtaskKept.ts';
+import { describeRecurrence } from '../../../src/domain/rrule.ts';
 
 /** Google Calendar's color for tasks. */
 export const GOOGLE_TASKS_COLOR = '#1a73e8';
@@ -18,10 +19,17 @@ export const GCAL_TASK_TYPE = 'application/x-planner-gcal-task';
 /** A working session dragged to another day in the month (its id). */
 export const GCAL_BLOCK_TYPE = 'application/x-planner-gcal-block';
 
+/** A Google task on the calendar: on its date, or on its deadline's day. */
 export const isTaskEvent = (event: CalendarEvent): boolean => event.calendarId === GOOGLE_TASKS_CALENDAR && Boolean(event.googleTask);
 
+/** A Google task on its date: it completes, and drags to another day or time. Not its deadline, nor an upcoming occurrence. */
+export const isMovableTask = (event: CalendarEvent): boolean => isTaskEvent(event) && !event.taskDeadline;
+
 export const eventColor = (event: CalendarEvent, calendars: Readonly<Record<string, CalendarSubscription>>): string =>
-  isTaskEvent(event) ? GOOGLE_TASKS_COLOR : event.google?.color ?? calendars[event.calendarId]?.color ?? '#868e96';
+  event.calendarId === GOOGLE_TASKS_CALENDAR ? GOOGLE_TASKS_COLOR : event.google?.color ?? calendars[event.calendarId]?.color ?? '#868e96';
+
+/** How a Google task item shows: the task, its deadline, or an upcoming occurrence of its series ('' for anything else), as class names. */
+export const taskClass = (event: CalendarEvent): string => (event.upcoming ? ' is-task is-upcoming' : !isTaskEvent(event) ? '' : event.taskDeadline ? ' is-task is-deadline' : ' is-task');
 
 /** Dark ink on light fills, white on the rest, as Google Calendar does. */
 export const inkOn = (hex: string): string => {
@@ -56,22 +64,40 @@ export const eventLabel = (event: CalendarEvent, zone: string): string => {
 /**
  * "Google task Send the report, due Monday, October 26 at 2pm, planned in the
  * Planner, deadline Friday, October 30, repeats": a task chip's full text, for
- * its label and tooltip.
+ * its label and tooltip. On its deadline's day: "Google task Send the report,
+ * deadline Friday, October 30, no date". An upcoming occurrence: "Google task
+ * Standup, upcoming Wednesday, October 28 at 10am, repeats daily".
  */
-export const taskEventLabel = (event: CalendarEvent, state: PlannerState, today: DateKey): string => {
+export const taskEventLabel = (event: CalendarEvent, state: PlannerState, today: DateKey, zone = 'UTC'): string => {
+  const upcoming = event.upcoming;
+  if (upcoming) {
+    const time = keptTimeLabel(upcoming.template);
+    const repeats = describeRecurrence([upcoming.rule], upcoming.template.start, zone);
+    return `Google task ${event.title}, upcoming ${longDay(upcoming.date)}${time ? ` at ${time}` : ''}, repeats ${repeats.charAt(0).toLowerCase()}${repeats.slice(1)}`;
+  }
   const task = event.googleTask!;
   const kept = keptFor(state, task);
   const time = keptTimeLabel(kept);
   const planned = taskForGoogleTask(state, task);
   const deadline = kept?.deadline ?? null;
-  return `Google task ${event.title}, due ${longDay(task.due ?? event.start.slice(0, 10))}${time ? ` at ${time}` : ''}${task.completed ? ', completed' : ''}${planned ? ', planned in the Planner' : ''}${deadline ? `, deadline ${longDay(deadline)}${deadline < today && !task.completed ? ', overdue' : ''}` : ''}${kept?.repeat ? ', repeats' : ''}`;
+  const overdue = deadline && deadline < today && !task.completed ? ', overdue' : '';
+  const after = `${task.completed ? ', completed' : ''}${planned ? ', planned in the Planner' : ''}`;
+  if (event.taskDeadline && deadline) return `Google task ${event.title}, deadline ${longDay(deadline)}${overdue}${task.due ? `, due ${longDay(task.due)}${time ? ` at ${time}` : ''}` : ', no date'}${after}${kept?.repeat ? ', repeats' : ''}`;
+  return `Google task ${event.title}, due ${longDay(task.due ?? event.start.slice(0, 10))}${time ? ` at ${time}` : ''}${after}${deadline ? `, deadline ${longDay(deadline)}${overdue}` : ''}${kept?.repeat ? ', repeats' : ''}`;
 };
 
-/** A task's deadline on its chip, red once it has passed; null without one. */
+/** A task's deadline on its chip, red once it has passed; null without one, and on its deadline's own item (the flag is the item). */
 export const deadlineOf = (event: CalendarEvent, state: PlannerState, today: DateKey): { date: DateKey; label: string; overdue: boolean } | null => {
   const task = event.googleTask;
   const deadline = task ? keptFor(state, task)?.deadline ?? null : null;
-  return deadline ? { date: deadline, label: shortDay(deadline), overdue: deadline < today && !task!.completed } : null;
+  return deadline && !event.taskDeadline ? { date: deadline, label: shortDay(deadline), overdue: deadline < today && !task!.completed } : null;
+};
+
+/** A deadline's own item, red once it has passed with the task open. */
+export const deadlinePassed = (event: CalendarEvent, state: PlannerState, today: DateKey): boolean => {
+  const task = event.googleTask;
+  const deadline = task && event.taskDeadline ? keptFor(state, task)?.deadline ?? null : null;
+  return Boolean(deadline && deadline < today && !task!.completed);
 };
 
 /** One thing on the calendar: an event (or a Google task due that day) or a working session. */

@@ -112,11 +112,41 @@ export class GoogleCalendars {
   }
 }
 
-/** Google tasks due in a range, for the calendar, kept a short while like calendar reads. */
+/**
+ * Google tasks for the calendar, kept a short while like calendar reads: those
+ * due in a range, and those read by id for their deadline (kept in the
+ * Planner, so Google cannot be asked for them by date).
+ */
 export class GoogleDueTasks {
   private readonly cache = new Map<string, { at: number; items: GoogleTaskItem[] }>();
+  /** Counts what was written: a read begun before a write is answered but not kept, as it may miss it. */
+  private writes = 0;
 
-  constructor(private readonly data: Pick<GoogleData, 'dueTasks'>, private readonly ttlMs = 90_000) {}
+  constructor(private readonly data: Pick<GoogleData, 'dueTasks' | 'tasksById'>, private readonly ttlMs = 90_000) {}
+
+  /** Tasks by account, list and id; ones Google no longer has are left out. */
+  async byIds(groups: readonly { account: string; listId: string; ids: string[] }[], refresh: boolean): Promise<{ items: GoogleTaskItem[]; errors: string[] }> {
+    const items: GoogleTaskItem[] = [];
+    const errors: string[] = [];
+    await Promise.all(
+      groups.map(async (group) => {
+        const key = `ids\n${group.account}\n${group.listId}\n${[...group.ids].sort().join(',')}`;
+        let hit = this.cache.get(key);
+        if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
+          try {
+            const before = this.writes;
+            hit = { at: Date.now(), items: await withDeadline(this.data.tasksById(group.account, group.listId, group.ids), READ_DEADLINE_MS, 'Google Tasks') };
+            if (this.writes === before) this.cache.set(key, hit);
+          } catch (error) {
+            errors.push(`${group.account}: ${messageOf(error)}`);
+            return;
+          }
+        }
+        items.push(...hit.items);
+      }),
+    );
+    return { items, errors };
+  }
 
   async read(accounts: readonly string[], from: DateKey, to: DateKey, refresh: boolean): Promise<{ items: GoogleTaskItem[]; errors: string[] }> {
     const items: GoogleTaskItem[] = [];
@@ -127,8 +157,9 @@ export class GoogleDueTasks {
         let hit = this.cache.get(key);
         if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
           try {
+            const before = this.writes;
             hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to), READ_DEADLINE_MS, 'Google Tasks') };
-            this.cache.set(key, hit);
+            if (this.writes === before) this.cache.set(key, hit);
           } catch (error) {
             errors.push(`${account}: ${messageOf(error)}`);
             return;
@@ -142,6 +173,7 @@ export class GoogleDueTasks {
 
   forget(): void {
     this.cache.clear();
+    this.writes++;
   }
 }
 

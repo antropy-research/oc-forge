@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import type { EditScope, EventInput } from '../../src/domain/gevents.ts';
-import type { GoogleEventDetail, GoogleEventRef, GoogleResponse } from '../../src/domain/google.ts';
+import type { GoogleEventDetail, GoogleEventRef, GoogleResponse, GoogleTaskItem } from '../../src/domain/google.ts';
 import type { CalendarMode } from '../../src/domain/gcalendar.ts';
 import type { DateKey } from '../../src/domain/types.ts';
 import { instantAt, zonedDateMinutes } from '../../src/domain/dates.ts';
@@ -26,7 +26,18 @@ export const boxAnchor = (box: DOMRect): Anchor => ({ x: box.left, y: box.top, w
 export type CalendarPopover =
   | { kind: 'event'; event: CalendarEvent; anchor: Anchor }
   | { kind: 'task'; event: CalendarEvent; anchor: Anchor }
+  /** An upcoming occurrence of a repeating Google task: its series. */
+  | { kind: 'upcoming'; event: CalendarEvent; anchor: Anchor }
   | { kind: 'day'; date: DateKey; anchor: Anchor; events: CalendarEvent[] };
+
+/** What a click on a calendar item opens: an event's details, a Google task's, or a series'. */
+export const popoverKind = (event: CalendarEvent): 'event' | 'task' | 'upcoming' => (event.upcoming ? 'upcoming' : event.googleTask ? 'task' : 'event');
+
+/** A Google task edited over the calendar, in the Tasks view's form; `series`: all of its series' tasks, without asking. */
+export interface TaskEditorTarget {
+  item: GoogleTaskItem;
+  series: boolean;
+}
 
 /** A new event or task being made in quick create: its day(s) and, for a timed one, its minutes. */
 export interface Draft {
@@ -96,6 +107,7 @@ interface CalendarUiState {
   popover: CalendarPopover | null;
   draft: Draft | null;
   editor: EditorTarget | null;
+  taskEditor: TaskEditorTarget | null;
   question: Question | null;
   pending: ReadonlyMap<string, Pending>;
   added: readonly { event: CalendarEvent; doneAt: number | null }[];
@@ -112,6 +124,7 @@ class CalendarUi {
     popover: null,
     draft: null,
     editor: null,
+    taskEditor: null,
     question: null,
     pending: new Map(),
     added: [],
@@ -157,6 +170,11 @@ class CalendarUi {
 
   edit(editor: EditorTarget | null): void {
     this.set({ editor, popover: null, draft: null });
+  }
+
+  /** Edit a Google task over the calendar, as Google Calendar's task details offer; the calendar stays where it is. */
+  editTask(taskEditor: TaskEditorTarget | null): void {
+    this.set({ taskEditor, popover: null, draft: null });
   }
 
   /** Ask, and wait for the answer; null when it is cancelled. */

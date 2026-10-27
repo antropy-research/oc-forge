@@ -1,6 +1,7 @@
 // Google Calendar's popovers: an event's details (with Edit, Delete, Duplicate,
-// RSVP and the Planner's "Plan as task"), a Google task's (complete, delete,
-// plan it), and a month day's "N more" list.
+// RSVP and the Planner's "Plan as task"), a Google task's (edit, complete,
+// delete, plan it), a repeating task's series from one of its upcoming
+// occurrences, and a month day's "N more" list.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/ics.ts';
 import type { DateKey, Task } from '../../../src/domain/types.ts';
@@ -14,11 +15,11 @@ import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
-import { anchorOf, calendarUi, eventDetail, removeEvent, respond, type Anchor } from '../../lib/gcal.ts';
+import { anchorOf, calendarUi, eventDetail, popoverKind, removeEvent, respond, type Anchor } from '../../lib/gcal.ts';
 import { plannedLabel } from '../GitHubPanel.tsx';
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
-import { answerClass, eventColor, eventLabel, GOOGLE_TASKS_COLOR, isTaskEvent } from './items.ts';
+import { answerClass, eventColor, eventLabel, GOOGLE_TASKS_COLOR, inkOn, isTaskEvent, taskClass, taskEventLabel } from './items.ts';
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const close = () => calendarUi.open(null);
@@ -265,7 +266,7 @@ export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: 
   );
 };
 
-/** A Google task on the calendar: complete it, delete it, open it in Google Tasks, or plan it. */
+/** A Google task on the calendar (on its date or its deadline's day): edit it, complete it, delete it, open it in Google Tasks, or plan it. */
 export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: Anchor }) => {
   const { client, google, host } = usePlanner();
   const view = useView();
@@ -275,10 +276,11 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   const [busy, setBusy] = useState(false);
   const list = gv.lists.find((other) => other.account === item.account && other.id === item.listId);
   const planned = taskForGoogleTask(view.state, item);
-  const due = item.due ?? event.start.slice(0, 10);
+  const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // Its date; a task without one plans on the day it shows (its deadline's).
+  const due = item.due ?? zonedDateMinutes(event.start, zone).date;
   const kept = keptFor(view.state, item);
   const time = keptTimeLabel(kept);
-  const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const remove = async () => {
     // A repeating task asks, as Google does: this one (the series goes on) or all future ones.
     const scope = kept?.repeat ? await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All future tasks' }] }) : 'this';
@@ -300,6 +302,9 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
         <button class={`icon-button pop-star${kept?.starredAt ? ' is-on' : ''}`} aria-label={`Star ${item.title}`} aria-pressed={Boolean(kept?.starredAt)} title={KEPT_HINT} onClick={() => void google.toggleStar(item)}>
           <Icon name={kept?.starredAt ? 'starred' : 'star'} />
         </button>
+        <button class="icon-button" aria-label="Edit task" title="Edit task" disabled={busy} onClick={() => calendarUi.editTask({ item, series: false })}>
+          <Icon name="edit" />
+        </button>
         <button class="icon-button" aria-label="Delete task" title="Delete task" disabled={busy} onClick={() => void remove()}>
           <Icon name="delete" />
         </button>
@@ -314,8 +319,8 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
         <span class="pop-icon" style={{ color: GOOGLE_TASKS_COLOR }}><Icon name={item.completed ? 'done' : 'circle'} /></span>
         <div class="pop-main">
           <h2 class={`pop-title${item.completed ? ' is-done' : ''}`}>{item.title}</h2>
-          <div class="pop-when">{longDay(due)}{time ? ` ⋅ ${time}` : ''}</div>
-          {kept?.repeat && <div class="pop-when">{describeRecurrence([kept.repeat.rule], due, zone)}</div>}
+          <div class="pop-when">{item.due ? `${longDay(item.due)}${time ? ` ⋅ ${time}` : ''}` : 'No date'}</div>
+          {kept?.repeat && <div class="pop-when">{describeRecurrence([kept.repeat.rule], kept.repeat.template?.start ?? due, zone)}</div>}
         </div>
       </div>
       {kept?.deadline && (
@@ -364,6 +369,86 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   );
 };
 
+/**
+ * An upcoming occurrence of a repeating task: the series, as Google Calendar
+ * shows a future instance (its title, when, and how it repeats), with Edit
+ * (all tasks) and Delete (all future tasks). Both act on the occurrence open
+ * now, which Google has; this one is made when the one before it is done.
+ */
+export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; anchor: Anchor }) => {
+  const { client, google } = usePlanner();
+  const view = useView();
+  const gv = useGoogle();
+  const upcoming = event.upcoming!;
+  const { template } = upcoming;
+  const [busy, setBusy] = useState(false);
+  const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const list = gv.lists.find((other) => other.account === upcoming.account && other.id === upcoming.listId);
+  const time = keptTimeLabel(template);
+  /** The occurrence open now, as Google has it. */
+  const current = async () => {
+    const item = await google.findTask(upcoming.account, upcoming.listId, upcoming.taskId);
+    if (!item) throw new Error('Google Tasks no longer has this series');
+    return item;
+  };
+  const run = (work: () => Promise<unknown>) => {
+    setBusy(true);
+    work()
+      .catch((error) => client.notify(`Google Tasks did not take it: ${messageOf(error)}`))
+      .finally(() => setBusy(false));
+  };
+  const remove = async () => {
+    const choice = await calendarUi.ask({ title: 'Delete repeating task', text: `"${template.title}" stops repeating, and its open task is deleted too.`, style: 'buttons', choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'all', label: 'Delete all future tasks' }] });
+    if (choice !== 'all') return;
+    await google.deleteListTask(await current(), 'all');
+    close();
+    calendarUi.snack('Tasks deleted');
+  };
+  return (
+    <Popover anchor={anchor} label={`Repeating Google task: ${template.title}`} onClose={close} className="task-popover">
+      <div class="pop-tools">
+        <button class="icon-button" aria-label="Edit all tasks" title="Edit all tasks" disabled={busy} onClick={() => run(async () => calendarUi.editTask({ item: await current(), series: true }))}>
+          <Icon name="edit" />
+        </button>
+        <button class="icon-button" aria-label="Delete all future tasks" title="Delete all future tasks" disabled={busy} onClick={() => run(remove)}>
+          <Icon name="delete" />
+        </button>
+        <button class="icon-button" aria-label="Close" title="Close" onClick={close}>
+          <Icon name="close" />
+        </button>
+      </div>
+      <div class="pop-row pop-head">
+        <span class="pop-icon" style={{ color: GOOGLE_TASKS_COLOR }}><Icon name="repeat" /></span>
+        <div class="pop-main">
+          <h2 class="pop-title">{template.title}</h2>
+          <div class="pop-when">{longDay(upcoming.date)}{time ? ` ⋅ ${time}` : ''}</div>
+          <div class="pop-when">{describeRecurrence([upcoming.rule], template.start, zone)}</div>
+        </div>
+      </div>
+      {template.deadline !== null && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name="flag" /></span>
+          <div class="pop-main">Deadline: {longDay(addDays(upcoming.date, template.deadline))}</div>
+        </div>
+      )}
+      {template.notes && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name="notes" /></span>
+          <div class="pop-main pop-description"><Linked text={template.notes} /></div>
+        </div>
+      )}
+      <div class="pop-row">
+        <span class="pop-icon"><Icon name="info" /></span>
+        <div class="muted pop-small">An upcoming task of this series: Google Tasks adds it when the one before it is done. {KEPT_HINT}.</div>
+      </div>
+      <div class="pop-row">
+        <span class="pop-icon"><Icon name="task" /></span>
+        <div class="pop-main">{list?.title ?? 'Google Tasks'}{new Set(gv.lists.map((other) => other.account)).size > 1 ? <span class="muted"> · {upcoming.account}</span> : null}</div>
+      </div>
+    </Popover>
+  );
+};
+
 /** A month day's "N more": everything on that day, each opening its own details. */
 export const DayPopover = ({ date, events, anchor, onDay }: { date: DateKey; events: readonly CalendarEvent[]; anchor: Anchor; onDay?: (date: DateKey) => void }) => {
   const view = useView();
@@ -386,18 +471,18 @@ export const DayPopover = ({ date, events, anchor, onDay }: { date: DateKey; eve
       <ul class="day-popover-list">
         {today.map((event) => {
           const color = eventColor(event, view.state.calendars);
-          const task = isTaskEvent(event);
+          const task = isTaskEvent(event) || Boolean(event.upcoming);
           return (
             <li key={event.id}>
               <button
-                class={`month-chip${event.allDay || task ? ' is-bar' : ''}${task ? ' is-task' : ''}${event.googleTask?.completed ? ' is-done' : ''}${answerClass(event)}`}
-                style={{ '--item-color': color }}
-                aria-label={eventLabel(event, zone)}
-                onClick={(click) => calendarUi.open({ kind: task ? 'task' : 'event', event, anchor: anchorOf(click.currentTarget) })}
+                class={`month-chip${event.allDay || task ? ' is-bar' : ''}${taskClass(event)}${event.googleTask?.completed ? ' is-done' : ''}${answerClass(event)}`}
+                style={{ '--item-color': color, '--item-ink': inkOn(color) }}
+                aria-label={task ? taskEventLabel(event, view.state, view.today, zone) : eventLabel(event, zone)}
+                onClick={(click) => calendarUi.open({ kind: popoverKind(event), event, anchor: anchorOf(click.currentTarget) })}
               >
                 {!(event.allDay || task) && <span class="chip-dot" aria-hidden="true" />}
                 {!(event.allDay || task) && <span class="chip-time">{compactClock(zonedDateMinutes(event.start, zone).minutes)}</span>}
-                {task && <span aria-hidden="true">{event.googleTask?.completed ? '☑ ' : '☐ '}</span>}
+                {task && <span aria-hidden="true">{event.taskDeadline ? '⚑ ' : event.upcoming ? '↻ ' : event.googleTask?.completed ? '☑ ' : '☐ '}</span>}
                 <span class="chip-title">{event.title}</span>
               </button>
             </li>

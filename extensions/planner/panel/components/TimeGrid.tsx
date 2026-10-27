@@ -15,8 +15,8 @@ import { isLinearIssue } from '../../src/domain/linear.ts';
 import { useUi } from '../lib/ui.ts';
 import { useNow } from '../lib/time.ts';
 import { useCalendarEvents } from '../lib/calendar.ts';
-import { anchorOf, boxAnchor, calendarUi, changeEventTimes, useCalendarUi, type Anchor } from '../lib/gcal.ts';
-import { answerClass, deadlineOf, eventColor, eventLabel, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isTaskEvent, plannedTask, taskEventLabel } from './calendar/items.ts';
+import { anchorOf, boxAnchor, calendarUi, changeEventTimes, popoverKind, useCalendarUi, type Anchor } from '../lib/gcal.ts';
+import { answerClass, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, plannedTask, taskClass, taskEventLabel } from './calendar/items.ts';
 import { CalendarOverlays } from './calendar/Overlays.tsx';
 import { Icon } from './calendar/Icon.tsx';
 
@@ -51,7 +51,8 @@ const BlockText = ({ text, time, timeLine, children }: { text: { inline: boolean
 );
 
 interface Item {
-  kind: 'block' | 'event' | 'task';
+  /** A working session, a Google event, a Google task at its time, or an upcoming occurrence of a repeating one. */
+  kind: 'block' | 'event' | 'task' | 'upcoming';
   id: string;
   start: number;
   end: number;
@@ -220,8 +221,9 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
       if (startLocal.date > date || endLocal.date < date || (endLocal.date === date && endLocal.minutes === 0 && startLocal.date < date)) continue;
       const start = startLocal.date < date ? 0 : startLocal.minutes;
       const end = endLocal.date > date ? DAY_MIN : endLocal.minutes;
-      // A Google task with a time kept in the Planner, as Google Calendar shows a timed task.
+      // A Google task with a time kept in the Planner, as Google Calendar shows a timed task; a repeating one's upcoming occurrences too.
       if (isTaskEvent(event)) items.push({ kind: 'task', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: compactClock(start), event, done: Boolean(event.googleTask?.completed) });
+      else if (event.upcoming) items.push({ kind: 'upcoming', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: compactClock(start), event });
       else items.push({ kind: 'event', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: `${compactRange(start, end)}${event.location ? `, ${event.location}` : ''}`, event, clipped: startLocal.date < date || endLocal.date > date });
     }
     return items;
@@ -338,16 +340,17 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
         {fitted.shown.map(({ item: event, col, span, slot, fromBefore, toAfter }) => {
           const color = eventColor(event, view.state.calendars);
           const task = isTaskEvent(event) ? event.googleTask! : null;
+          const movable = isMovableTask(event);
           const planned = task ? plannedTask(view.state, event) : null;
           const style = { gridColumn: `${col + 2} / span ${span}`, gridRow: `${slot + 1}`, '--item-color': color, '--item-ink': inkOn(color) };
-          const label = task ? taskEventLabel(event, view.state, view.today) : eventLabel(event, zone);
+          const label = task || event.upcoming ? taskEventLabel(event, view.state, view.today, zone) : eventLabel(event, zone);
           const deadline = task ? deadlineOf(event, view.state, view.today) : null;
           return (
             <button
               key={event.id}
-              class={`all-day-bar${task ? ' is-task' : ''}${task?.completed ? ' is-done' : ''}${fromBefore ? ' from-before' : ''}${toAfter ? ' to-after' : ''}${answerClass(event)}`}
+              class={`all-day-bar${taskClass(event)}${task?.completed ? ' is-done' : ''}${deadlinePassed(event, view.state, view.today) ? ' is-overdue' : ''}${fromBefore ? ' from-before' : ''}${toAfter ? ' to-after' : ''}${answerClass(event)}`}
               style={style}
-              draggable={Boolean(task) || Boolean(event.google?.editable)}
+              draggable={movable || Boolean(event.google?.editable)}
               aria-label={label}
               title={label}
               onDragStart={(drag) => {
@@ -359,9 +362,11 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                 } else drag.dataTransfer.setData(GCAL_EVENT_TYPE, event.id);
                 drag.dataTransfer.effectAllowed = 'copyMove';
               }}
-              onClick={(click) => calendarUi.open({ kind: task ? 'task' : 'event', event, anchor: anchorOf(click.currentTarget) })}
+              onClick={(click) => calendarUi.open({ kind: popoverKind(event), event, anchor: anchorOf(click.currentTarget) })}
             >
-              {task && <span class="task-box" aria-hidden="true">{task.completed ? '☑' : '☐'}</span>}
+              {movable && <span class="task-box" aria-hidden="true">{task!.completed ? '☑' : '☐'}</span>}
+              {event.taskDeadline && <span class="task-flag" aria-hidden="true">⚑</span>}
+              {event.upcoming && <span class="task-repeat" aria-hidden="true"><Icon name="repeat" size={12} /></span>}
               <span class="bar-title">{event.title}</span>
               {deadline && <span class={`task-deadline${deadline.overdue ? ' is-overdue' : ''}`} aria-hidden="true">⚑ {deadline.label}</span>}
               {planned && <span class="bar-badge" aria-hidden="true" title="Planned in the Planner">✓</span>}
@@ -504,10 +509,37 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                     '--item-color': item.color,
                     '--item-ink': inkOn(item.color),
                   };
+                  if (item.kind === 'upcoming' && item.event) {
+                    // An upcoming occurrence of a repeating task: its series opens; nothing to complete or drag before Google has it.
+                    const event = item.event;
+                    const label = taskEventLabel(event, view.state, view.today, zone);
+                    return (
+                      <div
+                        key={item.id}
+                        class={`grid-item is-task is-upcoming${text.inline ? ' is-inline' : ''}`}
+                        style={style}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={label}
+                        title={label}
+                        onClick={(click) => calendarUi.open({ kind: 'upcoming', event, anchor: anchorOf(click.currentTarget) })}
+                        onKeyDown={(key) => {
+                          if (key.key !== 'Enter' && key.key !== ' ') return;
+                          key.preventDefault();
+                          calendarUi.open({ kind: 'upcoming', event, anchor: anchorOf(key.currentTarget) });
+                        }}
+                      >
+                        <BlockText text={text} time={compactClock(start)} timeLine={compactClock(start)}>
+                          <span class="task-repeat" aria-hidden="true"><Icon name="repeat" size={12} /></span>
+                          {event.title}
+                        </BlockText>
+                      </div>
+                    );
+                  }
                   if (item.kind === 'task' && item.event?.googleTask) {
                     const event = item.event;
                     const task = event.googleTask!;
-                    const label = taskEventLabel(event, view.state, view.today);
+                    const label = taskEventLabel(event, view.state, view.today, zone);
                     const deadline = deadlineOf(event, view.state, view.today);
                     return (
                       <div
@@ -661,7 +693,7 @@ const zonedOffsetLabel = (zone: string, now: number): string => {
 
 /** One day's time grid with its calendar events, its details and editor. */
 export const DayCalendar = ({ date }: { date: DateKey }) => {
-  const feed = useCalendarEvents(date, date);
+  const feed = useCalendarEvents(date, date, { tasks: true });
   return (
     <>
       <TimeGrid dates={[date]} events={feed.events} />

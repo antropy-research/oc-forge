@@ -1008,6 +1008,24 @@ var isShortText = (value, max) => typeof value === "string" && value.length <= m
 var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due));
 var GOOGLE_NOTES_MAX = 8192;
 var isGoogleTaskId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
+var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start"];
+var validateGtaskTemplate = (value) => {
+  if (!isRecord2(value))
+    return "repeat template must be an object";
+  if (typeof value.title !== "string" || value.title.length > 1024)
+    return "template title must be text, at most 1024 characters";
+  if (typeof value.notes !== "string" || value.notes.length > GOOGLE_NOTES_MAX)
+    return `template notes must be text, at most ${GOOGLE_NOTES_MAX} characters`;
+  if (!(value.time === null || Number.isInteger(value.time) && value.time >= 0 && value.time < 24 * 60))
+    return "template time must be minutes after midnight, or null";
+  if (!(value.duration === null || Number.isInteger(value.duration) && value.duration >= 5 && value.duration <= 24 * 60))
+    return "template duration must be 5 to 1440 minutes, or null";
+  if (!(value.deadline === null || Number.isInteger(value.deadline) && Math.abs(value.deadline) <= 3660))
+    return "template deadline must be days from the date, or null";
+  if (!isDateKey(value.start))
+    return "template start must be a date";
+  return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? "template has an unknown field" : null;
+};
 var validateKeptPatch = (patch) => {
   if (!isRecord2(patch))
     return "patch must be an object";
@@ -1031,7 +1049,14 @@ var validateKeptPatch = (patch) => {
         return "repeat index must be a count";
       if (!(value.next === null || isGoogleTaskId(value.next)))
         return "repeat next must be a task id or null";
-      if (Object.keys(value).some((field) => !["rule", "seriesId", "index", "next"].includes(field)))
+      if (value.on !== undefined && !isDateKey(value.on))
+        return "repeat on must be a date";
+      if (value.template !== undefined) {
+        const error = validateGtaskTemplate(value.template);
+        if (error)
+          return error;
+      }
+      if (Object.keys(value).some((field) => !["rule", "seriesId", "index", "next", "on", "template"].includes(field)))
         return "repeat has an unknown field";
     } else if (!["time", "duration", "deadline", "starred", "repeat"].includes(key))
       return `unknown field ${key}`;
@@ -4199,9 +4224,34 @@ class GoogleDueTasks {
   data;
   ttlMs;
   cache = new Map;
+  writes = 0;
   constructor(data, ttlMs = 90000) {
     this.data = data;
     this.ttlMs = ttlMs;
+  }
+  async byIds(groups, refresh) {
+    const items = [];
+    const errors = [];
+    await Promise.all(groups.map(async (group) => {
+      const key = `ids
+${group.account}
+${group.listId}
+${[...group.ids].sort().join(",")}`;
+      let hit = this.cache.get(key);
+      if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
+        try {
+          const before = this.writes;
+          hit = { at: Date.now(), items: await withDeadline(this.data.tasksById(group.account, group.listId, group.ids), READ_DEADLINE_MS, "Google Tasks") };
+          if (this.writes === before)
+            this.cache.set(key, hit);
+        } catch (error) {
+          errors.push(`${group.account}: ${messageOf(error)}`);
+          return;
+        }
+      }
+      items.push(...hit.items);
+    }));
+    return { items, errors };
   }
   async read(accounts, from, to, refresh) {
     const items = [];
@@ -4213,8 +4263,10 @@ ${to}`;
       let hit = this.cache.get(key);
       if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
         try {
+          const before = this.writes;
           hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to), READ_DEADLINE_MS, "Google Tasks") };
-          this.cache.set(key, hit);
+          if (this.writes === before)
+            this.cache.set(key, hit);
         } catch (error) {
           errors.push(`${account}: ${messageOf(error)}`);
           return;
@@ -4226,6 +4278,7 @@ ${to}`;
   }
   forget() {
     this.cache.clear();
+    this.writes++;
   }
 }
 
@@ -4532,6 +4585,25 @@ var googleWriteRoute = async (req, url, ctx) => {
     }
   }
   return null;
+};
+
+// src/domain/gcalendar.ts
+var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+var SHORT = MONTHS.map((month) => month.slice(0, 3));
+
+// src/domain/gtaskKept.ts
+var deadlineGroups = (kept, accounts, from, to) => {
+  const groups = new Map;
+  for (const entry of Object.values(kept)) {
+    if (!entry.deadline || entry.deadline < from || entry.deadline > to || !accounts.includes(entry.account))
+      continue;
+    const key = `${entry.account}
+${entry.listId}`;
+    const group = groups.get(key) ?? { account: entry.account, listId: entry.listId, ids: [] };
+    group.ids.push(entry.taskId);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
 };
 
 // service/agents.ts
@@ -5368,15 +5440,17 @@ var server = http2.createServer(async (req, res) => {
       const timeMin = instantAt(from, 0, zone);
       const timeMax = instantAt(addDays(to, 1), 0, zone);
       const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email) : [];
-      const [feed, fromGoogle, due] = await Promise.all([
+      const [feed, fromGoogle, due, deadlines] = await Promise.all([
         feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
         googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
-        googleDueTasks.read(taskAccounts, from, to, refresh)
+        googleDueTasks.read(taskAccounts, from, to, refresh),
+        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, taskAccounts, from, to), refresh)
       ]);
       const dueEvents = due.items.flatMap((item) => item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
       json(res, 200, {
         events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
-        errors: [...feed.errors, ...fromGoogle.errors, ...due.errors.map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]
+        deadlineTasks: deadlines.items,
+        errors: [...feed.errors, ...fromGoogle.errors, ...[...due.errors, ...deadlines.errors].map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]
       });
       if (fromGoogle.reads.size)
         timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));

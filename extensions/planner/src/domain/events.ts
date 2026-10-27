@@ -143,7 +143,21 @@ export const GOOGLE_NOTES_MAX = 8192;
 
 const isGoogleTaskId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024;
 
-/** What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule, a star. */
+const GTASK_TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'start'];
+
+/** A repeating Google task's template: Google's title and details, and what the Planner keeps, for each next occurrence. */
+const validateGtaskTemplate = (value: unknown): string | null => {
+  if (!isRecord(value)) return 'repeat template must be an object';
+  if (typeof value.title !== 'string' || value.title.length > 1024) return 'template title must be text, at most 1024 characters';
+  if (typeof value.notes !== 'string' || value.notes.length > GOOGLE_NOTES_MAX) return `template notes must be text, at most ${GOOGLE_NOTES_MAX} characters`;
+  if (!(value.time === null || (Number.isInteger(value.time) && (value.time as number) >= 0 && (value.time as number) < 24 * 60))) return 'template time must be minutes after midnight, or null';
+  if (!(value.duration === null || (Number.isInteger(value.duration) && (value.duration as number) >= 5 && (value.duration as number) <= 24 * 60))) return 'template duration must be 5 to 1440 minutes, or null';
+  if (!(value.deadline === null || (Number.isInteger(value.deadline) && Math.abs(value.deadline as number) <= 3660))) return 'template deadline must be days from the date, or null';
+  if (!isDateKey(value.start)) return 'template start must be a date';
+  return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? 'template has an unknown field' : null;
+};
+
+/** What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule (with its series' template), a star. */
 const validateKeptPatch = (patch: unknown): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
@@ -157,7 +171,12 @@ const validateKeptPatch = (patch: unknown): string | null => {
       if (!isId(value.seriesId)) return 'repeat needs a series id';
       if (!(Number.isInteger(value.index) && (value.index as number) >= 1 && (value.index as number) <= 100_000)) return 'repeat index must be a count';
       if (!(value.next === null || isGoogleTaskId(value.next))) return 'repeat next must be a task id or null';
-      if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next'].includes(field))) return 'repeat has an unknown field';
+      if (value.on !== undefined && !isDateKey(value.on)) return 'repeat on must be a date';
+      if (value.template !== undefined) {
+        const error = validateGtaskTemplate(value.template);
+        if (error) return error;
+      }
+      if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next', 'on', 'template'].includes(field))) return 'repeat has an unknown field';
     } else if (!['time', 'duration', 'deadline', 'starred', 'repeat'].includes(key)) return `unknown field ${key}`;
   }
   return null;

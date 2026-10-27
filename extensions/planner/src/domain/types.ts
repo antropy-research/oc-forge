@@ -70,11 +70,34 @@ export interface GoogleTaskKept {
   duration: number | null;
   /** The day it must be done by, apart from its date. */
   deadline: DateKey | null;
-  /** A repeating task: its rule, its series, which occurrence this is, and the task made next (once made). */
-  repeat: { rule: string; seriesId: string; index: number; next: string | null } | null;
+  /**
+   * A repeating task: its rule, its series, which occurrence this is, the task
+   * made next (once made), the date the series put this occurrence on (a
+   * one-off change of its date leaves it) and the series' template. A series
+   * kept before templates gets both when it is next seen.
+   */
+  repeat: { rule: string; seriesId: string; index: number; next: string | null; on?: DateKey; template?: GoogleTaskTemplate } | null;
   /** When it was starred; null when it is not. */
   starredAt: string | null;
   updatedAt: string;
+}
+
+/**
+ * What each next occurrence of a repeating Google task is made from, as
+ * Google Tasks keeps a series apart from its occurrences: "This task" changes
+ * one occurrence and leaves it, "All tasks" changes it.
+ */
+export interface GoogleTaskTemplate {
+  title: string;
+  notes: string;
+  /** Minutes after midnight on an occurrence's date; null: all day. */
+  time: number | null;
+  /** How long it takes from `time`, in minutes; null: no end time. */
+  duration: number | null;
+  /** The deadline, in days after an occurrence's date; null: none. */
+  deadline: number | null;
+  /** The day the schedule counts from. */
+  start: DateKey;
 }
 
 /** How the Linear page groups and orders issues. */

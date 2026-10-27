@@ -121,7 +121,7 @@ export const CalendarView = () => {
   const days = viewDays(mode, anchor, weekStartsOn, prefs.weekends);
   // The year shows no events (as in Google, a date opens its day), so it reads only the anchor's day.
   const monthDays = mode === 'month' ? monthWeeks(anchor, weekStartsOn).flat() : mode === 'year' ? [anchor] : days;
-  const feed = useCalendarEvents(monthDays[0]!, monthDays[monthDays.length - 1]!, { declined: prefs.declined });
+  const feed = useCalendarEvents(monthDays[0]!, monthDays[monthDays.length - 1]!, { declined: prefs.declined, tasks: true });
   const events = prefs.completedTasks ? feed.events : feed.events.filter((event) => !(isTaskEvent(event) && event.googleTask?.completed));
 
   // What fits beside the grid: the rail first, as in Google Calendar; both when there is room.

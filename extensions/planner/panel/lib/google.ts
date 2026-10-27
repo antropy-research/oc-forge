@@ -25,10 +25,10 @@ import {
   type MailItem,
   type SyncedField,
 } from '../../src/domain/google.ts';
-import { dueOccurrences, keptFor, madeAlready } from '../../src/domain/gtaskKept.ts';
+import { dueOccurrences, firstSightOfSeries, keptFor, madeAlready, nextOccurrenceKept, scheduledOn, seriesTemplate, templateOf } from '../../src/domain/gtaskKept.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
-import { addDays, daysBetween } from '../../src/domain/dates.ts';
+import { addDays } from '../../src/domain/dates.ts';
 import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
 import type { CalendarSubscription, DateKey, GoogleTaskKept, Placement, PlannerState, Task } from '../../src/domain/types.ts';
 import type { Origin, PlannerClient } from './client.ts';
@@ -44,6 +44,11 @@ export interface TaskFields {
 
 /** Why a repeating task cannot go to another list: Google Tasks keeps it in its own. */
 export const REPEATING_STAYS = 'A repeating task stays in its list, as in Google Tasks';
+/** Why a repeating task takes no subtasks, and does not become one; and why a subtask, or a task with subtasks, does not repeat. */
+export const REPEATING_NO_SUBTASKS = "A repeating task can't have subtasks, as in Google Tasks";
+export const REPEATING_NOT_SUBTASK = "A repeating task can't be a subtask, as in Google Tasks";
+export const SUBTASKS_NO_REPEAT = "A task with subtasks can't repeat, as in Google Tasks";
+export const SUBTASK_NO_REPEAT = "A subtask can't repeat, as in Google Tasks";
 
 /** Which tasks of a repeating series a change or a deletion is for, as Google Tasks asks. */
 export type RepeatScope = 'this' | 'all';
@@ -504,19 +509,20 @@ export class GoogleStore {
 
   /**
    * The next occurrence of each repeating task just completed (here, in
-   * Google, or found so on a read): a new Google task in the same list on the
-   * rule's next date, with the series' title, details, time and deadline, as
-   * Google Tasks makes it. One Google's own repeat (or another window) made
-   * already is taken instead of making a second. A series that ends there
-   * stops repeating.
+   * Google, or found so on a read): a new Google task in the same list, made
+   * from the series' template (its title, details, time and deadline, which a
+   * change to "This task" leaves alone) on the series' next date after the
+   * one it put this occurrence on, as Google Tasks makes it. One Google's own
+   * repeat (or another window) made already is taken instead of making a
+   * second. A series that ends there stops repeating.
    */
   async makeNextOccurrences(items: readonly GoogleTaskItem[]): Promise<void> {
-    for (const { item, kept, date } of dueOccurrences(this.client.getView().state, items)) {
+    for (const { item, kept, template, date } of dueOccurrences(this.client.getView().state, items)) {
       const key = `${item.account}\n${item.id}`;
       if (this.making.has(key) || !kept.repeat) continue;
       this.making.add(key);
       try {
-        if (!date) {
+        if (!date || !template) {
           await this.client.dispatch([{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch: { repeat: null } }], { origin: 'google' });
           continue;
         }
@@ -524,17 +530,17 @@ export class GoogleStore {
         // Read again: another window may have made it while this one asked.
         const now = keptFor(this.client.getView().state, item);
         if (now?.repeat?.next) continue;
-        let next = madeAlready(list.tasks, item.title, date, item.id);
+        const title = template.title.trim() || item.title;
+        let next = madeAlready(list.tasks ?? [], title, date, item.id);
         if (!next) {
-          const created = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account: item.account, listId: item.listId, title: item.title, ...(item.notes ? { notes: item.notes } : {}), due: date });
+          const created = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account: item.account, listId: item.listId, title, ...(template.notes ? { notes: template.notes } : {}), due: date });
           next = created.task;
         }
         if (!next) throw new Error('Google did not return the task');
-        const shift = item.due ? daysBetween(item.due, date) : 0;
         await this.client.dispatch(
           [
             { type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch: { repeat: { ...kept.repeat, next: next.id } } },
-            { type: 'gtask.kept', account: next.account, listId: next.listId, taskId: next.id, patch: { time: kept.time, duration: kept.duration, deadline: kept.deadline ? addDays(kept.deadline, shift) : null, repeat: { rule: kept.repeat.rule, seriesId: kept.repeat.seriesId, index: kept.repeat.index + 1, next: null } } },
+            { type: 'gtask.kept', account: next.account, listId: next.listId, taskId: next.id, patch: nextOccurrenceKept(kept.repeat, template, date) },
           ],
           { origin: 'google' },
         );
@@ -604,7 +610,29 @@ export class GoogleStore {
       const task = this.client.getView().state.tasks[write.taskId];
       if (task) await this.writeTask(task, write.patch, true);
     }
+    await this.keepSeries(items);
     await this.makeNextOccurrences(items);
+  }
+
+  /** A series kept before templates gets its template from its open occurrence the first time it is seen (`firstSightOfSeries`). */
+  private async keepSeries(items: readonly GoogleTaskItem[]): Promise<void> {
+    const bodies = firstSightOfSeries(this.client.getView().state, items);
+    if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
+  }
+
+  /** A Google task as Google has it now: the Tasks view's copy of its list, else read (following a move to another list). */
+  async findTask(account: string, listId: string, id: string): Promise<GoogleTaskItem | null> {
+    const known = this.view.board[listKey(account, listId)]?.items.find((item) => item.id === id);
+    if (known) return known;
+    const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('POST', '/google/tasks/linked', { groups: [{ account, listId, ids: [id] }] });
+    return answer.tasks.find((item) => item.id === id) ?? null;
+  }
+
+  /** Whether a task has subtasks (open or done) in Google: from the Tasks view's copy of its list, else read. */
+  private async hasSubtasks(item: GoogleTaskItem): Promise<boolean> {
+    const known = this.view.board[listKey(item.account, item.listId)]?.items;
+    const items = known ?? (await this.client.call<{ tasks?: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}`)).tasks ?? [];
+    return items.some((other) => other.parent === item.id);
   }
 
   /**
@@ -658,6 +686,7 @@ export class GoogleStore {
         return kept && kept.listId !== item.listId ? [{ type: 'gtask.moved' as const, account: item.account, taskId: item.id, listId: item.listId }] : [];
       });
       if (moved.length) await this.client.dispatch(moved, { origin: 'google' });
+      await this.keepSeries(answer.tasks);
       await this.makeNextOccurrences(answer.tasks);
     } catch (error) {
       this.setBoard(key, { items: current?.items ?? [], loading: false, error: messageOf(error), complete: true });
@@ -695,9 +724,13 @@ export class GoogleStore {
   /**
    * A new task: at the top of the list, or under `parent` after `previous`.
    * Shown at once. What Google Tasks' API cannot take (a time, a deadline, a
-   * repeat, a star) is kept in the Planner for it.
+   * repeat with its series' template, a star) is kept in the Planner for it.
+   * As in Google Tasks, a repeating task takes no subtask and a subtask does
+   * not repeat: refused before anything changes.
    */
   async addListTask(account: string, listId: string, fields: { title: string; notes?: string; due?: DateKey | null; parent?: string | null; previous?: string | null }, kept: Omit<GoogleTaskKeptPatch, 'repeat'> & { rule?: string | null } = {}): Promise<GoogleTaskItem> {
+    if (fields.parent && keptFor(this.client.getView().state, { account, id: fields.parent })?.repeat) throw new Error(REPEATING_NO_SUBTASKS);
+    if (fields.parent && kept.rule) throw new Error(SUBTASK_NO_REPEAT);
     const key = listKey(account, listId);
     const temp: GoogleTaskItem = { account, listId, id: `new-${newId()}`, title: fields.title, notes: fields.notes ?? '', due: fields.due ?? null, completed: false, parent: fields.parent ?? null, position: '', url: 'https://tasks.google.com/', updated: new Date().toISOString() };
     const items = this.view.board[key]?.items ?? [];
@@ -706,7 +739,8 @@ export class GoogleStore {
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account, listId, ...fields, ...(fields.notes ? {} : { notes: undefined }) });
       if (!answer.task) throw new Error('Google did not return the task');
       const { rule, ...rest } = kept;
-      const patch: GoogleTaskKeptPatch = { ...rest, ...(rule && fields.due ? { repeat: { rule, seriesId: newId(), index: 1, next: null } } : {}) };
+      const template = fields.due ? templateOf({ title: fields.title, notes: fields.notes ?? '' }, { time: rest.time ?? null, duration: rest.duration ?? null, deadline: rest.deadline ?? null }, fields.due) : null;
+      const patch: GoogleTaskKeptPatch = { ...rest, ...(rule && fields.due && template ? { repeat: { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template } } : {}) };
       if (Object.values(patch).some((value) => value !== null && value !== undefined && value !== false)) await this.setKept(answer.task, patch);
       this.patchBoard(key, (this.view.board[key]?.items ?? []).map((item) => (item.id === temp.id ? answer.task! : item)));
       this.afterTaskWrite(account, listId, Boolean(fields.due));
@@ -728,26 +762,53 @@ export class GoogleStore {
   /**
    * A task's form saved: Google's fields written to Google, the rest kept in
    * the Planner. For a repeating task, `scope` says whether the change is for
-   * this task or all of the series (its rule, time and deadline go to every
-   * open occurrence), as Google Tasks asks.
+   * this task or all of the series, as Google Tasks asks (a new rule is for
+   * all). "This task" changes this occurrence alone, in Google and in what is
+   * kept for it; the series' template and schedule stay. "All tasks" changes
+   * the template (and the series' other open occurrences), then this
+   * occurrence to match; a new rule or a new date starts the schedule there.
+   * A subtask, or a task with subtasks, does not repeat, as in Google Tasks:
+   * refused before anything changes.
    */
   async saveListTask(item: GoogleTaskItem, fields: TaskFields, scope: RepeatScope = 'this'): Promise<void> {
+    const kept = keptFor(this.client.getView().state, item);
+    const repeat = kept?.repeat ?? null;
+    const rule = fields.kept.rule && fields.due ? fields.kept.rule : null;
+    if (rule && !repeat && item.parent) throw new Error(SUBTASK_NO_REPEAT);
+    if (rule && !repeat && (await this.hasSubtasks(item))) throw new Error(SUBTASKS_NO_REPEAT);
     const state = this.client.getView().state;
-    const kept = keptFor(state, item);
     const google = { ...(fields.title !== item.title ? { title: fields.title } : {}), ...(fields.notes !== item.notes ? { notes: fields.notes } : {}), ...(fields.due !== item.due ? { due: fields.due } : {}) };
-    const repeat = fields.kept.rule && fields.due ? { rule: fields.kept.rule, seriesId: kept?.repeat?.seriesId ?? newId(), index: kept?.repeat?.index ?? 1, next: kept?.repeat?.next ?? null } : null;
     const patch: GoogleTaskKeptPatch = {};
     if ((kept?.time ?? null) !== fields.kept.time) patch.time = fields.kept.time;
     if ((kept?.duration ?? null) !== fields.kept.duration) patch.duration = fields.kept.duration;
     if ((kept?.deadline ?? null) !== fields.kept.deadline) patch.deadline = fields.kept.deadline;
-    if ((kept?.repeat?.rule ?? null) !== (repeat?.rule ?? null)) patch.repeat = repeat;
+    const all = scope === 'all' || Boolean(repeat && rule && rule !== repeat.rule);
+    if (!rule || !fields.due) {
+      if (repeat) patch.repeat = null;
+    } else if (!kept || !repeat) {
+      patch.repeat = { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template: templateOf(fields, fields.kept, fields.due) };
+    } else {
+      const on = scheduledOn(kept, item) ?? fields.due;
+      const template = seriesTemplate(kept, item) ?? templateOf(item, kept, on);
+      if (all) {
+        const ruleChanged = rule !== repeat.rule;
+        const moved = ruleChanged || (fields.due !== item.due && fields.due !== on);
+        patch.repeat = { ...repeat, rule, index: ruleChanged ? 1 : repeat.index, on: moved ? fields.due : on, template: templateOf(fields, fields.kept, fields.due, moved ? fields.due : template.start) };
+      } else if (!repeat.on || !repeat.template) {
+        // First sight of a series kept before templates: kept as this occurrence was, before this one-off change.
+        patch.repeat = { ...repeat, on, template };
+      }
+    }
     const bodies: EventBody[] = Object.keys(patch).length ? [{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch }] : [];
-    if (scope === 'all' && kept?.repeat) {
-      // The series' other open occurrences take its rule, time and deadline.
+    if (all && repeat && patch.repeat !== undefined) {
+      // The series' other open occurrences take its rule, template, time and deadline.
+      const series = patch.repeat;
+      const template = series?.template;
       for (const other of Object.values(state.googleTasks)) {
-        if (other.repeat?.seriesId !== kept.repeat.seriesId || other.taskId === item.id || other.repeat.next) continue;
-        const { repeat: _repeat, ...rest } = patch;
-        bodies.push({ type: 'gtask.kept', account: other.account, listId: other.listId, taskId: other.taskId, patch: { ...rest, ...(patch.repeat !== undefined ? { repeat: patch.repeat ? { ...patch.repeat, seriesId: kept.repeat.seriesId, index: other.repeat.index, next: null } : null } : {}) } });
+        if (other.repeat?.seriesId !== repeat.seriesId || other.taskId === item.id || other.repeat.next) continue;
+        const own = other.repeat;
+        const timing = template ? { time: template.time, duration: template.duration, deadline: own.on ? (template.deadline === null ? null : addDays(own.on, template.deadline)) : other.deadline } : {};
+        bodies.push({ type: 'gtask.kept', account: other.account, listId: other.listId, taskId: other.taskId, patch: series ? { ...timing, repeat: { ...own, rule: series.rule, ...(template ? { template } : {}) } } : { repeat: null } });
       }
     }
     if (bodies.length) await this.client.dispatch(bodies);
@@ -814,10 +875,17 @@ export class GoogleStore {
     }
   }
 
-  /** Put a task under `parent` after `previous`, in its list or another of the same account. Shown at once. */
+  /**
+   * Put a task under `parent` after `previous`, in its list or another of the
+   * same account. Shown at once. As in Google Tasks, a repeating task stays in
+   * its list, takes no subtasks and is no subtask: such a move is refused
+   * before anything moves.
+   */
   async moveListTask(item: GoogleTaskItem, target: MoveTarget, destinationListId: string = item.listId): Promise<void> {
-    // As in Google Tasks, a repeating task stays in its list.
-    if (destinationListId !== item.listId && keptFor(this.client.getView().state, item)?.repeat) throw new Error(REPEATING_STAYS);
+    const state = this.client.getView().state;
+    if (destinationListId !== item.listId && keptFor(state, item)?.repeat) throw new Error(REPEATING_STAYS);
+    if (target.parent && keptFor(state, item)?.repeat) throw new Error(REPEATING_NOT_SUBTASK);
+    if (target.parent && keptFor(state, { account: item.account, id: target.parent })?.repeat) throw new Error(REPEATING_NO_SUBTASKS);
     const from = listKey(item.account, item.listId);
     const to = listKey(item.account, destinationListId);
     const before = { from: this.view.board[from]?.items ?? [], to: this.view.board[to]?.items ?? [] };
