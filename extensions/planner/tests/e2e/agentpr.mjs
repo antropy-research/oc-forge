@@ -8,8 +8,10 @@
 // runs in the container, and its gh (the agent's and the service's) reaches it through a
 // Unix socket (a ~/.config/gh written for the run). planner-demo-a gets an origin whose
 // fetch URL is https://github.com/harness-org/planner-demo-a (what gh reads) and whose
-// push URL is a bare repository beside it (where `git push` lands). A model that cannot
-// answer fails the run, and the journey says so. What it changes is put back at the end.
+// push URL is the fake's git server in the container (http://127.0.0.1:<port>/…, into a
+// bare repository; OpenChamber makes worktrees only for http(s) or ssh remotes). A model
+// that cannot answer fails the run, and the journey says so. What it changes is put back
+// at the end.
 //
 // Run on the host, with this checkout's extension built and installed in the container:
 //   node extensions/planner/tests/e2e/agentpr.mjs [baseUrl] [outDir]
@@ -69,7 +71,7 @@ const fakeState = () => {
 const restoreContainer = () => {
   docker(`[ -f ${STATE}/state.json ] && kill "$(node -e 'console.log(require(process.argv[1]).pid)' ${STATE}/state.json)" 2>/dev/null; true`);
   docker(`if grep -qs ${quote(`http_unix_socket: ${SOCKET}`)} ${GH_DIR}/config.yml; then rm -rf ${GH_DIR}; fi; if [ -d ${GH_SAVED} ] && [ ! -e ${GH_DIR} ]; then mv ${GH_SAVED} ${GH_DIR}; fi; true`);
-  docker(`cd ${DEMO} && if [ "$(git config --get remote.origin.pushurl)" = ${quote(BARE)} ]; then git remote remove origin; fi; true`);
+  docker(`cd ${DEMO} && if [ "$(git config --get remote.origin.url)" = ${quote(FETCH_URL)} ]; then git remote remove origin; fi; true`);
   docker(`[ -e ${GH_SAVED} ] || rm -rf ${STATE}; true`);
 };
 
@@ -152,11 +154,12 @@ try {
   if (origin) throw new Error(`${DEMO} already has an origin (${origin}); this journey only adds its own`);
   if (docker(`[ -e ${GH_DIR} ] && echo yes || echo no`).trim() === 'yes') docker(`mkdir -p ${STATE} && mv ${GH_DIR} ${GH_SAVED}`);
   docker(`mkdir -p ${STATE} && git init -q --bare -b main ${BARE}`);
-  docker(`cd ${DEMO} && git remote add origin ${FETCH_URL} && git remote set-url --push origin ${BARE} && git push -q origin main`);
   docker(`cat > ${STATE}/fakeGithub.mjs`, readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fakeGithub.mjs'), 'utf8'));
   docker(`cat > ${STATE}/world.json`, JSON.stringify(defaultGithubWorld({ owner: OWNER, repo: REPO, bare: BARE })));
-  execFileSync('docker', ['exec', '-d', CONTAINER, 'node', `${STATE}/fakeGithub.mjs`, SOCKET, `${STATE}/state.json`, `${STATE}/world.json`]);
-  for (let i = 0; i < 50 && !fakeState(); i++) await sleep(200);
+  execFileSync('docker', ['exec', '-d', CONTAINER, 'node', `${STATE}/fakeGithub.mjs`, SOCKET, `${STATE}/state.json`, `${STATE}/world.json`, '0']);
+  for (let i = 0; i < 50 && !fakeState()?.gitPort; i++) await sleep(200);
+  const pushUrl = `http://127.0.0.1:${fakeState()?.gitPort}/${OWNER}/${REPO}.git`;
+  docker(`cd ${DEMO} && git remote add origin ${FETCH_URL} && git remote set-url --push origin ${pushUrl} && git push -q origin main`);
   const files = ghConfigFiles(SOCKET);
   docker(`mkdir -p ${GH_DIR} && chmod 700 ${GH_DIR} && umask 077 && cat > ${GH_DIR}/config.yml`, files['config.yml']);
   docker(`umask 077 && cat > ${GH_DIR}/hosts.yml`, files['hosts.yml']);
@@ -231,6 +234,8 @@ try {
   console.log(`INFO the agent ran ${ran.length} command(s) in ${Math.round((Date.now() - begun) / 1000)} s:\n${ran.map((command) => `       $ ${command.split('\n')[0].slice(0, 160)}`).join('\n')}`);
   check('the agent pushed its branch and opened a pull request with gh', Boolean(pull) && ran.some((command) => /\bgh\s+pr\s+create\b/.test(command)), failure || (pull ? pull.url : 'no pull request'));
   if (!pull) throw new Error(failure || 'the agent opened no pull request');
+  const pushed = (fakeState()?.requests ?? []).some((request) => request.operation === 'git git-receive-pack');
+  check("the branch reached the fake GitHub's git server (git push over its http push URL)", pushed);
   const changed = docker(`git --git-dir=${BARE} diff --name-only main ${quote(branch)}`).trim();
   const content = docker(`git --git-dir=${BARE} show ${quote(`${branch}:CONTRIBUTING.md`)} 2>/dev/null; true`);
   check('its commits on the branch are in the repository: CONTRIBUTING.md with the line asked for', changed.split('\n').includes('CONTRIBUTING.md') && content.includes(LINE), `${changed.replace(/\n/g, ', ')}: ${content.trim().slice(0, 80)}`);
@@ -241,15 +246,17 @@ try {
   for (let i = 0; i < 36 && !(await replied()); i++) await sleep(5000);
   check("the agent's reply names the pull request", await replied());
 
-  // The Planner looks it up with gh in the run's worktree (a freshly opened Planner does it within seconds).
-  const listedBefore = (fakeState()?.requests ?? []).filter((request) => request.operation === 'query PullRequestList').length;
+  // The Planner looks it up with gh: by the run's branch in its worktree (gh pr list --head), or by the URL the
+  // agent linked to its chat (gh pr view <url>). A freshly opened Planner does it within seconds.
   await openPlanner();
   const withPull = await waitForState((latest) => runOf(latest)?.pullRequest?.url === pull.url, 60_000);
-  const lookups = (fakeState()?.requests ?? []).filter((request) => request.operation === 'query PullRequestList').slice(listedBefore);
+  const requests = fakeState()?.requests ?? [];
+  const opened = requests.findIndex((request) => request.operation === 'mutation PullRequestCreate');
+  const lookups = requests.slice(opened + 1).filter((request) => (request.operation === 'query PullRequestList' && request.variables?.headBranch === branch) || (request.operation === 'query PullRequestByNumber' && request.variables?.pr_number === pull.number));
   check(
-    "the Planner's service finds it with gh by the run's branch and logs it on the run",
-    runOf(withPull)?.pullRequest?.state === 'open' && runOf(withPull).pullRequest.number === pull.number && lookups.some((request) => request.variables?.headBranch === branch),
-    JSON.stringify(runOf(withPull)?.pullRequest ?? null),
+    "the Planner's service finds it with gh (by the run's branch, or the URL the agent linked) and logs it on the run",
+    runOf(withPull)?.pullRequest?.state === 'open' && runOf(withPull).pullRequest.number === pull.number && lookups.length > 0,
+    `${JSON.stringify(runOf(withPull)?.pullRequest ?? null)}; gh lookups: ${[...new Set(lookups.map((request) => request.operation))].join(', ') || 'none'}`,
   );
   await nav('Home').click();
   await card.getByRole('button', { name: `Open ${title}` }).click();

@@ -44,12 +44,12 @@ describe.skipIf(!GH)('the fake GitHub answers the real gh as GitHub would', () =
     await ok('git', ['config', 'user.name', 'Harness Agent']);
     await ok('git', ['config', 'user.email', 'agent@example.invalid']);
     await commit('README.md');
-    // gh reads the fetch URL (a GitHub repository); git pushes to the bare one.
-    await ok('git', ['remote', 'add', 'origin', 'https://github.com/harness-org/planner-pr-demo.git']);
-    await ok('git', ['remote', 'set-url', '--push', 'origin', bare]);
-    await ok('git', ['push', '-q', 'origin', 'main']);
-    fake = await startFakeGithub({ socket: join(root, 'gh.sock'), world: defaultGithubWorld({ bare }) });
+    fake = await startFakeGithub({ socket: join(root, 'gh.sock'), gitPort: 0, world: defaultGithubWorld({ bare }) });
     for (const [name, text] of Object.entries(ghConfigFiles(fake.socket!))) writeFileSync(join(home, '.config', 'gh', name), text, { mode: 0o600 });
+    // gh reads the fetch URL (a GitHub repository); git pushes over HTTP to the fake's git server.
+    await ok('git', ['remote', 'add', 'origin', 'https://github.com/harness-org/planner-pr-demo.git']);
+    await ok('git', ['remote', 'set-url', '--push', 'origin', fake.gitUrl('harness-org', 'planner-pr-demo')!]);
+    await ok('git', ['push', '-q', 'origin', 'main']);
   });
   afterAll(async () => {
     await fake?.close();
@@ -70,7 +70,10 @@ describe.skipIf(!GH)('the fake GitHub answers the real gh as GitHub would', () =
     const listed = JSON.parse(await ok(GH!, ['pr', 'list', '--head', 'planner/harness-one', '--state', 'all', '--limit', '10', '--json', fields]));
     expect(listed).toMatchObject([{ number: 1, url, state: 'OPEN', isDraft: false, title: 'Add one' }]);
     expect(JSON.parse(await ok(GH!, ['pr', 'view', url, '--json', fields]))).toMatchObject({ number: 1, state: 'OPEN' });
-    expect(fake.requests.map((request) => request.operation).filter(Boolean)).toEqual(expect.arrayContaining(['mutation PullRequestCreate', 'query PullRequestList', 'query PullRequestByNumber']));
+    expect(fake.requests.map((request) => request.operation).filter(Boolean)).toEqual(expect.arrayContaining(['git git-receive-pack', 'mutation PullRequestCreate', 'query PullRequestList', 'query PullRequestByNumber']));
+    // The push went over the fake's git server (an http endpoint, as OpenChamber requires of a remote) into the bare copy.
+    expect(fake.gitUrl('harness-org', 'planner-pr-demo')).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/harness-org\/planner-pr-demo\.git$/);
+    expect(await ok('git', ['--git-dir', bare, 'log', '--format=%s', '-1', 'planner/harness-one'])).toBe('Add one.txt');
 
     // Merged on "GitHub": gh says so.
     expect((await ok(GH!, ['api', '-X', 'PUT', 'repos/harness-org/planner-pr-demo/pulls/1/merge', '--jq', '.merged']))).toBe('true');

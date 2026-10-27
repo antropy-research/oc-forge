@@ -34,6 +34,9 @@ export interface FakeGithubRequest {
 export interface FakeGithub {
   socket: string | null;
   port: number | null;
+  /** The repositories' git server (smart HTTP), when started with `gitPort`. */
+  gitPort: number | null;
+  gitUrl(owner: string, name: string): string | null;
   world: FakeGithubWorld;
   requests: FakeGithubRequest[];
   close(): Promise<void>;
@@ -42,4 +45,4 @@ export interface FakeGithub {
 export const FAKE_TOKEN: string;
 export function defaultGithubWorld(options?: { owner?: string; repo?: string; viewer?: string; bare?: string | null; defaultBranch?: string }): FakeGithubWorld;
 export function ghConfigFiles(socket: string, viewer?: string): Record<'config.yml' | 'hosts.yml', string>;
-export function startFakeGithub(options?: { socket?: string | null; port?: number; world?: FakeGithubWorld; onChange?: () => void }): Promise<FakeGithub>;
+export function startFakeGithub(options?: { socket?: string | null; port?: number; gitPort?: number | null; world?: FakeGithubWorld; onChange?: () => void }): Promise<FakeGithub>;

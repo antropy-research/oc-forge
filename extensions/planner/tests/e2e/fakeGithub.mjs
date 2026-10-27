@@ -5,23 +5,26 @@
 // gh sends every request through a Unix socket when its config.yml says
 // `http_unix_socket: <path>`: plain HTTP, also for https://api.github.com, so nothing
 // reaches GitHub. Give a checkout an origin whose fetch URL is
-// https://github.com/<owner>/<repo> (what gh reads) and whose push URL is a local bare
-// repository (where `git push` lands). Then `git push` and `gh pr create` open a pull
-// request here, and gh finds it again by branch or by URL. As GitHub does, a pull
-// request needs its branch pushed, with commits the base branch does not have.
+// https://github.com/<owner>/<repo> (what gh reads) and whose push URL is the fake's
+// own git server, `gitUrl(repo)` (http://127.0.0.1:<port>/<owner>/<repo>.git, served by
+// `git http-backend` from the repository's bare copy; OpenChamber accepts only http(s)
+// and ssh endpoints for a remote, so not a local path). Then `git push` and
+// `gh pr create` open a pull request here, and gh finds it again by branch or by URL.
+// As GitHub does, a pull request needs its branch pushed, with commits the base branch
+// does not have.
 //
 //   import { defaultGithubWorld, ghConfigFiles, startFakeGithub } from './fakeGithub.mjs';
-//   const gh = await startFakeGithub({ socket: '/tmp/x/gh.sock', world: defaultGithubWorld({ bare: '/tmp/x/remote.git' }) });
+//   const gh = await startFakeGithub({ socket: '/tmp/x/gh.sock', gitPort: 0, world: defaultGithubWorld({ bare: '/tmp/x/remote.git' }) });
 //   // write ghConfigFiles(gh.socket) into <HOME>/.config/gh/ for the gh that should use it
 //   gh.world.pulls: what was opened; gh.requests: what gh asked; await gh.close();
 //
 // On its own, e.g. in the dev container where the agents' gh runs:
-//   node fakeGithub.mjs <socket> <state.json> <world.json>
-// keeps <state.json> up to date ({ pid, pulls, requests }) and stops on SIGTERM.
-import { execFileSync } from 'node:child_process';
+//   node fakeGithub.mjs <socket> <state.json> <world.json> [<git port>]
+// keeps <state.json> up to date ({ pid, gitPort, pulls, requests }) and stops on SIGTERM.
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { dirname } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** The token gh is given for the fake; it is never sent anywhere else. */
@@ -48,7 +51,65 @@ const json = (res, status, body) => {
 
 const git = (bare, args) => execFileSync('git', ['--git-dir', bare, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 
-export const startFakeGithub = async ({ socket = null, port = 0, world = defaultGithubWorld(), onChange = () => {} } = {}) => {
+/**
+ * Git's smart HTTP for /<owner>/<repo>.git/…, through `git http-backend` (CGI) on the
+ * repository's bare copy. REMOTE_USER is set, so pushes are allowed, as for a signed-in
+ * user on GitHub.
+ */
+const gitHttp = (req, res, url, repo, viewer) => {
+  const prefix = `/${repo.owner}/${repo.name}.git`;
+  const backend = spawn('git', ['http-backend'], {
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      GIT_PROJECT_ROOT: dirname(repo.bare),
+      GIT_HTTP_EXPORT_ALL: '1',
+      PATH_INFO: `/${basename(repo.bare)}${url.pathname.slice(prefix.length)}`,
+      REQUEST_METHOD: req.method ?? 'GET',
+      QUERY_STRING: url.search.slice(1),
+      CONTENT_TYPE: req.headers['content-type'] ?? '',
+      REMOTE_USER: viewer,
+      REMOTE_ADDR: '127.0.0.1',
+      ...(req.headers['content-encoding'] ? { HTTP_CONTENT_ENCODING: String(req.headers['content-encoding']) } : {}),
+      ...(req.headers['git-protocol'] ? { GIT_PROTOCOL: String(req.headers['git-protocol']) } : {}),
+    },
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  req.pipe(backend.stdin);
+  let head = Buffer.alloc(0);
+  let started = false;
+  backend.stdout.on('data', (chunk) => {
+    if (started) {
+      res.write(chunk);
+      return;
+    }
+    head = Buffer.concat([head, chunk]);
+    const end = head.indexOf('\r\n\r\n') >= 0 ? head.indexOf('\r\n\r\n') : head.indexOf('\n\n');
+    if (end < 0) return;
+    const gap = head[end] === 0x0d ? 4 : 2;
+    let status = 200;
+    const headers = {};
+    for (const line of head.subarray(0, end).toString('utf8').split(/\r?\n/)) {
+      const at = line.indexOf(':');
+      if (at < 0) continue;
+      const [name, value] = [line.slice(0, at).trim(), line.slice(at + 1).trim()];
+      if (name.toLowerCase() === 'status') status = Number.parseInt(value, 10) || 200;
+      else headers[name] = value;
+    }
+    res.writeHead(status, headers);
+    started = true;
+    res.write(head.subarray(end + gap));
+  });
+  backend.on('close', () => {
+    if (!started) res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end();
+  });
+  backend.on('error', () => {
+    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end();
+  });
+};
+
+export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null, world = defaultGithubWorld(), onChange = () => {} } = {}) => {
   const requests = [];
   const full = (repo) => `${repo.owner}/${repo.name}`;
   const repoOf = (owner, name) => world.repos.find((repo) => repo.owner.toLowerCase() === String(owner ?? '').toLowerCase() && repo.name.toLowerCase() === String(name ?? '').toLowerCase()) ?? null;
@@ -280,46 +341,63 @@ export const startFakeGithub = async ({ socket = null, port = 0, world = default
       json(res, status, payload);
     });
   });
+  const listen = (target, ...where) => new Promise((resolve, reject) => {
+    target.once('error', reject);
+    target.listen(...where, resolve);
+  });
   if (socket) {
     mkdirSync(dirname(socket), { recursive: true });
     rmSync(socket, { force: true });
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(socket, resolve);
-    });
-  } else {
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, '127.0.0.1', resolve);
-    });
-  }
+    await listen(server, socket);
+  } else await listen(server, port, '127.0.0.1');
+
+  // The repositories' git server, for push URLs: http://127.0.0.1:<gitPort>/<owner>/<repo>.git
+  const gitServer = gitPort === null ? null : createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const repo = world.repos.find((item) => item.bare && url.pathname.toLowerCase().startsWith(`/${item.owner}/${item.name}.git/`.toLowerCase()));
+    if (!repo) {
+      req.resume();
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Repository not found.');
+      return;
+    }
+    requests.push({ method: req.method, path: url.pathname, operation: `git ${url.searchParams.get('service') ?? url.pathname.split('/').pop()}` });
+    gitHttp(req, res, url, repo, world.viewer);
+    if (req.method === 'POST' && url.pathname.endsWith('/git-receive-pack')) res.on('finish', changed);
+  });
+  if (gitServer) await listen(gitServer, gitPort, '127.0.0.1');
+  const gitBase = gitServer ? `http://127.0.0.1:${gitServer.address().port}` : null;
+  const close = (target) => new Promise((resolve) => (target ? target.close(() => resolve()) : resolve()));
   return {
     socket,
     port: socket ? null : server.address().port,
+    gitPort: gitServer ? gitServer.address().port : null,
+    /** Where `git push` reaches a repository's bare copy (null without a git server). */
+    gitUrl: (owner, name) => (gitBase ? `${gitBase}/${owner}/${name}.git` : null),
     world,
     requests,
-    close: () => new Promise((resolve) => server.close(() => {
+    close: async () => {
+      await Promise.all([close(server), close(gitServer)]);
       if (socket) rmSync(socket, { force: true });
-      resolve();
-    })),
+    },
   };
 };
 
-// node fakeGithub.mjs <socket> <state.json> <world.json>
+// node fakeGithub.mjs <socket> <state.json> <world.json> [<git port>]
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  const [socket, stateFile, worldFile] = process.argv.slice(2);
+  const [socket, stateFile, worldFile, gitPortArg] = process.argv.slice(2);
   if (!socket || !stateFile || !worldFile) {
-    console.error('usage: node fakeGithub.mjs <socket> <state.json> <world.json>');
+    console.error('usage: node fakeGithub.mjs <socket> <state.json> <world.json> [<git port>]');
     process.exit(2);
   }
   const world = JSON.parse(readFileSync(worldFile, 'utf8'));
   let fake = null;
   const save = () => {
     const temporary = `${stateFile}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ pid: process.pid, socket, pulls: world.pulls, requests: fake?.requests ?? [] }, null, 1));
+    writeFileSync(temporary, JSON.stringify({ pid: process.pid, socket, gitPort: fake?.gitPort ?? null, pulls: world.pulls, requests: fake?.requests ?? [] }, null, 1));
     renameSync(temporary, stateFile);
   };
-  fake = await startFakeGithub({ socket, world, onChange: save });
+  fake = await startFakeGithub({ socket, world, gitPort: gitPortArg === undefined ? null : Number(gitPortArg), onChange: save });
   save();
   const stop = () => void fake.close().then(() => process.exit(0));
   process.on('SIGTERM', stop);
