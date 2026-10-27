@@ -51,6 +51,7 @@ const opencodeInfo = new OpenCodeInfo();
 const agentCommands = new CommandFiles(opencodeConfig, log);
 const syncAgentCommands = () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? []);
 syncAgentCommands();
+agentCommands.retireLeftovers();
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });

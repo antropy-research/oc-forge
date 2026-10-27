@@ -4775,14 +4775,18 @@ var mergeAgents = (fromConfig, live) => {
   const known = new Map(fromConfig.map((agent) => [agent.name, agent]));
   return orderAgents(live.map((agent) => ({ ...agent, source: known.get(agent.name)?.source ?? agent.source, description: agent.description ?? known.get(agent.name)?.description ?? null })));
 };
+var AGENT_COMMAND_MS = 3 * 60000;
 
 class CommandFiles {
   configDir;
   log;
+  agentCommandMs;
   lastPresets = null;
-  constructor(configDir, log = () => {}) {
+  retiring = new Map;
+  constructor(configDir, log = () => {}, agentCommandMs = AGENT_COMMAND_MS) {
     this.configDir = configDir;
     this.log = log;
+    this.agentCommandMs = agentCommandMs;
   }
   get dir() {
     return join3(this.configDir, "command");
@@ -4796,6 +4800,8 @@ class CommandFiles {
       const file = join3(this.dir, `${name}.md`);
       const content = commandFile(assignee, kind);
       const current = readSmall(file);
+      if (kind === "agent")
+        this.retire(name);
       if (current === content)
         return { id: assignee.id, name, changed: false };
       if (current !== null && !current.includes(COMMAND_MARKER))
@@ -4805,6 +4811,31 @@ class CommandFiles {
       renameSync(temporary, file);
       return { id: assignee.id, name, changed: true };
     });
+  }
+  retire(name) {
+    clearTimeout(this.retiring.get(name));
+    const timer = setTimeout(() => {
+      this.retiring.delete(name);
+      const file = join3(this.dir, `${name}.md`);
+      if (readSmall(file)?.startsWith(`---
+${COMMAND_MARKER} (agent)`))
+        rmSync(file, { force: true });
+    }, this.agentCommandMs);
+    timer.unref?.();
+    this.retiring.set(name, timer);
+  }
+  retireLeftovers() {
+    let files = [];
+    try {
+      files = readdirSync2(this.dir);
+    } catch {
+      return;
+    }
+    for (const file of files) {
+      if (file.startsWith(COMMAND_PREFIX) && file.endsWith(".md") && readSmall(join3(this.dir, file))?.startsWith(`---
+${COMMAND_MARKER} (agent)`))
+        this.retire(file.slice(0, -".md".length));
+    }
   }
   syncPresets(presets) {
     const key = JSON.stringify(presets);
@@ -4895,6 +4926,7 @@ var opencodeInfo = new OpenCodeInfo;
 var agentCommands = new CommandFiles(opencodeConfig, log);
 var syncAgentCommands = () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? []);
 syncAgentCommands();
+agentCommands.retireLeftovers();
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));

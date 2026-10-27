@@ -229,6 +229,29 @@ describe('command files', () => {
     expect(readFileSync(join(files.dir, 'oc-planner-mine.md'), 'utf8')).toBe('---\nagent: build\n---\nMine.');
   });
 
+  test("an agent's command goes a while after its last use (each use waits again); a preset's stays; leftovers go too", async () => {
+    const dir = join(temp(), 'opencode');
+    const files = new CommandFiles(dir, () => {}, 60);
+    const plan = agentAssignee({ name: 'plan', label: 'Plan' });
+    files.syncPresets([PRESET]);
+    files.ensure([{ assignee: plan, kind: 'agent' }]);
+    const agentFile = join(files.dir, 'oc-planner-agent-plan.md');
+    const presetFile = join(files.dir, 'oc-planner-build-claude-x7k2.md');
+    await sleep(40);
+    files.ensure([{ assignee: plan, kind: 'agent' }]);
+    await sleep(40);
+    expect(existsSync(agentFile)).toBe(true);
+    await sleep(60);
+    expect([existsSync(agentFile), existsSync(presetFile)]).toEqual([false, true]);
+    // A restart finds an agent's command from before and lets it go the same way; others stay.
+    writeFileSync(agentFile, commandFile(plan, 'agent'));
+    writeFileSync(join(files.dir, 'oc-planner-mine.md'), 'mine');
+    const restarted = new CommandFiles(dir, () => {}, 30);
+    restarted.retireLeftovers();
+    await sleep(70);
+    expect([existsSync(agentFile), existsSync(presetFile), existsSync(join(files.dir, 'oc-planner-mine.md'))]).toEqual([false, true, true]);
+  });
+
   test('presets keep a command each; a removed preset loses its command, agents and other files stay', () => {
     const files = new CommandFiles(join(temp(), 'opencode'));
     const other: AgentPreset = { id: 'plan-gpt-ab12', name: 'Plan · GPT-6', agent: 'plan', model: 'openai/gpt-6' };
@@ -245,6 +268,8 @@ describe('command files', () => {
     expect(existsSync(empty.dir)).toBe(false);
   });
 });
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** OpenCode 2.1.4's command expansion (packages/core/src/config/plugin/command.ts), for a `$ARGUMENTS` template. */
 const shellRegex = /!`([^`]+)`/g;

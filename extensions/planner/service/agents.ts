@@ -432,11 +432,20 @@ export const mergeAgents = (fromConfig: readonly DiscoveredAgent[], live: readon
   return orderAgents(live.map((agent) => ({ ...agent, source: known.get(agent.name)?.source ?? agent.source, description: agent.description ?? known.get(agent.name)?.description ?? null })));
 };
 
-/** The command files in OpenCode's global `command/` folder, one per assignee. */
+/** How long an agent's command stays after its last use: the chat it started has run it long before. */
+const AGENT_COMMAND_MS = 3 * 60_000;
+
+/**
+ * The command files in OpenCode's global `command/` folder, one per assignee.
+ * A preset's command stays as long as the preset; an agent's goes a few
+ * minutes after its last use, so OpenChamber's `/` menu does not keep one for
+ * every agent ever assigned.
+ */
 export class CommandFiles {
   private lastPresets: string | null = null;
+  private readonly retiring = new Map<string, ReturnType<typeof setTimeout>>();
 
-  constructor(readonly configDir: string, private readonly log: (message: string) => void = () => {}) {}
+  constructor(readonly configDir: string, private readonly log: (message: string) => void = () => {}, private readonly agentCommandMs = AGENT_COMMAND_MS) {}
 
   get dir(): string {
     return join(this.configDir, 'command');
@@ -451,6 +460,7 @@ export class CommandFiles {
       const file = join(this.dir, `${name}.md`);
       const content = commandFile(assignee, kind);
       const current = readSmall(file);
+      if (kind === 'agent') this.retire(name);
       if (current === content) return { id: assignee.id, name, changed: false };
       if (current !== null && !current.includes(COMMAND_MARKER)) throw new Error(`${file} exists and was not written by the Planner`);
       // OpenCode reads command/**/*.md; the temporary name is not one of them.
@@ -459,6 +469,31 @@ export class CommandFiles {
       renameSync(temporary, file);
       return { id: assignee.id, name, changed: true };
     });
+  }
+
+  /** Remove an agent's command once it has gone unused for a while (each use starts the wait again). */
+  private retire(name: string): void {
+    clearTimeout(this.retiring.get(name));
+    const timer = setTimeout(() => {
+      this.retiring.delete(name);
+      const file = join(this.dir, `${name}.md`);
+      if (readSmall(file)?.startsWith(`---\n${COMMAND_MARKER} (agent)`)) rmSync(file, { force: true });
+    }, this.agentCommandMs);
+    timer.unref?.();
+    this.retiring.set(name, timer);
+  }
+
+  /** Agents' commands an earlier run of the service left behind go after the same while. */
+  retireLeftovers(): void {
+    let files: string[] = [];
+    try {
+      files = readdirSync(this.dir);
+    } catch {
+      return;
+    }
+    for (const file of files) {
+      if (file.startsWith(COMMAND_PREFIX) && file.endsWith('.md') && readSmall(join(this.dir, file))?.startsWith(`---\n${COMMAND_MARKER} (agent)`)) this.retire(file.slice(0, -'.md'.length));
+    }
   }
 
   /** A command for every preset, and none left for presets that are gone; only when the presets changed. */
