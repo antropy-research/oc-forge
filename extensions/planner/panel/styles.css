@@ -1043,6 +1043,14 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gcal-switch button[aria-checked='true'] { background: color-mix(in srgb, var(--oc-primary) 14%, transparent); color: var(--oc-primary-text, var(--oc-primary)); }
 .gcal-view.is-narrow .gcal-title { font-size: 16px; }
 .gcal-view.is-narrow .gcal-brand { display: none; }
+/* Narrow (the Planner beside OpenChamber's own panels, a 1024 px window): one row, as Google Calendar keeps it;
+   the buttons tighten and the range gives way first. */
+.gcal-view.is-narrow .gcal-header { flex-wrap: nowrap; gap: 4px; padding: 6px 8px 6px 4px; }
+.gcal-view.is-narrow .gcal-title { flex: 1 1 0; min-width: 48px; }
+.gcal-view.is-narrow .gcal-today { padding: 4px 10px; }
+.gcal-view.is-narrow .gcal-actions { gap: 4px; flex: none; }
+.gcal-view.is-narrow .gcal-view-button { padding: 3px 4px 3px 10px; }
+.gcal-view.is-narrow .gcal-switch button { padding: 4px 7px; }
 .gcal-view > .feed-errors { margin: 0 16px 6px; }
 
 /* Body: the rail, the grid, the Planner's side panel. */
