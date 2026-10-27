@@ -180,7 +180,16 @@ try {
   await page.mouse.up();
   const resized = await until(() => requests('PATCH', `${EVENTS}/${createdId}`).find((request) => Date.parse(request.body?.end?.dateTime) === at(today, 750)));
   check('dragging its bottom edge resizes it in Google Calendar (to 12:30pm)', resized && Date.parse(resized.body.start.dateTime) === at(today, 660), JSON.stringify(requests('PATCH', `${EVENTS}/${createdId}`).map((request) => request.body)));
+  const snack = f.locator('.gcal-snack');
+  check('the change says "Event saved", with Undo, as Google Calendar does', (await snack.innerText().catch(() => '')).includes('Event saved') && (await snack.getByRole('button', { name: 'Undo' }).count()) === 1);
   await shot('cal-08-moved');
+  // Undo puts it back as it was before the resize.
+  await snack.getByRole('button', { name: 'Undo' }).click();
+  const undone = await until(() => {
+    const patches = requests('PATCH', `${EVENTS}/${createdId}`);
+    return patches.slice(patches.indexOf(resized) + 1).find((request) => Date.parse(request.body?.end?.dateTime) === at(today, 720));
+  });
+  check('Undo puts it back in Google Calendar (11am–12pm)', undone && Date.parse(undone.body.start.dateTime) === at(today, 660) && (await until(async () => (await created.innerText()).includes('12pm'))), JSON.stringify(undone?.body));
 
   // In Month, an event dragged to another day keeps its clock time.
   await pickView('Month');
@@ -188,7 +197,7 @@ try {
   if (await tomorrowCell.count()) {
     await f.locator('.month-chip', { hasText: 'Harness 1:1' }).dragTo(tomorrowCell, { targetPosition: { x: 6, y: 6 } });
     const nextDay = await until(() => requests('PATCH', `${EVENTS}/${createdId}`).find((request) => Date.parse(request.body?.start?.dateTime) === at(addDays(today, 1), 660)));
-    check('in Month, dragging an event to another day moves it in Google at the same time', nextDay && Date.parse(nextDay.body.end.dateTime) === at(addDays(today, 1), 750), JSON.stringify(requests('PATCH', `${EVENTS}/${createdId}`).at(-1)?.body));
+    check('in Month, dragging an event to another day moves it in Google at the same time', nextDay && Date.parse(nextDay.body.end.dateTime) === at(addDays(today, 1), 720), JSON.stringify(requests('PATCH', `${EVENTS}/${createdId}`).at(-1)?.body));
     await shot('cal-08b-month-moved');
     // And back, for the rest of the journey.
     await until(async () => (await f.locator(`.month-cell[data-date="${addDays(today, 1)}"]`).count()) === 1);
@@ -281,6 +290,35 @@ try {
   await deleteScope.getByRole('radio', { name: 'All events' }).check();
   await deleteScope.getByRole('button', { name: 'OK' }).click();
   check('deleting a recurring event asks which ones, and All events deletes the series in Google', await until(() => requests('DELETE', `${EVENTS}/${reviewId}`).length === 1 && !primary().has(reviewId)) && (await until(async () => (await reviewToday.count()) === 0)));
+
+  // Duplicate, from the details' Options: the editor opens with a copy to save as a new event.
+  await planning.click();
+  const original = f.getByRole('dialog', { name: 'Event: Quarter planning' });
+  await original.getByText('3 guests').waitFor();
+  await original.getByRole('button', { name: 'Options' }).click();
+  await shot('cal-11a-event-options');
+  await original.getByRole('menuitem', { name: 'Duplicate' }).click();
+  const copyEditor = f.getByRole('dialog', { name: 'New event' });
+  const copyTitle = copyEditor.getByRole('textbox', { name: 'Title' });
+  await until(async () => (await copyTitle.inputValue()) === 'Quarter planning');
+  await copyTitle.fill('Quarter planning copy');
+  await shot('cal-11b-duplicate');
+  await copyEditor.getByRole('button', { name: 'Save' }).click();
+  await f.getByRole('alertdialog', { name: /^Send invitation emails/ }).getByRole('button', { name: "Don't send" }).click();
+  const copied = await until(() => requests('POST', EVENTS).find((request) => request.body?.summary === 'Quarter planning copy'));
+  check(
+    'Duplicate saves a new event with the same time, place, guests, description and notifications, and a new Meet call',
+    copied && Date.parse(copied.body.start.dateTime) === at(today, 14 * 60) && Date.parse(copied.body.end.dateTime) === at(today, 15 * 60) && copied.body.location === 'Room 4' && copied.body.attendees?.map((guest) => guest.email).join() === 'ann@example.com,bo@example.com' && copied.body.description?.includes('Goals') && copied.body.reminders?.overrides?.[0]?.minutes === 10 && copied.query.sendUpdates === 'none' && copied.query.conferenceDataVersion === '1',
+    JSON.stringify({ body: copied?.body, query: copied?.query }),
+  );
+  // And away again, for the rest of the journey.
+  // Google's copy, not the one shown while saving, can be deleted.
+  const copyChip = f.locator('.grid-item.is-event.is-movable', { hasText: 'Quarter planning copy' });
+  await copyChip.waitFor({ timeout: 15_000 });
+  await copyChip.click();
+  await f.getByRole('dialog', { name: 'Event: Quarter planning copy' }).getByRole('button', { name: 'Delete event' }).click();
+  await f.getByRole('alertdialog', { name: /^Send cancellation emails/ }).getByRole('button', { name: "Don't send" }).click();
+  await until(async () => (await f.locator('.grid-item.is-event', { hasText: 'Quarter planning copy' }).count()) === 0);
 
   // An all-day event dragged to another day keeps its length.
   const offsiteStart = addDays(today, 2);
@@ -376,6 +414,20 @@ try {
   check('completed tasks move to the Completed section', (await myTasks.getByRole('list', { name: 'My Tasks completed tasks' }).innerText()).includes('Plan the trip'));
   await shot('cal-15-completed');
 
+  // Sort by date, as Google Tasks has it: under each day, then those with no date.
+  const listOptions = myTasks.getByRole('button', { name: 'List options for My Tasks' });
+  await listOptions.click();
+  await myTasks.getByRole('menuitemradio', { name: /Date$/ }).click();
+  const byDate = myTasks.getByRole('list', { name: 'My Tasks tasks by date' });
+  await byDate.waitFor();
+  const dated = (await byDate.innerText()).split('\n').map((line) => line.trim()).filter(Boolean);
+  const order = ['Today', 'Send the report', 'No date', 'Harness buy milk'].map((line) => dated.indexOf(line));
+  check('Sort by date lists the tasks under their day, then the ones with no date', order.every((index, step) => index >= 0 && (step === 0 || index > order[step - 1])), JSON.stringify(dated));
+  await shot('cal-15b-by-date');
+  await listOptions.click();
+  await myTasks.getByRole('menuitemradio', { name: /My order$/ }).click();
+  await byDate.waitFor({ state: 'detached' });
+
   // Drag a task into another list, as in Google Tasks.
   const errands = f.getByRole('region', { name: 'Errands' });
   await myTasks.locator('li.gt-row', { hasText: 'Harness buy milk' }).dragTo(errands.locator('li.gt-row', { hasText: 'Buy stamps' }), { targetPosition: { x: 20, y: 4 } });
@@ -393,6 +445,23 @@ try {
   const moving = f.getByRole('button', { name: /^Google task Plan the trip, due .*completed/ });
   check('the calendar shows a task on its new date, completed', await moving.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false));
   await todayButton.click();
+
+  // "Delete all completed tasks" asks first, then deletes each one, subtasks too.
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await myTasks.getByRole('button', { name: 'List options for My Tasks' }).click();
+  await myTasks.getByRole('menuitem', { name: 'Delete all completed tasks' }).click();
+  const clearing = myTasks.getByRole('group', { name: 'Delete all completed tasks?' });
+  const asked = (await clearing.innerText()).includes('Delete 4 completed tasks?');
+  await shot('cal-15c-delete-completed');
+  await clearing.getByRole('button', { name: 'Delete' }).click();
+  const cleared = await until(() => !fake.tasks.get('L1').some((task) => task.status === 'completed'));
+  const deletes = requests('DELETE', /^\/tasks\/v1\/lists\/L1\/tasks\//).map((request) => request.path.split('/').at(-1));
+  check(
+    'Delete all completed tasks asks, then deletes them in Google Tasks, subtasks before their task',
+    asked && cleared && deletes.length === 4 && deletes.indexOf('t-hotel') < deletes.indexOf('t-trip') && (await until(async () => (await myTasks.getByRole('button', { name: /^Completed \(/ }).count()) === 0)),
+    JSON.stringify({ asked, deletes }),
+  );
+  await f.getByRole('radio', { name: 'Calendar' }).click();
 
   // Layout at 1440: the rail and the week fit; the task panel opens on request.
   const laneWidth = async () => (await lane(today).boundingBox())?.width ?? 0;

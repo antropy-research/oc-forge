@@ -73,7 +73,7 @@ export const QuickCreate = ({ draft }: { draft: Draft }) => {
       google: { account: calendar.account, calendarId: calendar.id, eventId: '', recurringEventId: null, editable: false, response: null, guests: false, color: null, htmlLink: '', meet: null },
     });
     calendarUi.prefs({ lastCalendar: { account: calendar.account, calendarId: calendar.id } });
-    client.notify('Event saved');
+    calendarUi.snack('Event saved');
   };
 
   /** A Planner task on that day (at that time), added to the chosen Google Tasks list too. */

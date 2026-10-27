@@ -1,7 +1,7 @@
-// Google Calendar's popovers: an event's details (with Edit, Delete, RSVP and
-// the Planner's "Plan as task"), a Google task's (complete, delete, plan it),
-// and a month day's "N more" list.
-import { useEffect, useState } from 'preact/hooks';
+// Google Calendar's popovers: an event's details (with Edit, Delete, Duplicate,
+// RSVP and the Planner's "Plan as task"), a Google task's (complete, delete,
+// plan it), and a month day's "N more" list.
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/ics.ts';
 import type { DateKey, Task } from '../../../src/domain/types.ts';
 import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
@@ -67,7 +67,15 @@ export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: 
   const [detail, setDetail] = useState<GoogleEventDetail | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [answer, setAnswer] = useState<GoogleResponse | null>(event.google?.response ?? null);
+  const [options, setOptions] = useState(false);
+  const optionsRef = useRef<HTMLDivElement>(null);
   const ref = event.google;
+  useEffect(() => {
+    if (!options) return;
+    const shut = (click: MouseEvent) => !optionsRef.current?.contains(click.target as Node) && setOptions(false);
+    document.addEventListener('mousedown', shut);
+    return () => document.removeEventListener('mousedown', shut);
+  }, [options]);
   useEffect(() => {
     if (!ref || event.id.startsWith('new:')) return;
     let live = true;
@@ -122,6 +130,32 @@ export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: 
           <button class="icon-button" aria-label="Open in Google Calendar" title="Open in Google Calendar" onClick={() => void host.openUrl(ref.htmlLink)}>
             <Icon name="open" />
           </button>
+        )}
+        {detail && (
+          <div class="menu-anchor" ref={optionsRef}>
+            <button class="icon-button" aria-label="Options" title="Options" aria-haspopup="menu" aria-expanded={options} onClick={() => setOptions(!options)}>
+              <Icon name="more" />
+            </button>
+            {options && (
+              <div class="menu pop-menu" role="menu" aria-label="Options">
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    const span = eventSpan(event, zone);
+                    const start = zonedDateMinutes(event.start, zone);
+                    const end = zonedDateMinutes(event.end, zone);
+                    calendarUi.edit({
+                      mode: 'new',
+                      draft: { date: span.first, endDate: span.last, start: event.allDay ? null : start.minutes, end: event.allDay ? null : end.date > start.date ? 24 * 60 : end.minutes, title: detail.title, calendar: { account: detail.account, calendarId: detail.calendarId } },
+                      copy: { event, detail },
+                    });
+                  }}
+                >
+                  Duplicate
+                </button>
+              </div>
+            )}
+          </div>
         )}
         <button class="icon-button" aria-label="Close" title="Close" onClick={close}>
           <Icon name="close" />
@@ -246,7 +280,7 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
     work()
       .then(() => {
         close();
-        if (done) client.notify(done);
+        if (done) calendarUi.snack(done);
       })
       .catch((error) => client.notify(`Google Tasks did not take it: ${messageOf(error)}`))
       .finally(() => setBusy(false));

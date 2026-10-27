@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applyMove, completedItems, dropTarget, indentTarget, moveDownTarget, moveUpTarget, openRows, outdentTarget, positionBetween, subtasksOf } from '../src/domain/gtasks.ts';
+import { applyMove, completedItems, dateGroups, dropTarget, indentTarget, moveDownTarget, moveUpTarget, openRows, outdentTarget, positionBetween, subtasksOf } from '../src/domain/gtasks.ts';
 import type { GoogleTaskItem } from '../src/domain/google.ts';
 
 const task = (id: string, position: number, extra: Partial<GoogleTaskItem> = {}): GoogleTaskItem => ({
@@ -19,6 +19,16 @@ const list = [
 const shape = (rows: ReturnType<typeof openRows>) => rows.map((row) => `${'  '.repeat(row.depth)}${row.item.id}`);
 
 describe('a Google Tasks list as the app shows it', () => {
+  test('sorted by date: past ones, then day by day, then those without a date', () => {
+    const dated = [task('late', 1, { due: '2026-10-20' }), task('soon', 2, { due: '2026-10-27' }), task('now', 3, { due: '2026-10-26' }), task('free', 4), task('alsoNow', 0, { due: '2026-10-26' }), task('done', 5, { due: '2026-10-26', completed: true })];
+    expect(dateGroups(dated, '2026-10-26').map((group) => [group.kind, group.date, group.items.map((item) => item.id)])).toEqual([
+      ['past', null, ['late']],
+      ['day', '2026-10-26', ['alsoNow', 'now']],
+      ['day', '2026-10-27', ['soon']],
+      ['none', null, ['free']],
+    ]);
+  });
+
   test('open tasks in order with their subtasks, then "Completed", latest first', () => {
     expect(shape(openRows(list))).toEqual(['A', 'B', '  B1', '  B2', 'C', 'E']);
     expect(openRows(list).find((row) => row.item.id === 'B')!.children).toBe(2);

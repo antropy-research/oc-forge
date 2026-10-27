@@ -1,12 +1,37 @@
 // What opens over the calendar: details popovers, quick create, the event
-// editor, and Google Calendar's questions ("Edit recurring event", "Send
-// update emails?"). Mounted once by each calendar surface.
+// editor, Google Calendar's questions ("Edit recurring event", "Send update
+// emails?") and its snackbar. Mounted once by each calendar surface.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { DateKey } from '../../../src/domain/types.ts';
-import { calendarUi, useCalendarUi, type Question } from '../../lib/gcal.ts';
+import { calendarUi, useCalendarUi, type Question, type Snack } from '../../lib/gcal.ts';
 import { EventEditor } from './EventEditor.tsx';
+import { Icon } from './Icon.tsx';
 import { DayPopover, EventPopover, TaskPopover } from './Popovers.tsx';
 import { QuickCreate } from './QuickCreate.tsx';
+
+/** "Event saved · Undo ✕", bottom left, as Google Calendar says it. */
+const Snackbar = ({ snack }: { snack: Snack }) => {
+  const dismiss = () => calendarUi.set({ snack: null });
+  return (
+    <div class="gcal-snack">
+      <span>{snack.text}</span>
+      {snack.undo && (
+        <button
+          class="gcal-snack-action"
+          onClick={() => {
+            dismiss();
+            void snack.undo!();
+          }}
+        >
+          Undo
+        </button>
+      )}
+      <button class="gcal-snack-close" aria-label="Dismiss" title="Dismiss" onClick={dismiss}>
+        <Icon name="close" size={18} />
+      </button>
+    </div>
+  );
+};
 
 const QuestionDialog = ({ question }: { question: Question }) => {
   const [choice, setChoice] = useState(question.choices[0]?.id ?? '');
@@ -69,6 +94,10 @@ export const CalendarOverlays = ({ onDay }: { onDay?: (date: DateKey) => void })
       {ui.draft && <QuickCreate key={`${ui.draft.anchor.x}:${ui.draft.anchor.y}`} draft={ui.draft} />}
       {ui.editor && <EventEditor key={ui.editor.mode === 'edit' ? ui.editor.event.id : 'new'} target={ui.editor} />}
       {ui.question && <QuestionDialog question={ui.question} />}
+      {/* Always there, so screen readers hear each new message. */}
+      <div class="gcal-snack-region" role="status">
+        {ui.snack && <Snackbar key={ui.snack.id} snack={ui.snack} />}
+      </div>
     </>
   );
 };

@@ -8,7 +8,7 @@ import type { EditScope, EventInput } from '../../src/domain/gevents.ts';
 import type { GoogleEventDetail, GoogleEventRef, GoogleResponse } from '../../src/domain/google.ts';
 import type { CalendarMode } from '../../src/domain/gcalendar.ts';
 import type { DateKey } from '../../src/domain/types.ts';
-import { instantAt } from '../../src/domain/dates.ts';
+import { instantAt, zonedDateMinutes } from '../../src/domain/dates.ts';
 import type { PlannerClient } from './client.ts';
 
 /** Where a popover points: the clicked thing's box. */
@@ -39,7 +39,16 @@ export interface Draft {
   anchor: Anchor;
 }
 
-export type EditorTarget = { mode: 'new'; draft: Omit<Draft, 'anchor' | 'kind'> & { title?: string; calendar?: { account: string; calendarId: string } | null } } | { mode: 'edit'; event: CalendarEvent };
+export type EditorTarget =
+  | { mode: 'new'; draft: Omit<Draft, 'anchor' | 'kind'> & { title?: string; calendar?: { account: string; calendarId: string } | null }; copy?: { event: CalendarEvent; detail: GoogleEventDetail } }
+  | { mode: 'edit'; event: CalendarEvent };
+
+/** Google Calendar's snackbar: what just happened, and Undo where it can be undone. */
+export interface Snack {
+  id: number;
+  text: string;
+  undo: (() => Promise<void>) | null;
+}
 
 export interface Question {
   title: string;
@@ -93,7 +102,10 @@ interface CalendarUiState {
   /** Bumped after each write: calendar reads ask Google again. */
   tick: number;
   prefs: CalendarPrefs;
+  snack: Snack | null;
 }
+
+const SNACK_MS = 8000;
 
 class CalendarUi {
   private state: CalendarUiState = {
@@ -105,8 +117,19 @@ class CalendarUi {
     added: [],
     tick: 0,
     prefs: { page: 'calendar', mode: 'week', anchor: null, weekends: true, declined: true, completedTasks: true, rail: null, side: null, lastOpened: null, sideTab: 'unscheduled', myCalendarsOpen: true, otherCalendarsOpen: true, lastCalendar: null, lastList: null },
+    snack: null,
   };
   private readonly listeners = new Set<() => void>();
+  private snacks = 0;
+
+  /** Say what happened, with Undo when `undo` is given; it goes after a while. */
+  snack(text: string, undo: (() => Promise<void>) | null = null): void {
+    const id = ++this.snacks;
+    this.set({ snack: { id, text, undo } });
+    setTimeout(() => {
+      if (this.state.snack?.id === id) this.set({ snack: null });
+    }, SNACK_MS);
+  }
 
   get = (): CalendarUiState => this.state;
 
@@ -270,6 +293,25 @@ export const changeEventTimes = async (client: PlannerClient, event: CalendarEve
   try {
     await updateEvent(client, ref, input, scope, send);
     calendarUi.confirm([event.id]);
+    // One event can be put back where it was; a change to a series is undone in its editor.
+    const before: EventInput = event.allDay
+      ? { start: { date: zonedDateMinutes(event.start, zone).date }, end: { date: zonedDateMinutes(event.end, zone).date } }
+      : { start: { dateTime: event.start, timeZone: zone }, end: { dateTime: event.end, timeZone: zone } };
+    calendarUi.snack(
+      'Event saved',
+      scope === 'this'
+        ? async () => {
+            calendarUi.hold(event.id, { start: event.start, end: event.end, allDay: event.allDay });
+            try {
+              await updateEvent(client, ref, before, 'this', send);
+              calendarUi.confirm([event.id]);
+            } catch (error) {
+              calendarUi.drop([event.id]);
+              client.notify(`Google Calendar did not put "${event.title}" back: ${messageOf(error)}`);
+            }
+          }
+        : null,
+    );
   } catch (error) {
     calendarUi.drop([event.id]);
     client.notify(`Google Calendar did not move "${event.title}": ${messageOf(error)}`);
@@ -288,7 +330,7 @@ export const removeEvent = async (client: PlannerClient, event: CalendarEvent): 
   try {
     await deleteEvent(client, ref, scope, send);
     calendarUi.confirm([event.id]);
-    client.notify(scope === 'this' ? 'Event deleted' : 'Events deleted');
+    calendarUi.snack(scope === 'this' ? 'Event deleted' : 'Events deleted');
     return true;
   } catch (error) {
     calendarUi.drop([event.id]);

@@ -506,6 +506,23 @@ export class GoogleStore {
     }
   }
 
+  /** Google Tasks' "Delete all completed tasks": each completed task of a list, gone at once. */
+  async clearCompleted(account: string, listId: string): Promise<number> {
+    const key = listKey(account, listId);
+    const before = this.view.board[key]?.items ?? [];
+    // Subtasks first: deleting a task deletes its subtasks, which would then not be found.
+    const done = before.filter((item) => item.completed).sort((a, b) => Number(Boolean(b.parent)) - Number(Boolean(a.parent)));
+    this.patchBoard(key, before.filter((item) => !item.completed));
+    try {
+      for (const item of done) await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}&id=${encodeURIComponent(item.id)}`);
+      this.afterTaskWrite(account, listId, true);
+      return done.length;
+    } catch (error) {
+      void this.loadBoard(account, listId);
+      throw error;
+    }
+  }
+
   /** Put a task under `parent` after `previous`, in its list or another of the same account. Shown at once. */
   async moveListTask(item: GoogleTaskItem, target: MoveTarget, destinationListId: string = item.listId): Promise<void> {
     const from = listKey(item.account, item.listId);

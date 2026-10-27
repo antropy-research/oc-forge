@@ -49,6 +49,27 @@ export const openRows = (items: readonly GoogleTaskItem[]): TaskRow[] => {
 export const completedItems = (items: readonly GoogleTaskItem[]): GoogleTaskItem[] =>
   items.filter((item) => item.completed).sort((a, b) => (b.completedAt ?? b.updated).localeCompare(a.completedAt ?? a.updated) || byPosition(a, b));
 
+/** One heading of Google Tasks' "Sort by date": tasks before today, each later day, or no date. */
+export interface DateGroup {
+  kind: 'past' | 'day' | 'none';
+  date: string | null;
+  items: GoogleTaskItem[];
+}
+
+/** Open tasks by date, as Google Tasks sorts them: past ones first, then day by day, then the ones without a date. */
+export const dateGroups = (items: readonly GoogleTaskItem[], today: string): DateGroup[] => {
+  const open = items.filter((item) => !item.completed);
+  const past = open.filter((item) => item.due !== null && item.due < today).sort((a, b) => a.due!.localeCompare(b.due!) || byPosition(a, b));
+  const days = new Map<string, GoogleTaskItem[]>();
+  for (const item of open) if (item.due !== null && item.due >= today) days.set(item.due, [...(days.get(item.due) ?? []), item]);
+  const none = open.filter((item) => item.due === null).sort(byPosition);
+  return [
+    ...(past.length ? [{ kind: 'past' as const, date: null, items: past }] : []),
+    ...[...days.keys()].sort().map((date) => ({ kind: 'day' as const, date, items: days.get(date)!.sort(byPosition) })),
+    ...(none.length ? [{ kind: 'none' as const, date: null, items: none }] : []),
+  ];
+};
+
 /** The open subtasks of a task, in order. */
 export const subtasksOf = (items: readonly GoogleTaskItem[], id: string): GoogleTaskItem[] => items.filter((item) => item.parent === id && !item.completed).sort(byPosition);
 

@@ -207,6 +207,20 @@ export const EventEditor = ({ target }: { target: EditorTarget }) => {
         live = false;
       };
     }
+    if (target.copy) {
+      // Duplicate: the event's details as a new event you organize. The guests
+      // are invited afresh, and the dates the original skipped are its own.
+      const copied = fromDetail(target.copy.detail, target.copy.event, zone);
+      const rule = splitRecurrence(copied.recurrence).line;
+      const fresh: Form = {
+        ...copied,
+        recurrence: rule ? [rule] : [],
+        guests: copied.guests.filter((guest) => !guest.self).map((guest) => ({ ...guest, response: null, organizer: false })),
+      };
+      setInitial(fresh);
+      setForm(fresh);
+      return undefined;
+    }
     const draft = target.draft;
     const start = draft.start ?? 9 * 60;
     const fresh: Form = {
@@ -288,7 +302,7 @@ export const EventEditor = ({ target }: { target: EditorTarget }) => {
           google: { account: calendar.account, calendarId: calendar.id, eventId: '', recurringEventId: null, editable: false, response: null, guests: form.guests.length > 0, color: form.colorId ? EVENT_COLORS[form.colorId]?.color ?? null : null, htmlLink: '', meet: null },
         });
         calendarUi.prefs({ lastCalendar: { account: calendar.account, calendarId: calendar.id } });
-        client.notify('Event saved');
+        calendarUi.snack('Event saved');
         close();
       } catch (error) {
         setProblem(messageOf(error));
@@ -317,7 +331,7 @@ export const EventEditor = ({ target }: { target: EditorTarget }) => {
       if (Object.keys(input).length) await updateEvent(client, event.google, input, scope, send);
       if (moving) await moveEventToCalendar(client, event.google, moving.id, send);
       calendarUi.confirm([]);
-      client.notify('Event saved');
+      calendarUi.snack('Event saved');
       close();
     } catch (error) {
       setProblem(messageOf(error));
