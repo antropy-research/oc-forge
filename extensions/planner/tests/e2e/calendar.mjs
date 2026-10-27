@@ -1387,6 +1387,65 @@ try {
   const twinOther = await until(() => fake.tasks.get('L1').find((task) => task.title === twinTitle && task.id !== twinSeries)?.id);
   await until(() => keptOf(twinOther).then((kept) => kept?.time === 960));
   await twinForm.getByRole('button', { name: 'Cancel' }).click();
+  // Before it is completed, tomorrow shows the series' 9am occurrence (upcoming, once) beside the other task at 4pm,
+  // in Week, Day and Month, after a reload too, at both sizes (review 6: a task with the series' title hid it).
+  const twinUpcoming = f.getByRole('button', { name: new RegExp(`^Google task ${twinTitle}, upcoming ${longDay(tomorrow)} at 9am, repeats daily`) });
+  const twinReal = f.getByRole('button', { name: new RegExp(`^Google task ${twinTitle}, due ${longDay(tomorrow)} at 9am.*, repeats$`) });
+  const twinApart = f.getByRole('button', { name: new RegExp(`^Google task ${twinTitle}, due ${longDay(tomorrow)} at 4pm`) });
+  const twinSeen = async () => {
+    // The series' item (its projection, or the real one once made) and the other task, then how many of each.
+    await twinUpcoming.or(twinReal).first().waitFor({ timeout: 10_000 }).catch(() => {});
+    await twinApart.first().waitFor({ timeout: 10_000 }).catch(() => {});
+    return { upcoming: await twinUpcoming.count(), real: await twinReal.count(), apart: await twinApart.count() };
+  };
+  /** Tomorrow in Week, Day and Month (a full month cell lists the rest under its "N more"). */
+  const twinViews = async (size, shotName = 'cal-65-twin') => {
+    await f.getByRole('radio', { name: 'Calendar' }).click();
+    await todayButton.click();
+    await pickView('Week');
+    await f.locator('.day-lane').nth(6).waitFor({ timeout: 5000 });
+    if (!(await lane(tomorrow).count())) await f.getByRole('button', { name: 'Next week' }).click();
+    const week = await twinSeen();
+    await shot(`${shotName}-week-${size}`);
+    await f.getByRole('button', { name: new RegExp(`^${longDay(tomorrow)}: show this day$`) }).click();
+    await lane(tomorrow).waitFor();
+    const day = await twinSeen();
+    await shot(`${shotName}-day-${size}`);
+    await pickView('Month');
+    await f.locator(`.month-cell[data-date="${tomorrow}"]`).waitFor({ timeout: 10_000 });
+    let month = await twinSeen();
+    if (!month.upcoming || !month.apart) {
+      const cell = await f.locator(`.month-cell[data-date="${tomorrow}"]`).boundingBox();
+      for (const more of await f.locator('.month-more').all()) {
+        const box = await more.boundingBox();
+        if (!cell || !box || box.x + box.width / 2 < cell.x || box.x + box.width / 2 > cell.x + cell.width || box.y + box.height / 2 < cell.y || box.y + box.height / 2 > cell.y + cell.height) continue;
+        await more.click();
+        const list = f.getByRole('dialog', { name: `Everything on ${longDay(tomorrow)}` });
+        await list.waitFor({ timeout: 5000 });
+        month = { upcoming: await list.getByRole('button', { name: new RegExp(`^Google task ${twinTitle}, upcoming `) }).count(), real: await list.getByRole('button', { name: new RegExp(`^Google task ${twinTitle}, due .* at 9am`) }).count(), apart: await list.getByRole('button', { name: new RegExp(`^Google task ${twinTitle}, due .* at 4pm`) }).count(), more: true };
+        await shot(`${shotName}-month-more-${size}`);
+        await list.getByRole('button', { name: 'Close' }).click();
+        break;
+      }
+    }
+    await shot(`${shotName}-month-${size}`);
+    await pickView('Week');
+    return { week, day, month };
+  };
+  const twinWide = await twinViews(1440);
+  await reload();
+  await navTo('Calendar');
+  const twinReloadedViews = await twinViews('1440-reloaded');
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.waitForTimeout(800);
+  const twinNarrow = await twinViews(1024);
+  check(
+    "before it is completed, tomorrow shows the daily series' 9am occurrence once, beside a separate task with its title at 4pm, in Week, Day and Month, after a reload, at 1440 and 1024 px",
+    [twinWide, twinReloadedViews, twinNarrow].every((seen) => [seen.week, seen.day, seen.month].every((one) => one.upcoming === 1 && one.real === 0 && one.apart === 1)),
+    JSON.stringify({ twinWide, twinReloadedViews, twinNarrow }),
+  );
+  await wideAgain();
+  await openTasks();
   const twinPostsBefore = requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => request.body?.title === twinTitle).length;
   await myTasks.locator('li.gt-row', { hasText: 'daily series' }).getByRole('checkbox').first().click();
   const twinNext = await until(() => fake.tasks.get('L1').find((task) => task.title === twinTitle && task.id !== twinSeries && task.id !== twinOther)?.id, 15_000);
@@ -1403,6 +1462,14 @@ try {
     JSON.stringify({ twinNext, series: twinAfter.series?.repeat, other: twinAfter.other, next: twinAfter.next?.repeat }),
   );
   await shot('cal-63-twin-kept-apart');
+  // Completed: tomorrow has the series' own new occurrence at 9am in place of its projection, and the other task at 4pm.
+  await navTo('Calendar');
+  const twinDone = await twinViews(1440, 'cal-63b-twin-completed');
+  check(
+    "once completed, tomorrow shows the series' new occurrence (no projection there any more) and the other task, each once",
+    [twinDone.week, twinDone.day, twinDone.month].every((one) => one.upcoming === 0 && one.real === 1 && one.apart === 1),
+    JSON.stringify(twinDone),
+  );
 
   // A list holding a daily task: its upcoming occurrences show; deleted, they go without a reload.
   await openTasks();

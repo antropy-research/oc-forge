@@ -226,9 +226,11 @@ const STEPS_MAX = 4000;
  * Each repeating task's upcoming occurrences between `from` and `to`, as
  * Google Calendar shows a number of them on its grid: from the series' open
  * occurrence on, by its rule and template, from today on. A date a real
- * occurrence of the series shows on (`shown`: one the Planner made, or one
- * Google's own repeat made, with the template's title in the same list) is
- * left to it, so one date never shows two. A series deleted or ended shows none.
+ * occurrence of the series shows on (`shown`, kept as this series' own: the
+ * next one made, or one moved there) is left to it, so one date never shows
+ * two. A task that only shares the title and the date is a task of its own
+ * and shows beside it, as two tasks do in Google Calendar (nor is it taken
+ * for the next occurrence: `seriesNextIn`). A series deleted or ended shows none.
  */
 export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, shown: readonly GoogleTaskItem[], from: DateKey, to: DateKey, today: DateKey): UpcomingTask[] => {
   const taken = new Set<string>();
@@ -236,7 +238,6 @@ export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, sh
     if (!item.due) continue;
     const series = kept[googleTaskKey(item.account, item.id)]?.repeat?.seriesId;
     if (series) taken.add(`${series}\n${item.due}`);
-    taken.add(`${item.account}\n${item.listId}\n${item.title.trim()}\n${item.due}`);
   }
   const out: UpcomingTask[] = [];
   for (const source of Object.values(kept)) {
@@ -254,7 +255,7 @@ export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, sh
       index += 1;
       if (next < from || next < today) continue;
       const own = `${repeat.seriesId}\n${next}`;
-      if (taken.has(own) || taken.has(`${source.account}\n${source.listId}\n${repeat.template.title.trim()}\n${next}`)) continue;
+      if (taken.has(own)) continue;
       taken.add(own);
       out.push({ account: source.account, listId: source.listId, taskId: source.taskId, seriesId: repeat.seriesId, rule: repeat.rule, index, date: next, template: repeat.template });
       made++;
