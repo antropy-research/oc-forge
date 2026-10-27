@@ -265,6 +265,9 @@ export async function startHarness({
   const nav = (name) => frame.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name, exact: true });
   const shot = (name) => page.screenshot({ path: join(out, `${name}.png`) });
   const close = async () => {
+    // A route callback still forwarding a request (route.fetch) fails once the browser is gone; without this its
+    // rejection is unhandled and ends the journey before it reports.
+    await context.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
     await browser.close().catch(() => {});
     child.kill('SIGTERM');
   };
