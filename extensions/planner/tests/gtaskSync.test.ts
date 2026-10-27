@@ -228,6 +228,18 @@ describe('what the Planner keeps for Google tasks', () => {
     expect(foldEvents([kept({ time: 600 }), kept({ time: null })]).googleTasks).toEqual({});
   });
 
+  test('a repeating task stays in its list, as in Google Tasks: a move to another list is refused before anything moves', async () => {
+    const fake = fakeClient(foldEvents([kept({ repeat: { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO', seriesId: 's1', index: 1, next: null } })]));
+    const store = new GoogleStore(host, fake.client, 'page');
+    const refused = await store.moveListTask(item(), { parent: null, previous: null }, 'L2').catch((error) => error);
+    expect(refused).toBeInstanceOf(Error);
+    expect((refused as Error).message).toMatch(/repeating task stays in its list/);
+    expect(fake.calls.filter((call) => call.path === '/google/tasks/move')).toEqual([]);
+    // Within its own list it still moves.
+    await store.moveListTask(item(), { parent: null, previous: null });
+    expect(fake.calls.filter((call) => call.path === '/google/tasks/move')).toHaveLength(1);
+  });
+
   test('they follow the task to another list, and to a new id', () => {
     const moved = foldEvents([kept({ time: 600 }), ev({ type: 'gtask.moved', account: ME, taskId: 'gt1', listId: 'L2' })]);
     expect(keptFor(moved, { account: ME, id: 'gt1' })).toMatchObject({ listId: 'L2', time: 600 });

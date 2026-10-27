@@ -15,7 +15,7 @@ import { KEPT_HINT, TASKS_API_REFERENCE, keptFor, keptTimeLabel, starredKept, ta
 import { completedItems, dateGroups, dropTarget, indentTarget, moveDownTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
-import { listKey, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { REPEATING_STAYS, listKey, type RepeatScope, type TaskFields } from '../lib/google.ts';
 import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
@@ -309,6 +309,7 @@ const RowMenu = ({ row, rows, list, lists, ordered, place, onClose, onEdit, onSu
   };
   const move = (target: MoveTarget | null) => target && act(() => google.moveListTask(item, target));
   const elsewhere = lists.filter((other) => other.account === list.account && other.id !== list.id);
+  const repeating = Boolean(keptFor(view.state, item)?.repeat);
   const remove = async () => {
     const scope = keptFor(view.state, item)?.repeat ? await askRepeat('delete') : 'this';
     if (scope) await google.deleteListTask(item, scope);
@@ -321,7 +322,17 @@ const RowMenu = ({ row, rows, list, lists, ordered, place, onClose, onEdit, onSu
       {ordered && row.depth === 1 && <button role="menuitem" onClick={() => move(outdentTarget(rows, item.id))}>Unindent</button>}
       {ordered && moveUpTarget(rows, item.id) && <button role="menuitem" onClick={() => move(moveUpTarget(rows, item.id))}>Move up</button>}
       {ordered && moveDownTarget(rows, item.id) && <button role="menuitem" onClick={() => move(moveDownTarget(rows, item.id))}>Move down</button>}
-      {elsewhere.map((other) => <button key={other.id} role="menuitem" onClick={() => act(() => google.moveListTask(item, { parent: null, previous: null }, other.id))}>Move to {other.title}</button>)}
+      {elsewhere.map((other) => (
+        <button
+          key={other.id}
+          role="menuitem"
+          disabled={repeating}
+          title={repeating ? REPEATING_STAYS : undefined}
+          onClick={() => act(() => google.moveListTask(item, { parent: null, previous: null }, other.id))}
+        >
+          Move to {other.title}
+        </button>
+      ))}
       <hr />
       {linked ? (
         <button role="menuitem" onClick={() => { onClose(); setUi({ openTaskId: linked.id }); }}>Open the Planner task</button>

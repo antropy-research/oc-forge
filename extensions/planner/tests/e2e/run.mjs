@@ -327,7 +327,8 @@ try {
   await dragSource.dragTo(lane, { targetPosition: { x: 40, y: 10 * 48 + 4 } });
   const lowBlock = lane.locator('.grid-item.is-block', { hasText: `${run} sort-low` });
   await lowBlock.waitFor({ timeout: 10_000 });
-  check('dragging a task onto the calendar creates a working session at 10 AM', /10 AM/.test(await lowBlock.innerText()), (await lowBlock.innerText()).replace(/\s+/g, ' '));
+  // A short block reads "Title, 10am", as Google Calendar writes it; a taller one has the time on its own line ("10 AM").
+  check('dragging a task onto the calendar creates a working session at 10 AM', /\b10(?::00)?\s?am\b/i.test(await lowBlock.innerText()), (await lowBlock.innerText()).replace(/\s+/g, ' '));
   await shot('11-calendar');
 
   const box = await lowBlock.boundingBox();

@@ -42,6 +42,9 @@ export interface TaskFields {
   kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { rule: string | null };
 }
 
+/** Why a repeating task cannot go to another list: Google Tasks keeps it in its own. */
+export const REPEATING_STAYS = 'A repeating task stays in its list, as in Google Tasks';
+
 /** Which tasks of a repeating series a change or a deletion is for, as Google Tasks asks. */
 export type RepeatScope = 'this' | 'all';
 
@@ -813,6 +816,8 @@ export class GoogleStore {
 
   /** Put a task under `parent` after `previous`, in its list or another of the same account. Shown at once. */
   async moveListTask(item: GoogleTaskItem, target: MoveTarget, destinationListId: string = item.listId): Promise<void> {
+    // As in Google Tasks, a repeating task stays in its list.
+    if (destinationListId !== item.listId && keptFor(this.client.getView().state, item)?.repeat) throw new Error(REPEATING_STAYS);
     const from = listKey(item.account, item.listId);
     const to = listKey(item.account, destinationListId);
     const before = { from: this.view.board[from]?.items ?? [], to: this.view.board[to]?.items ?? [] };
