@@ -4,8 +4,8 @@
 import type { DateKey } from './types.ts';
 import { addDays, daysBetween, startOfWeek, weekday, zonedDateMinutes } from './dates.ts';
 
-export type CalendarMode = 'day' | 'week' | 'month' | 'schedule';
-export const CALENDAR_MODES: readonly CalendarMode[] = ['day', 'week', 'month', 'schedule'];
+export type CalendarMode = 'day' | 'week' | 'month' | 'year' | 'schedule';
+export const CALENDAR_MODES: readonly CalendarMode[] = ['day', 'week', 'month', 'year', 'schedule'];
 /** How many days the Schedule view lists from its first day. */
 export const SCHEDULE_DAYS = 30;
 
@@ -53,6 +53,10 @@ export const viewDays = (mode: CalendarMode, anchor: DateKey, weekStartsOn: 0 | 
     }
     case 'month':
       return monthWeeks(anchor, weekStartsOn).flat().filter((day) => weekends || !isWeekend(day));
+    case 'year': {
+      const first = `${anchor.slice(0, 4)}-01-01` as DateKey;
+      return Array.from({ length: daysBetween(first, `${Number(anchor.slice(0, 4)) + 1}-01-01` as DateKey) }, (_, index) => addDays(first, index));
+    }
     case 'schedule':
       return Array.from({ length: SCHEDULE_DAYS }, (_, index) => addDays(anchor, index));
   }
@@ -67,6 +71,8 @@ export const stepAnchor = (mode: CalendarMode, anchor: DateKey, direction: 1 | -
       return addDays(anchor, 7 * direction);
     case 'month':
       return addMonths(anchor, direction);
+    case 'year':
+      return addMonths(anchor, 12 * direction);
     case 'schedule':
       return addDays(anchor, SCHEDULE_DAYS * direction);
   }
@@ -77,6 +83,7 @@ export const rangeTitle = (mode: CalendarMode, anchor: DateKey, days: readonly D
   const { year, month, day } = parts(anchor);
   if (mode === 'day') return `${MONTHS[month - 1]} ${day}, ${year}`;
   if (mode === 'month') return `${MONTHS[month - 1]} ${year}`;
+  if (mode === 'year') return String(year);
   const first = parts(days[0] ?? anchor);
   const last = parts(days[days.length - 1] ?? anchor);
   if (mode === 'schedule') {

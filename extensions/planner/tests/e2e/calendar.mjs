@@ -136,6 +136,18 @@ try {
   const backToGrid = await f.locator('.day-lane').first().waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
   check('a result opens its details; Back returns to the calendar', fromSearch && backToGrid);
 
+  // Year, as Google Calendar's: Y shows twelve small months; a date opens that day.
+  await page.keyboard.press('y');
+  const yearView = f.locator('.year-view');
+  const months = await yearView.waitFor({ timeout: 5000 }).then(() => yearView.locator('.year-month').count()).catch(() => 0);
+  const yearTitle = (await f.locator('.gcal-title').innerText()).trim();
+  await shot('cal-04c-year');
+  await yearView.getByRole('gridcell', { name: /, today$/ }).click();
+  const dayOpened = await until(async () => (await f.locator('.day-lane').count()) === 1 && (await lane(today).count()) === 1, 5000);
+  check('Y shows the year as twelve months; a date opens that day', months === 12 && yearTitle === today.slice(0, 4) && Boolean(dayOpened), `${months} months, title ${yearTitle}, day opened ${Boolean(dayOpened)}`);
+  await page.keyboard.press('w');
+  await f.locator('.day-lane').nth(6).waitFor({ timeout: 5000 });
+
   // The mini month moves the calendar; Today comes back.
   const later = `${addDays(`${today.slice(0, 8)}01`, 40).slice(0, 8)}15`;
   await goTo(later);

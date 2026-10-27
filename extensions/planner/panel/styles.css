@@ -1041,6 +1041,12 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gcal-switch { border-radius: 18px; }
 .gcal-switch button { display: inline-flex; align-items: center; padding: 4px 12px; }
 .gcal-switch button[aria-checked='true'] { background: color-mix(in srgb, var(--oc-primary) 14%, transparent); color: var(--oc-primary-text, var(--oc-primary)); }
+/* Year: twelve small months, as Google Calendar's Year view; a date opens its day. */
+.year-view { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 18px 24px; padding: 16px 20px; align-content: start; }
+.year-month { max-width: 232px; }
+.year-month-name { font-size: 14px; font-weight: 500; margin: 0 0 6px 6px; }
+.year-month.is-current .year-month-name { color: var(--oc-primary-text, var(--oc-primary)); }
+.year-month .mini-day.is-blank { visibility: hidden; }
 /* Search: the header becomes a search box, as in Google Calendar; results read like Schedule. */
 .gcal-search { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0; }
 .gcal-search input { flex: 1; min-width: 0; height: 36px; border: 0; border-radius: 18px; padding: 0 16px; font: inherit; font-size: 15px; color: var(--oc-fg); background: var(--pl-soft); }

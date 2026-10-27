@@ -17,6 +17,7 @@ import { TasksView } from './TasksView.tsx';
 import { CalendarRail } from './calendar/Rail.tsx';
 import { MonthView } from './calendar/MonthView.tsx';
 import { ScheduleView, SearchResults } from './calendar/ScheduleView.tsx';
+import { YearView } from './calendar/YearView.tsx';
 import { CalendarOverlays } from './calendar/Overlays.tsx';
 import { Icon } from './calendar/Icon.tsx';
 import { isTaskEvent } from './calendar/items.ts';
@@ -32,11 +33,11 @@ export const UnscheduledToday = () => {
   return <TaskList placement={{ kind: 'day', date: view.today }} tasks={tasks} empty="Everything today has a time" />;
 };
 
-const MODE_LABELS: Record<CalendarMode, string> = { day: 'Day', week: 'Week', month: 'Month', schedule: 'Schedule' };
+const MODE_LABELS: Record<CalendarMode, string> = { day: 'Day', week: 'Week', month: 'Month', year: 'Year', schedule: 'Schedule' };
 /** Google Calendar's view keys; its A for Schedule adds a task in the Planner, so Schedule keeps Google's other key, 5. */
-const MODE_KEYS: Record<CalendarMode, string> = { day: 'D', week: 'W', month: 'M', schedule: '5' };
+const MODE_KEYS: Record<CalendarMode, string> = { day: 'D', week: 'W', month: 'M', year: 'Y', schedule: '5' };
 const MODE_DIGITS: Record<string, CalendarMode> = { '1': 'day', '2': 'week', '3': 'month', '5': 'schedule' };
-const STEP_NAMES: Record<CalendarMode, string> = { day: 'day', week: 'week', month: 'month', schedule: 'stretch' };
+const STEP_NAMES: Record<CalendarMode, string> = { day: 'day', week: 'week', month: 'month', year: 'year', schedule: 'stretch' };
 /** The rail takes this much, and the grid needs this much to stay readable. */
 const RAIL_PX = 236;
 const SIDE_PX = 280;
@@ -118,7 +119,8 @@ export const CalendarView = () => {
   const mode = prefs.mode;
   const weekStartsOn = view.state.settings.weekStartsOn;
   const days = viewDays(mode, anchor, weekStartsOn, prefs.weekends);
-  const monthDays = mode === 'month' ? monthWeeks(anchor, weekStartsOn).flat() : days;
+  // The year shows no events (as in Google, a date opens its day), so it reads only the anchor's day.
+  const monthDays = mode === 'month' ? monthWeeks(anchor, weekStartsOn).flat() : mode === 'year' ? [anchor] : days;
   const feed = useCalendarEvents(monthDays[0]!, monthDays[monthDays.length - 1]!, { declined: prefs.declined });
   const events = prefs.completedTasks ? feed.events : feed.events.filter((event) => !(isTaskEvent(event) && event.googleTask?.completed));
 
@@ -229,6 +231,7 @@ export const CalendarView = () => {
           <div class="gcal-main">
             {(mode === 'day' || mode === 'week') && !search?.shown && <TimeGrid dates={days} events={events} onDay={mode === 'week' ? goDay : undefined} />}
             {mode === 'month' && !search?.shown && <MonthView anchor={anchor} events={events} onDay={goDay} />}
+            {mode === 'year' && !search?.shown && <YearView anchor={anchor} onDay={goDay} />}
             {mode === 'schedule' && !search?.shown && <ScheduleView from={days[0]!} to={days[days.length - 1]!} events={events} onDay={goDay} />}
             {search?.shown && <SearchResults query={search.shown} onDay={(date) => { leaveSearch(); goDay(date); }} />}
           </div>

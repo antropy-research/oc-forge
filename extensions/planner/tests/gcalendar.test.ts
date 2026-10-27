@@ -18,6 +18,9 @@ describe('the days each view shows', () => {
     expect(viewDays('month', '2026-10-28', 1, false).every((day) => ![0, 6].includes(new Date(`${day}T00:00:00Z`).getUTCDay()))).toBe(true);
     const schedule = viewDays('schedule', '2026-10-28', 1);
     expect([schedule.length, schedule[0], schedule.at(-1)]).toEqual([30, '2026-10-28', '2026-11-26']);
+    // Year: every day of the anchor's year (a leap year has 366).
+    const year = viewDays('year', '2026-10-28', 1);
+    expect([year.length, year[0], year.at(-1), viewDays('year', '2028-02-29', 1).length]).toEqual([365, '2026-01-01', '2026-12-31', 366]);
   });
   test('the arrows step a day, a week, a month (shorter months clamp) or the schedule’s stretch', () => {
     expect(stepAnchor('day', '2026-10-31', 1)).toBe('2026-11-01');
@@ -26,10 +29,12 @@ describe('the days each view shows', () => {
     expect(stepAnchor('month', '2026-12-15', 1)).toBe('2027-01-15');
     expect(addMonths('2026-03-31', -1)).toBe('2026-02-28');
     expect(stepAnchor('schedule', '2026-10-28', 1)).toBe('2026-11-27');
+    expect([stepAnchor('year', '2026-10-28', 1), stepAnchor('year', '2028-02-29', 1)]).toEqual(['2027-10-28', '2029-02-28']);
   });
   test('titles as Google Calendar writes them', () => {
     expect(rangeTitle('day', '2026-10-26', ['2026-10-26'])).toBe('October 26, 2026');
     expect(rangeTitle('month', '2026-10-26', [])).toBe('October 2026');
+    expect(rangeTitle('year', '2026-10-26', [])).toBe('2026');
     expect(rangeTitle('week', '2026-10-14', viewDays('week', '2026-10-14', 1))).toBe('October 2026');
     expect(rangeTitle('week', '2026-10-28', viewDays('week', '2026-10-28', 1))).toBe('Oct – Nov 2026');
     expect(rangeTitle('week', '2026-12-30', viewDays('week', '2026-12-30', 1))).toBe('Dec 2026 – Jan 2027');

@@ -827,7 +827,8 @@ try {
   };
   await chooseWorkspace(/^Side Org/);
   await frame.locator('.linear-page li.lin-row', { hasText: /E2E-\d/ }).first().waitFor({ state: 'detached', timeout: 10_000 });
-  check('one workspace can be shown on its own', (await sideRow(2).count()) === 1);
+  // The other workspace's rows go before this one's arrive: wait for them.
+  check('one workspace can be shown on its own', await sideRow(2).waitFor({ timeout: 10_000 }).then(() => true).catch(() => false) && (await frame.locator('.linear-page li.lin-row', { hasText: /E2E-\d/ }).count()) === 0);
   await chooseWorkspace('All workspaces');
   displayMenu = await openDisplay();
   await chooseIn(displayMenu, 'Grouping', 'Status');
