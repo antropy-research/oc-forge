@@ -19,7 +19,7 @@ import { validateCommand, type EventBody, type PlannerEvent } from '../src/domai
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { emptyState, googleTaskKey, type PlannerState } from '../src/domain/types.ts';
 import { findMovedTask, GONE_STATUS, gtaskSource, linkedGoogleTasks, mergeGoogleTask, planGoogleTaskSync, plannerEditTimes, TASK_GONE, taskFromGoogleTask, type GoogleTaskItem } from '../src/domain/google.ts';
-import { deadlineEvents, deadlineGroups, dueOccurrences, firstSightOfSeries, keptFor, madeAlready, nextRepeatDate, starredKept, upcomingEvent, upcomingTasks, withTaskTimes } from '../src/domain/gtaskKept.ts';
+import { deadlineEvents, deadlineGroups, dueOccurrences, firstSightOfSeries, keptFor, nextRepeatDate, seriesNextIn, starredKept, upcomingEvent, upcomingTasks, withTaskTimes } from '../src/domain/gtaskKept.ts';
 import { blockText } from '../src/domain/gcalendar.ts';
 import type { CalendarEvent } from '../src/domain/ics.ts';
 
@@ -305,14 +305,57 @@ describe('repeating tasks', () => {
     expect(fake.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
   });
 
-  test('no duplicate when Google’s own repeat made the next one already', async () => {
-    const theirs = item({ id: 'g-own', due: '2026-11-02' });
-    expect(madeAlready([item({ completed: true }), theirs], 'Send the report', '2026-11-02', 'gt1')?.id).toBe('g-own');
-    const fake = fakeClient(series(), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ completed: true }), theirs], complete: true } : {}));
+  test('an unrelated task with the series’ title, due on its next date, is never taken for the next occurrence (review 5)', async () => {
+    // Its own task: made separately, at 4pm, with its own details and no repeat.
+    const theirs = item({ id: 'apt', due: '2026-11-02', notes: 'independent appointment' });
+    const start = applyEvents(series(), [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'apt', patch: { time: 16 * 60 } })]);
+    expect(seriesNextIn(start, [item({ completed: true }), theirs], { seriesId: 's1', index: 1 }, 'gt1')).toBeNull();
+    const fake = fakeClient(start, (method, path, body) => {
+      if (path.startsWith('/google/tasks/all')) return { tasks: [item({ completed: true }), theirs], complete: true };
+      if (method === 'POST' && path === '/google/tasks') return { task: item({ id: 'gt2', due: body.due }) };
+      return {};
+    });
+    await new GoogleStore(host, fake.client, 'page').makeNextOccurrences([item({ completed: true })]);
+    // The series gets an occurrence of its own; the other task keeps its time and stays a task that doesn't repeat.
+    expect(fake.calls.filter((call) => call.method === 'POST' && call.path === '/google/tasks')).toHaveLength(1);
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.next).toBe('gt2');
+    expect(keptFor(fake.state(), { account: ME, id: 'apt' })).toMatchObject({ time: 16 * 60, repeat: null });
+    // Seen again: no second one.
+    await new GoogleStore(host, fake.client, 'page').makeNextOccurrences([item({ completed: true })]);
+    expect(fake.calls.filter((call) => call.method === 'POST' && call.path === '/google/tasks')).toHaveLength(1);
+  });
+
+  test('the next occurrence another window made (kept as this series’ next) is taken, not made twice', async () => {
+    const made = item({ id: 'w2', due: '2026-11-02' });
+    const start = applyEvents(series(), [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'w2', patch: { time: 9 * 60, repeat: { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO', seriesId: 's1', index: 2, next: null } } })]);
+    expect(seriesNextIn(start, [item({ completed: true }), made], { seriesId: 's1', index: 1 }, 'gt1')?.id).toBe('w2');
+    const fake = fakeClient(start, (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ completed: true }), made], complete: true } : {}));
     await new GoogleStore(host, fake.client, 'page').makeNextOccurrences([item({ completed: true })]);
     expect(fake.calls.some((call) => call.method === 'POST')).toBe(false);
-    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.next).toBe('g-own');
-    expect(keptFor(fake.state(), { account: ME, id: 'g-own' })?.repeat?.index).toBe(2);
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.next).toBe('w2');
+  });
+
+  test('deleting a list drops what was kept for its tasks (no upcoming occurrences left) and marks linked tasks gone; a failed delete changes nothing (review 5)', async () => {
+    const trip = item({ listId: 'L9', id: 'd1', title: 'Water the plants' });
+    const start = applyEvents(planned(trip), [
+      ev({ type: 'gtask.kept', account: ME, listId: 'L9', taskId: 'd1', patch: { time: 9 * 60, repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 's9', index: 1, next: null } } }),
+      ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { starred: true } }),
+    ]);
+    const list = { account: ME, id: 'L9', title: 'Plants' };
+    let refuse = true;
+    const fake = fakeClient(start, (method) => {
+      if (method === 'DELETE' && refuse) throw new Error('Backend Error');
+      return {};
+    });
+    const store = new GoogleStore(host, fake.client, 'page');
+    await expect(store.deleteList(list)).rejects.toThrow('Backend Error');
+    expect(keptFor(fake.state(), { account: ME, id: 'd1' })?.repeat?.seriesId).toBe('s9');
+    refuse = false;
+    await store.deleteList(list);
+    expect(keptFor(fake.state(), { account: ME, id: 'd1' })).toBeNull();
+    // Another list's task keeps what it had.
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.starredAt).toBeTruthy();
+    expect(fake.state().tasks['t1']?.source?.status).toEqual(GONE_STATUS);
   });
 
   test('the last occurrence ends the series', async () => {

@@ -25,7 +25,7 @@ import {
   type MailItem,
   type SyncedField,
 } from '../../src/domain/google.ts';
-import { dueOccurrences, firstSightOfSeries, keptFor, madeAlready, nextOccurrenceKept, scheduledOn, seriesTemplate, templateOf } from '../../src/domain/gtaskKept.ts';
+import { dueOccurrences, firstSightOfSeries, keptFor, nextOccurrenceKept, seriesNextIn, scheduledOn, seriesTemplate, templateOf } from '../../src/domain/gtaskKept.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { addDays } from '../../src/domain/dates.ts';
@@ -520,9 +520,10 @@ export class GoogleStore {
    * Google, or found so on a read): a new Google task in the same list, made
    * from the series' template (its title, details, time and deadline, which a
    * change to "This task" leaves alone) on the series' next date after the
-   * one it put this occurrence on, as Google Tasks makes it. One Google's own
-   * repeat (or another window) made already is taken instead of making a
-   * second. A series that ends there stops repeating.
+   * one it put this occurrence on, as Google Tasks makes it. One another
+   * Planner window made already (kept as this series' next) is taken instead
+   * of making a second; a task that only shares the title and the date is
+   * never taken for it. A series that ends there stops repeating.
    */
   async makeNextOccurrences(items: readonly GoogleTaskItem[]): Promise<void> {
     for (const { item, kept, template, date } of dueOccurrences(this.client.getView().state, items)) {
@@ -539,7 +540,7 @@ export class GoogleStore {
         const now = keptFor(this.client.getView().state, item);
         if (now?.repeat?.next) continue;
         const title = template.title.trim() || item.title;
-        let next = madeAlready(list.tasks ?? [], title, date, item.id);
+        let next = seriesNextIn(this.client.getView().state, list.tasks ?? [], kept.repeat, item.id);
         if (!next) {
           const created = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account: item.account, listId: item.listId, title, ...(template.notes ? { notes: template.notes } : {}), due: date });
           next = created.task;
@@ -753,6 +754,18 @@ export class GoogleStore {
 
   async deleteList(list: GoogleTaskList): Promise<void> {
     await this.client.call('DELETE', `/google/tasklists?account=${encodeURIComponent(list.account)}&list=${encodeURIComponent(list.id)}`);
+    // Its tasks went with it in Google: what the Planner kept for them (their repeats' upcoming occurrences on the
+    // calendar too) goes now, not on the next read, and Planner tasks linked to them say they are gone.
+    const state = this.client.getView().state;
+    const bodies: EventBody[] = [
+      ...Object.values(state.googleTasks ?? {})
+        .filter((kept) => kept.account === list.account && kept.listId === list.id)
+        .map((kept) => ({ type: 'gtask.dropped' as const, account: kept.account, taskId: kept.taskId })),
+      ...Object.values(state.tasks)
+        .filter((task) => task.source?.kind === 'gtask' && task.source.account === list.account && task.source.listId === list.id && !task.deletedAt && task.source.status?.name !== GONE_STATUS.name)
+        .map((task) => ({ type: 'task.sourceSynced' as const, taskId: task.id, source: { ...task.source!, status: GONE_STATUS } })),
+    ];
+    if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
     const lists = this.view.lists.filter((item) => !(item.account === list.account && item.id === list.id));
     const { [listKey(list.account, list.id)]: _gone, ...board } = this.view.board;
     const selected = this.view.list?.account === list.account && this.view.list.id === list.id;

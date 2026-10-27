@@ -317,12 +317,16 @@ export const deadlineGroups = (kept: Readonly<Record<string, GoogleTaskKept>>, a
 };
 
 /**
- * The next occurrence made already, by Google's own repeat (a series made in
- * Google Tasks) or another Planner window: a task in the list with the title,
- * due that day, other than the one just done.
+ * The next occurrence a series has already (another Planner window made it): a
+ * task in the list whose kept repeat is this series' next one. Never a task
+ * that only shares the title and the date: an unrelated task can have both.
  */
-export const madeAlready = (items: readonly GoogleTaskItem[], title: string, date: DateKey, except: string): GoogleTaskItem | null =>
-  items.find((item) => item.id !== except && item.due === date && item.title.trim() === title.trim()) ?? null;
+export const seriesNextIn = (state: Pick<PlannerState, 'googleTasks'>, items: readonly GoogleTaskItem[], repeat: { seriesId: string; index: number }, except: string): GoogleTaskItem | null =>
+  items.find((item) => {
+    if (item.id === except) return false;
+    const theirs = keptFor(state, item)?.repeat;
+    return Boolean(theirs && theirs.seriesId === repeat.seriesId && theirs.index === repeat.index + 1);
+  }) ?? null;
 
 /** Starred tasks, the newest star first, as Google Tasks' Starred view lists them. */
 export const starredKept = (state: Pick<PlannerState, 'googleTasks'>): GoogleTaskKept[] =>

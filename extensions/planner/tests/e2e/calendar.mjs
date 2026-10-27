@@ -1363,6 +1363,83 @@ try {
   await f.locator('.day-lane').nth(6).waitFor({ timeout: 15_000 });
   await todayButton.click();
 
+  // ── 16. A series never takes an unrelated task with its title for its next occurrence; deleting a list takes its
+  //    tasks' upcoming occurrences off the calendar at once (review 5) ──
+  const twinTitle = 'Harness twin';
+  await openTasks();
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const twinForm = myTasks.getByRole('group', { name: 'New task' });
+  await twinForm.getByRole('textbox', { name: 'Title' }).fill(twinTitle);
+  await twinForm.getByRole('textbox', { name: 'Details' }).fill('daily series');
+  await twinForm.getByLabel('Date', { exact: true }).fill(today);
+  await twinForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('540');
+  await twinForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
+  await twinForm.getByRole('button', { name: 'Add' }).click();
+  const twinSeries = await until(() => fake.tasks.get('L1').find((task) => task.title === twinTitle)?.id);
+  await until(() => keptOf(twinSeries).then((kept) => Boolean(kept?.repeat?.template)));
+  // The other one: the same title, tomorrow at 4pm, its own details, no repeat.
+  await twinForm.getByRole('textbox', { name: 'Title' }).fill(twinTitle);
+  await twinForm.getByRole('textbox', { name: 'Details' }).fill('independent appointment');
+  await twinForm.getByLabel('Date', { exact: true }).fill(tomorrow);
+  await twinForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('960');
+  await twinForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Does not repeat' });
+  await twinForm.getByRole('button', { name: 'Add' }).click();
+  const twinOther = await until(() => fake.tasks.get('L1').find((task) => task.title === twinTitle && task.id !== twinSeries)?.id);
+  await until(() => keptOf(twinOther).then((kept) => kept?.time === 960));
+  await twinForm.getByRole('button', { name: 'Cancel' }).click();
+  const twinPostsBefore = requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => request.body?.title === twinTitle).length;
+  await myTasks.locator('li.gt-row', { hasText: 'daily series' }).getByRole('checkbox').first().click();
+  const twinNext = await until(() => fake.tasks.get('L1').find((task) => task.title === twinTitle && task.id !== twinSeries && task.id !== twinOther)?.id, 15_000);
+  await page.waitForTimeout(1500);
+  const twinAfter = { series: await keptOf(twinSeries), other: await keptOf(twinOther), next: twinNext ? await keptOf(twinNext) : null };
+  await reload();
+  const twinReloaded = await keptOf(twinOther);
+  const otherGoogle = fake.tasks.get('L1').find((task) => task.id === twinOther);
+  check(
+    'completing a daily task makes its own next occurrence; a separate task with its title, due on the next date, keeps its 4pm, its details and no repeat, after a reload too',
+    Boolean(twinNext) && requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => request.body?.title === twinTitle).length === twinPostsBefore + 1
+      && twinAfter.series?.repeat?.next === twinNext && twinAfter.next?.time === 540 && twinAfter.next?.repeat?.seriesId === twinAfter.series?.repeat?.seriesId
+      && twinAfter.other?.time === 960 && !twinAfter.other?.repeat && twinReloaded?.time === 960 && !twinReloaded?.repeat && otherGoogle?.notes === 'independent appointment',
+    JSON.stringify({ twinNext, series: twinAfter.series?.repeat, other: twinAfter.other, next: twinAfter.next?.repeat }),
+  );
+  await shot('cal-63-twin-kept-apart');
+
+  // A list holding a daily task: its upcoming occurrences show; deleted, they go without a reload.
+  await openTasks();
+  await f.getByRole('button', { name: 'Create new list' }).click();
+  await f.getByRole('textbox', { name: 'New list name' }).fill('Harness plants');
+  await f.getByRole('textbox', { name: 'New list name' }).press('Enter');
+  const plants = f.getByRole('region', { name: 'Harness plants' });
+  await plants.waitFor();
+  const plantsId = await until(() => fake.lists.find((list) => list.title === 'Harness plants')?.id);
+  await plants.getByRole('button', { name: 'Add a task' }).click();
+  const plantForm = plants.getByRole('group', { name: 'New task' });
+  await plantForm.getByRole('textbox', { name: 'Title' }).fill('Harness water plants');
+  await plantForm.getByLabel('Date', { exact: true }).fill(today);
+  await plantForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('480');
+  await plantForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
+  await plantForm.getByRole('button', { name: 'Add' }).click();
+  const plantId = await until(() => (fake.tasks.get(plantsId) ?? []).find((task) => task.title === 'Harness water plants')?.id);
+  await until(() => keptOf(plantId).then((kept) => Boolean(kept?.repeat?.template)));
+  await plantForm.getByRole('button', { name: 'Cancel' }).click();
+  const plantsUpcoming = () => f.locator('.grid-item.is-upcoming', { hasText: 'Harness water plants' }).count();
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  const before = await until(async () => (await plantsUpcoming()) || null, 15_000);
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await plants.getByRole('button', { name: 'List options for Harness plants' }).click();
+  await plants.getByRole('menuitem', { name: 'Delete list' }).click();
+  await until(() => !fake.lists.some((list) => list.title === 'Harness plants'));
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  await page.waitForTimeout(1200);
+  const afterDelete = await plantsUpcoming();
+  const keptLeft = await keptOf(plantId);
+  await shot('cal-64-list-deleted-no-occurrences');
+  check(
+    "deleting a list takes its daily task's upcoming occurrences off the calendar at once, and what was kept for it goes",
+    (before ?? 0) > 0 && afterDelete === 0 && !keptLeft,
+    JSON.stringify({ before, afterDelete, keptLeft: Boolean(keptLeft) }),
+  );
+
   // 7. (below, with the layout) Titles of two and three words read in full in blocks of an hour or more.
   primary().set('budget', { id: 'budget', summary: 'Budget review meeting', start: { dateTime: new Date(at(today, 16 * 60)).toISOString() }, end: { dateTime: new Date(at(today, 17 * 60)).toISOString() }, organizer: { email: ME, self: true } });
   // Made in Google, so the service's copy of this week (it keeps one for a minute and a half) is read again.
