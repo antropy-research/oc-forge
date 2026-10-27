@@ -8,8 +8,12 @@
 // a Google task planned stays on its due day; a planned task moved to another
 // list keeps its link (completion writes there), changes in Google reach the
 // Planner and a title changed on both sides takes the newer change; a time, a
-// deadline, a weekly repeat and a star kept in the Planner for Google tasks;
-// titles that read in full; the layout at 1440 and 1024 px.
+// deadline, a weekly repeat and a star kept in the Planner for Google tasks; a
+// repeating task's series (This task changes one occurrence, All tasks the
+// series, the next one made from it) and its upcoming occurrences on the grid;
+// a deadline-only task on its deadline's day; Edit from a task's details over
+// the calendar; a repeating task takes no subtasks by any path; titles that
+// read in full; the layout at 1440 and 1024 px.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/calendar.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
@@ -453,9 +457,10 @@ try {
   // Edit in place: a date, which the calendar shows on that day.
   await myTasks.getByRole('button', { name: 'Edit Plan the trip' }).click();
   const editing = myTasks.getByRole('group', { name: 'Edit Plan the trip' });
+  const noRepeat = editing.getByRole('combobox', { name: 'Repeat' });
   check(
-    'editing a task offers a time, a deadline and a star (no repeat for a task with subtasks), and says the Planner keeps them',
-    (await editing.getByRole('combobox', { name: 'Time' }).count()) === 1 && (await editing.getByLabel('Deadline', { exact: true }).count()) === 1 && (await editing.getByRole('button', { name: 'Star' }).count()) === 1 && (await editing.getByRole('combobox', { name: 'Repeat' }).count()) === 0 && (await editing.innerText()).includes('Kept in the Planner'),
+    'editing a task offers a time, a deadline and a star, and says the Planner keeps them; a task with subtasks cannot repeat, and says why',
+    (await editing.getByRole('combobox', { name: 'Time' }).count()) === 1 && (await editing.getByLabel('Deadline', { exact: true }).count()) === 1 && (await editing.getByRole('button', { name: 'Star' }).count()) === 1 && (await noRepeat.isDisabled()) && (await noRepeat.getAttribute('title')) === "A task with subtasks can't repeat, as in Google Tasks" && (await editing.innerText()).includes('Kept in the Planner'),
     await editing.innerText(),
   );
   await editing.getByLabel('Date', { exact: true }).fill(addDays(today, 1));
@@ -728,6 +733,301 @@ try {
   await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'All tasks' }).click();
   await f.getByRole('radio', { name: 'Calendar' }).click();
 
+
+  // ── 8. A repeating task's series (review 3): This task changes one occurrence, All tasks the series; the next one is made from it ──
+  const tomorrow = addDays(today, 1);
+  const dayAfter = addDays(today, 2);
+  const due = (date) => `${date}T00:00:00.000Z`;
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const dailyForm = myTasks.getByRole('group', { name: 'New task' });
+  await dailyForm.getByRole('textbox', { name: 'Title' }).fill('Harness daily');
+  await dailyForm.getByRole('textbox', { name: 'Details' }).fill('Series notes');
+  await dailyForm.getByLabel('Date', { exact: true }).fill(today);
+  await dailyForm.getByRole('combobox', { name: 'Time' }).selectOption('600');
+  await dailyForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
+  await dailyForm.getByRole('button', { name: 'Add' }).click();
+  await dailyForm.getByRole('button', { name: 'Cancel' }).click();
+  const dailyId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness daily')?.id);
+  const dailyKept = await until(() => keptOf(dailyId).then((kept) => (kept?.repeat?.template ? kept : null)));
+  check('a new daily task keeps its series: the template (title, details, 10am) and the date its schedule starts', dailyKept?.repeat?.template?.title === 'Harness daily' && dailyKept.repeat.template.notes === 'Series notes' && dailyKept.repeat.template.time === 600 && dailyKept.repeat.on === today, JSON.stringify(dailyKept));
+  const seriesPosts = () => requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => ['Harness daily', 'Harness one-off', 'Harness standup'].includes(request.body?.title));
+
+  // Before it is completed, its upcoming occurrences show on the week grid, at 10am, drawn as the series'.
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  await goTo(tomorrow);
+  const upcomingOn = (date, title = 'Harness daily') => lane(date).locator('.grid-item.is-upcoming', { hasText: title });
+  const itemsOn = (date, title) => lane(date).locator('.grid-item', { hasText: title });
+  await upcomingOn(tomorrow).waitFor({ timeout: 15_000 }).catch(() => {});
+  const upcomingBox = await upcomingOn(tomorrow).boundingBox().catch(() => null);
+  const tomorrowTop = (await lane(tomorrow).boundingBox())?.y ?? 0;
+  const laterDays = await f.locator('.day-lane').evaluateAll((lanes, day) => lanes.map((element) => element.getAttribute('data-date')).filter((date) => date > day), today);
+  const upcomingCounts = await Promise.all(laterDays.map((date) => upcomingOn(date).count()));
+  check(
+    'before it is completed, a daily task shows its upcoming occurrences on the week grid, one a day at 10am, marked as upcoming',
+    upcomingBox && Math.abs(upcomingBox.y - tomorrowTop - 600 * 0.8) <= 2 && upcomingCounts.every((count) => count === 1) && ((await upcomingOn(tomorrow).getAttribute('aria-label')) ?? '').startsWith('Google task Harness daily, upcoming') && ((await lane(today).count()) === 0 || (await itemsOn(today, 'Harness daily').count()) === 1),
+    JSON.stringify({ top: upcomingBox ? upcomingBox.y - tomorrowTop : null, laterDays, upcomingCounts, label: await upcomingOn(tomorrow).getAttribute('aria-label').catch(() => null) }),
+  );
+  await shot('cal-31-upcoming-occurrences-1440');
+  await upcomingOn(tomorrow).click();
+  const seriesPopover = f.getByRole('dialog', { name: 'Repeating Google task: Harness daily' });
+  const seriesText = await seriesPopover.innerText().catch(() => '');
+  check(
+    'an upcoming occurrence opens its series: title, when, how it repeats, with Edit all tasks and Delete all future tasks',
+    seriesText.includes('Harness daily') && seriesText.includes('Daily') && seriesText.includes(`${longDay(tomorrow)} ⋅ 10am`) && (await seriesPopover.getByRole('button', { name: 'Edit all tasks' }).count()) === 1 && (await seriesPopover.getByRole('button', { name: 'Delete all future tasks' }).count()) === 1,
+    seriesText,
+  );
+  await shot('cal-32-series-popover-1440');
+  await seriesPopover.getByRole('button', { name: 'Close' }).click();
+
+  // This task: a one-off title, details and time; completing it makes tomorrow's from the series, once.
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await myTasks.getByRole('button', { name: 'Edit Harness daily' }).click();
+  const oneOff = myTasks.getByRole('group', { name: 'Edit Harness daily' });
+  await oneOff.getByRole('textbox', { name: 'Title' }).fill('Harness one-off');
+  await oneOff.getByRole('textbox', { name: 'Details' }).fill('Only today');
+  await oneOff.getByRole('combobox', { name: 'Time' }).selectOption('720');
+  await oneOff.getByRole('button', { name: 'Done' }).click();
+  const repeatQuestion = f.getByRole('alertdialog', { name: 'Edit repeating task' });
+  await repeatQuestion.getByRole('radio', { name: 'This task' }).check();
+  await shot('cal-33-this-task');
+  await repeatQuestion.getByRole('button', { name: 'OK' }).click();
+  const oneOffDone = await until(async () => fake.tasks.get('L1').find((task) => task.id === dailyId)?.title === 'Harness one-off' && (await keptOf(dailyId))?.time === 720);
+  const keptAfterOne = await keptOf(dailyId);
+  check('This task changes this occurrence alone: Google has its title and details, the Planner its 12pm; the series keeps its own', oneOffDone && fake.tasks.get('L1').find((task) => task.id === dailyId)?.notes === 'Only today' && keptAfterOne?.repeat?.template?.title === 'Harness daily' && keptAfterOne.repeat.template.time === 600 && keptAfterOne.repeat.on === today, JSON.stringify(keptAfterOne));
+  const postsBefore = seriesPosts().length;
+  await myTasks.getByRole('checkbox', { name: 'Mark Harness one-off complete' }).click();
+  await until(() => seriesPosts().length > postsBefore, 15_000);
+  await page.waitForTimeout(1500);
+  await reload();
+  const second = fake.tasks.get('L1').find((task) => task.title === 'Harness daily' && task.status !== 'completed');
+  const secondKept = second ? await keptOf(second.id) : null;
+  const madeOnce = seriesPosts().length === postsBefore + 1 && fake.tasks.get('L1').filter((task) => task.status !== 'completed' && ['Harness daily', 'Harness one-off'].includes(task.title)).length === 1;
+  check(
+    'completing it makes tomorrow’s occurrence once, from the series: its title and details in Google, 10am in the Planner, after a reload',
+    second?.due === due(tomorrow) && second.notes === 'Series notes' && secondKept?.time === 600 && secondKept.repeat?.index === 2 && secondKept.repeat.on === tomorrow && madeOnce,
+    JSON.stringify({ second, secondKept, posts: seriesPosts().map((request) => request.body) }),
+  );
+  // After completing today's, tomorrow shows one item: the real occurrence, not a projection beside it.
+  await h.nav('Calendar').click();
+  await goTo(tomorrow);
+  await until(async () => (await lane(tomorrow).locator('.grid-item.is-task:not(.is-upcoming)', { hasText: 'Harness daily' }).count()) === 1, 15_000);
+  check(
+    'after today’s is completed, tomorrow shows one item for the series (Google’s, at 10am), and the days after it their upcoming ones',
+    (await itemsOn(tomorrow, 'Harness daily').count()) === 1 && (await upcomingOn(tomorrow).count()) === 0 && (laterDays.length < 2 || (await upcomingOn(laterDays[1]).count()) === 1),
+    JSON.stringify({ tomorrow: await itemsOn(tomorrow, 'Harness daily').evaluateAll((items) => items.map((item) => item.className)) }),
+  );
+  await shot('cal-34-next-occurrence-1440');
+
+  // All tasks: the series changes; the following occurrence has the new values.
+  await openTasks();
+  await myTasks.getByRole('button', { name: 'Edit Harness daily' }).click();
+  const allEdit = myTasks.getByRole('group', { name: 'Edit Harness daily' });
+  await allEdit.getByRole('textbox', { name: 'Title' }).fill('Harness standup');
+  await allEdit.getByRole('textbox', { name: 'Details' }).fill('Standup notes');
+  await allEdit.getByRole('combobox', { name: 'Time' }).selectOption('540');
+  await allEdit.getByRole('button', { name: 'Done' }).click();
+  await repeatQuestion.getByRole('radio', { name: 'All tasks' }).check();
+  await repeatQuestion.getByRole('button', { name: 'OK' }).click();
+  const allDone = await until(async () => fake.tasks.get('L1').find((task) => task.id === second?.id)?.title === 'Harness standup' && (await keptOf(second.id))?.repeat?.template?.title === 'Harness standup');
+  const postsBeforeThird = seriesPosts().length;
+  await myTasks.getByRole('checkbox', { name: 'Mark Harness standup complete' }).click();
+  const third = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness standup' && task.status !== 'completed' && task.id !== second?.id), 15_000);
+  const thirdKept = third ? await until(() => keptOf(third.id).then((kept) => (kept?.repeat ? kept : null))) : null;
+  check(
+    'All tasks changes the series: this one takes the new title, details and 9am, and the following one is made with them',
+    allDone && third?.due === due(dayAfter) && third.notes === 'Standup notes' && thirdKept?.time === 540 && seriesPosts().length === postsBeforeThird + 1,
+    JSON.stringify({ third, thirdKept }),
+  );
+  const standupId = third?.id;
+
+  // ── 9. A task with only a deadline: on that day's all-day row, as Google Calendar's flag, in Week, Month and Day ──
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+  await todayButton.click();
+  const weekDays = await f.locator('.day-lane').evaluateAll((lanes) => lanes.map((element) => element.getAttribute('data-date')));
+  const deadlineDay = weekDays.find((date) => date > today) ?? weekDays.find((date) => date < today);
+  await f.getByRole('radio', { name: 'Tasks' }).click();
+  await myTasks.getByRole('button', { name: 'Add a task' }).click();
+  const deadlineForm = myTasks.getByRole('group', { name: 'New task' });
+  await deadlineForm.getByRole('textbox', { name: 'Title' }).fill('Harness deadline only');
+  await deadlineForm.getByLabel('Deadline', { exact: true }).fill(deadlineDay);
+  await deadlineForm.getByRole('button', { name: 'Add' }).click();
+  await deadlineForm.getByRole('button', { name: 'Cancel' }).click();
+  const deadlineId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness deadline only')?.id);
+  await until(() => keptOf(deadlineId).then((kept) => kept?.deadline === deadlineDay));
+  const deadlinePost = requests('POST', '/tasks/v1/lists/L1/tasks').find((request) => request.body?.title === 'Harness deadline only');
+  await reload();
+  await h.nav('Calendar').click();
+  const deadlineBar = f.locator('.all-day-bar.is-deadline', { hasText: 'Harness deadline only' });
+  /** Whether an item's middle is over a day's cell. */
+  const over = async (item, cell) => {
+    const [a, b] = [await item.boundingBox(), await cell.boundingBox()];
+    return Boolean(a && b && a.x + a.width / 2 > b.x && a.x + a.width / 2 < b.x + b.width);
+  };
+  const deadlineViews = async (size) => {
+    await pickView('Week');
+    await f.locator('.day-lane').nth(weekDays.length - 1).waitFor({ timeout: 5000 });
+    const week = (await deadlineBar.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false)) && (await over(deadlineBar, f.locator(`.all-day-cell[data-date="${deadlineDay}"]`)));
+    const label = (await deadlineBar.getAttribute('aria-label').catch(() => '')) ?? '';
+    await shot(`cal-35-deadline-week-${size}`);
+    await pickView('Month');
+    const chip = f.locator('.month-chip.is-deadline', { hasText: 'Harness deadline only' });
+    const month = (await chip.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false)) && (await over(chip, f.locator(`.month-cell[data-date="${deadlineDay}"]`)));
+    await shot(`cal-36-deadline-month-${size}`);
+    await pickView('Schedule');
+    const agenda = f.getByRole('region', { name: longDay(deadlineDay) }).locator('.schedule-item.is-deadline', { hasText: 'Harness deadline only' });
+    const schedule = await agenda.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+    const upcomingListed = await f.locator('.schedule-item.is-upcoming').count();
+    await shot(`cal-36b-deadline-schedule-${size}`);
+    await pickView('Week');
+    await f.getByRole('button', { name: `${longDay(deadlineDay)}: show this day` }).click();
+    const day = (await f.locator('.day-lane').count()) === 1 && (await lane(deadlineDay).count()) === 1 && (await deadlineBar.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+    await shot(`cal-37-deadline-day-${size}`);
+    await pickView('Week');
+    await f.locator('.day-lane').nth(weekDays.length - 1).waitFor({ timeout: 5000 });
+    return { week, month, schedule, upcomingListed, day, label };
+  };
+  const wideDeadline = await deadlineViews(1440);
+  check(
+    'a task with only a deadline shows on that day in Week, Month, Day (the all-day row) and Schedule, as a deadline, after a reload (1440 px); Schedule lists upcoming occurrences too',
+    !deadlinePost?.body?.due && wideDeadline.week && wideDeadline.month && wideDeadline.day && wideDeadline.schedule && wideDeadline.upcomingListed > 0 && wideDeadline.label.startsWith(`Google task Harness deadline only, deadline ${longDay(deadlineDay)}`) && wideDeadline.label.includes('no date'),
+    JSON.stringify({ wideDeadline, body: deadlinePost?.body }),
+  );
+  await deadlineBar.click();
+  const deadlinePopover = f.getByRole('dialog', { name: 'Google task: Harness deadline only' });
+  const deadlinePopText = await deadlinePopover.innerText().catch(() => '');
+  check('its details say it has no date, and its deadline', deadlinePopText.includes('No date') && deadlinePopText.includes(`Deadline: ${longDay(deadlineDay)}`), deadlinePopText);
+  await deadlinePopover.getByRole('button', { name: 'Close' }).click();
+
+  // ── 10. Edit from a Google task's details on the calendar: the Tasks view's form over the calendar, which stays on its week ──
+  const reviewDay = addDays(today, 7);
+  await goTo(reviewDay);
+  const reviewChip = f.getByRole('button', { name: /^Google task Harness weekly review, due / });
+  await reviewChip.waitFor({ timeout: 15_000 });
+  const weekTitle = (await f.locator('.gcal-title').innerText()).trim();
+  await reviewChip.click();
+  const reviewPopover = f.getByRole('dialog', { name: 'Google task: Harness weekly review' });
+  await reviewPopover.getByRole('button', { name: 'Edit task' }).waitFor();
+  await shot('cal-38-task-popover-edit-1440');
+  await reviewPopover.getByRole('button', { name: 'Edit task' }).click();
+  const taskEditor = f.getByRole('dialog', { name: 'Edit task: Harness weekly review' });
+  await taskEditor.waitFor();
+  const editorForm = taskEditor.getByRole('group', { name: 'Edit Harness weekly review' });
+  const editorOffers = (await editorForm.getByRole('combobox', { name: 'Repeat' }).isEnabled()) && (await editorForm.getByRole('combobox', { name: 'List' }).isDisabled()) && (await editorForm.getByRole('textbox', { name: 'Details' }).count()) === 1 && (await editorForm.getByRole('button', { name: 'Star' }).count()) === 1;
+  await editorForm.getByRole('textbox', { name: 'Title' }).fill('Harness weekly review, edited');
+  await editorForm.getByRole('combobox', { name: 'Time' }).selectOption('660');
+  await editorForm.getByLabel('Deadline', { exact: true }).fill(addDays(reviewDay, 1));
+  await shot('cal-39-task-editor-1440');
+  await editorForm.getByRole('button', { name: 'Done' }).click();
+  await repeatQuestion.getByRole('radio', { name: 'This task' }).check();
+  await repeatQuestion.getByRole('button', { name: 'OK' }).click();
+  const reviewTask = () => fake.tasks.get('L1').find((task) => task.id === nextId);
+  const edited = await until(async () => reviewTask()?.title === 'Harness weekly review, edited' && (await keptOf(nextId))?.time === 660);
+  const stayed = (await taskEditor.count()) === 0 && (await f.locator('.gcal-title').innerText()).trim() === weekTitle && (await lane(reviewDay).count()) === 1;
+  check(
+    'Edit in a task’s details opens the Tasks view’s form over the calendar (repeat; list kept, as it repeats); its title, time and deadline are saved, and the calendar stays on that week',
+    editorOffers && edited && (await keptOf(nextId))?.deadline === addDays(reviewDay, 1) && stayed,
+    JSON.stringify({ editorOffers, edited, stayed, kept: await keptOf(nextId), title: reviewTask()?.title }),
+  );
+  await reload();
+  await h.nav('Calendar').click();
+  await goTo(reviewDay);
+  const editedChip = lane(reviewDay).locator('.grid-item.is-task:not(.is-upcoming)', { hasText: 'Harness weekly review, edited' });
+  const editedShown = await editedChip.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+  const editedBox = editedShown ? await editedChip.boundingBox() : null;
+  const reviewTop = (await lane(reviewDay).boundingBox())?.y ?? 0;
+  check(
+    'after a reload, the edited task is at 11am on its day with its new title and deadline',
+    editedShown && Math.abs((editedBox?.y ?? 0) - reviewTop - 660 * 0.8) <= 2 && ((await editedChip.getAttribute('aria-label')) ?? '').includes(`deadline ${longDay(addDays(reviewDay, 1))}`),
+    JSON.stringify({ editedShown, top: editedBox ? editedBox.y - reviewTop : null, label: await editedChip.getAttribute('aria-label').catch(() => null) }),
+  );
+  await shot('cal-40-edited-after-reload-1440');
+  await todayButton.click();
+
+  // ── 11. A repeating task takes no subtasks, by any path, as in Google Tasks ──
+  await openTasks();
+  const standupRow = myTasks.locator(`li.gt-row[data-task="${standupId}"]`);
+  await standupRow.waitFor();
+  await myTasks.getByRole('button', { name: 'Actions for Harness standup' }).click();
+  const addSubtask = myTasks.getByRole('menuitem', { name: 'Add a subtask' });
+  const addBlocked = (await addSubtask.getAttribute('aria-disabled')) === 'true' && (await addSubtask.getAttribute('title')) === "A repeating task can't have subtasks, as in Google Tasks";
+  await shot('cal-41-no-subtask-menu');
+  await addSubtask.click({ force: true });
+  const noForm = (await myTasks.getByRole('group', { name: 'New task' }).count()) === 0;
+  await myTasks.click({ position: { x: 4, y: 4 } });
+  // A task moved right below the repeating one (at the top level) cannot go under it: Indent is unavailable, with why.
+  const rowsNow = () => myTasks.locator('ul[aria-label="My Tasks tasks"] > li.gt-row').evaluateAll((rows) => rows.map((row) => ({ id: row.getAttribute('data-task'), title: row.getAttribute('aria-label') })));
+  const deadlineRow = myTasks.locator(`li.gt-row[data-task="${deadlineId}"]`);
+  const standupHeight = (await standupRow.boundingBox()).height;
+  await deadlineRow.dragTo(standupRow, { targetPosition: { x: 20, y: standupHeight - 4 } });
+  await until(() => requests('POST', `/tasks/v1/lists/L1/tasks/${deadlineId}/move`).find((request) => request.query.previous === standupId && !request.query.parent));
+  const belowStandup = await until(async () => {
+    const rows = await rowsNow();
+    return rows[rows.findIndex((row) => row.id === standupId) + 1]?.id === deadlineId ? rows : null;
+  });
+  const menuItem = async (title, name) => {
+    await myTasks.getByRole('button', { name: `Actions for ${title}` }).first().click();
+    const entry = myTasks.getByRole('menuitem', { name });
+    const said = `${await entry.getAttribute('aria-disabled')}|${await entry.getAttribute('title')}`;
+    await entry.click({ force: true });
+    await myTasks.click({ position: { x: 4, y: 4 } });
+    return said;
+  };
+  const indentBelow = await menuItem('Harness deadline only', 'Indent');
+  // A repeating task with a task above it cannot go under that one either.
+  const repeatingIds = Object.values((await state()).googleTasks ?? {}).filter((kept) => kept.repeat).map((kept) => kept.taskId);
+  const rows = belowStandup ?? (await rowsNow());
+  const repeatingBelow = rows.find((row, index) => index > 0 && repeatingIds.includes(row.id));
+  const indentSelf = repeatingBelow ? await menuItem(repeatingBelow.title, 'Indent') : 'none below another task';
+  check(
+    'on a repeating task, "Add a subtask" and Indent are unavailable, with the reason',
+    addBlocked && noForm && Boolean(belowStandup) && indentBelow === "true|A repeating task can't have subtasks, as in Google Tasks" && (!repeatingBelow || indentSelf === "true|A repeating task can't be a subtask, as in Google Tasks"),
+    JSON.stringify({ addBlocked, noForm, indentBelow, indentSelf, rows: rows.map((row) => row.title) }),
+  );
+  // Dragged to the right just under the repeating task, it stays at the top level.
+  const mark = fake.requests.length;
+  await deadlineRow.dragTo(standupRow, { targetPosition: { x: 120, y: standupHeight - 4 } });
+  await page.waitForTimeout(1500);
+  const nested = fake.requests.filter((request) => request.method === 'POST' && repeatingIds.includes(request.query.parent));
+  const childrenOfRepeating = [...fake.tasks.values()].flat().filter((task) => repeatingIds.includes(task.parent));
+  check(
+    'a task dragged under a repeating task does not nest; the fake Google got no request that would give a repeating task a subtask',
+    nested.length === 0 && childrenOfRepeating.length === 0 && fake.requests.slice(mark).every((request) => !request.query.parent),
+    JSON.stringify({ nested, childrenOfRepeating: childrenOfRepeating.map((task) => task.title), after: fake.requests.slice(mark).map((request) => `${request.method} ${request.path} ${JSON.stringify(request.query)}`) }),
+  );
+  await shot('cal-42-drag-not-nested');
+  await f.getByRole('radio', { name: 'Calendar' }).click();
+
+  // ── 12. An upcoming occurrence's series: Edit all tasks (it does not ask), then Delete all future tasks ──
+  await goTo(addDays(dayAfter, 1));
+  const standupUpcoming = () => f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).first();
+  await standupUpcoming().click();
+  const standupSeries = f.getByRole('dialog', { name: 'Repeating Google task: Harness standup' });
+  await standupSeries.getByRole('button', { name: 'Edit all tasks' }).click();
+  const seriesEditor = f.getByRole('dialog', { name: 'Edit all tasks: Harness standup' });
+  const seriesForm = seriesEditor.getByRole('group', { name: 'Edit Harness standup' });
+  await seriesForm.getByRole('combobox', { name: 'Time' }).selectOption('480');
+  await shot('cal-46-edit-all-tasks-editor');
+  await seriesForm.getByRole('button', { name: 'Done' }).click();
+  const seriesAsked = await repeatQuestion.waitFor({ timeout: 1500 }).then(() => true).catch(() => false);
+  const seriesMoved = await until(() => keptOf(standupId).then((kept) => kept?.time === 480 && kept.repeat?.template?.time === 480));
+  const upcomingLane = await standupUpcoming().evaluate((element) => element.closest('.day-lane')?.getAttribute('data-date')).catch(() => null);
+  const upcomingAt = upcomingLane ? (await standupUpcoming().boundingBox()).y - (await lane(upcomingLane).boundingBox()).y : null;
+  check(
+    'Edit all tasks from an upcoming occurrence changes the series without asking: the open task and its upcoming ones go to 8am',
+    !seriesAsked && seriesMoved && upcomingAt !== null && Math.abs(upcomingAt - 480 * 0.8) <= 2,
+    JSON.stringify({ seriesAsked, seriesMoved, upcomingAt, kept: await keptOf(standupId) }),
+  );
+  await shot('cal-47-series-at-8am');
+  await standupUpcoming().click();
+  await standupSeries.getByRole('button', { name: 'Delete all future tasks' }).click();
+  const deleteSeries = f.getByRole('alertdialog', { name: 'Delete repeating task' });
+  await shot('cal-48-delete-series-question');
+  await deleteSeries.getByRole('button', { name: 'Delete all future tasks' }).click();
+  const seriesGone = await until(async () => requests('DELETE', `/tasks/v1/lists/L1/tasks/${standupId}`).length === 1 && !(await keptOf(standupId)) && (await f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).count()) === 0);
+  check('Delete all future tasks from an upcoming occurrence deletes the open task in Google, and no upcoming one is left', Boolean(seriesGone), JSON.stringify({ deletes: requests('DELETE', /\/tasks\//).map((request) => request.path), upcoming: await f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).count() }));
+  await todayButton.click();
+
   // 7. (below, with the layout) Titles of two and three words read in full in blocks of an hour or more.
   primary().set('budget', { id: 'budget', summary: 'Budget review meeting', start: { dateTime: new Date(at(today, 16 * 60)).toISOString() }, end: { dateTime: new Date(at(today, 17 * 60)).toISOString() }, organizer: { email: ME, self: true } });
   // Made in Google, so the service's copy of this week (it keeps one for a minute and a half) is read again.
@@ -797,6 +1097,20 @@ try {
   check('at 1024 px, details still open by a click, inside the window', popBox && frameBox && popBox.x >= frameBox.x && popBox.x + popBox.width <= frameBox.x + frameBox.width + 1, JSON.stringify({ popBox, frameBox }));
   await shot('cal-17-week-1024');
   await small.getByRole('button', { name: 'Close' }).click();
+  const narrowDeadline = await deadlineViews(1024);
+  check('at 1024 px, the deadline-only task shows on its day in Week, Month, Day and Schedule', narrowDeadline.week && narrowDeadline.month && narrowDeadline.day && narrowDeadline.schedule, JSON.stringify(narrowDeadline));
+  await reportChip.click();
+  const narrowTask = f.getByRole('dialog', { name: 'Google task: Send the report' });
+  const narrowEdit = await narrowTask.getByRole('button', { name: 'Edit task' }).isVisible().catch(() => false);
+  await shot('cal-43-task-popover-edit-1024');
+  await narrowTask.getByRole('button', { name: 'Edit task' }).click();
+  const narrowEditor = f.getByRole('dialog', { name: 'Edit task: Send the report' });
+  const editorBox = await narrowEditor.boundingBox().catch(() => null);
+  await shot('cal-44-task-editor-1024');
+  check('at 1024 px, a task’s details offer Edit, and the editor fits in the window', narrowEdit && editorBox && editorBox.x >= frameBox.x && editorBox.x + editorBox.width <= frameBox.x + frameBox.width + 1, JSON.stringify({ narrowEdit, editorBox, frameBox }));
+  await narrowEditor.getByRole('button', { name: 'Close' }).click();
+  await goTo(addDays(today, 1)).catch(() => {});
+  await shot('cal-45-upcoming-1024');
   await f.getByRole('button', { name: 'Main menu' }).click();
   check('at 1024 px, the main menu opens the rail', (await rail.count()) === 1);
   await shot('cal-18-rail-1024');
