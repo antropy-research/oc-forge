@@ -89,6 +89,10 @@ printf '%s' "$OPENCODE_OPENAI_API_KEY" | docker compose exec -T openchamber sh -
 ```
 
 Then restart the container's OpenCode: Settings → OpenCode, or `POST /api/config/reload`.
+Sessions an extension starts (the Planner's agents) use OpenChamber's default model, else
+the model picked last; set it in Settings, or `PUT /api/config/settings` with
+`{ "defaultModel": "openai/gpt-6-luna" }`, so they don't fall back to the free tier.
 `extensions/planner/tests/e2e/agentpr.mjs` runs its agent on `AGENTPR_MODEL`
 (default `openai/gpt-6-luna`), and stops early, saying so, when the container's OpenCode
-has no such provider. Remove both files and reload to go back to the free models.
+has no such provider. Remove both files, clear the default model and reload to go back to
+the free models.
