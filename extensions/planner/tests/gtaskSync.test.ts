@@ -4,7 +4,10 @@
 // a write Google refuses leaves the Planner as Google is, and title, details
 // and date merge three ways. What the Planner keeps for Google tasks (time,
 // deadline, repeat, star) follows moves too; a repeating task's next
-// occurrence is made once; a timed block's text fits its height.
+// occurrence is made once; a timed block's text fits its height. An edit is
+// all or nothing (Google first, then what the Planner keeps); completing a
+// task completes its subtasks, and reopening a subtask its task, however
+// little the panel has loaded; a timed task's deadline has its all-day entry.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
 import { GoogleStore, listKey, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
@@ -505,6 +508,27 @@ describe('the calendar shows deadlines and upcoming occurrences, as Google Calen
     // What the service reads for them: by account and list, in the range only.
     expect(deadlineGroups(state, [ME], ...WEEK)).toEqual([{ account: ME, listId: 'L1', ids: ['gt1', 'gt2', 'gt3'] }]);
     expect(deadlineGroups(state, ['other@example.com'], ...WEEK)).toEqual([]);
+  });
+
+  test('a timed task’s deadline on its own day shows in the all-day section, its block staying at its time; an all-day task due that day stays one item', () => {
+    const zone = 'America/Los_Angeles';
+    const timed = item({ id: 'gt1', title: 'Review the deck', due: '2026-10-27' });
+    const allDay = item({ id: 'gt2', title: 'Send the report', due: '2026-10-27' });
+    const both = foldEvents([kept('gt1', { time: 13 * 60, deadline: '2026-10-27' }), kept('gt2', { deadline: '2026-10-27' })]);
+    const entries = (state: PlannerState, items: GoogleTaskItem[]) => deadlineEvents(items, state.googleTasks, ...WEEK, zone).map((event) => [event.id, event.start, event.allDay, event.taskDeadline]);
+    // The review's case: 1pm today, its deadline today.
+    expect(entries(both, [timed, allDay])).toEqual([['gtask-deadline:L1:gt1', '2026-10-27T07:00:00.000Z', true, true]]);
+    const due = (task: GoogleTaskItem): CalendarEvent => ({ id: `gtask:L1:${task.id}`, calendarId: 'google-tasks', title: task.title, location: '', start: `${task.due}T07:00:00.000Z`, end: '', allDay: true, busy: false, googleTask: task });
+    expect(withTaskTimes([due(timed), due(allDay)], both.googleTasks, zone).map((event) => [event.id, event.allDay, event.start])).toEqual([
+      ['gtask:L1:gt1', false, '2026-10-27T20:00:00.000Z'],
+      ['gtask:L1:gt2', true, '2026-10-27T07:00:00.000Z'],
+    ]);
+    // The entries follow either date: the deadline moved to tomorrow; the all-day task moved off its deadline's day; the time cleared.
+    const later = applyEvents(both, [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { deadline: '2026-10-28' } })]);
+    expect(entries(later, [timed, allDay])).toEqual([['gtask-deadline:L1:gt1', '2026-10-28T07:00:00.000Z', true, true]]);
+    expect(entries(both, [timed, { ...allDay, due: '2026-10-26' }]).map(([id]) => id)).toEqual(['gtask-deadline:L1:gt1', 'gtask-deadline:L1:gt2']);
+    const untimed = applyEvents(both, [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: null } })]);
+    expect(entries(untimed, [timed, allDay])).toEqual([]);
   });
 });
 
