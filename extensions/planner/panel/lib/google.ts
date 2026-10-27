@@ -430,12 +430,20 @@ export class GoogleStore {
    * other lists once and writes there, and the link follows. A write that
    * still fails says so, and the Planner does not keep claiming what Google
    * does not have: a completion or reopening Google refused is undone here, a
-   * task Google no longer has shows as deleted there.
+   * task Google no longer has shows as deleted there. Completed or reopened,
+   * it takes its subtasks or the task it is under along first, as the Tasks
+   * view does (`completeListTask`), however little of its list is loaded.
    */
   async writeTask(task: Task, patch: GoogleTaskWrite['patch'] & { completed?: boolean }, quiet = false): Promise<boolean> {
     const source = task.source;
     if (source?.kind !== 'gtask' || !source.account || !source.listId) return false;
     try {
+      const completed = patch.completed;
+      if (completed !== undefined) {
+        const related = await this.relatives({ account: source.account, listId: source.listId, id: source.id }, completed);
+        // Planner tasks planning those take the change too.
+        if (related.length) await this.syncItems(await this.writeListTask(related, () => ({ completed }), true));
+      }
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { account: source.account, listId: source.listId, id: source.id, ...patch });
       const item = answer.task;
       if (item) {
@@ -628,11 +636,31 @@ export class GoogleStore {
     return answer.tasks.find((item) => item.id === id) ?? null;
   }
 
-  /** Whether a task has subtasks (open or done) in Google: from the Tasks view's copy of its list, else read. */
+  /** A list's tasks, completed ones too: the Tasks view's copy of it, else read from Google. */
+  private async listItems(account: string, listId: string): Promise<GoogleTaskItem[]> {
+    const known = this.view.board[listKey(account, listId)]?.items;
+    return known ?? (await this.client.call<{ tasks?: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}`)).tasks ?? [];
+  }
+
+  /** Whether a task has subtasks (open or done) in Google. */
   private async hasSubtasks(item: GoogleTaskItem): Promise<boolean> {
-    const known = this.view.board[listKey(item.account, item.listId)]?.items;
-    const items = known ?? (await this.client.call<{ tasks?: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}`)).tasks ?? [];
-    return items.some((other) => other.parent === item.id);
+    return (await this.listItems(item.account, item.listId)).some((other) => other.parent === item.id);
+  }
+
+  /**
+   * What changes with a task completed or reopened, as in Google Tasks: its
+   * open subtasks when it is completed, the completed task it is under when it
+   * is reopened. Its list as the Tasks view has it, else read from Google, so
+   * the result is the same however little the panel has loaded. A task whose
+   * parent is known needs no read when it can have none: a subtask has no
+   * subtasks, a task at the top is under none.
+   */
+  private async relatives(task: { account: string; listId: string; id: string; parent?: string | null }, completed: boolean): Promise<GoogleTaskItem[]> {
+    if (task.parent !== undefined && (completed ? task.parent !== null : task.parent === null)) return [];
+    const items = await this.listItems(task.account, task.listId);
+    if (completed) return items.filter((other) => other.parent === task.id && !other.completed);
+    const parent = task.parent ?? items.find((other) => other.id === task.id)?.parent ?? null;
+    return parent ? items.filter((other) => other.id === parent && other.completed) : [];
   }
 
   /**
@@ -838,14 +866,16 @@ export class GoogleStore {
   }
 
   /**
-   * Complete or reopen a task. As in Google Tasks, completing a task completes
-   * its subtasks, and reopening a subtask reopens the task it is under; a
-   * repeating task's next occurrence appears.
+   * Complete or reopen a task, wherever it is done (the Tasks view, the
+   * calendar, Starred). As in Google Tasks, completing a task completes its
+   * subtasks, and reopening a subtask reopens the task it is under, read from
+   * Google when its list is not loaded (`relatives`). Those are written
+   * first, so Google never has an open subtask under a completed task, even
+   * when a write fails half way. A repeating task's next occurrence appears.
    */
   async completeListTask(item: GoogleTaskItem, completed: boolean): Promise<void> {
-    const items = this.view.board[listKey(item.account, item.listId)]?.items ?? [item];
-    const related = completed ? items.filter((other) => other.parent === item.id && !other.completed) : items.filter((other) => other.id === item.parent && other.completed);
-    const answers = await this.writeListTask([item, ...related], () => ({ completed }), true);
+    const related = await this.relatives(item, completed);
+    const answers = await this.writeListTask([...related, item], () => ({ completed }), true);
     if (completed) await this.makeNextOccurrences(answers);
     void this.sync();
   }
@@ -966,6 +996,8 @@ export class GoogleStore {
       return answers;
     } catch (error) {
       if (before) this.patchBoard(key, before);
+      // Refused half way: the list as Google has it now.
+      if (before && answers.length) void this.loadBoard(first.account, first.listId);
       throw error;
     }
   }

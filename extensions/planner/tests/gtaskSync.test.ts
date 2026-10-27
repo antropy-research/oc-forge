@@ -644,3 +644,131 @@ describe('an edit Google refuses leaves everything as it was; Save again applies
     expect([world.tasks.get('gt1')!.due, keptFor(fake.state(), { account: ME, id: 'gt1' })?.time]).toEqual(['2026-10-27', 840]);
   });
 });
+
+describe('completing a task completes its subtasks, and reopening a subtask reopens its task, however cold the panel is', () => {
+  const trip = () =>
+    tasksWorld([
+      item({ id: 'p', title: 'Plan the trip', due: '2026-10-29' }),
+      item({ id: 'c1', title: 'Book the hotel', due: null, parent: 'p' }),
+      item({ id: 'c2', title: 'Pack the bags', due: null, parent: 'p' }),
+      item({ id: 'c3', title: 'Renew the passport', due: null, parent: 'p', completed: true }),
+      item({ id: 'x', title: 'Send the report' }),
+    ]);
+  const done = (world: ReturnType<typeof trip>) => ['p', 'c1', 'c2', 'c3', 'x'].map((id) => world.tasks.get(id)!.completed);
+  const patched = (fake: ReturnType<typeof fakeClient>) => fake.calls.filter((call) => call.method === 'PATCH').map((call) => `${call.body.id}:${call.body.completed}`);
+  const reads = (fake: ReturnType<typeof fakeClient>) => fake.calls.filter((call) => call.method === 'GET' && call.path.startsWith('/google/tasks/all')).length;
+
+  test('from the calendar of a fresh panel (no list loaded): its subtasks are read from Google and completed first, then the task', async () => {
+    const world = trip();
+    const fake = fakeClient(emptyState(), world.answer);
+    await new GoogleStore(host, fake.client, 'page').completeListTask(world.tasks.get('p')!, true);
+    expect(done(world)).toEqual([true, true, true, true, false]);
+    expect(reads(fake)).toBe(1);
+    // The one done already is left alone; no open subtask is ever under a completed task.
+    expect(patched(fake)).toEqual(['c1:true', 'c2:true', 'p:true']);
+  });
+
+  test('reopening a subtask of a completed task reopens that task first, cold or warm; a subtask completed, or a task at the top reopened, reads nothing', async () => {
+    const world = trip();
+    for (const id of ['p', 'c1', 'c2']) world.tasks.set(id, { ...world.tasks.get(id)!, completed: true });
+    const cold = fakeClient(emptyState(), world.answer);
+    await new GoogleStore(host, cold.client, 'page').completeListTask(world.tasks.get('c1')!, false);
+    expect(done(world)).toEqual([false, false, true, true, false]);
+    expect(patched(cold)).toEqual(['p:false', 'c1:false']);
+    const warm = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, warm.client, 'page');
+    await store.completeListTask(world.tasks.get('c2')!, false);
+    expect(patched(warm)).toEqual(['c2:false']);
+    await store.loadBoard(ME, 'L1');
+    await store.completeListTask(world.tasks.get('p')!, true);
+    expect(done(world)).toEqual([true, true, true, true, false]);
+    // The list as the Tasks view read it served, and shows the result.
+    expect(reads(warm)).toBe(2);
+    expect(store.getView().board[listKey(ME, 'L1')]!.items.filter((task) => task.completed).map((task) => task.id).sort()).toEqual(['c1', 'c2', 'c3', 'p']);
+    const quiet = fakeClient(emptyState(), world.answer);
+    const other = new GoogleStore(host, quiet.client, 'page');
+    await other.completeListTask(world.tasks.get('p')!, false);
+    await other.completeListTask(world.tasks.get('c1')!, true);
+    expect(reads(quiet)).toBe(0);
+  });
+
+  test('a linked Planner task completed (Home, Today, Focus) completes its Google task’s subtasks; one reopened under a completed task reopens it', async () => {
+    const world = trip();
+    const linked = (id: string, taskId: string) => ev({ type: 'task.created', task: taskFromGoogleTask(world.tasks.get(id)!, taskId, { kind: 'day', date: '2026-10-29' }, 1) });
+    const fake = fakeClient(foldEvents([linked('p', 't1'), linked('c1', 't2')]), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    expect(await store.writeTask(fake.state().tasks.t1!, { completed: true })).toBe(true);
+    expect(done(world)).toEqual([true, true, true, true, false]);
+    expect(patched(fake)).toEqual(['c1:true', 'c2:true', 'p:true']);
+    // The Planner task planning a subtask takes the completion too.
+    expect(fake.state().tasks.t2!.completedAt).toBeTruthy();
+    expect(await store.writeTask(fake.state().tasks.t2!, { completed: false })).toBe(true);
+    expect(done(world)).toEqual([false, false, true, true, false]);
+    expect(patched(fake).slice(-2)).toEqual(['p:false', 'c1:false']);
+  });
+
+  test('refused half way: the task stays open (never completed over an open subtask), and a linked Planner task stays open too', async () => {
+    const world = trip();
+    const fake = fakeClient(emptyState(), world.answer);
+    world.refuse((method, _path, body) => method === 'PATCH' && body.id === 'c2');
+    await expect(new GoogleStore(host, fake.client, 'page').completeListTask(world.tasks.get('p')!, true)).rejects.toThrow('Backend Error');
+    expect(done(world)).toEqual([false, true, false, true, false]);
+    const start = applyEvents(foldEvents([ev({ type: 'task.created', task: taskFromGoogleTask(world.tasks.get('p')!, 't1', { kind: 'day', date: '2026-10-29' }, 1) })]), [ev({ type: 'task.completed', taskId: 't1', on: '2026-10-26' })]);
+    const linked = fakeClient(start, world.answer);
+    world.refuse((method, _path, body) => method === 'PATCH' && body.id === 'c2');
+    expect(await new GoogleStore(host, linked.client, 'page').writeTask(linked.state().tasks.t1!, { completed: true })).toBe(false);
+    expect(world.tasks.get('p')!.completed).toBe(false);
+    expect(linked.state().tasks.t1!.completedAt).toBeNull();
+  });
+});
+
+describe('a repeating task and subtasks never go together, as in Google Tasks', () => {
+  const repeating = () => foldEvents([ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 1, next: null } } })]);
+  const row = (id: string, depth: 0 | 1 = 0, parent: string | null = null) => ({ item: item({ id, parent }), depth, children: 0 });
+
+  test('dragged right under a repeating task, a task stays at the top level; a repeating task does not nest', () => {
+    const repeats = (id: string) => id === 'gt1';
+    const rows = [row('gt1'), row('gt2'), row('gt3')];
+    expect(dropTarget(rows, 'gt3', 1, true, repeats)).toEqual({ parent: null, previous: 'gt1' });
+    expect(dropTarget(rows, 'gt3', 2, true, repeats)).toEqual({ parent: 'gt2', previous: null });
+    expect(dropTarget(rows, 'gt1', 2, true, repeats)).toEqual({ parent: null, previous: 'gt3' });
+    expect(dropTarget(rows, 'gt3', 1, true)).toEqual({ parent: 'gt1', previous: null });
+  });
+
+  test('a subtask under a repeating task, a repeating task under another, or a repeat on a task with subtasks: refused before anything changes', async () => {
+    const fake = fakeClient(repeating(), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ id: 'gt2' }), item({ id: 'gt3', parent: 'gt2' })], complete: true } : {}));
+    const store = new GoogleStore(host, fake.client, 'page');
+    const refused = (work: Promise<unknown>) => work.then(() => null, (error: Error) => error.message);
+    expect(await refused(store.addListTask(ME, 'L1', { title: 'Child', parent: 'gt1' }))).toBe(REPEATING_NO_SUBTASKS);
+    expect(await refused(store.moveListTask(item({ id: 'gt2' }), { parent: 'gt1', previous: null }))).toBe(REPEATING_NO_SUBTASKS);
+    expect(await refused(store.moveListTask(item({ id: 'gt1' }), { parent: 'gt2', previous: null }))).toBe(REPEATING_NOT_SUBTASK);
+    const daily = { title: 'Send the report', notes: 'To Ann', due: '2026-10-26', kept: { time: null, duration: null, deadline: null, rule: 'RRULE:FREQ=DAILY' } };
+    expect(await refused(store.saveListTask(item({ id: 'gt2' }), daily))).toBe(SUBTASKS_NO_REPEAT);
+    expect(await refused(store.saveListTask(item({ id: 'gt3', parent: 'gt2' }), daily))).toBe(SUBTASK_NO_REPEAT);
+    // Nothing reached Google but a read of the list, and nothing was kept.
+    expect(fake.calls.every((call) => call.method === 'GET')).toBe(true);
+    expect(fake.dispatched).toEqual([]);
+    // A task without subtasks still takes a repeat, and a repeating one keeps its series on other edits.
+    await store.saveListTask(item({ id: 'gt1' }), { ...daily, title: 'Send the full report' });
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.rule).toBe('RRULE:FREQ=DAILY');
+  });
+});
+
+describe('calendar titles fit their block, as Google Calendar fits them', () => {
+  test('one line reads "Title, 10am"; taller blocks give the title every whole line, the time the one after it', () => {
+    // A 30-minute block at 48 px an hour: 22 px, less its padding.
+    expect(blockText(18, 14)).toEqual({ inline: true, lines: 1 });
+    expect(blockText(6, 14)).toEqual({ inline: true, lines: 1 });
+    // 45 minutes, an hour, two hours.
+    expect(blockText(30, 14)).toEqual({ inline: false, lines: 2 });
+    expect(blockText(42, 14)).toEqual({ inline: false, lines: 3 });
+    expect(blockText(90, 14)).toEqual({ inline: false, lines: 6 });
+  });
+});
+
+describe('the service reads tasks as the Planner shows them', () => {
+  test('toTaskItem keeps what a link compares against', () => {
+    const read = toTaskItem({ id: 'gt1', title: 'Send the report', notes: 'To Ann', due: '2026-10-26T00:00:00.000Z', status: 'needsAction', updated: '2026-10-26T15:00:00.000Z' }, ME, 'L1')!;
+    expect(gtaskSource(read)).toMatchObject({ title: 'Send the report', notes: 'To Ann', due: '2026-10-26', listId: 'L1' });
+  });
+});
