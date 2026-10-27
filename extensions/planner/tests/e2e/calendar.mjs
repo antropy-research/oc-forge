@@ -315,14 +315,27 @@ try {
     copied && Date.parse(copied.body.start.dateTime) === at(today, 14 * 60) && Date.parse(copied.body.end.dateTime) === at(today, 15 * 60) && copied.body.location === 'Room 4' && copied.body.attendees?.map((guest) => guest.email).join() === 'ann@example.com,bo@example.com' && copied.body.description?.includes('Goals') && copied.body.reminders?.overrides?.[0]?.minutes === 10 && copied.query.sendUpdates === 'none' && copied.query.conferenceDataVersion === '1',
     JSON.stringify({ body: copied?.body, query: copied?.query }),
   );
-  // And away again, for the rest of the journey.
+  // Delete it; "Event deleted · Undo" brings it back, as in Google Calendar. Then away again, for the rest of the journey.
   // Google's copy, not the one shown while saving, can be deleted.
   const copyChip = f.locator('.grid-item.is-event.is-movable', { hasText: 'Quarter planning copy' });
-  await copyChip.waitFor({ timeout: 15_000 });
-  await copyChip.click();
-  await f.getByRole('dialog', { name: 'Event: Quarter planning copy' }).getByRole('button', { name: 'Delete event' }).click();
-  await f.getByRole('alertdialog', { name: /^Send cancellation emails/ }).getByRole('button', { name: "Don't send" }).click();
-  await until(async () => (await f.locator('.grid-item.is-event', { hasText: 'Quarter planning copy' }).count()) === 0);
+  const deleteCopy = async () => {
+    await copyChip.waitFor({ timeout: 15_000 });
+    await copyChip.click();
+    await f.getByRole('dialog', { name: 'Event: Quarter planning copy' }).getByRole('button', { name: 'Delete event' }).click();
+    await f.getByRole('alertdialog', { name: /^Send cancellation emails/ }).getByRole('button', { name: "Don't send" }).click();
+    return until(async () => (await f.locator('.grid-item.is-event', { hasText: 'Quarter planning copy' }).count()) === 0);
+  };
+  await deleteCopy();
+  const copies = () => requests('POST', EVENTS).filter((request) => request.body?.summary === 'Quarter planning copy');
+  await f.locator('.gcal-snack', { hasText: 'Event deleted' }).getByRole('button', { name: 'Undo' }).click();
+  const back = await until(async () => (await copyChip.count()) === 1, 15_000);
+  check(
+    '"Event deleted · Undo" puts the event back in Google, its guests told as they were of the deletion (not)',
+    Boolean(back) && copies().length === 2 && copies()[1].query.sendUpdates === 'none' && copies()[1].body.attendees?.length === 2 && copies()[1].body.location === 'Room 4',
+    JSON.stringify(copies().map((request) => ({ query: request.query, attendees: request.body?.attendees?.length }))),
+  );
+  await shot('cal-11c-undo-delete');
+  await deleteCopy();
 
   // An all-day event dragged to another day keeps its length.
   const offsiteStart = addDays(today, 2);

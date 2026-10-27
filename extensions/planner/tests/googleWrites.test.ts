@@ -128,7 +128,57 @@ describe('Google Calendar events', () => {
     await data.deleteEvent(ME, 'primary', instance.id, 'following', 'all');
     expect(writes()).toEqual([{ method: 'PATCH', path: `${EVENTS}/wk`, query: { sendUpdates: 'all' }, body: { recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261026T155959Z'] } }]);
     const gone = google(() => ({ status: 410, body: { error: { message: 'Resource has been deleted' } } }));
-    expect(await gone.data.deleteEvent(ME, 'primary', 'old', 'this', 'none')).toBe(0);
+    expect(await gone.data.deleteEvent(ME, 'primary', 'old', 'this', 'none')).toEqual({ requests: 0, undo: null });
+  });
+
+  test('one deleted event can be put back ("Undo"): written back as confirmed, or copied once Google no longer has it', async () => {
+    const meeting = {
+      id: 'ev9', etag: '"1"', htmlLink: 'https://www.google.com/calendar/event?eid=9', iCalUID: 'ev9@google.com', status: 'confirmed', created: '2026-10-01T00:00:00Z', updated: '2026-10-02T00:00:00Z',
+      creator: { email: ME, self: true }, organizer: { email: ME, self: true }, summary: 'Design review', description: '<b>Agenda</b>', location: 'Room 4',
+      start: { dateTime: '2026-10-27T10:00:00-07:00', timeZone: LA }, end: { dateTime: '2026-10-27T11:00:00-07:00', timeZone: LA },
+      attendees: [{ email: ME, self: true, organizer: true, responseStatus: 'accepted' }, { email: 'ann@x.com', responseStatus: 'accepted' }],
+      reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 10 }] },
+      conferenceData: { conferenceId: 'abc-defg-hij', conferenceSolution: { key: { type: 'hangoutsMeet' } }, entryPoints: [{ entryPointType: 'video', uri: 'https://meet.google.com/abc-defg-hij' }] },
+    };
+    const restored = { summary: meeting.summary, description: meeting.description, location: meeting.location, start: meeting.start, end: meeting.end, attendees: meeting.attendees, reminders: meeting.reminders, conferenceData: meeting.conferenceData };
+    const answer = (putStatus: number) => (call: Call): Reply => calendarList(call) ?? (call.method === 'GET' ? ok(meeting) : call.method === 'PUT' ? { status: putStatus, body: putStatus === 200 ? meeting : { error: { message: 'Not Found' } } } : call.method === 'POST' ? ok({ ...meeting, id: 'copy' }) : { status: 204 });
+
+    const kept = google(answer(200));
+    const deleted = await kept.data.deleteEvent(ME, 'primary', 'ev9', 'this', 'all');
+    expect(deleted.requests).toBe(1);
+    expect(deleted.undo).toBeString();
+    await kept.data.restoreEvent(deleted.undo!);
+    // Google's bookkeeping (id, etag, links, organizer…) stays out; the guests hear of it as they heard of the deletion.
+    expect(kept.writes().map((call) => `${call.method} ${call.path}`)).toEqual([`DELETE ${EVENTS}/ev9`, `PUT ${EVENTS}/ev9`]);
+    expect(kept.writes()[1]).toMatchObject({ query: { sendUpdates: 'all', conferenceDataVersion: '1' }, body: { ...restored, status: 'confirmed' } });
+    expect(Object.keys(kept.writes()[1]!.body as object).sort()).toEqual([...Object.keys(restored), 'status'].sort());
+    // Once only.
+    const again = await kept.data.restoreEvent(deleted.undo!).catch((error) => error);
+    expect([again instanceof GoogleError, (again as GoogleError).status]).toEqual([true, 410]);
+
+    const lost = google(answer(404));
+    await lost.data.restoreEvent((await lost.data.deleteEvent(ME, 'primary', 'ev9', 'this', 'none')).undo!);
+    expect(lost.writes().map((call) => `${call.method} ${call.path}`)).toEqual([`DELETE ${EVENTS}/ev9`, `PUT ${EVENTS}/ev9`, `POST ${EVENTS}`]);
+    expect(lost.writes()[2]).toMatchObject({ query: { sendUpdates: 'none' }, body: restored });
+  });
+
+  test('a deleted occurrence comes back confirmed; a deleted series, or its rest, cannot be undone here; nor can an old deletion', async () => {
+    const { data, writes } = withSeries();
+    const one = await data.deleteEvent(ME, 'primary', instance.id, 'this', 'none');
+    await data.restoreEvent(one.undo!);
+    expect(writes().slice(-1)).toEqual([{ method: 'PATCH', path: `${EVENTS}/${instance.id}`, query: { sendUpdates: 'none' }, body: { status: 'confirmed' } }]);
+    expect((await data.deleteEvent(ME, 'primary', instance.id, 'all', 'none')).undo).toBeNull();
+    expect((await data.deleteEvent(ME, 'primary', instance.id, 'following', 'none')).undo).toBeNull();
+
+    const later = await data.deleteEvent(ME, 'primary', instance.id, 'this', 'none');
+    const now = Date.now;
+    Date.now = () => now() + 11 * 60_000;
+    try {
+      const old = await data.restoreEvent(later.undo!).catch((error) => error);
+      expect([old instanceof GoogleError, (old as GoogleError).status]).toEqual([true, 410]);
+    } finally {
+      Date.now = now;
+    }
   });
 
   test('answering an invitation patches my own answer, and the organizer hears it', async () => {

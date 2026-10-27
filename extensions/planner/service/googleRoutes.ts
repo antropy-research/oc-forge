@@ -62,7 +62,17 @@ export const googleWriteRoute = async (req: http.IncomingMessage, url: URL, ctx:
     const [account, calendar, id, scope] = [query('account'), query('calendar'), query('id'), scopeOf(query('scope') ?? undefined)];
     if (!isEmail(account) || !isId(calendar) || !isId(id) || !scope) return bad('account, calendar, id and a scope are required');
     try {
-      return ok({ requests: await ctx.data.deleteEvent(account, calendar, id, scope, sendOf(query('sendUpdates'))) });
+      return ok(await ctx.data.deleteEvent(account, calendar, id, scope, sendOf(query('sendUpdates'))));
+    } finally {
+      ctx.changed('calendar');
+    }
+  }
+  if (path === '/google/events/restore' && method === 'POST') {
+    const input = (await body()) as { token?: unknown };
+    if (!isId(input?.token)) return bad('token is required');
+    try {
+      await ctx.data.restoreEvent(input.token as string);
+      return ok({ restored: true });
     } finally {
       ctx.changed('calendar');
     }

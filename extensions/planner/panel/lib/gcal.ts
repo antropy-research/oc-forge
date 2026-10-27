@@ -243,8 +243,11 @@ export const createEvent = (client: PlannerClient, account: string, calendarId: 
 export const updateEvent = (client: PlannerClient, ref: GoogleEventRef, event: EventInput, scope: EditScope, sendUpdates: 'all' | 'none'): Promise<unknown> =>
   client.call('PATCH', '/google/events', { account: ref.account, calendarId: ref.calendarId, eventId: ref.eventId, event, scope, sendUpdates });
 
-export const deleteEvent = (client: PlannerClient, ref: GoogleEventRef, scope: EditScope, sendUpdates: 'all' | 'none'): Promise<unknown> =>
+/** Delete; `undo` is a token that puts one deleted event or occurrence back for a while (a series has none). */
+export const deleteEvent = (client: PlannerClient, ref: GoogleEventRef, scope: EditScope, sendUpdates: 'all' | 'none'): Promise<{ requests: number; undo: string | null }> =>
   client.call('DELETE', `/google/events?${q({ account: ref.account, calendar: ref.calendarId, id: ref.eventId, scope, sendUpdates })}`);
+
+export const restoreEvent = (client: PlannerClient, token: string): Promise<unknown> => client.call('POST', '/google/events/restore', { token });
 
 export const respondToEvent = (client: PlannerClient, ref: GoogleEventRef, response: GoogleResponse, scope: 'this' | 'all'): Promise<unknown> =>
   client.call('POST', '/google/events/respond', { account: ref.account, calendarId: ref.calendarId, eventId: ref.eventId, response, scope });
@@ -328,9 +331,23 @@ export const removeEvent = async (client: PlannerClient, event: CalendarEvent): 
   if (!send) return false;
   calendarUi.hold(event.id, { gone: true });
   try {
-    await deleteEvent(client, ref, scope, send);
+    const { undo } = await deleteEvent(client, ref, scope, send);
     calendarUi.confirm([event.id]);
-    calendarUi.snack(scope === 'this' ? 'Event deleted' : 'Events deleted');
+    // "Event deleted · Undo", as Google Calendar offers it for one event or occurrence.
+    calendarUi.snack(
+      scope === 'this' ? 'Event deleted' : 'Events deleted',
+      undo
+        ? async () => {
+            try {
+              await restoreEvent(client, undo);
+              calendarUi.drop([event.id]);
+              calendarUi.refresh();
+            } catch (error) {
+              client.notify(`Google Calendar did not put "${event.title}" back: ${messageOf(error)}`);
+            }
+          }
+        : null,
+    );
     return true;
   } catch (error) {
     calendarUi.drop([event.id]);

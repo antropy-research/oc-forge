@@ -127,7 +127,7 @@ listed; otherwise it waits a moment.
 Google's own APIs set further limits: Google Tasks has no due time and no stars for other
 apps (a task shows on its day in the all-day row), and Google Calendar's Year view,
 appointment schedules, working location and the search box are not part of the Planner.
-Undo covers moving or resizing one event; a deleted event or a changed series has none.
+Undo covers moving, resizing or deleting one event or occurrence (for ten minutes); a changed or deleted series has none.
 
 ## Develop
 

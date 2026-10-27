@@ -3632,10 +3632,13 @@ var toMailItem = (raw, account) => {
     url: gmailUrl(account, raw.threadId)
   };
 };
+var UNDO_MS = 10 * 60000;
+var RESTORED_FIELDS = ["summary", "description", "location", "colorId", "start", "end", "recurrence", "attendees", "reminders", "transparency", "visibility", "conferenceData", "guestsCanInviteOthers", "guestsCanModify", "guestsCanSeeOtherGuests", "anyoneCanAddSelf", "source", "extendedProperties"];
 
 class GoogleData {
   accounts;
   roles = new Map;
+  deleted = new Map;
   constructor(accounts) {
     this.accounts = accounts;
   }
@@ -3816,10 +3819,43 @@ ${calendarId}`;
       found = await this.withSeries(account, calendarId, eventId);
     } catch (error) {
       if (isGone(error))
-        return 0;
+        return { requests: 0, undo: null };
       throw error;
     }
-    return this.run(account, calendarId, planDelete({ scope, ...found }), sendUpdates);
+    const requests = await this.run(account, calendarId, planDelete({ scope, ...found }), sendUpdates);
+    if (found.instance.recurringEventId && scope !== "this")
+      return { requests, undo: null };
+    const now = Date.now();
+    for (const [token, entry] of this.deleted)
+      if (now - entry.at > UNDO_MS)
+        this.deleted.delete(token);
+    const undo = newId();
+    this.deleted.set(undo, { account, calendarId, resource: found.instance, sendUpdates, at: now });
+    return { requests, undo };
+  }
+  async restoreEvent(token) {
+    const entry = this.deleted.get(token);
+    this.deleted.delete(token);
+    if (!entry || Date.now() - entry.at > UNDO_MS)
+      throw new GoogleError(410, "This deletion can no longer be undone");
+    const { account, calendarId, resource, sendUpdates } = entry;
+    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
+    if (resource.recurringEventId) {
+      await this.accounts.request(account, "PATCH", `${base}/${enc(resource.id)}?${new URLSearchParams({ sendUpdates })}`, { status: "confirmed" });
+      return;
+    }
+    const body = {};
+    for (const field of RESTORED_FIELDS)
+      if (resource[field] !== undefined)
+        body[field] = resource[field];
+    const query = new URLSearchParams({ sendUpdates, ...body.conferenceData ? { conferenceDataVersion: "1" } : {} });
+    try {
+      await this.accounts.request(account, "PUT", `${base}/${enc(resource.id)}?${query}`, { ...body, status: "confirmed" });
+    } catch (error) {
+      if (!(error instanceof GoogleError) || error.status < 400 || error.status >= 500)
+        throw error;
+      await this.accounts.request(account, "POST", `${base}?${query}`, body);
+    }
   }
   async respond(account, calendarId, eventId, response, scope) {
     const found = await this.withSeries(account, calendarId, eventId);
@@ -4262,7 +4298,18 @@ var googleWriteRoute = async (req, url, ctx) => {
     if (!isEmail(account) || !isId2(calendar) || !isId2(id) || !scope)
       return bad("account, calendar, id and a scope are required");
     try {
-      return ok({ requests: await ctx.data.deleteEvent(account, calendar, id, scope, sendOf(query("sendUpdates"))) });
+      return ok(await ctx.data.deleteEvent(account, calendar, id, scope, sendOf(query("sendUpdates"))));
+    } finally {
+      ctx.changed("calendar");
+    }
+  }
+  if (path === "/google/events/restore" && method === "POST") {
+    const input = await body();
+    if (!isId2(input?.token))
+      return bad("token is required");
+    try {
+      await ctx.data.restoreEvent(input.token);
+      return ok({ restored: true });
     } finally {
       ctx.changed("calendar");
     }

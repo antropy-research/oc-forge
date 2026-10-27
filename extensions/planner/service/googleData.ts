@@ -134,9 +134,25 @@ export type SendUpdates = 'all' | 'none';
 
 type Identified = RawGoogleEvent & { id: string };
 
+/** How long a deleted event can be put back ("Undo"); Google Calendar's own offer is shorter. */
+const UNDO_MS = 10 * 60_000;
+/** What a restored or copied event keeps of the deleted one: what can be written, not Google's own bookkeeping. */
+const RESTORED_FIELDS = ['summary', 'description', 'location', 'colorId', 'start', 'end', 'recurrence', 'attendees', 'reminders', 'transparency', 'visibility', 'conferenceData', 'guestsCanInviteOthers', 'guestsCanModify', 'guestsCanSeeOtherGuests', 'anyoneCanAddSelf', 'source', 'extendedProperties'] as const;
+
+/** A deleted event, kept for "Undo": as Google had it just before. */
+interface Deleted {
+  account: string;
+  calendarId: string;
+  resource: Identified;
+  sendUpdates: SendUpdates;
+  at: number;
+}
+
 export class GoogleData {
   /** Each calendar's access role, as last read, for telling what may be changed. */
   private readonly roles = new Map<string, string>();
+  /** Single events and occurrences deleted lately, by their undo token. */
+  private readonly deleted = new Map<string, Deleted>();
 
   constructor(private readonly accounts: GoogleAccounts) {}
 
@@ -324,16 +340,55 @@ export class GoogleData {
     return this.run(account, calendarId, plan, sendUpdates);
   }
 
-  async deleteEvent(account: string, calendarId: string, eventId: string, scope: EditScope, sendUpdates: SendUpdates): Promise<number> {
+  /**
+   * Delete an event, or with `scope` this occurrence, it and the ones after it,
+   * or the whole series. One event or one occurrence can be put back for a
+   * while (`undo`, a token for `restoreEvent`), as Google Calendar's "Undo" does.
+   */
+  async deleteEvent(account: string, calendarId: string, eventId: string, scope: EditScope, sendUpdates: SendUpdates): Promise<{ requests: number; undo: string | null }> {
     let found: { instance: Identified; series: Identified | null };
     try {
       found = await this.withSeries(account, calendarId, eventId);
     } catch (error) {
       // Deleted already, here or in Google Calendar.
-      if (isGone(error)) return 0;
+      if (isGone(error)) return { requests: 0, undo: null };
       throw error;
     }
-    return this.run(account, calendarId, planDelete({ scope, ...found }), sendUpdates);
+    const requests = await this.run(account, calendarId, planDelete({ scope, ...found }), sendUpdates);
+    if (found.instance.recurringEventId && scope !== 'this') return { requests, undo: null };
+    const now = Date.now();
+    for (const [token, entry] of this.deleted) if (now - entry.at > UNDO_MS) this.deleted.delete(token);
+    const undo = newId();
+    this.deleted.set(undo, { account, calendarId, resource: found.instance, sendUpdates, at: now });
+    return { requests, undo };
+  }
+
+  /**
+   * Put back an event deleted here a moment ago. A deleted occurrence is a
+   * cancelled exception of its series: confirming it brings it back. A deleted
+   * event is written back as confirmed, which Google allows while it keeps the
+   * event; once it no longer does, a copy is made. Guests hear of it as they
+   * heard of the deletion.
+   */
+  async restoreEvent(token: string): Promise<void> {
+    const entry = this.deleted.get(token);
+    this.deleted.delete(token);
+    if (!entry || Date.now() - entry.at > UNDO_MS) throw new GoogleError(410, 'This deletion can no longer be undone');
+    const { account, calendarId, resource, sendUpdates } = entry;
+    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
+    if (resource.recurringEventId) {
+      await this.accounts.request(account, 'PATCH', `${base}/${enc(resource.id)}?${new URLSearchParams({ sendUpdates })}`, { status: 'confirmed' });
+      return;
+    }
+    const body: Record<string, unknown> = {};
+    for (const field of RESTORED_FIELDS) if (resource[field as keyof RawGoogleEvent] !== undefined) body[field] = resource[field as keyof RawGoogleEvent];
+    const query = new URLSearchParams({ sendUpdates, ...(body.conferenceData ? { conferenceDataVersion: '1' } : {}) });
+    try {
+      await this.accounts.request(account, 'PUT', `${base}/${enc(resource.id)}?${query}`, { ...body, status: 'confirmed' });
+    } catch (error) {
+      if (!(error instanceof GoogleError) || error.status < 400 || error.status >= 500) throw error;
+      await this.accounts.request(account, 'POST', `${base}?${query}`, body);
+    }
   }
 
   /** Answer an invitation, for this occurrence or the whole series. */
