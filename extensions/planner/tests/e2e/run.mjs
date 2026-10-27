@@ -103,7 +103,10 @@ await context.route((url) => new URL(url).pathname === '/api/guests/oc-forge-pla
 const page = await context.newPage();
 // OpenChamber's own toasts (an OpenCode update offer) can cover the Planner's buttons.
 await page.addLocatorHandler(page.getByText('OpenCode update'), async () => {
-  await page.getByRole('button', { name: 'Dismiss' }).first().click({ timeout: 2000 }).catch(() => {});
+  // The toast's own Close (an older host had Dismiss); never its Update, which would change the container.
+  await page.locator('li.toast', { hasText: 'OpenCode update' }).getByRole('button', { name: 'Close', exact: true }).first().click({ timeout: 2000 })
+    .catch(() => page.getByRole('button', { name: 'Dismiss' }).first().click({ timeout: 2000 }))
+    .catch(() => {});
 });
 const problems = [];
 page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
@@ -116,6 +119,9 @@ page.on('console', (message) => {
 });
 
 const openPlanner = async () => {
+  // Never reload while the Planner says "Saving…": a change still on its way to the service would be lost, as it
+  // would for anyone reloading then. A slow answer from the service made "survives a reload" checks flaky.
+  await page.frameLocator('.inset-0 > iframe[title="Planner"]').locator('.save-state.is-saving').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => {});
   await page.goto(`${base}/`, { waitUntil: 'load' });
   // The full page sits in the host's inset overlay; the Work Status section is a separate frame.
   // OpenChamber 2.5 serves extension frames from /api/guest-files/<grant>/; their title is the panel name.
@@ -284,6 +290,12 @@ try {
     }
     return latest;
   };
+  // The service's state once the panel has nothing left to save ("Saved"): what a check reads right after a change
+  // in the UI, which the panel shows at once and the service has once it answers the panel's command.
+  const savedState = async () => {
+    await frame.locator('.save-state.is-saving').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => {});
+    return serviceState();
+  };
   const snapshot = await serviceState();
   const zone = snapshot.state?.settings?.timezone ?? 'UTC';
   const todayKey = snapshot.today;
@@ -337,7 +349,7 @@ try {
   await page.mouse.move(box.x + box.width / 2, box.y + box.height - 2 + 48, { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(800);
-  const afterResize = await serviceState();
+  const afterResize = await savedState();
   const lowTask = Object.values(afterResize.state.tasks).find((task) => task.title === `${run} sort-low`);
   check('resizing the session updates planned time', lowTask?.plannedMinutes === 90, `planned ${lowTask?.plannedMinutes}`);
 
@@ -349,7 +361,7 @@ try {
   await autoCard.getByRole('button', { name: 'Task actions' }).click();
   await autoCard.getByRole('menuitem', { name: 'Timebox automatically' }).click();
   await page.waitForTimeout(1500);
-  const afterAuto = await serviceState();
+  const afterAuto = await savedState();
   const autoTask = Object.values(afterAuto.state.tasks).find((task) => task.title === `${run} auto`);
   const autoBlock = Object.values(afterAuto.state.blocks).find((block) => block.taskId === autoTask?.id);
   const expected = localToUtc(10 * 60, tomorrowKey).replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/, '$1-$2-$3T$4:$5:$6.000Z');
@@ -371,11 +383,11 @@ try {
     await page.mouse.move(laneBox.x + laneBox.width / 2, blockBox.y + blockBox.height / 2, { steps: 8 });
     await page.mouse.up();
     await page.waitForTimeout(800);
-    const moved = Object.values((await serviceState()).state.tasks).find((task) => task.title === `${run} sort-low`);
+    const moved = Object.values((await savedState()).state.tasks).find((task) => task.title === `${run} sort-low`);
     check('moving a session to the next day moves its task there', moved?.placement?.date === nextKey, JSON.stringify(moved?.placement));
     await frame.getByRole('status').filter({ hasText: 'Session moved' }).getByRole('button', { name: 'Undo' }).click();
     await page.waitForTimeout(800);
-    const back = Object.values((await serviceState()).state.tasks).find((task) => task.title === `${run} sort-low`);
+    const back = Object.values((await savedState()).state.tasks).find((task) => task.title === `${run} sort-low`);
     check('undo puts the session and task back', back?.placement?.date === todayKey, JSON.stringify(back?.placement));
   } else {
     check('moving a session to the next day moves its task there', true, 'today is the last day of the week view; skipped');
@@ -1043,7 +1055,7 @@ try {
   const boardColumns = await frame.locator('.lin-board section.board-column').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label')));
   // A board shows every priority as a column, as Linear's boards show empty columns.
   check('a saved view opens with its own layout and grouping (a board by priority)', boardColumns.join('|') === 'Urgent|High|Medium|Low|No priority', boardColumns.join('|'));
-  check("opening a view does not change the Planner's own display settings", (await serviceState()).state.settings.linearLayout === 'list');
+  check("opening a view does not change the Planner's own display settings", (await savedState()).state.settings.linearLayout === 'list');
   await shot('31-linear-view');
 
   const filterBar = frame.locator('.linear-page .lin-filters').first();
@@ -1085,7 +1097,7 @@ try {
   const assignFromRow = frame.getByRole('dialog', { name: 'Task details' }).getByRole('group', { name: 'Assign to an agent' });
   await assignFromRow.waitFor({ timeout: 10_000 });
   const rowBranch = await assignFromRow.getByRole('textbox', { name: 'Worktree branch' }).inputValue();
-  const rowTask = Object.values((await serviceState()).state.tasks).find((task) => task.title === `${run} view only bug` && !task.deletedAt);
+  const rowTask = Object.values((await savedState()).state.tasks).find((task) => task.title === `${run} view only bug` && !task.deletedAt);
   check("an issue row's Agent plans it today and opens the assignment on Linear's branch name", rowBranch === 'e2e/e2e-31' && rowTask?.placement.kind === 'day' && rowTask.source?.key === 'E2E-31', `${rowBranch} · ${JSON.stringify(rowTask?.placement ?? null)}`);
   await assignFromRow.getByRole('button', { name: 'Cancel' }).click();
   await frame.getByRole('dialog', { name: 'Task details' }).getByRole('button', { name: 'Close' }).click();
@@ -1119,7 +1131,7 @@ try {
   await firstAgent.dialog.getByRole('button', { name: 'Start agent' }).dblclick();
   await firstAgent.dialog.locator('li.run-row').first().waitFor({ timeout: 120_000 });
   await page.waitForTimeout(1500);
-  const afterStart = await serviceState();
+  const afterStart = await savedState();
   check('starting twice quickly makes one run (no duplicate dispatch)', runsOf(afterStart, agentTitle).length === 1, `${runsOf(afterStart, agentTitle).length} runs`);
   const agentRun = runsOf(afterStart, agentTitle)[0];
   check('the run keeps project, directory and session', Boolean(agentRun?.sessionId && agentRun.projectId && agentRun.directory?.endsWith('planner-demo-a')), JSON.stringify(agentRun ?? null).slice(0, 160));
@@ -1145,7 +1157,7 @@ try {
     } else if (ended.some((info) => info.finish)) check('a finished turn shows as Ready for review', false, `OpenCode finished the turn but the Planner shows: ${shown.split('\n')[0]}`);
     else console.log("INFO the dev container's free model did not finish within 3 minutes; skipped the review checks");
   }
-  check('a finished turn does not complete the task', !taskTitled(await serviceState(), agentTitle)?.completedAt);
+  check('a finished turn does not complete the task', !taskTitled(await savedState(), agentTitle)?.completedAt);
   await shot('19-agent-run');
   await firstAgent.dialog.getByRole('button', { name: 'Close' }).click();
   const sessionsResponse = await context.request.get(`${base}/api/session?directory=${encodeURIComponent(agentRun.directory)}`);
@@ -1171,7 +1183,7 @@ try {
   });
   await secondAgent.dialog.getByRole('button', { name: 'Start agent' }).click();
   await secondAgent.dialog.locator('li.run-row').first().waitFor({ timeout: 200_000 });
-  const worktreeRun = runsOf(await serviceState(), worktreeTitle)[0];
+  const worktreeRun = runsOf(await waitForState((latest) => Boolean(runsOf(latest, worktreeTitle)[0]?.worktree), 30_000), worktreeTitle)[0];
   check('an agent can work in a new worktree', worktreeRun?.worktree?.branch === branchName, JSON.stringify(worktreeRun?.worktree ?? null));
   await secondAgent.dialog.getByRole('button', { name: 'Close' }).click();
 
@@ -1214,7 +1226,8 @@ try {
   });
   await assignForm.getByRole('button', { name: 'Assign', exact: true }).click();
   await assignDialog.locator('li.run-row').first().waitFor({ timeout: 200_000 });
-  const assignedRun = runsOf(await serviceState(), assignTitle)[0];
+  // The row shows as soon as the panel has the run; the service has it once the panel's command is answered.
+  const assignedRun = runsOf(await waitForState((latest) => Boolean(runsOf(latest, assignTitle)[0]?.worktree), 30_000), assignTitle)[0];
   check('an assigned run works in a new worktree on its branch and expects a pull request', assignedRun?.worktree?.branch === assignBranch && assignedRun.wantsPr === true, JSON.stringify(assignedRun ?? null).slice(0, 200));
   await assignDialog.getByRole('button', { name: 'Close' }).click();
   fakePull = { number: 4242, url: 'https://github.com/e2e/demo/pull/4242', state: 'open', draft: false, title: assignTitle, repo: 'e2e/demo' };
@@ -1415,7 +1428,7 @@ try {
   await frame.getByRole('button', { name: 'Remove' }).click();
   await frame.getByRole('button', { name: 'Sync now' }).waitFor({ state: 'detached', timeout: 10_000 });
   execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', `rm -rf ${bare} /tmp/planner-replica`]);
-  check('the remote can be removed again', !(await serviceState()).sync?.remote);
+  check('the remote can be removed again', !(await savedState()).sync?.remote);
 
   // Parity polish: playlist times, folders leave on scheduling, subtask → task, date jump.
   await nav('Home').click();
