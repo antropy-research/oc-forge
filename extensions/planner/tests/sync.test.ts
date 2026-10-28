@@ -27,8 +27,10 @@ const replica = async (dir: string) => {
 const task = (cmd: string, id: string, title: string) => ({ cmd, type: 'task.created', task: { id, title, placement: { kind: 'day', date: '2026-10-24' }, position: 1024 } });
 
 describe('the history stays packed', () => {
-  const loose = (dir: string) => Number(/^count: (\d+)$/m.exec(execFileSync('git', ['-C', dir, 'count-objects', '-v'], { encoding: 'utf8' }))?.[1]);
-  const packs = (dir: string) => Number(/^packs: (\d+)$/m.exec(execFileSync('git', ['-C', dir, 'count-objects', '-v'], { encoding: 'utf8' }))?.[1]);
+  // Read outside the store's own git queue, so a repack may be under way: its temporary files are not news.
+  const objects = (dir: string) => execFileSync('git', ['-C', dir, 'count-objects', '-v'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const loose = (dir: string) => Number(/^count: (\d+)$/m.exec(objects(dir))?.[1]);
+  const packs = (dir: string) => Number(/^packs: (\d+)$/m.exec(objects(dir))?.[1]);
   const until = async (probe: () => boolean) => {
     for (let i = 0; i < 100 && !probe(); i++) await new Promise((resolve) => setTimeout(resolve, 50));
     return probe();
@@ -46,9 +48,10 @@ describe('the history stays packed', () => {
     // Each commit adds a few objects; past 40 they are packed at the next check.
     expect(await until(() => packs(dir) >= 1 && loose(dir) < 40)).toBe(true);
 
-    // A history left loose (as before this change) is packed when the store starts.
+    // A history left loose (as before this change) is packed when the store starts. Everything in the pack folder
+    // goes aside (newer git also writes a multi-pack-index there), then the objects come back loose.
     const saved = temp();
-    execFileSync('sh', ['-c', `mv '${dir}'/.git/objects/pack/pack-* '${saved}'/ && for p in '${saved}'/*.pack; do git -C '${dir}' unpack-objects -q < "$p"; done`]);
+    execFileSync('sh', ['-c', `mv '${dir}'/.git/objects/pack/* '${saved}'/ && for p in '${saved}'/*.pack; do git -C '${dir}' unpack-objects -q < "$p"; done`]);
     expect(packs(dir)).toBe(0);
     expect(loose(dir)).toBeGreaterThan(40);
     const restarted = new EventStore({ dir, commitDelayMs: 5, packLooseObjects: 40 });
@@ -57,7 +60,11 @@ describe('the history stays packed', () => {
     const again = new Planner(restarted, () => new Date('2026-10-24T18:00:00Z'));
     expect(Object.keys(again.state.tasks)).toHaveLength(30);
     expect(execFileSync('git', ['-C', dir, 'fsck', '--no-progress'], { encoding: 'utf8' })).toBe('');
-  });
+    // Packing runs behind the commits: let both stores finish before the folder goes.
+    await store.flush();
+    await restarted.flush();
+    // Thirty commits and two packings: a few seconds on a slow disk.
+  }, 30_000);
 });
 
 describe('remote urls', () => {
