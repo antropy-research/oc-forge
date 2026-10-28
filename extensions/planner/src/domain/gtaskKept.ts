@@ -1,13 +1,14 @@
 // What the Planner keeps for Google tasks because Google Tasks' API does not
 // let other apps read or write it: a time on the task's date (and how long it
-// takes), a deadline, a repeat rule with its series' template, and a star, as
-// Google Tasks and Google Calendar have them. Where a kept time puts a task on
-// the calendar, where its deadline and a series' upcoming occurrences show,
-// how a repeating task's next occurrence is found (without making one Google's
-// own repeat made already), and the Starred view's order. Google keeps the
-// rest: nothing kept here is written into a task's title or details.
+// takes), a deadline, a repeat rule with its series' template and its upcoming
+// occurrences changed on their own, and a star, as Google Tasks and Google
+// Calendar have them. Where a kept time puts a task on the calendar, where its
+// deadline and a series' upcoming occurrences show, how a repeating task's
+// next occurrence is found (without making one Google's own repeat made
+// already), and the Starred view's order. Google keeps the rest: nothing kept
+// here is written into a task's title or details.
 import type { CalendarEvent } from './ics.ts';
-import { googleTaskKey, type DateKey, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState } from './types.ts';
+import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState } from './types.ts';
 import { addDays, daysBetween, instantAt, monthDay, weekday, weekdayName } from './dates.ts';
 import { addMonths, compactClock, compactRange, daysInMonth } from './gcalendar.ts';
 import { parseRRule, untilDate, WEEKDAY_CODES, type RRule } from './rrule.ts';
@@ -123,6 +124,12 @@ export const nextRepeatDate = (line: string, date: DateKey, index: number): Date
 };
 
 type Repeat = NonNullable<GoogleTaskKept['repeat']>;
+type Exceptions = Record<DateKey, GoogleTaskException>;
+
+/** At most this many upcoming occurrences of one series in a range: a daily one fills a month's six weeks. */
+const UPCOMING_MAX = 62;
+/** How far a series is stepped to reach a range, so one years ahead stays quick. */
+const STEPS_MAX = 4000;
 
 /** The date the series put an occurrence on: kept since templates (a one-off change of its date leaves it), else its date. */
 export const scheduledOn = (kept: GoogleTaskKept, item: Pick<GoogleTaskItem, 'due'>): DateKey | null => kept.repeat?.on ?? item.due;
@@ -148,13 +155,103 @@ export const seriesTemplate = (kept: GoogleTaskKept, item: Pick<GoogleTaskItem, 
   return on ? templateOf(item, kept, on) : null;
 };
 
-/** What is kept for the occurrence a series makes on `date` after `repeat`'s: the template's time and deadline, and the series. */
-export const nextOccurrenceKept = (repeat: Repeat, template: GoogleTaskTemplate, date: DateKey): GoogleTaskKeptPatch => ({
-  time: template.time,
-  duration: template.duration,
-  deadline: template.deadline === null ? null : addDays(date, template.deadline),
-  repeat: { rule: repeat.rule, seriesId: repeat.seriesId, index: repeat.index + 1, next: null, on: date, template },
+/** What one occurrence of a series is: its template on the date the series puts it on, with what was changed for it alone. */
+export interface OccurrenceValues {
+  title: string;
+  notes: string;
+  /** Its date: the one the series puts it on, or its own once moved. */
+  due: DateKey;
+  time: number | null;
+  duration: number | null;
+  deadline: DateKey | null;
+}
+
+/** The occurrence a series puts on `on`: the template there (its deadline as many days after `on`), with `change` over it. */
+export const occurrenceValues = (template: GoogleTaskTemplate, on: DateKey, change?: GoogleTaskException): OccurrenceValues => ({
+  title: change?.title ?? template.title,
+  notes: change?.notes ?? template.notes,
+  due: change?.date ?? on,
+  time: change?.time !== undefined ? change.time : template.time,
+  duration: change?.time !== undefined ? change.duration ?? null : template.duration,
+  deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline),
 });
+
+/**
+ * What makes the occurrence the series puts on `on` read as `values`: only
+ * what differs from its template there, so an "All tasks" change of anything
+ * else reaches it too; null when nothing does.
+ */
+export const occurrenceChange = (template: GoogleTaskTemplate, on: DateKey, values: OccurrenceValues): GoogleTaskException | null => {
+  const series = occurrenceValues(template, on);
+  const change: GoogleTaskException = {
+    ...(values.title !== series.title ? { title: values.title } : {}),
+    ...(values.notes !== series.notes ? { notes: values.notes } : {}),
+    ...(values.due !== on ? { date: values.due } : {}),
+    ...(values.time !== series.time || values.duration !== series.duration ? { time: values.time, duration: values.duration } : {}),
+    ...(values.deadline !== series.deadline ? { deadline: values.deadline } : {}),
+  };
+  return Object.keys(change).length ? change : null;
+};
+
+/** A series' exceptions with the one for `on` set, or (null) taken off; undefined when none are left. */
+export const withException = (exceptions: Exceptions | undefined, on: DateKey, change: GoogleTaskException | null): Exceptions | undefined => {
+  const { [on]: _old, ...rest } = exceptions ?? {};
+  const next: Exceptions = change ? { ...rest, [on]: change } : rest;
+  return Object.keys(next).length ? next : undefined;
+};
+
+/** A repeat with these exceptions, or with none kept. */
+export const withExceptions = (repeat: Repeat, exceptions: Exceptions | undefined): Repeat => {
+  const { exceptions: _old, ...rest } = repeat;
+  return exceptions ? { ...rest, exceptions } : rest;
+};
+
+/**
+ * The exceptions of a series that still fall on its schedule: dates after
+ * `on` that `rule` makes from its `index`th occurrence there. A new rule or
+ * start drops the rest, as they are no occurrence of it any more.
+ */
+export const exceptionsOnSchedule = (exceptions: Exceptions | undefined, rule: string, on: DateKey, index: number): Exceptions | undefined => {
+  const dates = Object.keys(exceptions ?? {}).filter((date) => date > on).sort();
+  if (!exceptions || !dates.length) return undefined;
+  const out: Exceptions = {};
+  let date: DateKey | null = on;
+  for (let step = 0, at = index, seen = 0; date && seen < dates.length && step < STEPS_MAX; step++) {
+    date = nextRepeatDate(rule, date, at++);
+    while (date && seen < dates.length && dates[seen]! < date) seen++;
+    if (date && dates[seen] === date) {
+      out[date] = exceptions[date]!;
+      seen++;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+};
+
+/**
+ * The task a series makes for its `index`th occurrence, on `date`: Google's
+ * title, details and date, and what is kept for it (its time and deadline,
+ * and the series, with the exceptions still ahead), each as that occurrence
+ * was changed on its own, else from the template.
+ */
+export const occurrenceTask = (repeat: Repeat, template: GoogleTaskTemplate, date: DateKey, index: number): { title: string; notes: string; due: DateKey; kept: GoogleTaskKeptPatch } => {
+  const values = occurrenceValues(template, date, repeat.exceptions?.[date]);
+  const ahead = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on > date);
+  return {
+    title: values.title,
+    notes: values.notes,
+    due: values.due,
+    kept: {
+      time: values.time,
+      duration: values.duration,
+      deadline: values.deadline,
+      repeat: { rule: repeat.rule, seriesId: repeat.seriesId, index, next: null, on: date, template, ...(ahead.length ? { exceptions: Object.fromEntries(ahead) } : {}) },
+    },
+  };
+};
+
+/** The occurrences a series goes on from (no next one made): where its template and exceptions are kept. */
+export const seriesHeads = (state: Pick<PlannerState, 'googleTasks'>, seriesId: string): GoogleTaskKept[] =>
+  Object.values(state.googleTasks ?? {}).filter((kept) => kept.repeat?.seriesId === seriesId && !kept.repeat.next);
 
 /**
  * Series kept before templates, seen again: each open occurrence keeps the
@@ -183,20 +280,29 @@ export interface NextOccurrence {
   kept: GoogleTaskKept;
   /** What it is made from; null when the series has no date to count from. */
   template: GoogleTaskTemplate | null;
-  /** Null when the series ends with this occurrence. */
+  /** The date the series puts it on; null when the series ends with `item`. */
   date: DateKey | null;
-  /** Which occurrence of the series it is. */
+  /** Which occurrence of the series it is: a date deleted on its own counts, as an EXDATE does. */
   index: number;
 }
 
 /**
  * The occurrence a series makes after `item` (completed, or deleted with
  * "This task"): the series' next date after the one it put `item` on,
- * whatever `item` was moved to.
+ * whatever `item` was moved to, passing over the dates deleted on their own.
  */
 export const nextOccurrence = (item: GoogleTaskItem, kept: GoogleTaskKept): NextOccurrence => {
-  const on = scheduledOn(kept, item);
-  return { item, kept, template: seriesTemplate(kept, item), date: on && kept.repeat ? nextRepeatDate(kept.repeat.rule, on, kept.repeat.index) : null, index: (kept.repeat?.index ?? 0) + 1 };
+  const repeat = kept.repeat;
+  let date = scheduledOn(kept, item);
+  let index = repeat?.index ?? 0;
+  let found: DateKey | null = null;
+  for (let step = 0; repeat && date && !found && step < STEPS_MAX; step++) {
+    date = nextRepeatDate(repeat.rule, date, index);
+    if (!date) break;
+    index += 1;
+    if (!repeat.exceptions?.[date]?.skip) found = date;
+  }
+  return { item, kept, template: seriesTemplate(kept, item), date: found, index };
 };
 
 /**
@@ -224,24 +330,29 @@ export interface UpcomingTask {
   rule: string;
   /** Which occurrence of the series it would be. */
   index: number;
+  /** The date the series puts it on, which says which occurrence it is. */
+  on: DateKey;
+  /** The date it shows on: `on`, or its own once moved. */
   date: DateKey;
   template: GoogleTaskTemplate;
+  /** What was changed for it alone ("This task"). */
+  change?: GoogleTaskException;
 }
 
-/** At most this many upcoming occurrences of one series in a range: a daily one fills a month's six weeks. */
-const UPCOMING_MAX = 62;
-/** How far a series is stepped to reach a range, so one years ahead stays quick. */
-const STEPS_MAX = 4000;
+/** What an upcoming occurrence is: its template on its date, with what was changed for it alone. */
+export const upcomingValues = (task: UpcomingTask): OccurrenceValues => occurrenceValues(task.template, task.on, task.change);
 
 /**
- * Each repeating task's upcoming occurrences between `from` and `to`, as
- * Google Calendar shows a number of them on its grid: from the series' open
- * occurrence on, by its rule and template, from today on. A date a real
- * occurrence of the series shows on (`shown`, kept as this series' own: the
- * next one made, or one moved there) is left to it, so one date never shows
- * two. A task that only shares the title and the date is a task of its own
- * and shows beside it, as two tasks do in Google Calendar (nor is it taken
- * for the next occurrence: `seriesNextIn`). A series deleted or ended shows none.
+ * Each repeating task's upcoming occurrences shown between `from` and `to`,
+ * as Google Calendar shows a number of them on its grid: from the series'
+ * open occurrence on, by its rule and template, from today on. One changed
+ * on its own shows as changed (`change`): a date deleted shows nothing, one
+ * moved shows on its new date. A date a real occurrence of the series shows
+ * on (`shown`, kept as this series' own: the next one made, or one moved
+ * there) is left to it, so one date never shows two. A task that only shares
+ * the title and the date is a task of its own and shows beside it, as two
+ * tasks do in Google Calendar (nor is it taken for the next occurrence:
+ * `seriesNextIn`). A series deleted or ended shows none.
  */
 export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, shown: readonly GoogleTaskItem[], from: DateKey, to: DateKey, today: DateKey): UpcomingTask[] => {
   const taken = new Set<string>();
@@ -250,41 +361,48 @@ export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, sh
     const series = kept[googleTaskKey(item.account, item.id)]?.repeat?.seriesId;
     if (series) taken.add(`${series}\n${item.due}`);
   }
+  // Each occurrence once (by the date the series puts it on), however many open occurrences its series has.
+  const projected = new Set<string>();
   const out: UpcomingTask[] = [];
   for (const source of Object.values(kept)) {
     const repeat = source.repeat;
     const rule = repeat && !repeat.next && repeat.on && repeat.template ? parseRRule(repeat.rule) : null;
     if (!repeat?.on || !repeat.template || !rule) continue;
     const until = rule.until ? untilDate(rule.until, 'UTC') : null;
+    const changes = repeat.exceptions ?? {};
+    // An occurrence moved into the range from a later date is stepped to.
+    const last = Object.entries(changes).reduce((latest, [on, change]) => (change.date && change.date >= from && change.date <= to && on > latest ? on : latest), to);
     let date = repeat.on;
     let index = repeat.index;
     for (let step = 0, made = 0; step < STEPS_MAX && made < UPCOMING_MAX; step++) {
       if (rule.count !== null && index >= rule.count) break;
       const next = stepRule(rule, date);
-      if (!next || (until && next > until) || next > to) break;
+      if (!next || (until && next > until) || next > last) break;
       date = next;
       index += 1;
-      if (next < from || next < today) continue;
+      const change = changes[next];
+      const on = change?.date ?? next;
+      if (change?.skip || on < from || on > to || on < today) continue;
       const own = `${repeat.seriesId}\n${next}`;
-      if (taken.has(own)) continue;
-      taken.add(own);
-      out.push({ account: source.account, listId: source.listId, taskId: source.taskId, seriesId: repeat.seriesId, rule: repeat.rule, index, date: next, template: repeat.template });
+      if (projected.has(own) || taken.has(`${repeat.seriesId}\n${on}`)) continue;
+      projected.add(own);
+      out.push({ account: source.account, listId: source.listId, taskId: source.taskId, seriesId: repeat.seriesId, rule: repeat.rule, index, on: next, date: on, template: repeat.template, ...(change ? { change } : {}) });
       made++;
     }
   }
   return out;
 };
 
-/** An upcoming occurrence as the calendar draws it: at the template's time on its date, or all day. */
+/** An upcoming occurrence as the calendar draws it: at its time on its date (the template's, or its own), or all day. */
 export const upcomingEvent = (task: UpcomingTask, zone: string): CalendarEvent => {
-  const { time, duration } = task.template;
+  const { title, due, time, duration } = upcomingValues(task);
   return {
-    id: `gtask-upcoming:${task.seriesId}:${task.date}`,
+    id: `gtask-upcoming:${task.seriesId}:${task.on}`,
     calendarId: GOOGLE_TASKS_CALENDAR,
-    title: task.template.title,
+    title,
     location: '',
-    start: instantAt(task.date, time ?? 0, zone),
-    end: time === null ? instantAt(addDays(task.date, 1), 0, zone) : instantAt(task.date, Math.min(24 * 60, time + (duration ?? TASK_MINUTES)), zone),
+    start: instantAt(due, time ?? 0, zone),
+    end: time === null ? instantAt(addDays(due, 1), 0, zone) : instantAt(due, Math.min(24 * 60, time + (duration ?? TASK_MINUTES)), zone),
     allDay: time === null,
     busy: false,
     upcoming: task,
@@ -330,14 +448,15 @@ export const deadlineGroups = (kept: Readonly<Record<string, GoogleTaskKept>>, a
 
 /**
  * The next occurrence a series has already (another Planner window made it): a
- * task in the list whose kept repeat is this series' next one. Never a task
- * that only shares the title and the date: an unrelated task can have both.
+ * task in the list whose kept repeat is a later occurrence of this series (the
+ * next one, or one past dates deleted on their own). Never a task that only
+ * shares the title and the date: an unrelated task can have both.
  */
 export const seriesNextIn = (state: Pick<PlannerState, 'googleTasks'>, items: readonly GoogleTaskItem[], repeat: { seriesId: string; index: number }, except: string): GoogleTaskItem | null =>
   items.find((item) => {
     if (item.id === except) return false;
     const theirs = keptFor(state, item)?.repeat;
-    return Boolean(theirs && theirs.seriesId === repeat.seriesId && theirs.index === repeat.index + 1);
+    return Boolean(theirs && theirs.seriesId === repeat.seriesId && theirs.index > repeat.index);
   }) ?? null;
 
 /** Starred tasks, the newest star first, as Google Tasks' Starred view lists them. */

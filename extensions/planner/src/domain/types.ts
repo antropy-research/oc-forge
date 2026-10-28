@@ -74,9 +74,11 @@ export interface GoogleTaskKept {
    * A repeating task: its rule, its series, which occurrence this is, the task
    * made next (once made), the date the series put this occurrence on (a
    * one-off change of its date leaves it) and the series' template. A series
-   * kept before templates gets both when it is next seen.
+   * kept before templates gets both when it is next seen. `exceptions`: the
+   * series' later occurrences changed on their own, by the date the series
+   * puts each on, carried from occurrence to occurrence as the template is.
    */
-  repeat: { rule: string; seriesId: string; index: number; next: string | null; on?: DateKey; template?: GoogleTaskTemplate } | null;
+  repeat: { rule: string; seriesId: string; index: number; next: string | null; on?: DateKey; template?: GoogleTaskTemplate; exceptions?: Record<DateKey, GoogleTaskException> } | null;
   /** When it was starred; null when it is not. */
   starredAt: string | null;
   updatedAt: string;
@@ -98,6 +100,25 @@ export interface GoogleTaskTemplate {
   deadline: number | null;
   /** The day the schedule counts from. */
   start: DateKey;
+}
+
+/**
+ * One upcoming occurrence of a series changed on its own, as Google Calendar
+ * changes one occurrence ("This task"): deleted (`skip`: the series passes
+ * over its date), or with its own title, details, date, time or deadline. A
+ * field it does not have comes from the template, so an "All tasks" change
+ * of that field reaches it too.
+ */
+export interface GoogleTaskException {
+  skip?: true;
+  title?: string;
+  notes?: string;
+  /** Moved to another day. */
+  date?: DateKey;
+  /** Minutes after midnight; null: all day. Set with `duration`. */
+  time?: number | null;
+  duration?: number | null;
+  deadline?: DateKey | null;
 }
 
 /** How the Linear page groups and orders issues. */

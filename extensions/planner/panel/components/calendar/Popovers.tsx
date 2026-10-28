@@ -1,7 +1,7 @@
 // Google Calendar's popovers: an event's details (with Edit, Delete, Duplicate,
 // RSVP and the Planner's "Plan as task"), a Google task's (edit, complete,
-// delete, plan it), a repeating task's series from one of its upcoming
-// occurrences, and a month day's "N more" list.
+// delete, plan it), one upcoming occurrence of a repeating task (edit or
+// delete it alone, or its series), and a month day's "N more" list.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/ics.ts';
 import type { DateKey, Task } from '../../../src/domain/types.ts';
@@ -10,7 +10,7 @@ import { compactClock, compactRange, eventSpan, longDay, weekdayShort } from '..
 import { describeRecurrence } from '../../../src/domain/rrule.ts';
 import { descriptionText } from '../../../src/domain/gevents.ts';
 import { taskForGoogleTask, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google.ts';
-import { KEPT_HINT, keptFor, keptTimeLabel } from '../../../src/domain/gtaskKept.ts';
+import { KEPT_HINT, keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
@@ -370,10 +370,13 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
 };
 
 /**
- * An upcoming occurrence of a repeating task: the series, as Google Calendar
- * shows a future instance (its title, when, and how it repeats), with Edit
- * (all tasks) and Delete (all future tasks). Both act on the occurrence open
- * now, which Google has; this one is made when the one before it is done.
+ * An upcoming occurrence of a repeating task, as Google Calendar shows a
+ * future one: its title, when, and how its series repeats, with Edit (This
+ * task or All tasks) and Delete (This task or All future tasks). This task
+ * changes or deletes that occurrence alone, kept with its series until the
+ * series makes it (`setOccurrence`); the series and its other tasks stay as
+ * they are. All tasks and All future tasks act on the series through the
+ * occurrence open now, which Google has.
  */
 export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; anchor: Anchor }) => {
   const { client, google } = usePlanner();
@@ -381,10 +384,11 @@ export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; ancho
   const gv = useGoogle();
   const upcoming = event.upcoming!;
   const { template } = upcoming;
+  const values = upcomingValues(upcoming);
   const [busy, setBusy] = useState(false);
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const list = gv.lists.find((other) => other.account === upcoming.account && other.id === upcoming.listId);
-  const time = keptTimeLabel(template);
+  const time = keptTimeLabel(values);
   /** The occurrence open now, as Google has it. */
   const current = async () => {
     const item = await google.findTask(upcoming.account, upcoming.listId, upcoming.taskId);
@@ -397,20 +401,33 @@ export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; ancho
       .catch((error) => client.notify(`Google Tasks did not take it: ${messageOf(error)}`))
       .finally(() => setBusy(false));
   };
+  const edit = async () => {
+    const scope = await calendarUi.ask({ title: 'Edit repeating task', style: 'radio', choices: [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All tasks' }] });
+    // This task: the editor shows it as it is; its series' open task names its list and series.
+    if (scope === 'this') calendarUi.editTask({ item: { account: upcoming.account, listId: upcoming.listId, id: upcoming.taskId, title: values.title, notes: values.notes, due: values.due, completed: false, parent: null, position: '', url: 'https://tasks.google.com/', updated: '' }, series: false, occurrence: upcoming });
+    else if (scope === 'all') calendarUi.editTask({ item: await current(), series: true });
+  };
   const remove = async () => {
-    const choice = await calendarUi.ask({ title: 'Delete repeating task', text: `"${template.title}" stops repeating, and its open task is deleted too.`, style: 'buttons', choices: [{ id: 'cancel', label: 'Cancel' }, { id: 'all', label: 'Delete all future tasks' }] });
-    if (choice !== 'all') return;
-    await google.deleteListTask(await current(), 'all');
-    close();
-    calendarUi.snack('Tasks deleted');
+    const scope = await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All future tasks' }] });
+    if (scope === 'this') {
+      // The series passes over this date and goes on; Undo gives it back as it was.
+      const before = upcoming.change ?? null;
+      await google.setOccurrence(upcoming, { skip: true });
+      close();
+      calendarUi.snack('Task deleted', () => google.setOccurrence(upcoming, before).catch((error) => client.notify(`The Planner did not put "${values.title}" back: ${messageOf(error)}`)));
+    } else if (scope === 'all') {
+      await google.deleteListTask(await current(), 'all');
+      close();
+      calendarUi.snack('Tasks deleted');
+    }
   };
   return (
-    <Popover anchor={anchor} label={`Repeating Google task: ${template.title}`} onClose={close} className="task-popover">
+    <Popover anchor={anchor} label={`Repeating Google task: ${values.title}`} onClose={close} className="task-popover">
       <div class="pop-tools">
-        <button class="icon-button" aria-label="Edit all tasks" title="Edit all tasks" disabled={busy} onClick={() => run(async () => calendarUi.editTask({ item: await current(), series: true }))}>
+        <button class="icon-button" aria-label="Edit task" title="Edit task" disabled={busy} onClick={() => run(edit)}>
           <Icon name="edit" />
         </button>
-        <button class="icon-button" aria-label="Delete all future tasks" title="Delete all future tasks" disabled={busy} onClick={() => run(remove)}>
+        <button class="icon-button" aria-label="Delete task" title="Delete task" disabled={busy} onClick={() => run(remove)}>
           <Icon name="delete" />
         </button>
         <button class="icon-button" aria-label="Close" title="Close" onClick={close}>
@@ -420,26 +437,28 @@ export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; ancho
       <div class="pop-row pop-head">
         <span class="pop-icon" style={{ color: GOOGLE_TASKS_COLOR }}><Icon name="repeat" /></span>
         <div class="pop-main">
-          <h2 class="pop-title">{template.title}</h2>
+          <h2 class="pop-title">{values.title}</h2>
           <div class="pop-when">{longDay(upcoming.date)}{time ? ` ⋅ ${time}` : ''}</div>
           <div class="pop-when">{describeRecurrence([upcoming.rule], template.start, zone)}</div>
         </div>
       </div>
-      {template.deadline !== null && (
+      {values.deadline && (
         <div class="pop-row">
           <span class="pop-icon"><Icon name="flag" /></span>
-          <div class="pop-main">Deadline: {longDay(addDays(upcoming.date, template.deadline))}</div>
+          <div class="pop-main">Deadline: {longDay(values.deadline)}</div>
         </div>
       )}
-      {template.notes && (
+      {values.notes && (
         <div class="pop-row">
           <span class="pop-icon"><Icon name="notes" /></span>
-          <div class="pop-main pop-description"><Linked text={template.notes} /></div>
+          <div class="pop-main pop-description"><Linked text={values.notes} /></div>
         </div>
       )}
       <div class="pop-row">
         <span class="pop-icon"><Icon name="info" /></span>
-        <div class="muted pop-small">An upcoming task of this series: Google Tasks adds it when the one before it is done. {KEPT_HINT}.</div>
+        <div class="muted pop-small">
+          {upcoming.change ? 'An upcoming task of this series, changed for this task alone: Google Tasks adds it as shown here when the one before it is done.' : 'An upcoming task of this series: Google Tasks adds it when the one before it is done.'} {KEPT_HINT}.
+        </div>
       </div>
       <div class="pop-row">
         <span class="pop-icon"><Icon name="task" /></span>

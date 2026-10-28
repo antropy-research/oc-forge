@@ -103,16 +103,20 @@ const placed = (place: MenuPlace | null) =>
  * its list). A new task's form stays open after Enter for the next one, as
  * Google Tasks keeps adding. Subtasks, and tasks with subtasks, do not repeat,
  * nor does a repeating task take subtasks (nor in Google Tasks): those
- * controls are unavailable, with the reason. A save Google refuses leaves the
- * form open with what was typed and why, so Save can try again.
+ * controls are unavailable, with the reason. One upcoming task of a series,
+ * edited alone, shows its series' repeat there, unavailable, and no star (it
+ * is no Google task yet). A save Google refuses leaves the form open with
+ * what was typed and why, so Save can try again.
  */
-export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, lists, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false }: {
+export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star = true, lists, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false }: {
   item: Partial<GoogleTaskItem>;
   kept: GoogleTaskKept | null;
   depth: 0 | 1;
   canRepeat: boolean;
-  /** Why it cannot repeat, on the unavailable Repeat control. */
+  /** Why it cannot repeat, or change its repeat, on the unavailable Repeat control. */
   repeatNote?: string | null;
+  /** Whether it offers a star. */
+  star?: boolean;
   /** The lists it may go to (over the calendar), and why it stays in its own. */
   lists?: { lists: GoogleTaskList[]; locked: string | null };
   /** Settles once Google has answered: rejected when it refused. */
@@ -225,7 +229,7 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, list
         <div class="gt-form-row gt-form-repeat" title={repeatNote}>
           <Icon name="repeat" size={16} />
           <select aria-label="Repeat" disabled title={repeatNote}>
-            <option>Does not repeat</option>
+            <option>{rule ? describeRecurrence([rule], date, zone) : 'Does not repeat'}</option>
           </select>
           <span class="gt-form-note">{repeatNote}</span>
         </div>
@@ -282,11 +286,13 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, list
           {lists.locked && <span class="gt-form-note">{lists.locked}</span>}
         </div>
       )}
-      <div class="gt-form-row">
-        <button class={`gt-star-toggle${starred ? ' is-on' : ''}`} aria-pressed={starred} aria-label="Star" onClick={() => setStarred(!starred)}>
-          <Icon name={starred ? 'starred' : 'star'} size={18} /> {starred ? 'Starred' : 'Star'}
-        </button>
-      </div>
+      {star && (
+        <div class="gt-form-row">
+          <button class={`gt-star-toggle${starred ? ' is-on' : ''}`} aria-pressed={starred} aria-label="Star" onClick={() => setStarred(!starred)}>
+            <Icon name={starred ? 'starred' : 'star'} size={18} /> {starred ? 'Starred' : 'Star'}
+          </button>
+        </div>
+      )}
       <KeptHint />
       {problem && <p class="danger gt-form-problem" role="alert">{problem}</p>}
       <div class="gt-form-row gt-form-actions">

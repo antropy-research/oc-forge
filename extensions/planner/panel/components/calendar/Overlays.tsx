@@ -96,7 +96,7 @@ export const CalendarOverlays = ({ onDay }: { onDay?: (date: DateKey) => void })
       {popover?.kind === 'day' && <DayPopover key={popover.date} date={popover.date} events={popover.events} anchor={popover.anchor} onDay={onDay} />}
       {ui.draft && <QuickCreate key={`${ui.draft.anchor.x}:${ui.draft.anchor.y}`} draft={ui.draft} />}
       {ui.editor && <EventEditor key={ui.editor.mode === 'edit' ? ui.editor.event.id : 'new'} target={ui.editor} />}
-      {ui.taskEditor && <TaskEditor key={`${ui.taskEditor.item.id}:${ui.taskEditor.series}`} target={ui.taskEditor} />}
+      {ui.taskEditor && <TaskEditor key={`${ui.taskEditor.item.id}:${ui.taskEditor.series}:${ui.taskEditor.occurrence?.on ?? ''}`} target={ui.taskEditor} />}
       {ui.question && <QuestionDialog question={ui.question} />}
       {/* Always there, so screen readers hear each new message. */}
       <div class="gcal-snack-region" role="status">

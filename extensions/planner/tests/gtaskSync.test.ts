@@ -9,19 +9,37 @@
 // task completes its subtasks, and reopening a subtask its task, however
 // little the panel has loaded; a timed task's deadline has its all-day entry.
 // Deleting "This task" of a series is all or nothing too (its next one first,
-// then the delete).
+// then the delete); one upcoming occurrence is changed or deleted on its own,
+// in the projections and when the series makes it.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, listKey, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
+import { GoogleStore, listKey, OCCURRENCE_KEEPS_DATE, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
 import { dropTarget } from '../src/domain/gtasks.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { GoogleData, toTaskItem } from '../service/googleData.ts';
 import { GoogleError, type GoogleAccounts } from '../service/google.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
-import { emptyState, googleTaskKey, type PlannerState } from '../src/domain/types.ts';
+import { emptyState, googleTaskKey, type GoogleTaskException, type PlannerState } from '../src/domain/types.ts';
 import { findMovedTask, GONE_STATUS, gtaskSource, linkedGoogleTasks, mergeGoogleTask, planGoogleTaskSync, plannerEditTimes, TASK_GONE, taskFromGoogleTask, type GoogleTaskItem } from '../src/domain/google.ts';
-import { deadlineEvents, deadlineGroups, dueOccurrences, firstSightOfSeries, keptFor, nextRepeatDate, seriesNextIn, starredKept, upcomingEvent, upcomingTasks, withTaskTimes } from '../src/domain/gtaskKept.ts';
+import {
+  deadlineEvents,
+  deadlineGroups,
+  dueOccurrences,
+  firstSightOfSeries,
+  keptFor,
+  nextOccurrence,
+  nextRepeatDate,
+  occurrenceChange,
+  occurrenceTask,
+  occurrenceValues,
+  seriesNextIn,
+  starredKept,
+  upcomingEvent,
+  upcomingTasks,
+  upcomingValues,
+  withTaskTimes,
+} from '../src/domain/gtaskKept.ts';
 import { blockText } from '../src/domain/gcalendar.ts';
 import type { CalendarEvent } from '../src/domain/ics.ts';
 
@@ -969,6 +987,164 @@ describe('deleting "This task" of a repeating task is all or nothing (review 7)'
     expect(other.google()).toBeNull();
     expect(open(other.world)).toHaveLength(1);
     expect(keptFor(other.fake.state(), open(other.world)[0]!)).toMatchObject({ time: 660, repeat: { index: 2, on: '2026-10-28', template: { title: 'Daily standup' } } });
+  });
+});
+
+describe('one upcoming task of a series changed or deleted on its own, as in Google Calendar (review 7)', () => {
+  const template = { title: 'Daily standup', notes: 'Agenda', time: 660, duration: null, deadline: 0, start: '2026-10-27' };
+  const series = (exceptions: Record<string, GoogleTaskException>, rule = 'RRULE:FREQ=DAILY') =>
+    foldEvents([ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: 660, deadline: '2026-10-27', repeat: { rule, seriesId: 's1', index: 1, next: null, on: '2026-10-27', template, exceptions } } })]);
+  const seen = (found: ReturnType<typeof upcomingTasks>) => found.map((task) => [task.on, task.date, upcomingValues(task).title, upcomingValues(task).time]);
+
+  test('in the projections: a deleted date shows nothing, an edited one its own values, a moved one on its new date; the others as the series has them', () => {
+    const state = series({
+      '2026-10-28': { skip: true },
+      '2026-10-29': { title: 'Standup with Ann', time: 900, duration: null },
+      '2026-10-30': { date: '2026-11-03' },
+      '2026-11-05': { date: '2026-10-31', notes: 'Moved up' },
+    });
+    const week = upcomingTasks(state.googleTasks, [item({ id: 'gt1', due: '2026-10-27' })], '2026-10-26', '2026-11-01', '2026-10-27');
+    expect(seen(week)).toEqual([
+      ['2026-10-29', '2026-10-29', 'Standup with Ann', 900],
+      ['2026-10-31', '2026-10-31', 'Daily standup', 660],
+      ['2026-11-01', '2026-11-01', 'Daily standup', 660],
+      // A later one moved into this week.
+      ['2026-11-05', '2026-10-31', 'Daily standup', 660],
+    ]);
+    const events = week.map((task) => upcomingEvent(task, 'America/Los_Angeles'));
+    expect(events[0]).toMatchObject({ id: 'gtask-upcoming:s1:2026-10-29', title: 'Standup with Ann', start: '2026-10-29T22:00:00.000Z', allDay: false });
+    expect(events[3]).toMatchObject({ id: 'gtask-upcoming:s1:2026-11-05', start: '2026-10-31T18:00:00.000Z' });
+    expect(new Set(events.map((event) => event.id)).size).toBe(4);
+    expect(upcomingValues(week[3]!)).toMatchObject({ notes: 'Moved up', deadline: '2026-11-05' });
+    // The next week: the one moved there beside that date's own, and nothing on the date moved away.
+    const next = upcomingTasks(state.googleTasks, [], '2026-11-02', '2026-11-08', '2026-10-27');
+    expect(next.filter((task) => task.date === '2026-11-03').map((task) => task.on)).toEqual(['2026-10-30', '2026-11-03']);
+    expect(next.map((task) => task.date)).not.toContain('2026-11-05');
+  });
+
+  test('an occurrence edited alone keeps only what differs from its series there', () => {
+    const own = occurrenceValues(template, '2026-10-29');
+    expect(own).toEqual({ title: 'Daily standup', notes: 'Agenda', due: '2026-10-29', time: 660, duration: null, deadline: '2026-10-29' });
+    expect(occurrenceChange(template, '2026-10-29', own)).toBeNull();
+    expect(occurrenceChange(template, '2026-10-29', { ...own, title: 'Standup with Ann', time: 900 })).toEqual({ title: 'Standup with Ann', time: 900, duration: null });
+    expect(occurrenceChange(template, '2026-10-29', { ...own, due: '2026-10-31', deadline: null })).toEqual({ date: '2026-10-31', deadline: null });
+  });
+
+  test('made by the series: past a deleted date (which counts, as an EXDATE does); a moved one on its new date, the series going on from the one it put it on', () => {
+    const skipped = series({ '2026-10-28': { skip: true } });
+    const done = item({ id: 'gt1', due: '2026-10-27', completed: true });
+    expect(nextOccurrence(done, keptFor(skipped, done)!)).toMatchObject({ date: '2026-10-29', index: 3 });
+    expect(dueOccurrences(skipped, [done])).toMatchObject([{ date: '2026-10-29', index: 3 }]);
+    // Its last occurrence deleted: the series ends with this one.
+    expect(nextOccurrence(done, keptFor(series({ '2026-10-28': { skip: true } }, 'RRULE:FREQ=DAILY;COUNT=2'), done)!).date).toBeNull();
+    const moved = series({ '2026-10-28': { date: '2026-10-29', deadline: '2026-10-30' }, '2026-11-02': { skip: true } });
+    const repeat = keptFor(moved, done)!.repeat!;
+    const next = nextOccurrence(done, keptFor(moved, done)!);
+    expect(next).toMatchObject({ date: '2026-10-28', index: 2 });
+    expect(occurrenceTask(repeat, template, next.date!, next.index)).toEqual({
+      title: 'Daily standup',
+      notes: 'Agenda',
+      due: '2026-10-29',
+      kept: { time: 660, duration: null, deadline: '2026-10-30', repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 2, next: null, on: '2026-10-28', template, exceptions: { '2026-11-02': { skip: true } } } },
+    });
+  });
+
+  test('completed one after another: past the deleted date, the edited one with its own values, the one after it as the series has it', async () => {
+    const world = tasksWorld();
+    const fake = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    const first = await store.addListTask(ME, 'L1', { title: 'Daily standup', notes: 'Agenda', due: '2026-10-27' }, { time: 660, rule: 'RRULE:FREQ=DAILY' });
+    const at = (on: string) => upcomingTasks(fake.state().googleTasks, [], '2026-10-26', '2026-11-08', '2026-10-27').find((task) => task.on === on)!;
+    await store.setOccurrence(at('2026-10-28'), { skip: true });
+    await store.editOccurrence(at('2026-10-30'), { title: 'Standup with Ann', notes: 'Agenda', due: '2026-10-30', kept: { time: 900, duration: null, deadline: null, rule: null } });
+    // Only those two dates changed: the open task and the series are as they were, and Google has nothing new.
+    expect(keptFor(fake.state(), first)).toMatchObject({ time: 660, repeat: { index: 1, on: '2026-10-27', template: { title: 'Daily standup', time: 660 }, exceptions: { '2026-10-28': { skip: true }, '2026-10-30': { title: 'Standup with Ann', time: 900, duration: null } } } });
+    expect(fake.calls.filter((call) => call.method !== 'GET')).toHaveLength(1);
+    expect(seen(upcomingTasks(fake.state().googleTasks, [], '2026-10-26', '2026-11-01', '2026-10-27')).map(([on, , title]) => `${on} ${title}`)).toEqual(['2026-10-29 Daily standup', '2026-10-30 Standup with Ann', '2026-10-31 Daily standup', '2026-11-01 Daily standup']);
+    const complete = async () => {
+      await store.completeListTask([...world.tasks.values()].find((task) => !task.completed)!, true);
+      await flush();
+      const open = [...world.tasks.values()].filter((task) => !task.completed);
+      expect(open).toHaveLength(1);
+      return open[0]!;
+    };
+    const second = await complete();
+    expect(second).toMatchObject({ title: 'Daily standup', notes: 'Agenda', due: '2026-10-29' });
+    expect(keptFor(fake.state(), second)).toMatchObject({ time: 660, repeat: { index: 3, on: '2026-10-29', exceptions: { '2026-10-30': { title: 'Standup with Ann' } } } });
+    expect(keptFor(fake.state(), second)?.repeat?.exceptions?.['2026-10-28']).toBeUndefined();
+    const third = await complete();
+    expect(third).toMatchObject({ title: 'Standup with Ann', due: '2026-10-30' });
+    expect(keptFor(fake.state(), third)).toMatchObject({ time: 900, repeat: { index: 4, on: '2026-10-30', template: { title: 'Daily standup', time: 660 } } });
+    expect(keptFor(fake.state(), third)?.repeat?.exceptions).toBeUndefined();
+    const fourth = await complete();
+    expect(fourth).toMatchObject({ title: 'Daily standup', due: '2026-10-31' });
+    expect(keptFor(fake.state(), fourth)).toMatchObject({ time: 660, repeat: { index: 5, on: '2026-10-31' } });
+    // Deleted with This task, the series passes over a deleted date the same way.
+    await store.setOccurrence(at('2026-11-01'), { skip: true });
+    await store.deleteListTask(fourth, 'this');
+    const fifth = [...world.tasks.values()].find((task) => !task.completed)!;
+    expect(fifth).toMatchObject({ title: 'Daily standup', due: '2026-11-02' });
+    expect(keptFor(fake.state(), fifth)?.repeat).toMatchObject({ index: 7, on: '2026-11-02' });
+  });
+
+  test('a deleted date given back (Undo) shows again; one edited back to its series keeps nothing', async () => {
+    const world = tasksWorld();
+    const fake = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    const first = await store.addListTask(ME, 'L1', { title: 'Daily standup', notes: '', due: '2026-10-27' }, { time: 660, rule: 'RRULE:FREQ=DAILY' });
+    const week = () => upcomingTasks(fake.state().googleTasks, [], '2026-10-26', '2026-11-01', '2026-10-27');
+    const tomorrow = week()[0]!;
+    await store.setOccurrence(tomorrow, { skip: true });
+    expect(week().map((task) => task.on)).not.toContain('2026-10-28');
+    await store.setOccurrence(tomorrow, null);
+    expect(week()[0]).toMatchObject({ on: '2026-10-28', date: '2026-10-28' });
+    await store.editOccurrence(tomorrow, { title: 'Daily standup', notes: '', due: '2026-10-28', kept: { time: 660, duration: null, deadline: null, rule: null } });
+    expect(keptFor(fake.state(), first)?.repeat?.exceptions).toBeUndefined();
+    // A date of its own is required: deleting is how one goes.
+    await expect(store.editOccurrence(tomorrow, { title: 'Daily standup', notes: '', due: null, kept: { time: 660, duration: null, deadline: null, rule: null } })).rejects.toThrow(OCCURRENCE_KEEPS_DATE);
+  });
+
+  test('All tasks keeps the exceptions (each its own, the rest of it the series’ new values); a new rule or start keeps only those still on its schedule', async () => {
+    const world = tasksWorld();
+    const fake = fakeClient(emptyState(), world.answer);
+    const store = new GoogleStore(host, fake.client, 'page');
+    const first = await store.addListTask(ME, 'L1', { title: 'Weekly review', notes: '', due: '2026-10-27' }, { time: 660, rule: 'RRULE:FREQ=WEEKLY' });
+    const shown = () => upcomingTasks(fake.state().googleTasks, [], '2026-10-26', '2026-11-30', '2026-10-27');
+    await store.setOccurrence(shown().find((task) => task.on === '2026-11-03')!, { skip: true });
+    await store.editOccurrence(shown().find((task) => task.on === '2026-11-10')!, { title: 'Monthly review', notes: '', due: '2026-11-10', kept: { time: 660, duration: null, deadline: null, rule: null } });
+    const exceptions: Record<string, GoogleTaskException> = { '2026-11-03': { skip: true }, '2026-11-10': { title: 'Monthly review' } };
+    const fields = (due: string, rule: string) => ({ title: 'Weekly sync', notes: '', due, kept: { time: 9 * 60, duration: null, deadline: null, rule } });
+    // All tasks, a new title and time: the exceptions stay; the edited one keeps its title and takes the new time.
+    await store.saveListTask(world.tasks.get(first.id)!, fields('2026-10-27', 'RRULE:FREQ=WEEKLY'), 'all');
+    expect(keptFor(fake.state(), first)?.repeat?.exceptions).toEqual(exceptions);
+    expect(seen(shown())).toEqual([
+      ['2026-11-10', '2026-11-10', 'Monthly review', 540],
+      ['2026-11-17', '2026-11-17', 'Weekly sync', 540],
+      ['2026-11-24', '2026-11-24', 'Weekly sync', 540],
+    ]);
+    // A new rule both dates are still on (daily from the 27th): both stay.
+    await store.saveListTask(world.tasks.get(first.id)!, fields('2026-10-27', 'RRULE:FREQ=DAILY'), 'all');
+    expect(keptFor(fake.state(), first)?.repeat).toMatchObject({ rule: 'RRULE:FREQ=DAILY', index: 1, exceptions });
+    // Weekly again from a new start (the 28th: the 4th, the 11th…): neither date is on it any more.
+    await store.saveListTask(world.tasks.get(first.id)!, fields('2026-10-28', 'RRULE:FREQ=WEEKLY'), 'all');
+    expect(keptFor(fake.state(), first)?.repeat).toMatchObject({ rule: 'RRULE:FREQ=WEEKLY', on: '2026-10-28' });
+    expect(keptFor(fake.state(), first)?.repeat?.exceptions).toBeUndefined();
+    // This task leaves them alone.
+    await store.setOccurrence(shown().find((task) => task.on === '2026-11-04')!, { skip: true });
+    await store.saveListTask(world.tasks.get(first.id)!, { ...fields('2026-10-28', 'RRULE:FREQ=WEEKLY'), title: 'Just this one' }, 'this');
+    expect(keptFor(fake.state(), first)?.repeat?.exceptions).toEqual({ '2026-11-04': { skip: true } });
+  });
+
+  test('what is kept for an occurrence is checked: skip alone, its own fields, by date', () => {
+    const command = (exceptions: unknown) => ({ cmd: 'c1', type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 1, next: null, on: '2026-10-27', template, exceptions } } });
+    const state = emptyState();
+    expect(validateCommand(command({ '2026-10-28': { skip: true }, '2026-10-29': { title: 'Standup with Ann', notes: '', date: '2026-10-30', time: 900, duration: null, deadline: null } }), state)).toBeNull();
+    expect(validateCommand(command({ '2026-10-28': { skip: true, title: 'Standup' } }), state)).toBe('a skipped occurrence is skip: true alone');
+    expect(validateCommand(command({ tomorrow: { skip: true } }), state)).toBe('repeat exceptions are by date');
+    expect(validateCommand(command({ '2026-10-28': {} }), state)).toBe('an occurrence change needs a field');
+    expect(validateCommand(command({ '2026-10-28': { color: 'red' } }), state)).toBe('an occurrence change has an unknown field');
+    expect(validateCommand(command({ '2026-10-28': { time: 1440 } }), state)).toBe('an occurrence time must be minutes after midnight, or null');
+    expect(validateCommand(command({ '2026-10-28': { title: ' ' } }), state)).toBe('an occurrence title must be 1-1024 characters');
   });
 });
 
