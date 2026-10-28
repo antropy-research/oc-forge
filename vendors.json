@@ -11,8 +11,8 @@
   },
   "orca": {
     "repository": "https://github.com/stablyai/orca.git",
-    "release": "v1.4.242",
-    "commit": "86ad9d95cac792f3d1359d886cef9fb9b0aadd47"
+    "release": "v1.4.243",
+    "commit": "2d9b5957851e5bd449e179018e53759ea69e3f0b"
   },
   "vscode": {
     "repository": "https://github.com/microsoft/vscode.git",
