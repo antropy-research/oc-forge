@@ -1,5 +1,7 @@
 [tools]
 bun = "1.4.4"
+# OpenChamber's web build (scripts/build-openchamber.py) runs Vite under Node, as its releases do.
+node = "24"
 python = "3.12.11"
 uv = "0.12.0"
 
@@ -56,6 +58,14 @@ run = [
 [tasks.build]
 description = "Rebuild one release target with adapters, e.g. `mise run build opencode-linux-x64`"
 run = "uv run --locked python scripts/build.py"
+
+[tasks."build:openchamber"]
+description = "Build OpenChamber's web package from vendors/openchamber with the oc-forge adapters: dist/openchamber-web-<version>.tgz"
+run = "uv run --locked python scripts/build-openchamber.py"
+
+[tasks."check:openchamber"]
+description = "Apply the OpenChamber adapters to vendors/openchamber and type-check the result, without building a package"
+run = "uv run --locked python scripts/build-openchamber.py --check-only"
 
 [tasks."upstream:sync"]
 description = "Pin the submodule to the official latest V2 release if it is newer"
