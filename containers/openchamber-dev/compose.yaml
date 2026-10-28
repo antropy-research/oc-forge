@@ -1,11 +1,14 @@
-# OpenChamber 2.5.2 + OpenCode 2.1.4, VS Code Server 1.140.0 for the web and the GitHub CLI,
-# for extension development; see README.md.
+# OpenChamber, OpenCode and VS Code Server for the web, built from vendors/ at their pins, and the
+# GitHub CLI, for extension development; see README.md. Build with ./build.sh.
 name: oc-forge-openchamber-dev
 
 services:
   openchamber:
-    build: .
-    image: oc-forge/openchamber-dev:2.5.2
+    build:
+      # The repository root, for vendors/, adapters/ and scripts/ (Dockerfile.dockerignore).
+      context: ../..
+      dockerfile: containers/openchamber-dev/Dockerfile
+    image: oc-forge/openchamber-dev:vendors
     container_name: oc-forge-openchamber-dev
     init: true
     restart: unless-stopped
@@ -23,8 +26,10 @@ services:
 
   # VS Code in the browser, on the same home volume (projects, worktrees) and extensions.
   vscode:
-    build: .
-    image: oc-forge/openchamber-dev:2.5.2
+    build:
+      context: ../..
+      dockerfile: containers/openchamber-dev/Dockerfile
+    image: oc-forge/openchamber-dev:vendors
     container_name: oc-forge-vscode-dev
     init: true
     restart: unless-stopped
@@ -45,7 +50,7 @@ services:
         test -n "$$VSCODE_CONNECTION_TOKEN" || { echo 'Set VSCODE_CONNECTION_TOKEN in secrets.env' >&2; exit 1; };
         umask 077; printf %s "$$VSCODE_CONNECTION_TOKEN" > /tmp/vscode-token;
         exec vscode-server --host 0.0.0.0 --port 8000 --connection-token-file /tmp/vscode-token
-        --accept-server-license-terms --server-data-dir /home/node/.vscode-server-web
+        --server-data-dir /home/node/.vscode-server-web
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8000"]
       interval: 30s
