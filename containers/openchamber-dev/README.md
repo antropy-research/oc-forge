@@ -65,11 +65,12 @@ git submodule update --init vendors/opencode vendors/openchamber vendors/vscode 
 ./build.sh             # arguments go to `docker compose build`, such as --no-cache
 ```
 
-The stages build in parallel. From a clean cache (`./build.sh --no-cache`) the build took 36
-minutes on the 16-core host it was written on, whose Docker disk is slow; VS Code's stage is the
-longest (its `npm ci` about 8 minutes; `core-ci`, the Copilot VSIX and the packaging about 10),
-OpenCode's took about 13 minutes and OpenChamber's about 4. The image is 2.8 GB (`docker images`);
-the npm-based image before it was 3.9 GB.
+The stages build in parallel. From a clean cache (`./build.sh --no-cache`) the build took 36 and
+43 minutes on the 16-core host it was written on, whose Docker disk is slow and shared; VS Code's
+stage is the longest (its `npm ci` 8 to 16 minutes; `core-ci`, the Copilot VSIX and the packaging
+about 10), then OpenCode's (13 to 25) and OpenChamber's (4 to 10). The disk load slows every
+container on the host while it runs. The image is 2.8 GB (`docker images`); the npm-based image
+before it was 3.9 GB.
 
 A rebuild redoes only what changed: a pin that moves rebuilds that vendor's stage (the VS Code
 commit is read from `vendors.json` on its own, so another pin moving leaves VS Code alone), and
@@ -113,9 +114,10 @@ OpenCode and the VS Code Server watch files with inotify, and the host counts in
 user (`fs.inotify.max_user_instances`, 128 by default); the containers' `node` is the host's UID
 1000. When that user has none left, VS Code's Source Control stops seeing changes (`EMFILE` in the
 server's log), and OpenCode, the npm release as much as this build, can stop answering once a chat
-opens in OpenChamber. The VS Code Server keeps a watcher process for each window it has served, so
-a `vscode` service that has run for long can hold most of them: `docker compose restart vscode`
-gives them back, or raise the limit (`sudo sysctl fs.inotify.max_user_instances=1024`).
+opens in OpenChamber (both hung each time all of the user's instances were taken, and never
+otherwise). The VS Code Server keeps a watcher process for every window whose connection is still
+open, which is how the VS Code extension's tunnel leak held 90 of them on 2026-10-28: ending the
+leak gives them back, or raise the limit (`sudo sysctl fs.inotify.max_user_instances=1024`).
 
 ## First run
 
