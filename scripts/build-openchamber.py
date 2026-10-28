@@ -28,7 +28,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,7 +75,7 @@ def main() -> None:
             sys.exit("the built UI does not contain the adapted code")
         step("staging the adapted server sources and packing")
         bun(env, "run", str(CLI), "stage", str(tree), "server")
-        package = pack(env, web, version)
+        package = pack(env, web, version, tree.parent / "pack")
     else:
         bun(env, "run", str(CLI), "stage", str(tree), "server")
 
@@ -135,8 +134,10 @@ def copy_source(source: Path, tree: Path) -> None:
         shutil.copytree(source, tree, dirs_exist_ok=True, ignore=shutil.ignore_patterns("node_modules", "dist", ".git"))
 
 
-def pack(env: dict[str, str], web: Path, version: str) -> Path:
-    staging = Path(tempfile.mkdtemp(prefix="openchamber-pack-"))
+def pack(env: dict[str, str], web: Path, version: str, staging: Path) -> Path:
+    # Beside the build tree, so the tree's cleanup (or --keep) covers it too.
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
     bun(env, "pm", "pack", "--destination", str(staging), cwd=web)
     packed = list(staging.glob("*.tgz"))
     if len(packed) != 1:
