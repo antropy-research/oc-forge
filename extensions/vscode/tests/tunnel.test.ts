@@ -1,6 +1,49 @@
 import { describe, expect, test } from 'bun:test';
+import net from 'node:net';
 import { Tunnels, type SocketFactory } from '../service/tunnel.ts';
 import { sendBatches, TunnelSocket, type TunnelService } from '../workbench/tunnel.ts';
+
+/**
+ * A loopback server that answers an upgrade the way the VS Code Server's
+ * upgradeToISocket does, then echoes the raw bytes; like the real server, it
+ * never answers a WebSocket Close frame or ends a socket by itself.
+ */
+const vscodeServer = async () => {
+  const upgrades: { requestLine: string; headers: Record<string, string> }[] = [];
+  const connections: { socket: net.Socket; received: Buffer[]; closed: Promise<void> }[] = [];
+  const server = net.createServer((socket) => {
+    let head = Buffer.alloc(0);
+    let upgraded = false;
+    const connection = { socket, received: [] as Buffer[], closed: new Promise<void>((resolve) => socket.on('close', () => resolve())) };
+    connections.push(connection);
+    socket.on('error', () => {});
+    socket.on('data', (data: Buffer) => {
+      if (upgraded) {
+        connection.received.push(data);
+        socket.write(data);
+        return;
+      }
+      head = Buffer.concat([head, data]);
+      const end = head.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      const [requestLine = '', ...lines] = head.subarray(0, end).toString('latin1').split('\r\n');
+      const headers = Object.fromEntries(lines.map((line) => [line.slice(0, line.indexOf(':')).toLowerCase(), line.slice(line.indexOf(':') + 1).trim()]));
+      upgrades.push({ requestLine, headers });
+      if (headers.cookie !== 'vscode-tkn=t') {
+        socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+        return;
+      }
+      upgraded = true;
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: x\r\n\r\n');
+      const rest = head.subarray(end + 4);
+      if (rest.length > 0) socket.emit('data', rest);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  return { port, upgrades, connections, stop: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+};
+const within = <T,>(promise: Promise<T>, ms: number): Promise<T | 'timeout'> => Promise.race([promise, new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), ms))]);
 
 /** A socket that records what it sent and lets the test play the server. */
 const fakeSockets = () => {
@@ -65,6 +108,95 @@ describe('the service side', () => {
     tunnels.sweep();
     expect(tunnels.has(id)).toBe(false);
     expect(sockets[0]!.closed).toBe(true);
+    tunnels.dispose();
+  });
+
+  test('a closed tunnel whose socket never closes still counts as an open connection', () => {
+    const { sockets, factory } = fakeSockets();
+    const tunnels = new Tunnels(factory);
+    const id = tunnels.open('ws://x/', {});
+    tunnels.close(id);
+    expect([tunnels.size(), tunnels.sockets()]).toEqual([0, 1]);
+    sockets[0]!.fire('close', { code: 1006 });
+    expect(tunnels.sockets()).toBe(0);
+    tunnels.dispose();
+  });
+});
+
+describe('the connection to the VS Code Server', () => {
+  test('is a raw upgrade asking for skipWebSocketFrames=true, carries the bytes unframed, and closing ends it', async () => {
+    const server = await vscodeServer();
+    const tunnels = new Tunnels();
+    const id = tunnels.open(`ws://127.0.0.1:${server.port}/?reconnectionToken=r1&reconnection=false&skipWebSocketFrames=false&tkn=t`, { cookie: 'vscode-tkn=t' });
+    expect((await tunnels.receive(id, 2000)).events).toEqual([{ type: 'open' }]);
+    const upgrade = server.upgrades[0]!;
+    expect(upgrade.requestLine).toBe('GET /?reconnectionToken=r1&reconnection=false&skipWebSocketFrames=true&tkn=t HTTP/1.1');
+    expect(upgrade.headers).toMatchObject({ upgrade: 'websocket', connection: 'Upgrade', cookie: 'vscode-tkn=t', host: `127.0.0.1:${server.port}` });
+    expect(upgrade.headers['sec-websocket-key']).toMatch(/^[A-Za-z0-9+/]{22}==$/);
+
+    tunnels.send(id, ['AQID', 'BA==']);
+    const echoed: string[] = [];
+    while (Buffer.concat(echoed.map((data) => Buffer.from(data, 'base64'))).length < 4) {
+      for (const event of (await tunnels.receive(id, 2000)).events) if (event.type === 'data') echoed.push(event.data);
+    }
+    expect([...Buffer.concat(server.connections[0]!.received)]).toEqual([1, 2, 3, 4]);
+    expect([...Buffer.concat(echoed.map((data) => Buffer.from(data, 'base64')))]).toEqual([1, 2, 3, 4]);
+
+    expect(tunnels.sockets()).toBe(1);
+    tunnels.close(id);
+    expect(await within(server.connections[0]!.closed, 2000)).not.toBe('timeout');
+    expect([tunnels.size(), tunnels.sockets()]).toEqual([0, 0]);
+    tunnels.dispose();
+    await server.stop();
+  });
+
+  test("an abandoned tunnel's connection is ended by the sweep", async () => {
+    const server = await vscodeServer();
+    let now = 0;
+    const tunnels = new Tunnels(undefined, () => now);
+    const id = tunnels.open(`ws://127.0.0.1:${server.port}/?reconnectionToken=r2`, { cookie: 'vscode-tkn=t' });
+    expect((await tunnels.receive(id, 2000)).events).toEqual([{ type: 'open' }]);
+    now = 60_000;
+    tunnels.sweep();
+    expect(await within(server.connections[0]!.closed, 2000)).not.toBe('timeout');
+    expect(tunnels.sockets()).toBe(0);
+    tunnels.dispose();
+    await server.stop();
+  });
+
+  test("the server's end reaches the frame as a close", async () => {
+    const server = await vscodeServer();
+    const tunnels = new Tunnels();
+    const id = tunnels.open(`ws://127.0.0.1:${server.port}/?reconnectionToken=r3`, { cookie: 'vscode-tkn=t' });
+    expect((await tunnels.receive(id, 2000)).events).toEqual([{ type: 'open' }]);
+    server.connections[0]!.socket.end();
+    expect(await tunnels.receive(id, 2000)).toEqual({ events: [], closed: { code: 1006, reason: '', wasClean: false } });
+    expect([tunnels.has(id), tunnels.sockets()]).toEqual([false, 0]);
+    tunnels.dispose();
+    await server.stop();
+  });
+
+  test('a refused upgrade, or no server, is an error and a close', async () => {
+    // Everything a tunnel reports until it closes.
+    const untilClosed = async (tunnels: Tunnels, id: string) => {
+      const events: unknown[] = [];
+      for (let poll = 0; poll < 5; poll += 1) {
+        const answer = await tunnels.receive(id, 1000);
+        events.push(...answer.events);
+        if (answer.closed) return { events, closed: answer.closed };
+      }
+      return { events, closed: null };
+    };
+    const server = await vscodeServer();
+    const tunnels = new Tunnels();
+    const refused = await untilClosed(tunnels, tunnels.open(`ws://127.0.0.1:${server.port}/?reconnectionToken=r4`, { cookie: 'vscode-tkn=wrong' }));
+    expect(refused.events).toEqual([{ type: 'error', message: 'The VS Code Server refused the connection (HTTP 403).' }]);
+    expect(refused.closed?.code).toBe(1006);
+    await server.stop();
+    const none = await untilClosed(tunnels, tunnels.open(`ws://127.0.0.1:${server.port}/`, {}));
+    expect(none.events.map((event) => (event as { type: string }).type)).toEqual(['error']);
+    expect(none.closed?.code).toBe(1006);
+    expect(tunnels.sockets()).toBe(0);
     tunnels.dispose();
   });
 });

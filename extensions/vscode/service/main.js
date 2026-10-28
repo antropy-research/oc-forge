@@ -594,21 +594,118 @@ class WorkbenchState {
 }
 
 // service/tunnel.ts
+import { randomBytes } from "node:crypto";
+import net from "node:net";
+import tls from "node:tls";
 var POLL_BYTES = 4000000;
 var POLL_WAIT_MS = 12000;
 var ABANDONED_MS = 45000;
 var MAX_TUNNELS = 32;
-var defaultFactory = (url, headers) => {
-  const Socket = globalThis.WebSocket;
-  if (!Socket)
-    throw new Error("This Node has no WebSocket; OpenChamber needs Node 22 or newer for the VS Code view.");
-  return new Socket(url, { headers });
-};
+var HEADER_MAX = 16384;
+
+class ServerSocket {
+  binaryType = "arraybuffer";
+  socket;
+  listeners = new Map;
+  early = [];
+  header = Buffer.alloc(0);
+  ended = false;
+  constructor(url, headers) {
+    const target = new URL(url);
+    target.searchParams.set("skipWebSocketFrames", "true");
+    const secure = target.protocol === "wss:" || target.protocol === "https:";
+    const host = target.hostname.replace(/^\[(.*)\]$/, "$1");
+    const port = Number(target.port) || (secure ? 443 : 80);
+    const lines = [
+      `GET ${target.pathname}${target.search} HTTP/1.1`,
+      `Host: ${target.host}`,
+      "Connection: Upgrade",
+      "Upgrade: websocket",
+      "Sec-WebSocket-Version: 13",
+      `Sec-WebSocket-Key: ${randomBytes(16).toString("base64")}`,
+      ...Object.entries(headers).filter(([name, value]) => !/[\r\n:]/.test(name) && !/[\r\n]/.test(value)).map(([name, value]) => `${name}: ${value}`)
+    ];
+    const request = `${lines.join(`\r
+`)}\r
+\r
+`;
+    this.socket = secure ? tls.connect({ host, port, servername: net.isIP(host) ? undefined : host }, () => this.socket.write(request)) : net.connect({ host, port }, () => this.socket.write(request));
+    this.socket.setNoDelay(true);
+    this.socket.on("data", (data) => this.accept(data));
+    this.socket.on("error", (error) => this.emit("error", { message: error.message }));
+    this.socket.on("close", () => this.end(1006, ""));
+  }
+  addEventListener(type, listener) {
+    this.listeners.set(type, [...this.listeners.get(type) ?? [], listener]);
+  }
+  send(data) {
+    if (this.ended)
+      return;
+    if (this.header)
+      this.early.push(Buffer.from(data));
+    else
+      this.socket.write(data);
+  }
+  close() {
+    if (this.ended)
+      return;
+    this.socket.destroy();
+    this.end(1000, "", true);
+  }
+  accept(data) {
+    if (this.ended)
+      return;
+    if (!this.header) {
+      this.emit("message", { data });
+      return;
+    }
+    const header = Buffer.concat([this.header, data]);
+    const end = header.indexOf(`\r
+\r
+`);
+    if (end < 0) {
+      if (header.length > HEADER_MAX)
+        this.fail("The VS Code Server sent no upgrade answer.");
+      else
+        this.header = header;
+      return;
+    }
+    this.header = null;
+    const status = /^HTTP\/1\.[01] (\d{3})/.exec(header.subarray(0, end).toString("latin1"))?.[1] ?? "no status";
+    if (status !== "101") {
+      this.fail(`The VS Code Server refused the connection (HTTP ${status}).`);
+      return;
+    }
+    this.emit("open", {});
+    for (const chunk of this.early.splice(0))
+      this.socket.write(chunk);
+    const rest = header.subarray(end + 4);
+    if (rest.length > 0)
+      this.emit("message", { data: rest });
+  }
+  fail(message) {
+    this.emit("error", { message });
+    this.socket.destroy();
+    this.end(1006, message);
+  }
+  end(code, reason, wasClean = false) {
+    if (this.ended)
+      return;
+    this.ended = true;
+    this.emit("close", { code, reason, wasClean });
+  }
+  emit(type, event) {
+    for (const listener of this.listeners.get(type) ?? [])
+      listener(event);
+  }
+}
+var defaultFactory = (url, headers) => new ServerSocket(url, headers);
 
 class Tunnels {
   factory;
   now;
   tunnels = new Map;
+  live = new Set;
   next = 1;
   sweeper;
   constructor(factory = defaultFactory, now = Date.now) {
@@ -641,9 +738,11 @@ class Tunnels {
     });
     socket.addEventListener("error", (event) => push({ type: "error", message: event.message ?? "socket error" }));
     socket.addEventListener("close", (event) => {
+      this.live.delete(socket);
       tunnel.closed = { code: event.code ?? 1006, reason: event.reason ?? "", wasClean: event.wasClean ?? false };
       wake();
     });
+    this.live.add(socket);
     this.tunnels.set(id, tunnel);
     return id;
   }
@@ -716,10 +815,15 @@ class Tunnels {
   size() {
     return this.tunnels.size;
   }
+  sockets() {
+    return this.live.size;
+  }
   dispose() {
     clearInterval(this.sweeper);
     for (const id of [...this.tunnels.keys()])
       this.close(id);
+    for (const socket of [...this.live])
+      socket.close();
   }
 }
 
@@ -850,7 +954,7 @@ var server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   try {
     if (url.pathname === "/health" && req.method === "GET") {
-      json(res, 200, { ok: true, tunnels: tunnels.size() });
+      json(res, 200, { ok: true, tunnels: tunnels.size(), sockets: tunnels.sockets() });
       return;
     }
     const route = req.method === "POST" ? routes[url.pathname] : undefined;

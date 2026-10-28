@@ -24,7 +24,7 @@ its server's origin. The extension's intermediate components close that gap:
 |---|---|---|
 | Its compiled files (`out/`, a few `node_modules`) | Only its own package's `.html .js .css .svg .json .png` load | `service/assets.ts` copies the browser's files of the server's own commit into `vscode-web/<commit>/` (from the install on this machine, or over HTTP from the server's static route by `service/web-files.json`), WebAssembly renamed `.json` |
 | Its embedder (`create(document.body, options)`) | | `src/patch.ts` routes the compiled embedder's options through the frame, which adds the folder, the web socket factory, the workspace provider and OpenChamber's defaults; each patch fails loudly if a release moved its code |
-| A web socket to the server | `connect-src` is the package only | The workbench's `webSocketFactory` tunnels through the host's service channel: the service opens the socket, the frame sends batches and long-polls (`workbench/tunnel.ts`, `service/tunnel.ts`) |
+| A web socket to the server | `connect-src` is the package only | The workbench's `webSocketFactory` tunnels through the host's service channel: the service opens the connection, the frame sends batches and long-polls (`workbench/tunnel.ts`, `service/tunnel.ts`). The service connects as VS Code's own Node client does: an upgrade with `skipWebSocketFrames=true`, then the raw stream. A WebSocket can't be closed there, since the server ignores Close frames; it kept every closed tunnel's connection, and with it the server's extension host for that workbench. Tunnels no frame polls for 45 s are closed, and `/health` reports `tunnels` and the `sockets` still open |
 | vsda to sign the handshake | Needs `crypto.subtle`, which plain HTTP lacks | The client sends its connection token, which the VS Code Server accepts in place of the signature |
 | Remote resources (themes, grammars, icon fonts, extension icons) and the gallery | Blocked by the CSP | `fetch`, `<img>`, `<style>` and CSSOM rules that name the server or the gallery are fetched by the service (`workbench/shims.ts`) |
 | Module workers from `blob:` URLs | An opaque origin cannot start them | The bootstrap's text starts the worker from a `data:` URL |
@@ -60,7 +60,11 @@ bun run check                      # tsc, strict
 bun test tests/                    # VSCODE_SERVER_DIR=<install> also patches a real compiled workbench
 bun run build                      # workbench/main.js, panel/main.js, service/main.js
 node tests/e2e/run.mjs http://<bind>:35310   # on the host, against the dev container
+node tests/e2e/tunnel-leak.mjs               # against the adapters' scratch stack (its header says how)
 ```
+
+`tunnel-leak.mjs` opens a workbench in a scratch OpenChamber, closes the browser, and checks that every
+connection to the VS Code Server ends and that the server starts the grace after which it frees the extension host.
 
 The E2E check connects the panel to the dev container's VS Code Server, checks the Explorer, file icons, the
 editor's grammar colors, a save with Ctrl+S, Markdown's preview (a webview), Source Control and its diff editor, Search, the terminal, state kept
