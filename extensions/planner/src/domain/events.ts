@@ -157,6 +157,26 @@ const validateGtaskTemplate = (value: unknown): string | null => {
   return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? 'template has an unknown field' : null;
 };
 
+const GTASK_EXCEPTION_FIELDS = ['skip', 'title', 'notes', 'date', 'time', 'duration', 'deadline'];
+/** A series keeps at most this many of its occurrences changed on their own. */
+export const GTASK_EXCEPTIONS_MAX = 200;
+
+/** An occurrence of a series changed on its own: skipped, or its own title, details, date, time or deadline. */
+const validateGtaskException = (value: unknown): string | null => {
+  if (!isRecord(value)) return 'an occurrence change must be an object';
+  const fields = Object.keys(value);
+  if (!fields.length) return 'an occurrence change needs a field';
+  if (fields.some((field) => !GTASK_EXCEPTION_FIELDS.includes(field))) return 'an occurrence change has an unknown field';
+  if (value.skip !== undefined && (value.skip !== true || fields.length > 1)) return 'a skipped occurrence is skip: true alone';
+  if (value.title !== undefined && !(typeof value.title === 'string' && value.title.trim().length > 0 && value.title.length <= 1024)) return 'an occurrence title must be 1-1024 characters';
+  if (value.notes !== undefined && !(typeof value.notes === 'string' && value.notes.length <= GOOGLE_NOTES_MAX)) return `an occurrence's notes must be text, at most ${GOOGLE_NOTES_MAX} characters`;
+  if (value.date !== undefined && !isDateKey(value.date)) return 'an occurrence date must be a date';
+  if (value.time !== undefined && !(value.time === null || (Number.isInteger(value.time) && (value.time as number) >= 0 && (value.time as number) < 24 * 60))) return 'an occurrence time must be minutes after midnight, or null';
+  if (value.duration !== undefined && !(value.duration === null || (Number.isInteger(value.duration) && (value.duration as number) >= 5 && (value.duration as number) <= 24 * 60))) return 'an occurrence duration must be 5 to 1440 minutes, or null';
+  if (value.deadline !== undefined && !(value.deadline === null || isDateKey(value.deadline))) return 'an occurrence deadline must be a date or null';
+  return null;
+};
+
 /** What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule (with its series' template), a star. */
 const validateKeptPatch = (patch: unknown): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
@@ -176,7 +196,15 @@ const validateKeptPatch = (patch: unknown): string | null => {
         const error = validateGtaskTemplate(value.template);
         if (error) return error;
       }
-      if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next', 'on', 'template'].includes(field))) return 'repeat has an unknown field';
+      if (value.exceptions !== undefined) {
+        if (!isRecord(value.exceptions) || Object.keys(value.exceptions).length > GTASK_EXCEPTIONS_MAX) return `repeat exceptions must be at most ${GTASK_EXCEPTIONS_MAX} occurrences by date`;
+        for (const [date, change] of Object.entries(value.exceptions)) {
+          if (!isDateKey(date)) return 'repeat exceptions are by date';
+          const error = validateGtaskException(change);
+          if (error) return error;
+        }
+      }
+      if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next', 'on', 'template', 'exceptions'].includes(field))) return 'repeat has an unknown field';
     } else if (!['time', 'duration', 'deadline', 'starred', 'repeat'].includes(key)) return `unknown field ${key}`;
   }
   return null;

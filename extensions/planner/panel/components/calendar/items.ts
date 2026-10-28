@@ -7,7 +7,7 @@ import { blocksOnDay } from '../../../src/domain/selectors.ts';
 import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
 import { compactClock, compactRange, eventSpan, longDay, shortDay, type RowItem } from '../../../src/domain/gcalendar.ts';
 import { GOOGLE_TASKS_CALENDAR, taskForGoogleTask } from '../../../src/domain/google.ts';
-import { keptFor, keptTimeLabel } from '../../../src/domain/gtaskKept.ts';
+import { keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
 import { describeRecurrence } from '../../../src/domain/rrule.ts';
 
 /** Google Calendar's color for tasks. */
@@ -66,14 +66,15 @@ export const eventLabel = (event: CalendarEvent, zone: string): string => {
  * Planner, deadline Friday, October 30, repeats": a task chip's full text, for
  * its label and tooltip. On its deadline's day: "Google task Send the report,
  * deadline Friday, October 30, no date". An upcoming occurrence: "Google task
- * Standup, upcoming Wednesday, October 28 at 10am, repeats daily".
+ * Standup, upcoming Wednesday, October 28 at 10am, repeats daily" (", changed
+ * for this task" when it was changed on its own).
  */
 export const taskEventLabel = (event: CalendarEvent, state: PlannerState, today: DateKey, zone = 'UTC'): string => {
   const upcoming = event.upcoming;
   if (upcoming) {
-    const time = keptTimeLabel(upcoming.template);
+    const time = keptTimeLabel(upcomingValues(upcoming));
     const repeats = describeRecurrence([upcoming.rule], upcoming.template.start, zone);
-    return `Google task ${event.title}, upcoming ${longDay(upcoming.date)}${time ? ` at ${time}` : ''}, repeats ${repeats.charAt(0).toLowerCase()}${repeats.slice(1)}`;
+    return `Google task ${event.title}, upcoming ${longDay(upcoming.date)}${time ? ` at ${time}` : ''}, repeats ${repeats.charAt(0).toLowerCase()}${repeats.slice(1)}${upcoming.change ? ', changed for this task' : ''}`;
   }
   const task = event.googleTask!;
   const kept = keptFor(state, task);

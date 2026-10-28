@@ -6,6 +6,7 @@ import { useEffect, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import type { EditScope, EventInput } from '../../src/domain/gevents.ts';
 import type { GoogleEventDetail, GoogleEventRef, GoogleResponse, GoogleTaskItem } from '../../src/domain/google.ts';
+import type { UpcomingTask } from '../../src/domain/gtaskKept.ts';
 import type { CalendarMode } from '../../src/domain/gcalendar.ts';
 import type { DateKey } from '../../src/domain/types.ts';
 import { instantAt, zonedDateMinutes } from '../../src/domain/dates.ts';
@@ -33,10 +34,15 @@ export type CalendarPopover =
 /** What a click on a calendar item opens: an event's details, a Google task's, or a series'. */
 export const popoverKind = (event: CalendarEvent): 'event' | 'task' | 'upcoming' => (event.upcoming ? 'upcoming' : event.googleTask ? 'task' : 'event');
 
-/** A Google task edited over the calendar, in the Tasks view's form; `series`: all of its series' tasks, without asking. */
+/**
+ * A Google task edited over the calendar, in the Tasks view's form; `series`:
+ * all of its series' tasks, without asking; `occurrence`: one upcoming task of
+ * the series of `item` (its open one) alone ("This task" from the calendar).
+ */
 export interface TaskEditorTarget {
   item: GoogleTaskItem;
   series: boolean;
+  occurrence?: UpcomingTask;
 }
 
 /** A new event or task being made in quick create: its day(s) and, for a timed one, its minutes. */
