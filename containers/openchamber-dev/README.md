@@ -52,7 +52,7 @@ adapters and set `OPENCHAMBER_BUILD` to run it.
 | `Dockerfile.dockerignore` | the build context, the repository root, cut to what the stages copy, without git metadata or `node_modules` |
 | `vscode-product.json` | merged into VS Code's `product.json` before its build |
 | `build.sh` | checks that the three vendors are checked out at their pins and unmodified, then runs `docker compose build` |
-| `compose.yaml` | containers `oc-forge-openchamber-dev` (OpenChamber) and `oc-forge-vscode-dev` (VS Code Server), from the same image; both mount volume `oc-forge-openchamber-dev-home` at `/home/node` (settings, projects, sessions, OpenCode data, VS Code Server data) and `../../extensions` at `/extensions` |
+| `compose.yaml` | containers `oc-forge-openchamber-dev` (OpenChamber) and `oc-forge-vscode-dev` (VS Code Server), from the same image; both mount volume `oc-forge-openchamber-dev-home` at `/home/node` (settings, projects, sessions, OpenCode data, VS Code Server data) and `../../extensions` at `/extensions`. Each may use 16 GiB of memory and no swap (`mem_limit`, `memswap_limit`), so a runaway one is OOM-killed alone instead of the host running out: on 2026-10-28 the VS Code Server reached 24.5 GiB of the host's 62.6 GiB through a tunnel leak in the VS Code extension |
 | `.env` (untracked) | optional `OC_DEV_BIND`, `OC_DEV_PORT` and `OC_VSCODE_PORT`; default `127.0.0.1:35310` and `:35311` |
 | `~/.local/share/oc-forge-openchamber-dev/secrets.env` (outside the repository, mode 0600) | `OPENCHAMBER_UI_PASSWORD`, `VSCODE_CONNECTION_TOKEN` and provider keys such as `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` |
 

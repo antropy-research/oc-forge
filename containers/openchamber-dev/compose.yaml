@@ -12,6 +12,9 @@ services:
     container_name: oc-forge-openchamber-dev
     init: true
     restart: unless-stopped
+    # A runaway container is OOM-killed on its own instead of exhausting the host (vscode reached 24.5 GiB on 2026-10-28).
+    mem_limit: 16g
+    memswap_limit: 16g
     ports:
       # Loopback by default; set OC_DEV_BIND in the untracked .env to publish
       # on another address, such as the host's Tailscale IP.
@@ -33,6 +36,8 @@ services:
     container_name: oc-forge-vscode-dev
     init: true
     restart: unless-stopped
+    mem_limit: 16g
+    memswap_limit: 16g
     ports:
       - "${OC_DEV_BIND:-127.0.0.1}:${OC_VSCODE_PORT:-35311}:8000"
     env_file:
