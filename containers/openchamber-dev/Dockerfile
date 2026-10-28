@@ -92,12 +92,21 @@ RUN version="$(cat .nvmrc)" \
 ENV PATH=/opt/node/bin:$PATH
 COPY vendors/vscode ./
 # As in VS Code's CI: no Electron, browsers or ONNX Runtime downloads for a server, and no Foundry
-# Local native install (on-device dictation, from Microsoft's private feed). The postinstall runs
-# `git config`, which needs a repository, and the copy has no git metadata.
-ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 ONNXRUNTIME_NODE_INSTALL=skip
+# Local native install (on-device dictation, from Microsoft's private feed): FOUNDRY_LOCAL_SKIP_INSTALL,
+# or on releases older than that variable, their disableFoundryLocalInstall.ts. `npm ci` gets five
+# tries, as there: native modules building at once can race on node-gyp's header cache. The
+# postinstall runs `git config`, which needs a repository, and the copy has no git metadata.
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 ONNXRUNTIME_NODE_INSTALL=skip \
+  FOUNDRY_LOCAL_SKIP_INSTALL=1
 RUN git init -q \
-  && node build/azure-pipelines/common/disableFoundryLocalInstall.ts \
-  && npm ci
+  && if [ -f build/azure-pipelines/common/disableFoundryLocalInstall.ts ]; then \
+       node build/azure-pipelines/common/disableFoundryLocalInstall.ts; \
+     fi \
+  && for try in 1 2 3 4 5; do \
+       npm ci && break; \
+       [ "$try" -lt 5 ] || { echo "npm ci failed five times" >&2; exit 1; }; \
+       echo "npm ci failed ($try of 5), trying again" >&2; \
+     done
 # The packaging VS Code leaves to whoever distributes its OSS build: the commit, which
 # build/lib/getVersion.ts reads from BUILD_SOURCEVERSION as the copy has no git, and
 # vscode-product.json merged into product.json (quality, Open VSX as the extension gallery) before
