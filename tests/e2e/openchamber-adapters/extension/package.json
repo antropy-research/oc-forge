@@ -1,0 +1,36 @@
+{
+  "name": "ocforge-test",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scratch extension for the end-to-end check of oc-forge's OpenChamber adapters: rail entries from its service, header tabs, a bottom-zone entry, key forwarding and deep links.",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.5.2"
+    },
+    "contributes": {
+      "panel": {
+        "id": "ocforge-test",
+        "name": "oc-forge test",
+        "icon": "flask",
+        "entry": "panel/index.html"
+      },
+      "page": {
+        "entry": "panel/index.html",
+        "title": "oc-forge test"
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host"
+      },
+      "capabilities": ["sessions"]
+    }
+  },
+  "ocForge": {
+    "apiVersion": 1,
+    "rail": {
+      "path": "/rail",
+      "interval": 1000
+    }
+  }
+}

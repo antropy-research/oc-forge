@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>oc-forge test</title>
+    <style>
+      body { margin: 0; padding: 12px 14px; font: 13px/1.45 var(--font, system-ui), sans-serif; background: var(--bg, #fff); color: var(--fg, #111); }
+      h1 { font-size: 15px; margin: 0 0 6px; }
+      h2 { font-size: 12px; margin: 12px 0 4px; text-transform: uppercase; letter-spacing: .04em; opacity: .7; }
+      .big { font-size: 22px; font-weight: 600; }
+      button { font: inherit; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 5px; border: 1px solid var(--border, #bbb); background: transparent; color: inherit; cursor: pointer; }
+      input { font: inherit; width: 220px; padding: 2px 6px; border: 1px solid var(--border, #bbb); border-radius: 5px; background: transparent; color: inherit; }
+      code, #log { font-family: var(--mono, monospace); font-size: 12px; }
+      #log { white-space: pre-wrap; max-height: 160px; overflow: auto; opacity: .85; }
+      a { color: var(--primary, #2563eb); }
+    </style>
+  </head>
+  <body>
+    <h1>oc-forge test <span id="surface"></span></h1>
+    <div id="status">connecting…</div>
+    <div>loaded at <code id="loaded"></code></div>
+    <h2>Rail entry</h2>
+    <div class="big" id="entry">—</div>
+    <button id="report-beta">I switched to beta</button>
+    <h2>Header tabs</h2>
+    <div>shown on <code id="tab">—</code></div>
+    <button id="open-a">Open tab A</button><button id="open-b">Open tab B (unsaved)</button><button id="close-a">Close tab A</button>
+    <h2>Keys</h2>
+    <input id="keys" placeholder="focus here and press keys" />
+    <div>last: <code id="key-result">—</code></div>
+    <button id="late-key">Forward mod+1 in 7 s</button>
+    <h2>Links</h2>
+    <div>route: <code id="route">—</code></div>
+    <a id="page-link" href="#">This page on /item/42</a> · <a id="session-link" href="#">The current chat</a>
+    <div><button id="set-route">Set route /item/7</button></div>
+    <h2>Log</h2>
+    <div id="log"></div>
+    <script src="./main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,223 @@
+// The oc-forge OpenChamber protocol as both ends read it, the server's reading
+// of the package.json block, and the client module extensions bundle.
+import { describe, expect, test } from "bun:test"
+import {
+  connectOcForge,
+  envelope,
+  matchHostShortcut,
+  readOcForgeManifest,
+  readOcForgeRailEntries,
+  readOcForgeRequest,
+  type OcForgeHello,
+  type OcForgeKey,
+  type OcForgeShortcuts,
+} from "../adapters/openchamber/client/index"
+import { parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
+
+const linux: OcForgeShortcuts = {
+  mod: ["ctrl"],
+  mac: false,
+  bindings: {
+    switch_session_tab: "mod",
+    switch_context_surface: "mod+alt",
+    switch_session_previous: "mod+alt+arrowleft",
+    switch_session_next: "mod+alt+arrowright",
+    session_history_back: "mod+[",
+    session_history_forward: "mod+]",
+    close_session_tab: "alt+w",
+    toggle_sidebar: "mod+b",
+    open_command_palette: "mod+p",
+  },
+}
+const macBrowser: OcForgeShortcuts = { ...linux, mod: ["meta", "ctrl"], mac: true }
+
+const press = (key: string, code: string, flags: Partial<OcForgeKey> = {}): OcForgeKey => ({
+  key, code, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...flags,
+})
+
+describe("frame requests", () => {
+  test("well-formed requests are read, anything else is not", () => {
+    expect(readOcForgeRequest(envelope({ type: "hello" }))).toEqual({ id: null, request: { type: "hello" } })
+    expect(readOcForgeRequest({ channel: "openchamber", v: 1, type: "hello" })).toBeNull()
+    expect(readOcForgeRequest({ channel: "oc-forge", v: 2, type: "hello" })).toBeNull()
+    const open = readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "file:///a.ts", title: " a.ts ", icon: "<svg viewBox='0 0 1 1'/>", activate: true } }, "7"))
+    expect(open).toEqual({ id: "7", request: { type: "tab-open", payload: { id: "file:///a.ts", title: "a.ts", icon: "<svg viewBox='0 0 1 1'/>", activate: true } } })
+    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "" } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", icon: "javascript:alert(1)" } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "tab-update", payload: { id: "a", icon: null, dirty: true } }))?.request).toEqual({ type: "tab-update", payload: { id: "a", icon: null, dirty: true } })
+    expect(readOcForgeRequest(envelope({ type: "route", payload: { route: "x".repeat(2049) } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "rail-active", payload: { entry: "a--b" } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "key", payload: press("1", "Digit1", { ctrlKey: true }) }))?.request.type).toBe("key")
+    expect(readOcForgeRequest(envelope({ type: "key", payload: { key: "1", code: "Digit1" } }))).toBeNull()
+  })
+})
+
+describe("rail entries from a service", () => {
+  test("ordered by `order`, then as listed; a bad entry is dropped on its own", () => {
+    const entries = readOcForgeRailEntries({
+      entries: [
+        { id: "search", title: "Search", icon: "search-line" },
+        { id: "scm", title: "Source Control", icon: "git-branch", order: 2 },
+        { id: "explorer", title: "Explorer", icon: "<svg xmlns='http://www.w3.org/2000/svg'/>", order: 1 },
+        { id: "terminal", title: "Terminal", icon: "terminal-box", zone: "bottom" },
+        { id: "bad--id", title: "Reserved separator", icon: "apps" },
+        { id: "scm", title: "Duplicate", icon: "apps" },
+        { id: "nozone", title: "Bad zone", icon: "apps", zone: "top" },
+        { id: "noicon", title: "No icon" },
+        "not an object",
+      ],
+    })
+    expect(entries?.map((entry) => entry.id)).toEqual(["explorer", "scm", "search", "terminal"])
+    expect(entries?.find((entry) => entry.id === "terminal")?.zone).toBe("bottom")
+    expect(readOcForgeRailEntries({ items: [] })).toBeNull()
+    expect(readOcForgeRailEntries({ entries: Array.from({ length: 40 }, (_, i) => ({ id: `e${i}`, title: `E${i}`, icon: "apps" })) })).toHaveLength(32)
+  })
+})
+
+describe("the ocForge manifest block", () => {
+  const manifest = { contributes: { panel: { entry: "panel/index.html" }, service: { entry: "service/main.js" } } }
+  test("the server reads zone and rail source, clamping the interval", () => {
+    const raw = JSON.stringify({ openchamber: {}, ocForge: { apiVersion: 1, zone: "bottom", rail: { path: "/rail", interval: 10 } } })
+    expect(parseOcForgeManifest(raw, manifest)).toEqual({ apiVersion: 1, zone: "bottom", rail: { path: "/rail", interval: 1000 } })
+  })
+  test("a rail needs a service, everything needs a panel page, other versions are ignored", () => {
+    const raw = JSON.stringify({ ocForge: { apiVersion: 1, zone: "left", rail: { path: "/rail" } } })
+    expect(parseOcForgeManifest(raw, { contributes: { panel: { entry: "a.html" } } })).toEqual({ apiVersion: 1, zone: "left" })
+    expect(parseOcForgeManifest(raw, { contributes: { panel: {} } })).toBeNull()
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 2, zone: "left" } }), manifest)).toBeNull()
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, rail: { path: "../x" } } }), manifest)).toBeNull()
+    expect(parseOcForgeManifest("{", manifest)).toBeNull()
+  })
+  test("the UI reads the catalog row's field the same way", () => {
+    expect(readOcForgeManifest({ apiVersion: 1, rail: { path: "/rail" } })).toEqual({ apiVersion: 1, rail: { path: "/rail", interval: 3000 } })
+    expect(readOcForgeManifest({ apiVersion: 1, zone: "top" })).toEqual({ apiVersion: 1 })
+    expect(readOcForgeManifest("nope")).toBeUndefined()
+  })
+})
+
+describe("OpenChamber's navigation shortcuts, as a frame sees them", () => {
+  test("default bindings on Linux", () => {
+    expect(matchHostShortcut(press("1", "Digit1", { ctrlKey: true }), linux)).toBe("switch_session_tab")
+    expect(matchHostShortcut(press("0", "Digit0", { ctrlKey: true }), linux)).toBeNull()
+    expect(matchHostShortcut(press("2", "Digit2", { ctrlKey: true, altKey: true }), linux)).toBe("switch_context_surface")
+    expect(matchHostShortcut(press("ArrowRight", "ArrowRight", { ctrlKey: true, altKey: true }), linux)).toBe("switch_session_next")
+    expect(matchHostShortcut(press("∑", "KeyW", { altKey: true }), linux)).toBe("close_session_tab")
+    expect(matchHostShortcut(press("b", "KeyB", { ctrlKey: true }), linux)).toBe("toggle_sidebar")
+    expect(matchHostShortcut(press("p", "KeyP", { ctrlKey: true }), linux)).toBe("open_command_palette")
+    expect(matchHostShortcut(press("s", "KeyS", { ctrlKey: true }), linux)).toBeNull()
+    expect(matchHostShortcut(press("b", "KeyB", { ctrlKey: true, shiftKey: true }), linux)).toBeNull()
+    expect(matchHostShortcut(press("1", "Digit1", { metaKey: true }), linux)).toBeNull()
+    expect(matchHostShortcut(press("1", "Digit1", { ctrlKey: true, repeat: true }), linux)).toBeNull()
+  })
+  test("a macOS browser takes Command or Control as mod", () => {
+    expect(matchHostShortcut(press("1", "Digit1", { metaKey: true }), macBrowser)).toBe("switch_session_tab")
+    expect(matchHostShortcut(press("¡", "Digit1", { metaKey: true, altKey: true }), macBrowser)).toBe("switch_context_surface")
+    expect(matchHostShortcut(press("b", "KeyB", { ctrlKey: true }), macBrowser)).toBe("toggle_sidebar")
+  })
+  test("rebinding moves what a frame forwards", () => {
+    const rebound = { ...linux, bindings: { ...linux.bindings, close_session_tab: "mod+w", switch_session_next: "ctrl+tab" } }
+    expect(matchHostShortcut(press("w", "KeyW", { ctrlKey: true }), rebound)).toBe("close_session_tab")
+    expect(matchHostShortcut(press("w", "KeyW", { altKey: true }), rebound)).toBeNull()
+    expect(matchHostShortcut(press("Tab", "Tab", { ctrlKey: true }), rebound)).toBe("switch_session_next")
+  })
+})
+
+type Posted = { data: unknown }
+
+// A frame window whose parent records what the client posts and can answer.
+const fakeFrame = () => {
+  const host = { posted: [] as Posted[], postMessage(data: unknown) { this.posted.push({ data }) } }
+  const frame = new EventTarget() as EventTarget & { parent: unknown }
+  frame.parent = host
+  const deliver = (data: unknown, source: unknown = host) => {
+    const event = new Event("message")
+    Object.assign(event, { data, source })
+    frame.dispatchEvent(event)
+  }
+  return { host, frame: frame as unknown as Window, deliver }
+}
+
+const hello: OcForgeHello = {
+  version: 1,
+  features: ["rail", "tabs", "zones", "keys", "links"],
+  extension: "ocforge-test",
+  surface: "panel",
+  rail: { entry: "alpha", own: false },
+  tabs: { list: [], active: null, shown: false, strip: true },
+  route: null,
+  links: { page: "http://h/?extension=ocforge-test&route=", session: "http://h/?session=" },
+  shortcuts: linux,
+}
+
+describe("the client module", () => {
+  test("resolves null when the host does not answer: a stock OpenChamber", async () => {
+    const { frame, host } = fakeFrame()
+    expect(await connectOcForge({ target: frame, timeoutMs: 20 })).toBeNull()
+    expect(host.posted[0].data).toEqual({ channel: "oc-forge", v: 1, type: "hello" })
+  })
+
+  test("outside a frame there is no host", async () => {
+    const lone = new EventTarget() as EventTarget & { parent: unknown }
+    lone.parent = lone
+    expect(await connectOcForge({ target: lone as unknown as Window })).toBeNull()
+  })
+
+  test("hello, requests and events", async () => {
+    const { frame, host, deliver } = fakeFrame()
+    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
+    deliver(envelope({ type: "hello", payload: { ...hello, extension: "someone-else" } }), {})
+    deliver(envelope({ type: "hello", payload: hello }))
+    const forge = await connecting
+    expect(forge?.hello.extension).toBe("ocforge-test")
+    expect(forge?.has("tabs")).toBe(true)
+    expect(forge?.links.pageUrl("/task/1 a")).toBe("http://h/?extension=ocforge-test&route=%2Ftask%2F1%20a")
+    expect(forge?.links.sessionUrl("ses_1")).toBe("http://h/?session=ses_1")
+
+    const opening = forge!.tabs.open({ id: "a", title: "A" }, { activate: true })
+    const request = host.posted.at(-1)!.data as { id: string; type: string; payload: unknown }
+    expect(request).toMatchObject({ channel: "oc-forge", type: "tab-open", payload: { id: "a", title: "A", activate: true } })
+    deliver(envelope({ type: "result", id: request.id, ok: true }))
+    await opening
+
+    const refused = forge!.tabs.activate("missing")
+    deliver(envelope({ type: "result", id: (host.posted.at(-1)!.data as { id: string }).id, ok: false, error: "No such tab." }))
+    await expect(refused).rejects.toThrow("No such tab.")
+
+    const seen: string[] = []
+    forge!.rail.onEntry((entry) => seen.push(`entry:${entry}`))
+    forge!.tabs.onActivate((id) => seen.push(`tab:${id}`))
+    forge!.tabs.onClose((id) => seen.push(`closed:${id}`))
+    forge!.links.onRoute((route) => seen.push(`route:${route}`))
+    deliver(envelope({ type: "rail-entry", payload: { entry: "beta" } }))
+    deliver(envelope({ type: "tab-activated", payload: { id: "a" } }))
+    deliver(envelope({ type: "tab-closed", payload: { id: "a" } }))
+    deliver(envelope({ type: "route", payload: { route: "/x" } }))
+    expect(seen).toEqual(["entry:beta", "tab:a", "closed:a", "route:/x"])
+    expect(forge!.rail.entry()).toBe("beta")
+    expect(forge!.links.route()).toBe("/x")
+    forge!.dispose()
+  })
+
+  test("forwardHostShortcuts takes OpenChamber's keys from the frame and leaves the rest", async () => {
+    const { frame, host, deliver } = fakeFrame()
+    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
+    deliver(envelope({ type: "hello", payload: hello }))
+    const forge = (await connecting)!
+    const stop = forge.keys.forwardHostShortcuts({ except: ["toggle_sidebar"] })
+    const key = (init: KeyboardEventInit) => {
+      const event = new Event("keydown", { cancelable: true }) as KeyboardEvent
+      Object.assign(event, { key: "", code: "", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, repeat: false, isComposing: false, ...init })
+      frame.dispatchEvent(event)
+      return event
+    }
+    const before = host.posted.length
+    expect(key({ key: "2", code: "Digit2", ctrlKey: true }).defaultPrevented).toBe(true)
+    expect(host.posted.at(-1)!.data).toMatchObject({ type: "key", payload: { key: "2", code: "Digit2", ctrlKey: true } })
+    expect(key({ key: "b", code: "KeyB", ctrlKey: true }).defaultPrevented).toBe(false)
+    expect(key({ key: "k", code: "KeyK", ctrlKey: true }).defaultPrevented).toBe(false)
+    expect(host.posted.length).toBe(before + 1)
+    stop()
+    expect(key({ key: "2", code: "Digit2", ctrlKey: true }).defaultPrevented).toBe(false)
+    forge.dispose()
+  })
+})
