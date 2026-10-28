@@ -4,7 +4,19 @@ name: Upstream sync
 on:
   schedule:
     - cron: "17 * * * *"
+  # By hand, the same sync for a working branch: its pin commit goes to an
+  # `upstream-sync…` branch for that branch to merge, so vendor pins only ever
+  # change in a commit CI made. Only a sync of main is released.
   workflow_dispatch:
+    inputs:
+      base:
+        description: Branch whose vendor pins to update
+        type: string
+        default: main
+      target:
+        description: Branch the pin commit is pushed to (upstream-sync or upstream-sync-<name>)
+        type: string
+        default: upstream-sync
 
 permissions:
   contents: read
@@ -22,10 +34,20 @@ jobs:
     outputs:
       changed: ${{ steps.sync.outputs.changed }}
       sha: ${{ steps.commit.outputs.sha }}
+    env:
+      BASE: ${{ inputs.base || 'main' }}
+      TARGET: ${{ inputs.target || 'upstream-sync' }}
     steps:
+      # The pin commit is force-pushed to TARGET: never let that be a working branch.
+      - name: Check the target branch
+        run: |
+          case "$TARGET" in
+            upstream-sync|upstream-sync-*) ;;
+            *) echo "target must be upstream-sync or upstream-sync-<name>, not $TARGET" >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@v6
         with:
-          ref: main
+          ref: ${{ env.BASE }}
           submodules: recursive
       - uses: jdx/mise-action@v4
         with:
@@ -41,12 +63,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add vendors vendors.json upstream.json
           git commit -m "chore: update vendor releases"
-          git push --force origin HEAD:refs/heads/upstream-sync
+          git push --force origin "HEAD:refs/heads/$TARGET"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release:
     needs: sync
-    if: needs.sync.outputs.changed == 'true'
+    if: needs.sync.outputs.changed == 'true' && (inputs.base || 'main') == 'main'
     permissions:
       contents: write
     uses: ./.github/workflows/release.yml
