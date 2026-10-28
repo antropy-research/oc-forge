@@ -1,10 +1,12 @@
 // Two throwaway OpenChamber 2.5.2 instances on this machine for the end-to-end
 // check: `stock` (the npm release) and `adapted` (dist/openchamber-web-<v>.tgz),
 // each with its own HOME, data dir and loopback port, the same extensions and
-// one demo project. Nothing is shared with the dev containers.
+// one demo project. Nothing is shared with the dev containers or with the
+// session that runs this (see instanceEnv).
 //
 //   node tests/e2e/openchamber-adapters/stack.mjs prepare  install both builds, the check's tools and a VS Code Server (network)
 //   node tests/e2e/openchamber-adapters/stack.mjs up       start both, and the VS Code Server the VS Code extension connects to
+//   node tests/e2e/openchamber-adapters/stack.mjs restart <stock|adapted>   stop and start one instance
 //   node tests/e2e/openchamber-adapters/stack.mjs down     stop everything and delete the work dir
 //
 // WORK (default /tmp/opencode/oc-adapters/e2e) holds everything, including the
@@ -33,6 +35,13 @@ const env = () => {
   delete next.BASH_ENV;
   return next;
 };
+
+// The scratch servers start like fresh installs: without the variables the
+// OpenChamber or OpenCode this runs under hands its children (its config, server
+// passwords, agent-tool URL, Linear auth) and without credentials, so they can
+// neither load the host's config nor reach its services.
+const instanceEnv = () => Object.fromEntries(Object.entries(env())
+  .filter(([name]) => !/^(OPENCODE|OPENCHAMBER)/.test(name) && !/TOKEN|SECRET|PASSW|API_?KEY|AUTH|CREDENTIAL/i.test(name)));
 
 const secret = (name) => new RegExp(`^${name}=(.+)$`, 'm').exec(readFileSync(join(work, 'secrets.env'), 'utf8'))?.[1]?.trim();
 export const password = () => secret('OPENCHAMBER_UI_PASSWORD');
@@ -101,7 +110,7 @@ const up = async () => {
     spawnLogged('vscode', join(work, 'vscode-server/bin/code-server'), [
       '--host', '127.0.0.1', '--port', String(VSCODE_PORT), '--connection-token-file', tokenFile,
       '--accept-server-license-terms', '--server-data-dir', join(work, 'vscode', 'data'),
-    ], { cwd: join(work, 'vscode', 'home'), env: { ...env(), HOME: join(work, 'vscode', 'home') } });
+    ], { cwd: join(work, 'vscode', 'home'), env: { ...instanceEnv(), HOME: join(work, 'vscode', 'home') } });
   }
 
   // The extensions under test, as copies: some write into their own folder.
@@ -114,46 +123,53 @@ const up = async () => {
   execFileSync('bun', [join(here, 'build-fixture.ts'), extensions, join(work, 'deps/node_modules/@openchamber/sdk')], { stdio: 'inherit', env: env() });
 
   for (const [name, instance] of Object.entries(instances)) {
-    const root = join(work, name);
-    const prefix = join(root, 'prefix');
-    if (await healthy(instance.port)) continue;
-    stop(name);
-    for (let attempt = 0; attempt < 20 && await fetch(`http://127.0.0.1:${instance.port}/health`).then(() => true).catch(() => false); attempt += 1) await wait(500);
-    const home = join(root, 'home');
-    const project = join(home, 'projects/demo');
-    if (!existsSync(project)) {
-      mkdirSync(project, { recursive: true });
-      writeFileSync(join(project, 'README.md'), '# demo\n\nA project for the oc-forge adapter check.\n');
-      execFileSync('git', ['init', '-q', '-b', 'main', project]);
-      execFileSync('git', ['-C', project, '-c', 'user.name=oc-forge e2e', '-c', 'user.email=e2e@oc-forge.invalid', 'add', '.'], { env: env() });
-      execFileSync('git', ['-C', project, '-c', 'user.name=oc-forge e2e', '-c', 'user.email=e2e@oc-forge.invalid', 'commit', '-qm', 'demo'], { env: env() });
-    }
-    spawnLogged(name, 'node', [join(prefix, 'lib/node_modules/@openchamber/web/bin/cli.js'), 'serve', '--foreground', '--port', String(instance.port), '--host', '127.0.0.1'], {
-      cwd: home,
-      env: {
-        ...env(),
-        HOME: home,
-        XDG_CONFIG_HOME: join(home, '.config'),
-        XDG_DATA_HOME: join(home, '.local/share'),
-        XDG_STATE_HOME: join(home, '.local/state'),
-        XDG_CACHE_HOME: join(home, '.cache'),
-        OPENCHAMBER_DATA_DIR: join(home, '.config/openchamber'),
-        OPENCHAMBER_UI_PASSWORD: password(),
-        OPENCHAMBER_RELAY_HOST: 'off',
-        OPENCHAMBER_PUSH_RELAY_DISABLED: '1',
-      },
-    });
+    if (!await healthy(instance.port)) await start(name);
   }
-  for (const [name, instance] of Object.entries(instances)) {
-    const base = `http://127.0.0.1:${instance.port}`;
-    for (let attempt = 0; ; attempt += 1) {
-      const health = await fetch(`${base}/health`).then((response) => response.json()).catch(() => null);
-      if (health?.isOpenCodeReady) break;
-      if (attempt > 240) throw new Error(`${name} did not become ready; see ${join(work, name, `${name}.log`)}`);
-      await wait(500);
-    }
-    console.log(`${name}: ${base} ready`);
+  for (const name of Object.keys(instances)) await waitReady(name);
+};
+
+// One OpenChamber instance, with its own HOME, data dir and port.
+const start = async (name) => {
+  const instance = instances[name];
+  const root = join(work, name);
+  const prefix = join(root, 'prefix');
+  stop(name);
+  for (let attempt = 0; attempt < 20 && await fetch(`http://127.0.0.1:${instance.port}/health`).then(() => true).catch(() => false); attempt += 1) await wait(500);
+  const home = join(root, 'home');
+  const project = join(home, 'projects/demo');
+  if (!existsSync(project)) {
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, 'README.md'), '# demo\n\nA project for the oc-forge adapter check.\n');
+    execFileSync('git', ['init', '-q', '-b', 'main', project]);
+    execFileSync('git', ['-C', project, '-c', 'user.name=oc-forge e2e', '-c', 'user.email=e2e@oc-forge.invalid', 'add', '.'], { env: env() });
+    execFileSync('git', ['-C', project, '-c', 'user.name=oc-forge e2e', '-c', 'user.email=e2e@oc-forge.invalid', 'commit', '-qm', 'demo'], { env: env() });
   }
+  spawnLogged(name, 'node', [join(prefix, 'lib/node_modules/@openchamber/web/bin/cli.js'), 'serve', '--foreground', '--port', String(instance.port), '--host', '127.0.0.1'], {
+    cwd: home,
+    env: {
+      ...instanceEnv(),
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, '.config'),
+      XDG_DATA_HOME: join(home, '.local/share'),
+      XDG_STATE_HOME: join(home, '.local/state'),
+      XDG_CACHE_HOME: join(home, '.cache'),
+      OPENCHAMBER_DATA_DIR: join(home, '.config/openchamber'),
+      OPENCHAMBER_UI_PASSWORD: password(),
+      OPENCHAMBER_RELAY_HOST: 'off',
+      OPENCHAMBER_PUSH_RELAY_DISABLED: '1',
+    },
+  });
+};
+
+const waitReady = async (name) => {
+  const base = `http://127.0.0.1:${instances[name].port}`;
+  for (let attempt = 0; ; attempt += 1) {
+    const health = await fetch(`${base}/health`).then((response) => response.json()).catch(() => null);
+    if (health?.isOpenCodeReady) break;
+    if (attempt > 240) throw new Error(`${name} did not become ready; see ${join(work, name, `${name}.log`)}`);
+    await wait(500);
+  }
+  console.log(`${name}: ${base} ready`);
 };
 
 const healthy = async (port) => Boolean((await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json()).catch(() => null))?.isOpenCodeReady);
@@ -180,8 +196,15 @@ const down = () => {
 const command = process.argv[2];
 if (command === 'prepare') await prepare();
 else if (command === 'up') await up();
+else if (command === 'restart' && instances[process.argv[3]]) {
+  // OpenCode 2.1.4 sometimes stops answering under load (all threads parked on
+  // futexes) and OpenChamber's own restarts of it hang the same way; a fresh
+  // OpenChamber process brings up a working one.
+  await start(process.argv[3]);
+  await waitReady(process.argv[3]);
+}
 else if (command === 'down') down();
 else if (command) {
-  console.error('usage: stack.mjs prepare|up|down');
+  console.error('usage: stack.mjs prepare|up|restart <stock|adapted>|down');
   process.exit(2);
 }

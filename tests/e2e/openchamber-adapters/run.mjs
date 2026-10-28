@@ -10,8 +10,12 @@
 // On a host whose network interfaces change often (Docker builds), Chromium
 // aborts requests with ERR_NETWORK_CHANGED; run all three inside one private
 // network namespace then (README.md shows how). Never prints the UI password.
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 const work = process.env.WORK ?? '/tmp/opencode/oc-adapters/e2e';
 const out = process.argv[2] ?? '/tmp/opencode/oc-adapters/screens';
@@ -81,14 +85,28 @@ const seed = async (name, base, request) => {
   return { project, sessions: ids };
 };
 
-// OpenCode can restart under load; wait until the instance answers and lists the chats.
-const ready = async (request, base, seeded) => until(async () => {
-  const health = await (await request.get(`${base}/health`)).json();
-  if (!health.isOpenCodeReady) return false;
-  const listed = await (await request.get(`${base}/api/session?directory=${encodeURIComponent(seeded.project)}`, { timeout: 10_000 })).json();
-  const sessions = Array.isArray(listed) ? listed : listed.data ?? [];
-  return seeded.sessions.every((id) => sessions.some((session) => session.id === id));
-}, 240_000);
+// OpenCode 2.1.4 sometimes stops answering under load (every thread parked on
+// a futex), and OpenChamber's own restarts of it hang the same way. Before each
+// phase: wait until the instance lists the chats; if it does not, restart the
+// whole instance (stack.mjs restart), which brings up a working OpenCode.
+const restarts = [];
+const ready = async (request, base, seeded) => {
+  const name = Object.entries(instances).find(([, url]) => url === base)[0];
+  for (let attempt = 0; ; attempt += 1) {
+    const answered = await until(async () => {
+      const health = await (await request.get(`${base}/health`, { timeout: 10_000 })).json();
+      if (!health.isOpenCodeReady) return false;
+      const listed = await (await request.get(`${base}/api/session?directory=${encodeURIComponent(seeded.project)}`, { timeout: 10_000 })).json();
+      const sessions = Array.isArray(listed) ? listed : listed.data ?? [];
+      return seeded.sessions.every((id) => sessions.some((session) => session.id === id));
+    }, 90_000);
+    if (answered || attempt >= 2) return Boolean(answered);
+    console.log(`note: ${name}'s OpenCode stopped answering; restarting ${name}`);
+    restarts.push(`${name} at ${new Date().toISOString()}`);
+    execFileSync('node', [join(here, 'stack.mjs'), 'restart', name], { stdio: 'inherit' });
+    await request.post(`${base}/auth/session`, { data: { password } });
+  }
+};
 
 const setEnabled = (request, base, id, enabled) => request.put(`${base}/api/guests/${id}/enabled`, { data: { enabled } });
 const setEntries = (request, base, entries) => request.post(`${base}/api/guests/${TEST}/service/request`, {
@@ -96,7 +114,8 @@ const setEntries = (request, base, entries) => request.post(`${base}/api/guests/
 });
 
 // A browser window on one instance, with the three chats as pinned header tabs.
-const open = async (browser, base, viewport, sessions, path = `/?session=${sessions[0]}`) => {
+const open = async (browser, base, viewport, seeded, path = `/?session=${seeded.sessions[0]}`) => {
+  const { sessions } = seeded;
   const context = await browser.newContext({ viewport });
   await context.request.post(`${base}/auth/session`, { data: { password } });
   await context.addInitScript((ids) => {
@@ -110,10 +129,13 @@ const open = async (browser, base, viewport, sessions, path = `/?session=${sessi
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  // A page that loaded while OpenCode was restarting (it does under load) can
-  // stay on its loading state; load it again rather than compare that.
+  // A page stays on its loading state when OpenCode stopped answering while it
+  // loaded: make sure OpenCode answers again (ready() restarts the instance if
+  // not, and logs this window in again) and load the page again rather than
+  // compare that.
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await (attempt === 0 ? page.goto(`${base}${path}`) : page.reload());
+    if (attempt > 0) await ready(context.request, base, seeded);
+    await page.goto(`${base}${path}`);
     const loaded = await until(() => page.locator('[data-context-surface="plugin:oc-forge-planner"]').count(), 60_000)
       && await until(async () => (await page.locator('[role="tablist"] [role="tab"]').count()) >= 3, 60_000)
       && await until(() => page.getByText(CHATS[2], { exact: true }).first().count(), 30_000);
@@ -152,7 +174,7 @@ const reset = async (page) => {
 const apiRound = async (browser, base, viewport, seeded, request) => {
   const size = `${viewport.width}x${viewport.height}`;
   await ready(request, base, seeded);
-  const { context, page, errors } = await open(browser, base, viewport, seeded.sessions);
+  const { context, page, errors } = await open(browser, base, viewport, seeded);
   try {
     await apiChecks(context, page, base, size, seeded, request);
   } catch (error) {
@@ -297,7 +319,7 @@ const compare = async (browser, seeded, request, viewport) => {
   const views = {};
   for (const [name, base] of Object.entries(instances)) {
     await ready(request, base, seeded[name]);
-    const { context, page } = await open(browser, base, viewport, seeded[name].sessions);
+    const { context, page } = await open(browser, base, viewport, seeded[name]);
     await page.waitForTimeout(3_000);
     const railBox = await page.locator('nav[aria-label="Panel surfaces"]').boundingBox();
     const headerBox = await page.locator('[role="tablist"]').first().boundingBox();
@@ -352,7 +374,7 @@ const compare = async (browser, seeded, request, viewport) => {
 // The repository's own extensions, untouched, on either build: they must load and work.
 const realExtensions = async (browser, name, base, seeded, request) => {
   await ready(request, base, seeded);
-  const { context, page } = await open(browser, base, { width: 1440, height: 900 }, seeded.sessions);
+  const { context, page } = await open(browser, base, { width: 1440, height: 900 }, seeded);
   try {
     await plannerAndVscode(page, name);
   } catch (error) {
@@ -412,7 +434,8 @@ for (const id of [TEST, ZONE]) await setEnabled(request, base, id, true);
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await apiRound(browser, base, viewport, seeded.adapted, request);
 
 await browser.close();
-writeFileSync(join(out, 'results.json'), `${JSON.stringify(results, null, 2)}\n`);
+writeFileSync(join(out, 'results.json'), `${JSON.stringify({ results, restarts }, null, 2)}\n`);
 const failed = results.filter((result) => !result.ok);
+if (restarts.length > 0) console.log(`instances restarted because OpenCode stopped answering: ${restarts.join('; ')}`);
 console.log(`${results.length - failed.length}/${results.length} passed; screenshots in ${out}`);
 process.exitCode = failed.length > 0 ? 1 : 0;

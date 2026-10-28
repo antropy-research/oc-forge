@@ -208,7 +208,10 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   extensions. `run.mjs` checks every API at 1440×900 and 1024×768, the release
   against the adapted build with no extension using the APIs (rail, header and
   an extension page, pixel by pixel), and that the Planner and VS Code work on
-  both.
+  both. The instances start like fresh installs: their own HOME and data dir,
+  and none of the `OPENCODE*`/`OPENCHAMBER*` variables or credentials of the
+  session that runs the check, so they cannot load its config or reach its
+  services.
 
 ```sh
 node tests/e2e/openchamber-adapters/stack.mjs prepare   # network: both builds, Playwright, a VS Code Server
@@ -221,6 +224,14 @@ On a host whose network interfaces keep changing (Docker builds), Chromium
 aborts requests with `ERR_NETWORK_CHANGED`; run `up`, `run.mjs` and `down`
 inside one private network namespace (`unshare -rn` once, then `nsenter -t
 <pid> -U -n --preserve-credentials` for each command) after `prepare`.
+
+OpenCode 2.1.4 sometimes stops answering on an instance's first page loads
+(every thread parked on a futex, its log ending in concurrent `git` spawns),
+and OpenChamber's own relaunch takes about six minutes to start. Before each
+phase and between page-load attempts, `run.mjs` waits up to 90 s for the
+instance to list the chats, restarts the instance (`stack.mjs restart
+<stock|adapted>`) when it does not, and lists those restarts in
+`results.json`.
 
 ## Limits and choices
 
