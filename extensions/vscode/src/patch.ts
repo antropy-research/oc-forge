@@ -9,21 +9,74 @@
 //   options(options)   adds OpenChamber's options to the ones VS Code's own embedder builds
 //   workbench(handle)  receives the workbench API (commands, window, env) once it runs
 //   connectionToken    sent where VS Code would send a vsda signature (see `sign` below)
+// and, for OpenChamber's own surfaces (the surface patches below):
+//   services(instantiationService)  as the workbench starts, before it restores its editors and views
+//   serviceIds         set by the workbench: VS Code's service identifiers by name
+//   keyboard           true: keep the keybindings VS Code for the web drops in a browser tab
+//   bare               true: the editor area and the panel may both be hidden (a view container alone)
 
 export class PatchError extends Error {}
 
 const IDENT = '[A-Za-z_$][\\w$]*';
 
+const matchCount = (text: string, pattern: RegExp): number => [...text.matchAll(new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`))].length;
+
 const replaceOnce = (text: string, pattern: RegExp, replacement: string, what: string): string => {
-  const matches = [...text.matchAll(new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`))];
-  if (matches.length !== 1) throw new PatchError(`${what}: expected one match in the compiled workbench, found ${matches.length}`);
+  const matches = matchCount(text, pattern);
+  if (matches !== 1) throw new PatchError(`${what}: expected one match in the compiled workbench, found ${matches}`);
   return text.replace(pattern, replacement);
 };
 
 const withoutSourceMap = (text: string): string => text.replace(/\n?\/\/# sourceMappingURL=\S+\s*$/u, '\n');
 
-/** The workbench bundle (`out/vs/code/browser/workbench/workbench.js`). */
-export const patchWorkbench = (source: string): string => {
+/**
+ * The patches that let the frame show VS Code's parts in OpenChamber's own
+ * surfaces (rail views, header tabs, the bottom terminal; `workbench/surfaces.ts`).
+ * Unlike the others they may be missing: a release that moved one still runs,
+ * as the whole workbench in each frame.
+ */
+const SURFACE_PATCHES: { what: string; pattern: RegExp; replacement: string }[] = [
+  {
+    // The instantiation service as the workbench starts: the frame reaches VS Code's services through it.
+    what: 'the workbench startup',
+    pattern: new RegExp(`let (${IDENT})=(${IDENT})\\.startup\\(\\);return this\\._register\\(\\1\\.createInstance\\(`),
+    replacement: 'let $1=$2.startup();globalThis.__ocVSCode?.services?.($1);return this._register($1.createInstance(',
+  },
+  {
+    // createDecorator(): the identifiers of VS Code's services by name.
+    what: 'the service identifiers',
+    pattern: new RegExp(`function (${IDENT})\\((${IDENT})\\)\\{if\\((${IDENT})\\.serviceIds\\.has\\(\\2\\)\\)return \\3\\.serviceIds\\.get\\(\\2\\);`),
+    replacement: 'function $1($2){globalThis.__ocVSCode&&(globalThis.__ocVSCode.serviceIds=$3.serviceIds);if($3.serviceIds.has($2))return $3.serviceIds.get($2);',
+  },
+  {
+    // BrowserFeatures.keyboard: VS Code for the web drops its Cmd/Ctrl+0–9 and Cmd/Ctrl+Alt+←/→
+    // bindings in a browser tab. Inside OpenChamber VS Code keeps its keys while it has focus.
+    what: 'the browser keyboard support',
+    pattern: new RegExp(`keyboard:(${IDENT})\\|\\|(${IDENT})\\(\\)\\?0:navigator\\.keyboard\\|\\|(${IDENT})\\?1:2,`),
+    replacement: 'keyboard:$1||$2()||globalThis.__ocVSCode?.keyboard===!0?0:navigator.keyboard||$3?1:2,',
+  },
+  {
+    // "The editor and panel cannot be hidden at the same time": a rail view shows its view container alone.
+    what: 'the editor area\'s hiding',
+    pattern: new RegExp(`(${IDENT})&&!this\\.isVisible\\("workbench\\.parts\\.panel"\\)&&!this\\.isAuxiliaryBarMaximized\\(\\)&&this\\.setPanelHidden\\(!1,!0\\)`),
+    replacement: '$1&&!this.isVisible("workbench.parts.panel")&&!this.isAuxiliaryBarMaximized()&&!globalThis.__ocVSCode?.bare&&this.setPanelHidden(!1,!0)',
+  },
+  {
+    // The same rule as the layout is restored.
+    what: 'the restored editor area',
+    pattern: new RegExp(`(this\\.getRuntimeValue\\((${IDENT})\\.PANEL_HIDDEN\\)&&this\\.getRuntimeValue\\(\\2\\.EDITOR_HIDDEN\\)&&!this\\.getRuntimeValue\\(\\2\\.AUXILIARYBAR_WAS_LAST_MAXIMIZED\\)&&)(this\\.setRuntimeValue\\(\\2\\.EDITOR_HIDDEN,!1\\))`),
+    replacement: '$1!globalThis.__ocVSCode?.bare&&$3',
+  },
+];
+
+/** The surface patches by name, for reports. */
+export const SURFACE_PATCH_NAMES = SURFACE_PATCHES.map((patch) => patch.what);
+
+/**
+ * The workbench bundle (`out/vs/code/browser/workbench/workbench.js`). The
+ * surface patches that did not apply are added to `missing`.
+ */
+export const patchWorkbench = (source: string, missing: string[] = []): string => {
   let text = withoutSourceMap(source);
   // VS Code's own embedder ends by calling create(document.body, {...config, ...}).
   // Route that options object through the frame, which adds the tunnel, the
@@ -80,6 +133,10 @@ export const patchWorkbench = (source: string): string => {
     'if($1.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)&&!($1.origin==="null"&&$1.source===this.element?.contentWindow))',
     "the webview origin check",
   );
+  for (const patch of SURFACE_PATCHES) {
+    if (matchCount(text, patch.pattern) === 1) text = text.replace(patch.pattern, patch.replacement);
+    else missing.push(patch.what);
+  }
   return renameWasm(text, 'the workbench');
 };
 

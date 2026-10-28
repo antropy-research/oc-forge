@@ -35,7 +35,14 @@ export const DEFAULT_THEMES: Record<ThemeMode, string> = { light: 'Light 2026', 
  */
 export const workbenchConfiguration = (
   server: ServerWorkbenchConfig,
-  { folder, token, mode, followTheme }: { folder: string | null; token: string | null; mode: ThemeMode; followTheme: boolean },
+  { folder, token, mode, followTheme, defaults = {} }: {
+    folder: string | null;
+    token: string | null;
+    mode: ThemeMode;
+    followTheme: boolean;
+    /** The part of VS Code this frame is (`roleSettings` in surfaces.ts), as defaults from the start. */
+    defaults?: Record<string, unknown>;
+  },
 ): ServerWorkbenchConfig => {
   const authority = server.remoteAuthority ?? '';
   const product = { ...(server.productConfiguration ?? {}) };
@@ -57,6 +64,7 @@ export const workbenchConfiguration = (
     'workbench.preferredDarkColorTheme': DEFAULT_THEMES.dark,
   };
   if (followTheme) configurationDefaults['workbench.colorTheme'] = DEFAULT_THEMES[mode];
+  Object.assign(configurationDefaults, defaults);
   return {
     ...server,
     productConfiguration: product,

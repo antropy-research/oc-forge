@@ -1,9 +1,9 @@
 {
   "name": "@oc-forge/openchamber-vscode",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "VS Code inside OpenChamber: the compiled workbench of your own VS Code Server, rendered in OpenChamber's panel and page.",
+  "description": "VS Code inside OpenChamber: the compiled workbench of your own VS Code Server, rendered in OpenChamber's panel and page, or in OpenChamber's rail, header tabs and bottom with oc-forge's adapters.",
   "openchamber": {
     "apiVersion": 1,
     "engines": {
@@ -36,6 +36,13 @@
         "entry": "service/main.js",
         "runtime": "host"
       }
+    }
+  },
+  "ocForge": {
+    "apiVersion": 1,
+    "rail": {
+      "path": "/rail",
+      "interval": 2000
     }
   },
   "scripts": {

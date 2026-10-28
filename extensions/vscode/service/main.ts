@@ -11,8 +11,10 @@ import { fileURLToPath } from 'node:url';
 import { isConnectionToken, parseServerUrl } from '../src/settings.ts';
 import { isExternalAllowed } from '../src/workbench.ts';
 import { WorkbenchAssets } from './assets.ts';
+import { EditorRequests, readTabs, SavedTabs } from './editors.ts';
+import { Rail } from './rail.ts';
 import { RESOURCE_MAX, ServerError, VscodeServer } from './server.ts';
-import { readOps, WorkbenchState } from './state.ts';
+import { isStateRole, readOps, WorkbenchState } from './state.ts';
 import { Tunnels } from './tunnel.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
@@ -33,7 +35,12 @@ const assets = new WorkbenchAssets(
   join(packageRoot, 'webview'),
 );
 const tunnels = new Tunnels();
-const state = new WorkbenchState(process.env.OPENCHAMBER_VSCODE_DATA_DIR || join(homedir(), '.local', 'share', 'openchamber-vscode', 'state'), log);
+const stateDir = process.env.OPENCHAMBER_VSCODE_DATA_DIR || join(homedir(), '.local', 'share', 'openchamber-vscode', 'state');
+const state = new WorkbenchState(stateDir, log);
+// OpenChamber's own surfaces (oc-forge's adapters): the rail, editors handed to the page, the page's tabs.
+const rail = new Rail(join(stateDir, 'rail.json'), (url, token) => new VscodeServer(url, token), log);
+const editorRequests = new EditorRequests();
+const savedTabs = new SavedTabs(stateDir, log);
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -78,7 +85,37 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
   '/connect': async (body) => {
     const server = serverOf(body);
     const page = await server.page();
+    // The rail lists this server's extensions from now on.
+    await rail.remember(server.url, (body.token as string | null | undefined) ?? null);
     return { commit: page.commit, base: page.base, version: await server.version(page.base), config: page.config, assets: assets.status(page.commit) };
+  },
+  // A workbench tells where the server keeps its extensions (its remote environment's extensionsPath).
+  '/rail/source': async (body) => {
+    const server = serverOf(body);
+    const path = typeof body.extensionsPath === 'string' && body.extensionsPath.startsWith('/') && body.extensionsPath.length <= 4096 && !body.extensionsPath.includes('\0') ? body.extensionsPath : null;
+    if (!path) throw new ServerError('extensionsPath is required', 400);
+    await rail.remember(server.url, (body.token as string | null | undefined) ?? null, path);
+    return { ok: true };
+  },
+  // An editor a rail view or the terminal hands to the page, waiting for the page to take it.
+  '/editors/request': async (body) => {
+    if (typeof body.key !== 'string' || !body.key || body.key.length > 1024 || typeof body.open !== 'object' || body.open === null) throw new ServerError('key and open are required', 400);
+    editorRequests.put(body.key, body.open);
+    return { ok: true };
+  },
+  '/editors/take': async (body) => {
+    if (typeof body.key !== 'string') throw new ServerError('key is required', 400);
+    return { open: editorRequests.take(body.key) };
+  },
+  // The page's header tabs, so a frame can bring them back after OpenChamber reloads.
+  '/tabs/save': async (body) => {
+    const server = serverOf(body);
+    await savedTabs.save(WorkbenchState.keyOf(server.url, null), readTabs(body.tabs));
+    return { ok: true };
+  },
+  '/tabs/load': async (body) => {
+    const server = serverOf(body);
+    return { tabs: await savedTabs.load(WorkbenchState.keyOf(server.url, null)) };
   },
   // Start (or follow) preparing the compiled workbench of the server's commit.
   '/assets/prepare': async (body) => {
@@ -129,13 +166,17 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
     if (data.byteLength > RESOURCE_MAX) throw new ServerError('The answer is too large.', 413);
     return { status: response.status, contentType: response.headers.get('content-type') ?? 'application/octet-stream', data: data.toString('base64') };
   },
+  // A frame in one of OpenChamber's own surfaces names its role: its layout and open editors are its own.
   '/state/load': async (body) => {
     const server = serverOf(body);
-    return state.load(WorkbenchState.keyOf(server.url, null));
+    const key = WorkbenchState.keyOf(server.url, null);
+    return isStateRole(body.role) ? state.loadRole(key, body.role) : state.load(key);
   },
   '/state/apply': async (body) => {
     const server = serverOf(body);
-    await state.apply(WorkbenchState.keyOf(server.url, null), readOps(body.ops));
+    const key = WorkbenchState.keyOf(server.url, null);
+    if (isStateRole(body.role)) await state.applyRole(key, body.role, readOps(body.ops));
+    else await state.apply(key, readOps(body.ops));
     return { ok: true };
   },
 };
@@ -149,6 +190,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === '/health' && req.method === 'GET') {
       json(res, 200, { ok: true, tunnels: tunnels.size(), sockets: tunnels.sockets() });
+      return;
+    }
+    // Polled by an adapted OpenChamber (manifest `ocForge.rail`): one rail icon per entry.
+    if (url.pathname === '/rail' && req.method === 'GET') {
+      json(res, 200, { entries: await rail.entries() });
       return;
     }
     const route = req.method === 'POST' ? routes[url.pathname] : undefined;

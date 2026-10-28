@@ -14,7 +14,15 @@ const POLL_BYTES = 4_000_000;
 export const POLL_WAIT_MS = 12_000;
 /** A tunnel nobody polled for this long belongs to a frame that is gone. */
 const ABANDONED_MS = 45_000;
-const MAX_TUNNELS = 32;
+/**
+ * Past this the least recently polled tunnel is closed, which ends a live
+ * workbench if every tunnel is live. Each workbench holds 2 (its management
+ * connection and its extension host's); in an adapted OpenChamber a browser
+ * window runs up to 3 (rail view, page, bottom terminal), so 6, and up to 12
+ * for the 45 s a reloaded frame's old tunnels linger. 128 leaves room for
+ * about ten such windows; the server's cost is per workbench either way.
+ */
+export const MAX_TUNNELS = 128;
 
 export type TunnelEvent = { type: 'open' } | { type: 'data'; data: string } | { type: 'error'; message: string };
 export type TunnelClose = { code: number; reason: string; wasClean: boolean };

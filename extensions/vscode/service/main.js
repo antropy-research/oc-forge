@@ -1,8 +1,8 @@
 // service/main.ts
 import http from "node:http";
-import { readFile as readFile3 } from "node:fs/promises";
+import { readFile as readFile5 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join3, resolve } from "node:path";
+import { dirname as dirname3, join as join4, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/settings.ts
@@ -141,15 +141,44 @@ var REQUIRED_SOURCE_FILES = [
 class PatchError extends Error {
 }
 var IDENT = "[A-Za-z_$][\\w$]*";
+var matchCount = (text, pattern) => [...text.matchAll(new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`))].length;
 var replaceOnce = (text, pattern, replacement, what) => {
-  const matches = [...text.matchAll(new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`))];
-  if (matches.length !== 1)
-    throw new PatchError(`${what}: expected one match in the compiled workbench, found ${matches.length}`);
+  const matches = matchCount(text, pattern);
+  if (matches !== 1)
+    throw new PatchError(`${what}: expected one match in the compiled workbench, found ${matches}`);
   return text.replace(pattern, replacement);
 };
 var withoutSourceMap = (text) => text.replace(/\n?\/\/# sourceMappingURL=\S+\s*$/u, `
 `);
-var patchWorkbench = (source) => {
+var SURFACE_PATCHES = [
+  {
+    what: "the workbench startup",
+    pattern: new RegExp(`let (${IDENT})=(${IDENT})\\.startup\\(\\);return this\\._register\\(\\1\\.createInstance\\(`),
+    replacement: "let $1=$2.startup();globalThis.__ocVSCode?.services?.($1);return this._register($1.createInstance("
+  },
+  {
+    what: "the service identifiers",
+    pattern: new RegExp(`function (${IDENT})\\((${IDENT})\\)\\{if\\((${IDENT})\\.serviceIds\\.has\\(\\2\\)\\)return \\3\\.serviceIds\\.get\\(\\2\\);`),
+    replacement: "function $1($2){globalThis.__ocVSCode&&(globalThis.__ocVSCode.serviceIds=$3.serviceIds);if($3.serviceIds.has($2))return $3.serviceIds.get($2);"
+  },
+  {
+    what: "the browser keyboard support",
+    pattern: new RegExp(`keyboard:(${IDENT})\\|\\|(${IDENT})\\(\\)\\?0:navigator\\.keyboard\\|\\|(${IDENT})\\?1:2,`),
+    replacement: "keyboard:$1||$2()||globalThis.__ocVSCode?.keyboard===!0?0:navigator.keyboard||$3?1:2,"
+  },
+  {
+    what: "the editor area's hiding",
+    pattern: new RegExp(`(${IDENT})&&!this\\.isVisible\\("workbench\\.parts\\.panel"\\)&&!this\\.isAuxiliaryBarMaximized\\(\\)&&this\\.setPanelHidden\\(!1,!0\\)`),
+    replacement: '$1&&!this.isVisible("workbench.parts.panel")&&!this.isAuxiliaryBarMaximized()&&!globalThis.__ocVSCode?.bare&&this.setPanelHidden(!1,!0)'
+  },
+  {
+    what: "the restored editor area",
+    pattern: new RegExp(`(this\\.getRuntimeValue\\((${IDENT})\\.PANEL_HIDDEN\\)&&this\\.getRuntimeValue\\(\\2\\.EDITOR_HIDDEN\\)&&!this\\.getRuntimeValue\\(\\2\\.AUXILIARYBAR_WAS_LAST_MAXIMIZED\\)&&)(this\\.setRuntimeValue\\(\\2\\.EDITOR_HIDDEN,!1\\))`),
+    replacement: "$1!globalThis.__ocVSCode?.bare&&$3"
+  }
+];
+var SURFACE_PATCH_NAMES = SURFACE_PATCHES.map((patch) => patch.what);
+var patchWorkbench = (source, missing = []) => {
   let text = withoutSourceMap(source);
   text = replaceOnce(text, new RegExp(`(${IDENT})\\((${IDENT})\\.document\\.body,\\{\\.\\.\\.(${IDENT}),windowIndicator:`), "$1($2.document.body,globalThis.__ocVSCode.options({...$3,windowIndicator:", "the embedder's create() call");
   text = replaceOnce(text, /\}\)\}\)\(\);export\{/, "}))})();export{", "the end of the embedder");
@@ -159,6 +188,12 @@ var patchWorkbench = (source) => {
   text = replaceOnce(text, new RegExp(`async sign\\((${IDENT})\\)\\{try\\{return await this\\.signValue\\(\\1\\)\\}catch\\{\\}return \\1\\}`), "async sign($1){try{return await this.signValue($1)}catch{}return globalThis.__ocVSCode.connectionToken??$1}", "the handshake signature");
   text = replaceOnce(text, new RegExp(`if\\(!crypto\\.subtle\\)throw new Error\\("'crypto\\.subtle' is not available so webviews will not work\\.[^"]*"\\);let (${IDENT})=JSON\\.stringify\\(\\{parentOrigin:(${IDENT}),salt:(${IDENT})\\}\\)`), "if(!crypto.subtle)return globalThis.__ocVSCode.originHash($2,$3);let $1=JSON.stringify({parentOrigin:$2,salt:$3})", "the webview origin hash");
   text = replaceOnce(text, new RegExp(`if\\((${IDENT})\\.origin!==this\\._webviewContentOrigin\\(this\\._encodedWebviewOrigin\\)\\)`), 'if($1.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)&&!($1.origin==="null"&&$1.source===this.element?.contentWindow))', "the webview origin check");
+  for (const patch of SURFACE_PATCHES) {
+    if (matchCount(text, patch.pattern) === 1)
+      text = text.replace(patch.pattern, patch.replacement);
+    else
+      missing.push(patch.what);
+  }
   return renameWasm(text, "the workbench");
 };
 var renameWasm = (text, what) => {
@@ -182,7 +217,7 @@ var patchExtensionHostIframe = (source) => {
 };
 
 // service/assets.ts
-var CACHE_FORMAT = 2;
+var CACHE_FORMAT = 3;
 var MARKER = "ready.json";
 var KEEP = 2;
 var DOWNLOADS_AT_ONCE = 8;
@@ -235,8 +270,10 @@ class WorkbenchAssets {
     if (existsSync(marker)) {
       try {
         const ready = JSON.parse(readFileSync(marker, "utf8"));
-        if (ready.format === CACHE_FORMAT)
-          return { state: "ready", path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? "local" };
+        if (ready.format === CACHE_FORMAT) {
+          const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
+          return { state: "ready", path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? "local", surfaces };
+        }
       } catch {}
     }
     return { state: "idle" };
@@ -287,6 +324,7 @@ class WorkbenchAssets {
     try {
       let next = 0;
       let files = 0;
+      const missing = [];
       const worker = async () => {
         while (next < wanted.length) {
           const path = wanted[next++];
@@ -296,7 +334,7 @@ class WorkbenchAssets {
             continue;
           const target = join(tmp, clientFileName(path));
           await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, transform(path, body, codicon));
+          await writeFile(target, transform(path, body, codicon, missing));
           files += 1;
         }
       };
@@ -311,13 +349,15 @@ class WorkbenchAssets {
         if (!existsSync(join(tmp, file)))
           throw new Error(`${file} is missing from the VS Code Server`);
       }
-      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, at: new Date().toISOString() }));
+      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, at: new Date().toISOString() }));
       const final = join(this.cacheRoot, page.commit);
       await rm(final, { recursive: true, force: true });
       await rename(tmp, final);
       await this.prune(page.commit);
       this.log(`VS Code ${page.commit.slice(0, 8)} ready from ${local ?? "the server"} (${files} files)`);
-      return { state: "ready", path: WorkbenchAssets.folder(page.commit), files, source: job.source };
+      if (missing.length > 0)
+        this.log(`VS Code ${page.commit.slice(0, 8)}: not in OpenChamber's own surfaces; this release moved ${missing.join(", ")}`);
+      return { state: "ready", path: WorkbenchAssets.folder(page.commit), files, source: job.source, surfaces: missing.length === 0 };
     } catch (error) {
       await rm(tmp, { recursive: true, force: true });
       throw error instanceof PatchError ? new Error(`This VS Code release cannot run inside OpenChamber yet: ${error.message}`) : error;
@@ -346,9 +386,9 @@ class WorkbenchAssets {
       await rm(join(this.cacheRoot, old.name), { recursive: true, force: true });
   }
 }
-var transform = (path, body, codicon) => {
+var transform = (path, body, codicon, missing = []) => {
   if (path === "out/vs/code/browser/workbench/workbench.js")
-    return patchWorkbench(body.toString("utf8"));
+    return patchWorkbench(body.toString("utf8"), missing);
   if (path === "out/vs/code/browser/workbench/workbench.css")
     return patchStylesheet(body.toString("utf8"), codicon.toString("base64"));
   if (path === "out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html")
@@ -357,6 +397,376 @@ var transform = (path, body, codicon) => {
     return patchScript(body.toString("utf8"));
   return body;
 };
+
+// service/editors.ts
+import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join2 } from "node:path";
+var REQUEST_TTL_MS = 60000;
+var REQUESTS_MAX = 64;
+var TABS_MAX = 64;
+
+class EditorRequests {
+  now;
+  pending = new Map;
+  constructor(now = Date.now) {
+    this.now = now;
+  }
+  put(key, open) {
+    this.prune();
+    this.pending.delete(key);
+    this.pending.set(key, { open, at: this.now() });
+    while (this.pending.size > REQUESTS_MAX)
+      this.pending.delete(this.pending.keys().next().value);
+  }
+  take(key) {
+    this.prune();
+    const request = this.pending.get(key);
+    this.pending.delete(key);
+    return request?.open ?? null;
+  }
+  prune() {
+    const now = this.now();
+    for (const [key, request] of this.pending)
+      if (now - request.at > REQUEST_TTL_MS)
+        this.pending.delete(key);
+  }
+}
+var readTabs = (raw) => {
+  if (!Array.isArray(raw))
+    return [];
+  const tabs = [];
+  for (const item of raw.slice(0, TABS_MAX)) {
+    const tab = item;
+    if (typeof tab?.id !== "string" || !tab.id || tab.id.length > 1024)
+      continue;
+    if (typeof tab.title !== "string" || !tab.title.trim() || tab.title.length > 80)
+      continue;
+    const icon = typeof tab.icon === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tab.icon) ? tab.icon : undefined;
+    tabs.push(icon ? { id: tab.id, title: tab.title, icon } : { id: tab.id, title: tab.title });
+  }
+  return tabs;
+};
+
+class SavedTabs {
+  dir;
+  log;
+  tabs = new Map;
+  constructor(dir, log) {
+    this.dir = dir;
+    this.log = log;
+  }
+  file(key) {
+    return join2(this.dir, `${key}.tabs.json`);
+  }
+  async load(key) {
+    const cached = this.tabs.get(key);
+    if (cached)
+      return cached;
+    const tabs = await readFile2(this.file(key), "utf8").then((text) => readTabs(JSON.parse(text)), () => []);
+    this.tabs.set(key, tabs);
+    return tabs;
+  }
+  async save(key, tabs) {
+    if (JSON.stringify(this.tabs.get(key)) === JSON.stringify(tabs))
+      return;
+    this.tabs.set(key, tabs);
+    try {
+      await mkdir2(this.dir, { recursive: true, mode: 448 });
+      const tmp = `${this.file(key)}.tmp-${process.pid}`;
+      await writeFile2(tmp, JSON.stringify(tabs), { mode: 384 });
+      await rename2(tmp, this.file(key));
+    } catch (error) {
+      this.log(`could not keep the page's tabs: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+// service/rail.ts
+import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
+import { dirname as dirname2 } from "node:path";
+
+// src/rail.ts
+var BUILT_IN_ENTRIES = [
+  { id: "explorer", title: "Explorer", icon: "file-copy-2", order: 1, view: "workbench.view.explorer" },
+  { id: "search", title: "Search", icon: "search", order: 2, view: "workbench.view.search" },
+  { id: "scm", title: "Source Control", icon: "git-branch", order: 3, view: "workbench.view.scm" },
+  { id: "debug", title: "Run and Debug", icon: "bug", order: 4, view: "workbench.view.debug" },
+  { id: "extensions", title: "Extensions", icon: "puzzle", order: 5, view: "workbench.view.extensions" }
+];
+var TERMINAL_ENTRY = { id: "terminal", title: "Terminal", icon: "terminal-box", order: 1000, zone: "bottom" };
+var ENTRY_ID_MAX = 48;
+var TITLE_MAX = 80;
+var SVG_MAX = 16384;
+var ENTRIES_MAX = 32;
+var declaredContainers = (manifest, nls = {}) => {
+  const list = manifest?.contributes?.viewsContainers?.activitybar;
+  if (!Array.isArray(list))
+    return [];
+  const localized = (value) => {
+    if (typeof value !== "string")
+      return null;
+    const key = /^%(.+)%$/.exec(value)?.[1];
+    if (!key)
+      return value;
+    const found = nls[key];
+    const text = typeof found === "string" ? found : typeof found?.message === "string" ? found.message : null;
+    return text ?? key;
+  };
+  const containers = [];
+  for (const item of list) {
+    const entry = item;
+    if (typeof entry?.id !== "string" || !/^[\w.-]{1,200}$/.test(entry.id))
+      continue;
+    const title = localized(entry.title)?.trim();
+    if (!title)
+      continue;
+    containers.push({ id: entry.id, title, icon: typeof entry.icon === "string" ? entry.icon : "" });
+  }
+  return containers;
+};
+var entryIdOf = (containerId, taken) => {
+  let id = containerId.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!/^[a-z]/.test(id))
+    id = `v-${id}`.replace(/-+$/, "");
+  id = id.slice(0, ENTRY_ID_MAX - 3).replace(/-+$/, "");
+  if (!taken.has(id))
+    return id;
+  for (let suffix = 2;; suffix++) {
+    const candidate = `${id}-${suffix}`;
+    if (!taken.has(candidate))
+      return candidate;
+  }
+};
+var railSvg = (text) => {
+  let svg = text.replace(/^﻿/, "").replace(/<\?xml[\s\S]*?\?>/gi, "").replace(/<!DOCTYPE[\s\S]*?>/gi, "").replace(/<!--[\s\S]*?-->/g, "").replace(/<(script|metadata|title|desc)\b[\s\S]*?<\/\1\s*>/gi, "").replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "").replace(/>\s+</g, "><").trim();
+  if (!/^<svg[\s>]/i.test(svg) || !/<\/svg\s*>$/i.test(svg))
+    return null;
+  if (!/^<svg[^>]*\sxmlns\s*=/i.test(svg))
+    svg = svg.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  if (!/^<svg[^>]*\sviewBox\s*=/i.test(svg)) {
+    const size = (name) => Number.parseFloat(new RegExp(`^<svg[^>]*\\s${name}\\s*=\\s*["']?([\\d.]+)`, "i").exec(svg)?.[1] ?? "");
+    const [width, height] = [size("width"), size("height")];
+    if (width > 0 && height > 0)
+      svg = svg.replace(/^<svg/i, `<svg viewBox="0 0 ${width} ${height}"`);
+  }
+  return svg.length <= SVG_MAX ? svg : null;
+};
+var CODICONS = {
+  account: "shield-user",
+  beaker: "flask",
+  book: "book",
+  bookmark: "book-marked",
+  bug: "bug",
+  checklist: "list-check-2",
+  cloud: "cloud",
+  code: "code",
+  copilot: "robot",
+  database: "database-2",
+  "debug-alt": "bug",
+  extensions: "puzzle",
+  file: "file",
+  "file-code": "file-code",
+  files: "file-copy-2",
+  folder: "folder",
+  "folder-opened": "folder-open",
+  gear: "settings-3",
+  "git-branch": "git-branch",
+  "git-commit": "git-commit",
+  "git-merge": "git-merge",
+  "git-pull-request": "git-pull-request",
+  github: "github",
+  history: "history",
+  inbox: "inbox-archive",
+  inspect: "search-eye",
+  layers: "stack",
+  "list-flat": "list-unordered",
+  "list-tree": "node-tree",
+  "list-unordered": "list-unordered",
+  package: "box-3",
+  play: "play",
+  plug: "plug",
+  references: "node-tree",
+  robot: "robot",
+  "run-all": "play",
+  search: "search",
+  server: "server",
+  "server-environment": "server",
+  settings: "settings-3",
+  "settings-gear": "settings-3",
+  shield: "shield",
+  "source-control": "git-branch",
+  terminal: "terminal-box",
+  tools: "tools",
+  "type-hierarchy": "node-tree",
+  window: "window"
+};
+var FALLBACK_ICON = "apps";
+var codiconIcon = (icon) => {
+  const name = /^\$\(([a-z0-9-]+)(?:~[a-z]+)?\)$/.exec(icon.trim())?.[1];
+  return name ? CODICONS[name] ?? FALLBACK_ICON : null;
+};
+var railEntries = (installed) => {
+  const taken = new Set([...BUILT_IN_ENTRIES.map((entry) => entry.id), TERMINAL_ENTRY.id]);
+  const extensions = [];
+  const views = new Set(BUILT_IN_ENTRIES.map((entry) => entry.view));
+  for (const extension of installed) {
+    for (const container of extension.containers) {
+      const view = `workbench.view.extension.${container.id}`;
+      if (views.has(view))
+        continue;
+      views.add(view);
+      const id = entryIdOf(container.id, taken);
+      taken.add(id);
+      const title = container.title.length > TITLE_MAX ? `${container.title.slice(0, TITLE_MAX - 1)}…` : container.title;
+      const icon = (container.svg ? railSvg(container.svg) : null) ?? codiconIcon(container.icon) ?? FALLBACK_ICON;
+      extensions.push({ id, title, icon, order: 10 + extensions.length, view });
+    }
+  }
+  const room = ENTRIES_MAX - BUILT_IN_ENTRIES.length - 1;
+  return [...BUILT_IN_ENTRIES, ...extensions.slice(0, room), TERMINAL_ENTRY].map((entry) => ({ ...entry }));
+};
+
+// service/rail.ts
+var FRESH_MS = 1000;
+var ICON_MAX = 64000;
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var installedFolders = (listing, obsolete, extensionsPath) => {
+  if (!Array.isArray(listing))
+    return [];
+  const gone = new Set(isRecord(obsolete) ? Object.keys(obsolete).filter((key) => obsolete[key] === true).map((key) => key.toLowerCase()) : []);
+  const folders = [];
+  for (const item of listing) {
+    if (!isRecord(item))
+      continue;
+    const id = isRecord(item.identifier) && typeof item.identifier.id === "string" ? item.identifier.id : null;
+    const version = typeof item.version === "string" ? item.version : "";
+    const relative = typeof item.relativeLocation === "string" && /^[^/\\]+$/.test(item.relativeLocation) && item.relativeLocation !== ".." ? item.relativeLocation : null;
+    const location = isRecord(item.location) && typeof item.location.path === "string" ? item.location.path : typeof item.location === "string" ? item.location.replace(/^file:\/\//, "") : null;
+    const folder = relative ? `${extensionsPath.replace(/\/+$/, "")}/${relative}` : location;
+    if (!id || !folder || !folder.startsWith("/"))
+      continue;
+    if (gone.has(`${id}-${version}`.toLowerCase()) || relative && gone.has(relative.toLowerCase()))
+      continue;
+    folders.push({ key: `${id}@${version}:${folder}`, folder });
+  }
+  return folders;
+};
+
+class Rail {
+  file;
+  serverFor;
+  log;
+  now;
+  source = null;
+  loaded = null;
+  extensions = new Map;
+  last = railEntries([]);
+  readAt = 0;
+  reading = null;
+  constructor(file, serverFor, log, now = Date.now) {
+    this.file = file;
+    this.serverFor = serverFor;
+    this.log = log;
+    this.now = now;
+  }
+  load() {
+    this.loaded ??= readFile3(this.file, "utf8").then((text) => {
+      const saved = JSON.parse(text);
+      if (typeof saved.serverUrl === "string") {
+        this.source ??= { serverUrl: saved.serverUrl, token: typeof saved.token === "string" ? saved.token : null, extensionsPath: typeof saved.extensionsPath === "string" ? saved.extensionsPath : null };
+      }
+    }).catch(() => {
+      return;
+    });
+    return this.loaded;
+  }
+  async remember(serverUrl, token, extensionsPath) {
+    await this.load();
+    const same = this.source?.serverUrl === serverUrl;
+    const next = { serverUrl, token, extensionsPath: extensionsPath ?? (same ? this.source.extensionsPath : null) };
+    if (this.source && JSON.stringify(this.source) === JSON.stringify(next))
+      return;
+    if (!same)
+      this.extensions.clear();
+    this.source = next;
+    this.readAt = 0;
+    try {
+      await mkdir3(dirname2(this.file), { recursive: true, mode: 448 });
+      const tmp = `${this.file}.tmp-${process.pid}`;
+      await writeFile3(tmp, JSON.stringify(next), { mode: 384 });
+      await rename3(tmp, this.file);
+    } catch (error) {
+      this.log(`could not keep the rail's server: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  async entries() {
+    await this.load();
+    if (this.now() - this.readAt < FRESH_MS)
+      return this.last;
+    this.reading ??= this.read().finally(() => {
+      this.reading = null;
+    });
+    return this.reading;
+  }
+  async read() {
+    const source = this.source;
+    if (!source?.extensionsPath)
+      return this.last;
+    const server = this.serverFor(source.serverUrl, source.token);
+    const file = async (path) => {
+      const base = new URL(server.url).pathname.replace(/\/+$/, "");
+      const answer = await server.get(`${base}/vscode-remote-resource?path=${encodeURIComponent(path)}`);
+      return answer.status === 200 ? answer.body : null;
+    };
+    const json = async (path) => {
+      const body = await file(path).catch(() => null);
+      if (!body)
+        return null;
+      try {
+        return JSON.parse(body.toString("utf8").replace(/^﻿/, ""));
+      } catch {
+        return null;
+      }
+    };
+    try {
+      const listing = await file(`${source.extensionsPath}/extensions.json`);
+      if (!listing)
+        throw new Error("no extensions.json");
+      const obsolete = await json(`${source.extensionsPath}/.obsolete`);
+      const folders = installedFolders(JSON.parse(listing.toString("utf8").replace(/^﻿/, "")), obsolete, source.extensionsPath);
+      const installed = [];
+      for (const { key, folder } of folders) {
+        let extension = this.extensions.get(key);
+        if (!extension) {
+          const manifest = await json(`${folder}/package.json`);
+          const needsNls = JSON.stringify(manifest?.contributes?.viewsContainers ?? "").includes("%");
+          const nls = needsNls ? await json(`${folder}/package.nls.json`) : null;
+          const containers = declaredContainers(manifest, isRecord(nls) ? nls : {});
+          const withIcons = [];
+          for (const container of containers) {
+            const relative = container.icon.replace(/^\.?\//, "");
+            const svg = /\.svg$/i.test(relative) && !relative.split("/").includes("..") ? await file(`${folder}/${relative}`).catch(() => null) : null;
+            withIcons.push({ ...container, svg: svg && svg.byteLength <= ICON_MAX ? svg.toString("utf8") : null });
+          }
+          extension = { extension: key, containers: withIcons };
+          if (manifest)
+            this.extensions.set(key, extension);
+        }
+        installed.push(extension);
+      }
+      for (const key of [...this.extensions.keys()])
+        if (!folders.some((folder) => folder.key === key))
+          this.extensions.delete(key);
+      this.last = railEntries(installed);
+      this.readAt = this.now();
+    } catch (error) {
+      if (this.readAt !== -1)
+        this.log(`could not read the VS Code Server's extensions: ${error instanceof Error ? error.message : String(error)}`);
+      this.readAt = -1;
+    }
+    return this.last;
+  }
+}
 
 // service/server.ts
 var PAGE_TIMEOUT_MS = 8000;
@@ -450,8 +860,8 @@ class VscodeServer {
 
 // service/state.ts
 import { createHash } from "node:crypto";
-import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join2 } from "node:path";
+import { mkdir as mkdir4, readFile as readFile4, rename as rename4, stat as stat2, writeFile as writeFile4 } from "node:fs/promises";
+import { join as join3 } from "node:path";
 var LOAD_MAX = 7000000;
 var NAME = /^[\w.:@ -]{1,200}$/;
 var isValue = (value) => {
@@ -527,6 +937,9 @@ var applyOps = (snapshot, ops, parts) => {
     }
   }
 };
+var STATE_ROLES = ["view", "editor", "terminal"];
+var isStateRole = (value) => STATE_ROLES.includes(value);
+var isRoleDb = (db) => db.startsWith("vscode-web-state-db");
 
 class WorkbenchState {
   dir;
@@ -541,8 +954,41 @@ class WorkbenchState {
   static keyOf(serverUrl, folder) {
     return createHash("sha256").update(serverUrl).digest("hex").slice(0, 32);
   }
+  static roleKeyOf(key, role) {
+    return `${key}.${role}`;
+  }
+  async loadRole(key, role) {
+    const shared = await this.get(key);
+    const roleKey = WorkbenchState.roleKeyOf(key, role);
+    const own = await this.get(roleKey);
+    if (role === "editor" && Object.keys(own.dbs).length === 0 && !await this.exists(roleKey)) {
+      for (const [name, db] of Object.entries(shared.dbs))
+        if (isRoleDb(name))
+          own.dbs[name] = structuredClone(db);
+      this.schedule(roleKey);
+    }
+    const merged = { format: 1, dbs: {} };
+    for (const [name, db] of Object.entries(shared.dbs))
+      if (!isRoleDb(name))
+        merged.dbs[name] = db;
+    for (const [name, db] of Object.entries(own.dbs))
+      if (isRoleDb(name))
+        merged.dbs[name] = db;
+    return this.fit(merged, `${roleKey}`);
+  }
+  async applyRole(key, role, ops) {
+    const own = ops.filter((op) => isRoleDb(op.db));
+    const shared = ops.filter((op) => !isRoleDb(op.db));
+    if (own.length > 0)
+      await this.apply(WorkbenchState.roleKeyOf(key, role), own);
+    if (shared.length > 0)
+      await this.apply(key, shared);
+  }
+  async exists(key) {
+    return stat2(this.file(key)).then(() => true, () => false);
+  }
   file(key) {
-    return join2(this.dir, `${key}.json`);
+    return join3(this.dir, `${key}.json`);
   }
   async get(key) {
     const cached = this.snapshots.get(key);
@@ -550,7 +996,7 @@ class WorkbenchState {
       return cached;
     let snapshot = { format: 1, dbs: {} };
     try {
-      const parsed = JSON.parse(await readFile2(this.file(key), "utf8"));
+      const parsed = JSON.parse(await readFile4(this.file(key), "utf8"));
       if (parsed?.format === 1 && typeof parsed.dbs === "object")
         snapshot = parsed;
     } catch {}
@@ -558,19 +1004,24 @@ class WorkbenchState {
     return snapshot;
   }
   async load(key) {
-    const snapshot = await this.get(key);
+    return this.fit(await this.get(key), key);
+  }
+  fit(snapshot, key) {
     const text = JSON.stringify(snapshot);
     if (text.length <= LOAD_MAX)
       return snapshot;
     this.log(`workbench state ${key} is ${text.length} bytes; loading the user data only`);
     const trimmed = { format: 1, dbs: {} };
     for (const [name, db] of Object.entries(snapshot.dbs))
-      if (!name.startsWith("vscode-web-state-db"))
+      if (!isRoleDb(name))
         trimmed.dbs[name] = db;
     return trimmed;
   }
   async apply(key, ops) {
     applyOps(await this.get(key), ops, this.parts);
+    this.schedule(key);
+  }
+  schedule(key) {
     clearTimeout(this.timers.get(key));
     this.timers.set(key, setTimeout(() => void this.write(key), 400));
   }
@@ -580,10 +1031,10 @@ class WorkbenchState {
     if (!snapshot)
       return;
     try {
-      await mkdir2(this.dir, { recursive: true, mode: 448 });
+      await mkdir4(this.dir, { recursive: true, mode: 448 });
       const tmp = `${this.file(key)}.tmp-${process.pid}`;
-      await writeFile2(tmp, JSON.stringify(snapshot), { mode: 384 });
-      await rename2(tmp, this.file(key));
+      await writeFile4(tmp, JSON.stringify(snapshot), { mode: 384 });
+      await rename4(tmp, this.file(key));
     } catch (error) {
       this.log(`could not save the workbench state: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -600,7 +1051,7 @@ import tls from "node:tls";
 var POLL_BYTES = 4000000;
 var POLL_WAIT_MS = 12000;
 var ABANDONED_MS = 45000;
-var MAX_TUNNELS = 32;
+var MAX_TUNNELS = 128;
 var HEADER_MAX = 16384;
 
 class ServerSocket {
@@ -835,11 +1286,15 @@ if (!port || !token) {
   process.exit(1);
 }
 var BODY_LIMIT = 200000;
-var packageRoot = resolve(dirname2(fileURLToPath(import.meta.url)), "..");
+var packageRoot = resolve(dirname3(fileURLToPath(import.meta.url)), "..");
 var log = (message) => console.error(`[vscode] ${message}`);
-var assets = new WorkbenchAssets(join3(packageRoot, "vscode-web"), async () => JSON.parse(await readFile3(join3(packageRoot, "service", "web-files.json"), "utf8")), log, undefined, join3(packageRoot, "webview"));
+var assets = new WorkbenchAssets(join4(packageRoot, "vscode-web"), async () => JSON.parse(await readFile5(join4(packageRoot, "service", "web-files.json"), "utf8")), log, undefined, join4(packageRoot, "webview"));
 var tunnels = new Tunnels;
-var state = new WorkbenchState(process.env.OPENCHAMBER_VSCODE_DATA_DIR || join3(homedir2(), ".local", "share", "openchamber-vscode", "state"), log);
+var stateDir = process.env.OPENCHAMBER_VSCODE_DATA_DIR || join4(homedir2(), ".local", "share", "openchamber-vscode", "state");
+var state = new WorkbenchState(stateDir, log);
+var rail = new Rail(join4(stateDir, "rail.json"), (url, token) => new VscodeServer(url, token), log);
+var editorRequests = new EditorRequests;
+var savedTabs = new SavedTabs(stateDir, log);
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -879,7 +1334,36 @@ var routes = {
   "/connect": async (body) => {
     const server = serverOf(body);
     const page = await server.page();
+    await rail.remember(server.url, body.token ?? null);
     return { commit: page.commit, base: page.base, version: await server.version(page.base), config: page.config, assets: assets.status(page.commit) };
+  },
+  "/rail/source": async (body) => {
+    const server = serverOf(body);
+    const path = typeof body.extensionsPath === "string" && body.extensionsPath.startsWith("/") && body.extensionsPath.length <= 4096 && !body.extensionsPath.includes("\x00") ? body.extensionsPath : null;
+    if (!path)
+      throw new ServerError("extensionsPath is required", 400);
+    await rail.remember(server.url, body.token ?? null, path);
+    return { ok: true };
+  },
+  "/editors/request": async (body) => {
+    if (typeof body.key !== "string" || !body.key || body.key.length > 1024 || typeof body.open !== "object" || body.open === null)
+      throw new ServerError("key and open are required", 400);
+    editorRequests.put(body.key, body.open);
+    return { ok: true };
+  },
+  "/editors/take": async (body) => {
+    if (typeof body.key !== "string")
+      throw new ServerError("key is required", 400);
+    return { open: editorRequests.take(body.key) };
+  },
+  "/tabs/save": async (body) => {
+    const server = serverOf(body);
+    await savedTabs.save(WorkbenchState.keyOf(server.url, null), readTabs(body.tabs));
+    return { ok: true };
+  },
+  "/tabs/load": async (body) => {
+    const server = serverOf(body);
+    return { tabs: await savedTabs.load(WorkbenchState.keyOf(server.url, null)) };
   },
   "/assets/prepare": async (body) => {
     const server = serverOf(body);
@@ -938,11 +1422,16 @@ var routes = {
   },
   "/state/load": async (body) => {
     const server = serverOf(body);
-    return state.load(WorkbenchState.keyOf(server.url, null));
+    const key = WorkbenchState.keyOf(server.url, null);
+    return isStateRole(body.role) ? state.loadRole(key, body.role) : state.load(key);
   },
   "/state/apply": async (body) => {
     const server = serverOf(body);
-    await state.apply(WorkbenchState.keyOf(server.url, null), readOps(body.ops));
+    const key = WorkbenchState.keyOf(server.url, null);
+    if (isStateRole(body.role))
+      await state.applyRole(key, body.role, readOps(body.ops));
+    else
+      await state.apply(key, readOps(body.ops));
     return { ok: true };
   }
 };
@@ -955,6 +1444,10 @@ var server = http.createServer(async (req, res) => {
   try {
     if (url.pathname === "/health" && req.method === "GET") {
       json(res, 200, { ok: true, tunnels: tunnels.size(), sockets: tunnels.sockets() });
+      return;
+    }
+    if (url.pathname === "/rail" && req.method === "GET") {
+      json(res, 200, { entries: await rail.entries() });
       return;
     }
     const route = req.method === "POST" ? routes[url.pathname] : undefined;

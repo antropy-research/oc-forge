@@ -13,6 +13,11 @@ server's files.
 - When OpenChamber moves to another folder, VS Code offers to open it; *OpenChamber: Open OpenChamber's Folder* and
   *OpenChamber: VS Code Server Connection…* are in VS Code's command palette.
 - VS Code keeps its settings, keybindings, open editors and layout across reloads.
+- With focus in VS Code, VS Code takes the keys, Cmd/Ctrl+1–9 and Cmd/Ctrl+Alt+←/→ included (VS Code for the web
+  drops those in a browser tab).
+
+On an OpenChamber built with oc-forge's adapters (`adapters/openchamber`) VS Code's parts move into OpenChamber's own
+surfaces instead: [below](#in-openchambers-own-surfaces-oc-forges-adapters).
 
 ## How it fits in an extension frame
 
@@ -41,13 +46,107 @@ may not.
 The extension no longer replaces OpenChamber's own file editor (`contributes.fileEditors`): the host can't hand a
 line to an extension editor, so search results and file links lost their line. Code renders in the VS Code view.
 
+## In OpenChamber's own surfaces (oc-forge's adapters)
+
+On an OpenChamber built with oc-forge's adapters (`adapters/openchamber`, contract version 1; `AGENTS.md` 2.ii a–c)
+VS Code's activity bar, editor tabs and terminal become OpenChamber's rail, header tabs and bottom panel. On a stock
+OpenChamber `connectOcForge()` answers null and every frame is the whole workbench, as above.
+
+| VS Code's | In OpenChamber | How |
+|---|---|---|
+| Activity bar: Explorer, Search, Source Control, Run and Debug, Extensions, and every installed extension's view container | One rail icon each, in VS Code's order; installed or uninstalled on the VS Code Server, an icon comes or goes within the next poll (2 s), no reload | The manifest's `ocForge.rail` (`GET /rail`, every 2 s). The service lists the built-ins (Remixicons of OpenChamber's sprite: `file-copy-2`, `search`, `git-branch`, `bug`, `puzzle`) and each installed extension's `contributes.viewsContainers.activitybar`, read from the server's `extensions.json`, `package.json` (and `package.nls.json`) and SVG icon through the server's own `/vscode-remote-resource` route, so it needn't share the server's disk (`service/rail.ts`, `src/rail.ts`). An SVG is inlined (16 KB at most, cleaned for the mask), a `$(codicon)` maps to a Remixicon, anything else is `apps`. Where the extensions live, a workbench tells the service once (its default profile's `extensions.json`); it is kept with the server's address (mode 0600), so after a restart the rail is complete before any frame runs |
+| A view container in the side bar | The rail panel shows that container alone, filling it | The panel's frame is the **view** role: `rail-entry` opens the container (`IViewsService.openViewContainer`); VS Code switching containers by itself (Ctrl+Shift+F, *Reveal in Explorer*) moves the rail's light (`rail.setActive`) |
+| Editor tabs | Header tabs after the chats'; choosing one shows its editor in the main area; they switch and close like chat tabs | The page is the **editor** role: each editor it has open is a header tab (id: its resource, or `diff:<original> <modified>`; title; icon by type; the unsaved dot). Choosing one activates its editor; closing one closes the editor, asking to save as VS Code does, and a cancelled close brings the tab back; an editor VS Code closes or switches to moves the header with it. VS Code's own tab bar is off (`workbench.editor.showTabs: none`), and so is preview mode, as header tabs have none |
+| The panel's terminal | VS Code's panel at OpenChamber's bottom, maximized: several terminals, split, the shell picker, Problems and Output beside it | A rail entry `terminal` with `zone: "bottom"`, so a panel of its own (`plugin:oc-forge-vscode--terminal`): the **terminal** role. Its workbench starts the first time that panel is shown |
+
+**Roles.** Each frame is a workbench of its own on the same server, in one role (`src/surfaces.ts`, `workbench/surfaces.ts`):
+`view` (the rail panel), `editor` (the page), `terminal` (the terminal's panel), or `classic` (the whole workbench: a
+stock OpenChamber, a service without `/rail`, or a release the surface patches don't fit). A role is settings and a
+layout. The settings (activity bar hidden; status bar, title bar and layout buttons off in a view and the terminal;
+the tab and preview settings in the page; a maximized, centred panel in the terminal) are the workbench's defaults
+from the start, and are set again in VS Code's in-memory configuration once it runs, above the user's
+`settings.json`, which nothing writes to. The layout (which parts show) is set as the workbench starts and again
+once it has restored its parts, through VS Code's layout service; a view and the terminal keep theirs when VS Code
+brings a part back.
+
+**Reaching VS Code's services.** The embedder API (`IWorkbench`) has no events for editors, parts or view containers.
+Five more patches (`src/patch.ts`, *surface patches*) hand the frame VS Code's instantiation service as the
+workbench starts and its service identifiers by name (`createDecorator`'s map), keep the keybindings VS Code for
+the web drops in a browser tab (`BrowserFeatures.keyboard`), and let a view show its container alone (VS Code
+otherwise brings the panel back whenever the editor area hides). From there the frame uses public members of
+VS Code's service interfaces only (`workbench/vscode.ts`: the editor, editor groups, layout, views, pane composite,
+configuration, remote agent and file services). Unlike the others these patches may be missing: the prepared
+workbench records which (`ready.json`), and a release that moved them runs as the whole workbench per frame.
+They apply once each to VS Code 1.140.0 and 1.143.1.
+
+**Between frames.** Frames reach each other only through OpenChamber, plus the service for what doesn't fit a tab
+message:
+- A file opened in a view or the terminal (Explorer, Search, Source Control, a terminal link) is handed to the page:
+  the frame's `openEditor`/`openEditors` post the editor (marshalled as VS Code does, with its selection) to the
+  service (`/editors/request`) and open its header tab with `activate`; OpenChamber shows the page on it, the page
+  gets `tab-activated`, takes the request (`/editors/take`) and opens it. An extension's details page goes as
+  `extension.open`. What can't be handed over (a webview of that frame's extension host, a terminal or output
+  editor) opens in that frame.
+- The page keeps its tabs in the service (`/tabs/save`); after OpenChamber reloads, the rail view opens them again
+  (`/tabs/load`), which mounts the page behind them, and the page's VS Code restores the same editors.
+- The page and the terminal follow the folder the rail view shows (host storage `folder`); "Open in VS Code" is
+  answered by the rail view, which hands a file to the page.
+- The page names its editor in the address bar (`?extension=oc-forge-vscode&route=/editor?key=…`), so a reload or a
+  copied link opens it again. A Cmd/Ctrl+click in a view or the terminal that opens a file opens it in a new browser
+  tab on that link instead of over the current view; Cmd/Ctrl+click in VS Code's lists (multi-select) and in the
+  page's editor (Go to Definition) keeps its VS Code meaning. Web links open in a new tab as before.
+
+**State.** One store per server for the user's data (settings, keybindings, snippets: VS Code's `vscode-web-db`),
+shared by every frame and by the whole workbench of a stock OpenChamber; one store per role for VS Code's state
+databases (layout, open editors, view state, extensions' state: `vscode-web-state-db-*`), so the parts don't
+overwrite each other's layout (`service/state.ts`, `<server>.<role>.json`). The page starts from the whole
+workbench's state (its open editors), the others from nothing. Two frames that both write the same user file (each
+saved `settings.json`) still keep the later one, as two windows of the whole workbench did.
+
+**Keys.** VS Code takes the keys while it has focus, in every frame: with the keyboard patch it keeps Cmd/Ctrl+1–9
+and Cmd/Ctrl+Alt+←/→ too, as VS Code's own default keybindings (not user keybindings, so `keybindings.json` stays
+the user's). OpenChamber's tab keys are not forwarded. The exception is a press VS Code has no binding for
+(it didn't prevent its default) that OpenChamber binds to navigation, such as its close-tab key (Alt+W) or its
+rail digits: it goes to OpenChamber, since those tabs and that rail are OpenChamber's now. Keys Chrome keeps in a
+normal tab (Ctrl+Tab, Cmd+W, Cmd+Option+←/→) reach VS Code only in an installed app window.
+
+**Tunnels.** Each workbench holds 2 of the service's tunnels (its management connection and its extension host's).
+A browser window runs up to 3 workbenches, so 6, and 12 for the 45 s a reloaded frame's old tunnels linger; past
+`MAX_TUNNELS` the least recently polled one is closed, which ends a live workbench. The limit is 128 (was 32): room
+for about ten such windows.
+
+**Cost** (adapters' scratch stack, VS Code 1.143.1, Chromium headless; `tests/e2e/surfaces.mjs` writes
+`<size>-frames.json`; two runs at 1440×900 and 1024×768). Each workbench, from its frame's navigation to running,
+with the prepared workbench cached: rail view 1.4–1.6 s, page 2.1–2.5 s, terminal 1.2–1.4 s; to a live shell
+7–13 s from the click (VS Code revives the last session's terminals first). The three add 210–225 MB of JS heap
+to the page's renderer (the sandboxed frames share it; 60–135 MB each, depending on which start together). On the
+server each workbench is an extension host of its own, 145–250 MB resident, against one for the whole workbench.
+To keep it down the terminal's workbench starts only when its panel is first shown, and the page only when it has
+a tab or is opened.
+
+**Limits.**
+- OpenChamber's bottom zone belongs to the chat column, and a page covers it (OpenChamber 2.5.2,
+  `ContextPanel.tsx`: "a page covering the chat covers it too"): while a file's header tab shows the editor, the
+  terminal panel is hidden (kept, not reloaded); it comes back with a chat. Showing it under the page too would be
+  an adapters change (`coveredByPage` for a page shown on its own header tabs).
+- Closing the last header tab of the page while its editor has unsaved changes: OpenChamber removes the page at
+  once, so VS Code can't ask; the changes stay in VS Code's backup and come back unsaved when the page opens again.
+  Any other tab asks. VS Code for the web saves a second after each edit by default (`files.autoSave`), so this is rare.
+- Each part has its own extension host: an extension's webview or terminal opened from a view stays in that view's
+  workbench; the Explorer doesn't show the page's unsaved dots; a task run in the page shows in the page's own panel.
+- Rail icons follow what is installed on the server (`extensions.json`), not VS Code's `when` clauses or a
+  disabled state: an installed extension whose container VS Code hides still has its icon, and opening it says so.
+- The Remixicons for the built-ins are the closest OpenChamber's sprite has to VS Code's codicons.
+- On an adapted OpenChamber this extension's rail entries replace its one `plugin:oc-forge-vscode` icon; a check
+  that compares the rail with a stock build's turns the extension off first.
+
 ## Layout
 
 | Path | Role |
 |---|---|
-| `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`) |
-| `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`) |
-| `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB |
+| `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`), the rail entries (`rail.ts`), the roles and editors between frames (`surfaces.ts`) |
+| `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`), the rail (`rail.ts`), editors handed to the page and its saved tabs (`editors.ts`) |
+| `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB; the roles in OpenChamber's own surfaces (`surfaces.ts`) and the VS Code services they use (`vscode.ts`) |
 | `panel/` | The background frame: "Open in VS Code" on a chat |
 | `webview/` | The webview host page (`host.ts`, built to `host.js` with the agent inside) and the agent that runs in each webview's content (`agent.ts`); `content.ts` makes a webview's HTML self-contained |
 | `scripts/web-files.ts` | Lists the browser's files of a VS Code Server install for `service/web-files.json` |
@@ -61,22 +160,35 @@ bun test tests/                    # VSCODE_SERVER_DIR=<install> also patches a 
 bun run build                      # workbench/main.js, panel/main.js, service/main.js
 node tests/e2e/run.mjs http://<bind>:35310   # on the host, against the dev container
 node tests/e2e/tunnel-leak.mjs               # against the adapters' scratch stack (its header says how)
+node tests/e2e/surfaces.mjs                  # against the adapters' scratch stack's adapted instance (its header says how)
 ```
 
 `tunnel-leak.mjs` opens a workbench in a scratch OpenChamber, closes the browser, and checks that every
 connection to the VS Code Server ends and that the server starts the grace after which it frees the extension host.
+
+`surfaces.mjs` checks OpenChamber's own surfaces at 1440×900 and 1024×768, with screenshots: the five built-ins
+as rail icons, each opening its view alone; an extension it builds and installs with the server's CLI getting
+its icon, opening its view, and losing the icon when uninstalled; files from the Explorer as header tabs (the
+editor in the main area, kept across a chat, the unsaved dot, closing asks to save, no VS Code tab bar); the
+terminal at the bottom (a command, a second terminal, a split, the shell picker, kept while a page covers it);
+Ctrl+Alt+→ and Ctrl+1 acting in VS Code; nothing opening another page; the page with session tabs off keeping
+VS Code's tab bar. It writes each size's start times and memory to `<size>-frames.json`. Run the stack's
+`prepare` outside a private network namespace (it downloads), then `up`, the check and `down` inside one.
 
 The E2E check connects the panel to the dev container's VS Code Server, checks the Explorer, file icons, the
 editor's grammar colors, a save with Ctrl+S, Markdown's preview (a webview), Source Control and its diff editor, Search, the terminal, state kept
 across a reload, the page, "Open in VS Code" on a chat, that OpenChamber's own editor still opens a search hit at its line, and that no other page or tab opened. It puts the
 demo project's README, the extension's settings and its chats back afterwards.
 
-After the VS Code pin moves, refresh `service/web-files.json` from a server of that release:
+After the VS Code pin moves, refresh `service/web-files.json` from a server of that release, and run the tests
+against it (every patch, the surface patches too, must apply once). Microsoft's web server of the pinned version
+has the same compiled workbench; `web-files.json` is now 1.143.1's, which holds all of 1.140.0's files:
 
 ```sh
-docker cp oc-forge-vscode-dev:/opt/vscode-server /tmp/vscode-server
+mkdir -p /tmp/vscode-server
+curl -fsSL https://update.code.visualstudio.com/1.143.1/server-linux-x64-web/stable | tar -xz -C /tmp/vscode-server --strip-components=1
 bun run web-files /tmp/vscode-server
-VSCODE_SERVER_DIR=/tmp/vscode-server bun test tests/patch.test.ts
+VSCODE_SERVER_DIR=/tmp/vscode-server bun test tests/
 ```
 
 ## Install

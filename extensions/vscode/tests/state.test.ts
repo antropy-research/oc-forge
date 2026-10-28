@@ -52,6 +52,35 @@ describe('the service keeps the workbench storage', () => {
     expect((await again.load(key)).dbs.d!.stores.s!.k).toEqual({ s: 'v' });
     expect(WorkbenchState.keyOf('http://other:8000', null)).not.toBe(key);
   });
+
+  test('in OpenChamber\'s own surfaces each part keeps its layout; all share the user\'s settings', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vscode-state-'));
+    const key = WorkbenchState.keyOf('http://vscode:8000', null);
+    const state = new WorkbenchState(dir, () => {});
+    // The whole workbench of a stock OpenChamber, before: its settings and its layout.
+    await state.apply(key, [
+      { op: 'put', db: 'vscode-web-db', store: 'vscode-userdata-store', key: '/User/settings.json', value: { s: '{"a":1}' } },
+      { op: 'put', db: 'vscode-web-state-db-ws1', store: 'ItemTable', key: 'workbench.sideBar.hidden', value: { s: 'false' } },
+    ]);
+    // The page's editor area starts from that layout and its open editors; a rail view from nothing.
+    const editor = await state.loadRole(key, 'editor');
+    expect(editor.dbs['vscode-web-state-db-ws1']!.stores.ItemTable!['workbench.sideBar.hidden']).toEqual({ s: 'false' });
+    const view = await state.loadRole(key, 'view');
+    expect(view.dbs['vscode-web-state-db-ws1']).toBeUndefined();
+    expect(view.dbs['vscode-web-db']!.stores['vscode-userdata-store']!['/User/settings.json']).toEqual({ s: '{"a":1}' });
+    // A part's layout stays its own; a setting changed in one is everyone's.
+    await state.applyRole(key, 'view', [
+      { op: 'put', db: 'vscode-web-state-db-ws1', store: 'ItemTable', key: 'workbench.sideBar.hidden', value: { s: 'true' } },
+      { op: 'put', db: 'vscode-web-db', store: 'vscode-userdata-store', key: '/User/settings.json', value: { s: '{"a":2}' } },
+    ]);
+    await state.flush();
+    const again = new WorkbenchState(dir, () => {});
+    expect((await again.loadRole(key, 'view')).dbs['vscode-web-state-db-ws1']!.stores.ItemTable!['workbench.sideBar.hidden']).toEqual({ s: 'true' });
+    expect((await again.loadRole(key, 'editor')).dbs['vscode-web-state-db-ws1']!.stores.ItemTable!['workbench.sideBar.hidden']).toEqual({ s: 'false' });
+    expect((await again.load(key)).dbs['vscode-web-state-db-ws1']!.stores.ItemTable!['workbench.sideBar.hidden']).toEqual({ s: 'false' });
+    expect((await again.loadRole(key, 'terminal')).dbs['vscode-web-db']!.stores['vscode-userdata-store']!['/User/settings.json']).toEqual({ s: '{"a":2}' });
+    expect(statSync(join(dir, `${key}.view.json`)).mode & 0o777).toBe(0o600);
+  });
 });
 
 describe('the frame runs an IndexedDB that persists through the service', () => {

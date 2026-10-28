@@ -15,6 +15,14 @@ const workbench = [
   '_registerMessageHandler(e){let t=this._register(q(e,"message",i=>{if(!(!this._encodedWebviewOrigin||i?.data?.target!==this.id)){if(i.origin!==this._webviewContentOrigin(this._encodedWebviewOrigin)){console.log("skipped");return}}}))}',
   '(function(){axo(dt.document.body,{...e,windowIndicator:1})})();export{lxo as L};',
 ].join('\n');
+// What the surface patches look for (tests/patch.test.ts has them in full).
+const surfaces = [
+  'function ue(s){if(Pz.serviceIds.has(s))return Pz.serviceIds.get(s);return s}',
+  'var Ji={keyboard:Ws||J6()?0:navigator.keyboard||Pf?1:2,touch:1};',
+  'e&&!this.isVisible("workbench.parts.panel")&&!this.isAuxiliaryBarMaximized()&&this.setPanelHidden(!1,!0);',
+  'this.getRuntimeValue(qo.PANEL_HIDDEN)&&this.getRuntimeValue(qo.EDITOR_HIDDEN)&&!this.getRuntimeValue(qo.AUXILIARYBAR_WAS_LAST_MAXIMIZED)&&this.setRuntimeValue(qo.EDITOR_HIDDEN,!1);',
+  'let i=t.startup();return this._register(i.createInstance(fze)),1;',
+].join('\n');
 const iframe = [
   '<meta http-equiv="Content-Security-Policy" content="x"/>',
   "const blob = new Blob([[`a`].join('')], { type: 'application/javascript' });",
@@ -23,11 +31,11 @@ const iframe = [
 ].join('\n');
 
 /** A VS Code Server install with just enough of each kind of file. */
-const fakeInstall = (): string => {
+const fakeInstall = (withSurfaces = true): string => {
   const dir = mkdtempSync(join(tmpdir(), 'vscode-install-'));
   const files: Record<string, string | Buffer> = {
     'product.json': JSON.stringify({ commit }),
-    'out/vs/code/browser/workbench/workbench.js': workbench,
+    'out/vs/code/browser/workbench/workbench.js': withSurfaces ? `${workbench}\n${surfaces}` : workbench,
     'out/vs/code/browser/workbench/workbench.css': '@font-face{src:url("../../../../media/codicon.ttf") format("truetype")}',
     'out/nls.messages.js': 'globalThis._VSCODE_NLS_MESSAGES=[];',
     'out/media/codicon.ttf': Buffer.from([0, 1, 2, 3]),
@@ -79,15 +87,17 @@ describe('preparing the workbench of a VS Code Server', () => {
     const server = { staticFile: async () => null } as unknown as VscodeServer;
     expect(assets.prepare(server, page).state).toBe('preparing');
     const done = await settle(assets);
-    expect(done).toMatchObject({ state: 'ready', path: `vscode-web/${commit}`, source: 'local' });
+    expect(done).toMatchObject({ state: 'ready', path: `vscode-web/${commit}`, source: 'local', surfaces: true });
     expectPrepared(cache);
+    expect(JSON.parse(readFileSync(join(cache, commit, 'ready.json'), 'utf8')).missing).toEqual([]);
     // Once ready it is not prepared again.
     expect(assets.prepare(server, page).state).toBe('ready');
     expect(new WorkbenchAssets(cache, async () => [], () => {}).status(commit).state).toBe('ready');
   });
 
   test("over HTTP from the server's static files, by the shipped list", async () => {
-    const install = fakeInstall();
+    // A release that moved the surface patches' code: ready all the same, as the whole workbench per frame.
+    const install = fakeInstall(false);
     const cache = mkdtempSync(join(tmpdir(), 'vscode-cache-'));
     const requested: string[] = [];
     const server = {
@@ -99,7 +109,7 @@ describe('preparing the workbench of a VS Code Server', () => {
     const list = ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js', 'out/media/codicon.ttf', 'out/media/loading.svg', 'out/vs/editor/common/services/editorWebWorkerMain.js', 'out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html', 'node_modules/vscode-oniguruma/release/onig.wasm', 'node_modules/vscode-oniguruma/release/main.js', 'out/gone.js'];
     const assets = new WorkbenchAssets(cache, async () => list, () => {}, () => []);
     assets.prepare(server, page);
-    expect(await settle(assets)).toMatchObject({ state: 'ready', source: 'download' });
+    expect(await settle(assets)).toMatchObject({ state: 'ready', source: 'download', surfaces: false });
     expectPrepared(cache);
     expect(requested.every((path) => path.startsWith(`/stable-${commit}/static/`))).toBe(true);
   });

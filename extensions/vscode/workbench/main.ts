@@ -1,16 +1,26 @@
 // The VS Code view (rail panel and page): the compiled workbench of the user's
 // own VS Code Server, rendered in this frame. Everything it needs from outside
 // (its files, its web sockets, its remote resources, the extension gallery, its
-// storage) comes through this extension's service; see `shims.ts`.
+// storage) comes through this extension's service; see `shims.ts`. In an
+// OpenChamber with oc-forge's adapters the frame is one part of VS Code (a rail
+// view, the page's editor area, the bottom terminal; `surfaces.ts`); in a
+// stock one, the whole workbench.
 import { connectHost, type HostReadyContext, type JsonValue } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
+import { connectOcForge } from '../../../adapters/openchamber/client/index.ts';
+import type { RailEntry } from '../src/rail.ts';
 import { isConnectionToken, parseServerUrl, readOpenRequest, readSettings, type OpenRequest, type VscodeSettings } from '../src/settings.ts';
+import { roleOf, roleSettings, type Role } from '../src/surfaces.ts';
 import { isExternalAllowed, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
 import { persistentIndexedDB, IDBKeyRange, type StateOp, type StateSnapshot } from './storage.ts';
+import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceRole } from './surfaces.ts';
 import { TunnelSocket, type TunnelService } from './tunnel.ts';
+import { VscodeServices, type InstantiationService } from './vscode.ts';
 
 const host = connectHost();
+// oc-forge's adapters answer at once; a stock OpenChamber never does, and the boot below takes longer than this anyway.
+const forgeReady = connectOcForge({ timeoutMs: 1_000 }).catch(() => null);
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 installBasicShims((url) => void host.openUrl(url).catch(() => {}));
@@ -31,7 +41,7 @@ const call = async <T>(path: string, body: Record<string, unknown>): Promise<T> 
 type AssetState =
   | { state: 'idle' }
   | { state: 'preparing'; source: 'local' | 'download'; done: number; total: number }
-  | { state: 'ready'; path: string; files: number }
+  | { state: 'ready'; path: string; files: number; surfaces?: boolean }
   | { state: 'failed'; error: string };
 interface Connected {
   commit: string;
@@ -145,10 +155,20 @@ const boot = async (): Promise<void> => {
   }
   status(`Starting ${label}…`);
 
-  // Storage first: VS Code reads its settings from IndexedDB as it starts.
-  const snapshot = await call<StateSnapshot>('/state/load', server).catch((): StateSnapshot => ({ format: 1, dbs: {} }));
+  // Which part of VS Code this frame is: the whole workbench on a stock OpenChamber.
+  const forge = await forgeReady;
+  const role: Role = roleOf(forge?.hello ?? null, assets.surfaces === true);
+  const surfaceRole: SurfaceRole | null = role === 'classic' ? null : role;
+  if (forge && !surfaceRole) forge.dispose();
+  const strip = forge?.tabs.state().strip ?? true;
+  // For the end-to-end check's measurements: which part this frame is, and (below) when its workbench ran.
+  document.documentElement.dataset.ocVscodeRole = role;
+
+  // Storage first: VS Code reads its settings from IndexedDB as it starts. Each part keeps its own layout.
+  const stateRole = surfaceRole ? { role: surfaceRole } : {};
+  const snapshot = await call<StateSnapshot>('/state/load', { ...server, ...stateRole }).catch((): StateSnapshot => ({ format: 1, dbs: {} }));
   const storage = persistentIndexedDB(snapshot, async (ops: StateOp[]) => {
-    await call('/state/apply', { ...server, ops });
+    await call('/state/apply', { ...server, ...stateRole, ops });
   });
   await storage.ready;
   Object.defineProperty(window, 'indexedDB', { configurable: true, get: () => storage.factory });
@@ -165,15 +185,18 @@ const boot = async (): Promise<void> => {
     openUrl: (url) => void host.openUrl(url).catch(() => {}),
   });
 
-  // The panel and the page each answer an "Open in VS Code" request once.
-  const handledKey = `handled-open:${context.surface}`;
+  // The panel and the page each answer an "Open in VS Code" request once. In OpenChamber's own surfaces the
+  // rail view answers it; the page and the terminal follow the folder it shows.
+  const answersOpen = !surfaceRole || surfaceRole === 'view';
+  const handledKey = `handled-open:${surfaceRole ?? context.surface}`;
   const handledBefore = Number((await host.storage.get(handledKey).catch(() => 0)) ?? 0);
-  const open = await pendingOpen();
+  const open = answersOpen ? await pendingOpen() : null;
   const fresh = open && open.at > handledBefore && Date.now() - open.at < 120_000 ? open : null;
   if (fresh) await host.storage.set(handledKey, fresh.at).catch(() => {});
   const storedFolder = await host.storage.get('folder').catch(() => undefined);
   const folder = fresh?.folder ?? (typeof storedFolder === 'string' && storedFolder.startsWith('/') ? storedFolder : null) ?? context.directory;
-  const configuration = workbenchConfiguration(connected.config, { folder, token: settings.token, mode: modeOf(context), followTheme: settings.followTheme });
+  if (surfaceRole && fresh && fresh.folder !== storedFolder) await host.storage.set('folder', fresh.folder).catch(() => {});
+  const configuration = workbenchConfiguration(connected.config, { folder, token: settings.token, mode: modeOf(context), followTheme: settings.followTheme, defaults: roleSettings(role, strip) });
 
   const service: TunnelService = {
     open: async (path) => (await call<{ id: string }>('/tunnel/open', { ...server, path })).id,
@@ -191,16 +214,38 @@ const boot = async (): Promise<void> => {
     location.reload();
   };
   let workbench: { commands: { executeCommand: (id: string, ...args: unknown[]) => Promise<unknown> }; window: { showInformationMessage: (message: string, ...items: string[]) => Promise<string | undefined> } } | null = null;
-  (globalThis as Record<string, unknown>).__ocVSCode = {
+  let markRunning: () => void = () => {};
+  const running = new Promise<void>((resolve) => {
+    markRunning = resolve;
+  });
+  let markServices: (services: VscodeServices) => void = () => {};
+  const servicesReady = new Promise<VscodeServices>((resolve) => {
+    markServices = resolve;
+  });
+  const hooks: Record<string, unknown> = {
     connectionToken: settings.token ?? undefined,
     originHash: async (parentOrigin: string, salt: string) => webviewOriginName(parentOrigin, salt),
+    // VS Code keeps its Cmd/Ctrl+digit and Cmd/Ctrl+Alt+arrow keys inside OpenChamber (VS Code for the web drops them in a browser tab).
+    keyboard: true,
+    // A rail view is its view container alone: no editor area and no panel.
+    bare: surfaceRole === 'view',
+    services: (instantiation: InstantiationService) => {
+      const ids = hooks.serviceIds;
+      if (!(ids instanceof Map)) return;
+      const services = new VscodeServices(instantiation, ids);
+      if (surfaceRole) prepareSurface(surfaceRole, services);
+      markServices(services);
+    },
     workbench: (handle: typeof workbench) => {
       workbench = handle;
+      document.documentElement.dataset.ocVscodeStarted = String(Math.round(performance.now()));
+      markRunning();
     },
     options: (options: Record<string, unknown>) => {
       const original = options.workspaceProvider as Record<string, unknown> & { workspace?: unknown };
       const payload: [string, string][] = [];
-      if (fresh?.file && authority) {
+      // A rail view hands the file to the page once it runs (below).
+      if (fresh?.file && authority && !surfaceRole) {
         const target = remoteUri(authority, fresh.file);
         payload.push(['openFile', `vscode-remote://${target.authority}${encodeURI(target.path)}${fresh.line ? `:${fresh.line}` : ''}`]);
         if (fresh.line) payload.push(['gotoLineMode', 'true']);
@@ -240,6 +285,7 @@ const boot = async (): Promise<void> => {
       };
     },
   };
+  (globalThis as Record<string, unknown>).__ocVSCode = hooks;
 
   // VS Code's own page carries these; this frame is that page now.
   const meta = document.createElement('meta');
@@ -265,6 +311,27 @@ const boot = async (): Promise<void> => {
     return;
   }
 
+  // OpenChamber's own surfaces, once VS Code runs: this frame's part, and where the server keeps its extensions for the rail.
+  const openFileAt = (file: string, line?: number) => workbench?.commands.executeCommand('_workbench.open', remoteUri(authority, file), [undefined, { pinned: true, ...(line ? { selection: { startLineNumber: line, startColumn: 1 } } : {}) }]);
+  void Promise.all([servicesReady, running]).then(async ([services]) => {
+    const serviceCall = <T>(path: string, body: Record<string, unknown> = {}): Promise<T> => call<T>(path, { ...server, ...body });
+    void reportExtensionsPath(services, serviceCall).catch(() => {});
+    if (!surfaceRole || !forge) return;
+    await startSurface({
+      role: surfaceRole,
+      forge,
+      services,
+      call: serviceCall,
+      railEntries: async () => {
+        const answer = await host.serviceRequest({ method: 'GET', path: '/rail' });
+        return ((JSON.parse(answer.body || '{}') as { entries?: RailEntry[] }).entries ?? []);
+      },
+      openUrl: (url) => void host.openUrl(url).catch(() => {}),
+    });
+    // "Open in VS Code" with a file: the rail view hands it to the page.
+    if (surfaceRole === 'view' && fresh?.file) await openFileAt(fresh.file, fresh.line);
+  }).catch((error) => console.warn('[OpenChamber VS Code] the surface did not start', error));
+
   // OpenChamber's look follows into VS Code when it changes; its folder is offered.
   let shownFolder = folder;
   let asked: string | null = null;
@@ -275,7 +342,7 @@ const boot = async (): Promise<void> => {
     const dark = document.querySelector('.monaco-workbench')?.classList.contains('vs-dark') ?? false;
     if (settings.followTheme && modeOf(next) !== before && (modeOf(next) === 'dark') !== dark) void workbench?.commands.executeCommand('workbench.action.toggleLightDarkThemes');
     const directory = next.directory;
-    if (directory && directory !== shownFolder && directory !== asked && workbench) {
+    if (answersOpen && directory && directory !== shownFolder && directory !== asked && workbench) {
       asked = directory;
       void workbench.window.showInformationMessage(`OpenChamber is now in ${directory}.`, 'Open it here').then((choice) => {
         if (choice) void reloadWith(directory);
@@ -286,6 +353,16 @@ const boot = async (): Promise<void> => {
   // "Open in VS Code" from a chat, the file view or elsewhere: shown here.
   let handled = fresh?.at ?? handledBefore;
   setInterval(() => {
+    if (!answersOpen) {
+      // The page and the terminal follow the folder the rail view shows.
+      void host.storage.get('folder').catch(() => undefined).then(async (stored) => {
+        if (typeof stored === 'string' && stored.startsWith('/') && stored !== shownFolder) {
+          shownFolder = stored;
+          await reloadWith(stored);
+        }
+      });
+      return;
+    }
     void pendingOpen().then(async (request) => {
       if (!request || request.at <= handled) return;
       handled = request.at;
@@ -295,9 +372,7 @@ const boot = async (): Promise<void> => {
         await reloadWith(request.folder, request);
         return;
       }
-      if (request.file && workbench) {
-        await workbench.commands.executeCommand('_workbench.open', remoteUri(authority, request.file), [undefined, { pinned: true, ...(request.line ? { selection: { startLineNumber: request.line, startColumn: 1 } } : {}) }]);
-      }
+      if (request.file && workbench) await openFileAt(request.file, request.line);
     });
   }, 1500);
 };

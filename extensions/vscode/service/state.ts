@@ -3,7 +3,7 @@
 // has no IndexedDB of its own: the frame runs an in-memory IndexedDB and sends
 // every change to the service, which keeps one file per VS Code Server.
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export type StoredValue = { s: string } | { b: string } | { j: unknown };
@@ -97,6 +97,20 @@ export const applyOps = (snapshot: StateSnapshot, ops: StateOp[], parts: Parts):
   }
 };
 
+/**
+ * The workbench a frame runs in OpenChamber's own surfaces (oc-forge's
+ * adapters): a rail view, the page's editor area, the bottom terminal. Each
+ * keeps its own layout, open editors and view state; all share the user's
+ * data (settings, keybindings, snippets) with the whole workbench of a stock
+ * OpenChamber, which has no role.
+ */
+export const STATE_ROLES = ['view', 'editor', 'terminal'] as const;
+export type StateRole = (typeof STATE_ROLES)[number];
+export const isStateRole = (value: unknown): value is StateRole => (STATE_ROLES as readonly unknown[]).includes(value);
+
+/** VS Code's storage databases (application, profile and workspace state); the rest is the user's data. */
+export const isRoleDb = (db: string): boolean => db.startsWith('vscode-web-state-db');
+
 export class WorkbenchState {
   private readonly snapshots = new Map<string, StateSnapshot>();
   private readonly parts: Parts = new Map();
@@ -108,6 +122,42 @@ export class WorkbenchState {
     // One store per VS Code Server: VS Code itself separates workspaces inside it.
     void folder;
     return createHash('sha256').update(serverUrl).digest('hex').slice(0, 32);
+  }
+
+  /** The store of a role's own databases, next to the server's. */
+  static roleKeyOf(key: string, role: StateRole): string {
+    return `${key}.${role}`;
+  }
+
+  /**
+   * A role's state: the server's user data and the role's own databases. The
+   * page's editor area starts from the whole workbench's state (its open
+   * editors, view state), the others from nothing.
+   */
+  async loadRole(key: string, role: StateRole): Promise<StateSnapshot> {
+    const shared = await this.get(key);
+    const roleKey = WorkbenchState.roleKeyOf(key, role);
+    const own = await this.get(roleKey);
+    if (role === 'editor' && Object.keys(own.dbs).length === 0 && !(await this.exists(roleKey))) {
+      for (const [name, db] of Object.entries(shared.dbs)) if (isRoleDb(name)) own.dbs[name] = structuredClone(db);
+      this.schedule(roleKey);
+    }
+    const merged: StateSnapshot = { format: 1, dbs: {} };
+    for (const [name, db] of Object.entries(shared.dbs)) if (!isRoleDb(name)) merged.dbs[name] = db;
+    for (const [name, db] of Object.entries(own.dbs)) if (isRoleDb(name)) merged.dbs[name] = db;
+    return this.fit(merged, `${roleKey}`);
+  }
+
+  /** A role's changes: its own databases to its store, the user's data to the server's. */
+  async applyRole(key: string, role: StateRole, ops: StateOp[]): Promise<void> {
+    const own = ops.filter((op) => isRoleDb(op.db));
+    const shared = ops.filter((op) => !isRoleDb(op.db));
+    if (own.length > 0) await this.apply(WorkbenchState.roleKeyOf(key, role), own);
+    if (shared.length > 0) await this.apply(key, shared);
+  }
+
+  private async exists(key: string): Promise<boolean> {
+    return stat(this.file(key)).then(() => true, () => false);
   }
 
   private file(key: string): string {
@@ -129,18 +179,25 @@ export class WorkbenchState {
   }
 
   async load(key: string): Promise<StateSnapshot> {
-    const snapshot = await this.get(key);
+    return this.fit(await this.get(key), key);
+  }
+
+  private fit(snapshot: StateSnapshot, key: string): StateSnapshot {
     const text = JSON.stringify(snapshot);
     if (text.length <= LOAD_MAX) return snapshot;
     // Too big to hand back in one answer: the state databases (layout, open editors) go first, settings stay.
     this.log(`workbench state ${key} is ${text.length} bytes; loading the user data only`);
     const trimmed: StateSnapshot = { format: 1, dbs: {} };
-    for (const [name, db] of Object.entries(snapshot.dbs)) if (!name.startsWith('vscode-web-state-db')) trimmed.dbs[name] = db;
+    for (const [name, db] of Object.entries(snapshot.dbs)) if (!isRoleDb(name)) trimmed.dbs[name] = db;
     return trimmed;
   }
 
   async apply(key: string, ops: StateOp[]): Promise<void> {
     applyOps(await this.get(key), ops, this.parts);
+    this.schedule(key);
+  }
+
+  private schedule(key: string): void {
     clearTimeout(this.timers.get(key));
     this.timers.set(key, setTimeout(() => void this.write(key), 400));
   }

@@ -13,7 +13,7 @@ import { patchExtensionHostIframe, patchScript, patchStylesheet, patchWorkbench,
 import type { ServerPage, VscodeServer } from './server.ts';
 
 /** Bumped when the cache's layout or patches change, so older caches are rebuilt. */
-export const CACHE_FORMAT = 2;
+export const CACHE_FORMAT = 3;
 const MARKER = 'ready.json';
 const KEEP = 2;
 const DOWNLOADS_AT_ONCE = 8;
@@ -21,7 +21,8 @@ const DOWNLOADS_AT_ONCE = 8;
 export type AssetState =
   | { state: 'idle' }
   | { state: 'preparing'; source: 'local' | 'download'; done: number; total: number }
-  | { state: 'ready'; path: string; files: number; source: 'local' | 'download' }
+  /** `surfaces`: every surface patch applied, so the frames can use OpenChamber's own surfaces. */
+  | { state: 'ready'; path: string; files: number; source: 'local' | 'download'; surfaces: boolean }
   | { state: 'failed'; error: string };
 
 /** Where a VS Code Server is usually installed on the machine running OpenChamber. */
@@ -73,8 +74,11 @@ export class WorkbenchAssets {
     const marker = join(this.cacheRoot, commit, MARKER);
     if (existsSync(marker)) {
       try {
-        const ready = JSON.parse(readFileSync(marker, 'utf8')) as { format?: number; files?: number; source?: 'local' | 'download' };
-        if (ready.format === CACHE_FORMAT) return { state: 'ready', path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? 'local' };
+        const ready = JSON.parse(readFileSync(marker, 'utf8')) as { format?: number; files?: number; source?: 'local' | 'download'; missing?: unknown };
+        if (ready.format === CACHE_FORMAT) {
+          const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
+          return { state: 'ready', path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? 'local', surfaces };
+        }
       } catch {
         // A broken marker: prepare again.
       }
@@ -133,6 +137,7 @@ export class WorkbenchAssets {
     try {
       let next = 0;
       let files = 0;
+      const missing: string[] = [];
       const worker = async (): Promise<void> => {
         while (next < wanted.length) {
           const path = wanted[next++]!;
@@ -141,7 +146,7 @@ export class WorkbenchAssets {
           if (!body) continue;
           const target = join(tmp, clientFileName(path)!);
           await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, transform(path, body, codicon));
+          await writeFile(target, transform(path, body, codicon, missing));
           files += 1;
         }
       };
@@ -154,13 +159,15 @@ export class WorkbenchAssets {
       for (const file of ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js']) {
         if (!existsSync(join(tmp, file))) throw new Error(`${file} is missing from the VS Code Server`);
       }
-      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, at: new Date().toISOString() }));
+      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, at: new Date().toISOString() }));
       const final = join(this.cacheRoot, page.commit);
       await rm(final, { recursive: true, force: true });
       await rename(tmp, final);
       await this.prune(page.commit);
       this.log(`VS Code ${page.commit.slice(0, 8)} ready from ${local ?? 'the server'} (${files} files)`);
-      return { state: 'ready', path: WorkbenchAssets.folder(page.commit), files, source: job.source };
+      // Without them each frame is the whole workbench, as on a stock OpenChamber.
+      if (missing.length > 0) this.log(`VS Code ${page.commit.slice(0, 8)}: not in OpenChamber's own surfaces; this release moved ${missing.join(', ')}`);
+      return { state: 'ready', path: WorkbenchAssets.folder(page.commit), files, source: job.source, surfaces: missing.length === 0 };
     } catch (error) {
       await rm(tmp, { recursive: true, force: true });
       throw error instanceof PatchError ? new Error(`This VS Code release cannot run inside OpenChamber yet: ${error.message}`) : error;
@@ -190,9 +197,9 @@ export class WorkbenchAssets {
   }
 }
 
-/** A file as the cache stores it. */
-export const transform = (path: string, body: Buffer, codicon: Buffer): Buffer | string => {
-  if (path === 'out/vs/code/browser/workbench/workbench.js') return patchWorkbench(body.toString('utf8'));
+/** A file as the cache stores it; surface patches the workbench lacks are added to `missing`. */
+export const transform = (path: string, body: Buffer, codicon: Buffer, missing: string[] = []): Buffer | string => {
+  if (path === 'out/vs/code/browser/workbench/workbench.js') return patchWorkbench(body.toString('utf8'), missing);
   if (path === 'out/vs/code/browser/workbench/workbench.css') return patchStylesheet(body.toString('utf8'), codicon.toString('base64'));
   if (path === 'out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html') return patchExtensionHostIframe(body.toString('utf8'));
   if (path.endsWith('.js') && path.startsWith('out/')) return patchScript(body.toString('utf8'));
