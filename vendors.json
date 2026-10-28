@@ -1,22 +1,22 @@
 {
   "opencode": {
     "repository": "https://github.com/anomalyco/opencode.git",
-    "release": "v2.1.4",
-    "commit": "68bc26b7da1990ce10ffecfbc1e09eb13aa5d824"
+    "release": "v2.2.0",
+    "commit": "1097e2668b1e08ad63bdf0b1c4860b9bc01e420c"
   },
   "openchamber": {
     "repository": "https://github.com/openchamber/openchamber.git",
-    "release": "v2.5.1",
-    "commit": "3e9ef4db17bd184f1f2713eb6356261304d6aee7"
+    "release": "v2.5.2",
+    "commit": "c4919abc1e7a0a3beeaa126666487806bf79cfe0"
   },
   "orca": {
     "repository": "https://github.com/stablyai/orca.git",
-    "release": "v1.4.240",
-    "commit": "86de8f90e22a15846a49912015278c1e440d00c7"
+    "release": "v1.4.243",
+    "commit": "2d9b5957851e5bd449e179018e53759ea69e3f0b"
   },
   "vscode": {
     "repository": "https://github.com/microsoft/vscode.git",
-    "release": "1.140.0",
-    "commit": "07f806f999227108933c2e30515b26eecc1fda74"
+    "release": "1.143.1",
+    "commit": "e646868227c3e3a9e3f24277c8c7220be42c0be7"
   }
 }
