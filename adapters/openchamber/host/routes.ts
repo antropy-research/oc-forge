@@ -11,6 +11,7 @@ import { pluginModeFromId } from '@/lib/surfaces/modes';
 import { shownContextModes } from '@/lib/workspace/zones';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { normalizeContextPanelDirectoryKey, useUIStore } from '@/stores/useUIStore';
+import { useSessionUIStore } from '@/sync/session-ui-store';
 
 import { broadcastOcForge } from './bus.ts';
 import { isGuestId, OC_FORGE_LIMITS } from './protocol.ts';
@@ -20,6 +21,10 @@ export const OC_FORGE_EXTENSION_PARAM = 'extension';
 export const OC_FORGE_ROUTE_PARAM = 'route';
 
 const CATALOG_WAIT_MS = 20_000;
+/** How long a deep link waits for the app's own first chat or new-chat draft. */
+const STARTUP_WAIT_MS = 15_000;
+/** That choice is settled once it hasn't changed for this long. */
+const STARTUP_QUIET_MS = 400;
 
 /** For the router: the URL names an extension page. */
 export const hasOcForgeRouteParams = (params: URLSearchParams): boolean => params.has(OC_FORGE_EXTENSION_PARAM);
@@ -68,6 +73,36 @@ const waitForCatalog = (): Promise<boolean> => new Promise((resolve) => {
   });
 });
 
+/**
+ * Once it has loaded, the app selects a chat (the URL's or a restored tab) or
+ * opens a new-chat draft, and MainLayout closes every page when it does: a
+ * page a deep link opened before that would close again at once. Resolves when
+ * the app has a chat or a draft and that has held for a moment, or after
+ * STARTUP_WAIT_MS (an app with nothing to select).
+ */
+const waitForStartupSelection = (): Promise<void> => new Promise((resolve) => {
+  const chosen = (): boolean => {
+    const state = useSessionUIStore.getState();
+    return Boolean(state.currentSessionId) || Boolean(state.newSessionDraft?.open);
+  };
+  let quiet: number | undefined;
+  const finish = () => {
+    window.clearTimeout(quiet);
+    window.clearTimeout(limit);
+    unsubscribe();
+    resolve();
+  };
+  const settle = () => {
+    window.clearTimeout(quiet);
+    if (chosen()) quiet = window.setTimeout(finish, STARTUP_QUIET_MS);
+  };
+  const limit = window.setTimeout(finish, STARTUP_WAIT_MS);
+  const unsubscribe = useSessionUIStore.subscribe((state, previous) => {
+    if (state.currentSessionId !== previous.currentSessionId || state.newSessionDraft !== previous.newSessionDraft) settle();
+  });
+  settle();
+});
+
 const deliverRoute = (guestId: string, route: string, surface: 'page' | 'panel'): void => {
   useOcForgeStore.setState((state) => ({ routes: { ...state.routes, [guestId]: route } }));
   broadcastOcForge(guestId, { type: 'route', payload: { route } }, (frame) => frame.surface === surface && frame.ownEntry === null);
@@ -81,6 +116,8 @@ const openDeepLink = async (link: { guestId: string; route: string }): Promise<v
   const guest = useGuestsStore.getState().guests.find((entry) => entry.id === link.guestId);
   if (!guest || !isGuestActive(guest)) return;
   if (guest.pageEntry) {
+    await waitForStartupSelection();
+    if (attempt !== applying) return;
     deliverRoute(guest.id, link.route, 'page');
     useOcForgeStore.setState({ linked: guest.id });
     useUIStore.getState().setOpenGuestPage(guest.id);
