@@ -1,6 +1,7 @@
 // Agents on tasks: start OpenChamber sessions for tasks, follow their live state,
 // and keep the run facts (adopted runs, settled outcomes) in the Planner's log.
 import type { GuestProject, GuestSessionRecord, GuestSessionsSnapshot, GuestWorktree, HostClient } from '@openchamber/sdk';
+import { chatUrl, openInNewTab } from './forge.ts';
 import { assignPrompt, needsYou, planAdoptions, planLinkedPullRequests, planPullRequests, planRunOutcomes, pullRequestLookups, runStatus, runsFor, taskChipId, taskUrl, type LiveSession } from '../../src/domain/runs.ts';
 import { commandText, type AgentCatalog } from '../../src/domain/assignees.ts';
 import type { SeenPullRequest } from '../../src/domain/events.ts';
@@ -195,6 +196,8 @@ export class AgentStore {
   }
 
   openSession(sessionId: string): Promise<void> {
+    // A Cmd/Ctrl+click or a middle click opens the chat in a new browser tab (oc-forge's deep links).
+    if (openInNewTab(chatUrl(sessionId), (url) => this.host.openUrl(url))) return Promise.resolve();
     return this.host.openSession(sessionId);
   }
 

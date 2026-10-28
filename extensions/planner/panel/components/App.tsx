@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { usePlanner, useView } from '../lib/context.ts';
 import { UiContext, type UiState } from '../lib/ui.ts';
 import { ArchiveView } from './ArchiveView.tsx';
@@ -27,6 +27,8 @@ import { AssistantModal } from './Assistant.tsx';
 import { hoveredTask } from '../lib/hover.ts';
 import { moveTo } from '../lib/commands.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
+import { parseRoute, routeOf } from '../lib/deepLink.ts';
+import { openInNewTab, placeUrl, plannerKeeps, useForge, watchNewTabClicks } from '../lib/forge.ts';
 
 export const App = ({ surface }: { surface: string }) => {
   const { client, host, linear, agents, github, google } = usePlanner();
@@ -45,12 +47,52 @@ export const App = ({ surface }: { surface: string }) => {
     setNavOpen(false);
     document.querySelector<HTMLElement>('.nav-rail-button[aria-controls="planner-nav"]')?.focus();
   };
+  // oc-forge's host APIs (null on a stock OpenChamber): a Cmd/Ctrl+click or a middle click on a page, a task or an
+  // issue opens it on the Planner's page in a new browser tab, as on a link; a plain click goes there here.
+  const forge = useForge();
   const go = (next: Route) => {
+    if (openInNewTab(placeUrl({ page: next }), (url) => host.openUrl(url))) return;
     setRoute(next);
     setNavOpen(false);
   };
   const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null, agentForm: null });
-  const setUi = (patch: Partial<UiState>) => setUiState((current) => ({ ...current, ...patch }));
+  const setUi = (patch: Partial<UiState>) => {
+    if (patch.openIssue || patch.openTaskId) {
+      // From the rail panel's Today, a task opens on the page's Today.
+      const page = surface === 'page' ? route : 'today';
+      const place = patch.openIssue ? { page, openIssue: patch.openIssue } : { page, openTaskId: patch.openTaskId };
+      if (openInNewTab(placeUrl(place), (url) => host.openUrl(url))) return;
+    }
+    setUiState((current) => ({ ...current, ...patch }));
+  };
+  useEffect(() => watchNewTabClicks(), []);
+  // A deep link (or back and forward) puts the page on its place; then the address bar follows the page.
+  const [linkApplied, setLinkApplied] = useState(false);
+  useEffect(() => {
+    if (!forge || surface !== 'page') return;
+    const apply = (value: string | null) => {
+      const place = parseRoute(value);
+      if (place) {
+        setRoute(place.page);
+        setUiState((current) => ({ ...current, openTaskId: place.openTaskId ?? null, openIssue: place.openIssue ?? null }));
+      }
+      setLinkApplied(true);
+    };
+    apply(forge.links.route());
+    return forge.links.onRoute(apply);
+  }, [forge, surface]);
+  useEffect(() => {
+    if (!forge || surface !== 'page' || !linkApplied) return;
+    void forge.links.setRoute(routeOf({ page: route, openTaskId: ui.openTaskId, openIssue: ui.openIssue })).catch(() => {});
+  }, [forge, surface, linkApplied, route, ui.openTaskId, ui.openIssue?.id, ui.openIssue?.workspaceId]);
+  // OpenChamber's own navigation keys (tabs, surfaces, chats, sidebar, its palette) go to OpenChamber while the
+  // Planner has focus, not to Chrome; the Planner keeps what it uses itself (plannerKeeps).
+  const routeNow = useRef(route);
+  routeNow.current = route;
+  useEffect(() => {
+    if (!forge) return;
+    return forge.keys.forwardHostShortcuts({ except: (_action, event) => plannerKeeps(event, { surface, page: routeNow.current }) });
+  }, [forge, surface]);
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | 'ask' | null>(null);
   const [askText, setAskText] = useState('');
 

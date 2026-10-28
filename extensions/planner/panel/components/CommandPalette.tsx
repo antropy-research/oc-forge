@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { formatMinutes, monthDay } from '../../src/domain/dates.ts';
 import { parseQuickAdd } from '../../src/domain/quickAdd.ts';
@@ -23,6 +23,21 @@ const where = (task: Task): string => {
   return task.placement.kind === 'day' ? monthDay(task.placement.date) : 'backlog';
 };
 
+/**
+ * Escape closes an overlay wherever the focus is in it, as it does the calendar's popovers. Attached before the
+ * overlay is painted, so an Escape pressed the moment it shows is not lost.
+ */
+const useEscape = (onClose: () => void) =>
+  useLayoutEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
 /** Cmd/Ctrl+K: jump anywhere, run an action, or find a task. */
 export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose: () => void; onRoute: (route: Route) => void; onAddTask: () => void; onAsk: (query: string) => void }) => {
   const { client } = usePlanner();
@@ -31,7 +46,8 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
   const input = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
-  useEffect(() => input.current?.focus(), []);
+  useLayoutEffect(() => input.current?.focus(), []);
+  useEscape(onClose);
 
   const go = (route: Route, label: string, hint: string): Item => ({ id: `go-${route}`, label: `Go to ${label}`, hint, run: () => onRoute(route) });
   const commands: Item[] = [
@@ -92,7 +108,6 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
             if (event.key === 'ArrowDown') setIndex((current) => Math.min(items.length - 1, current + 1));
             else if (event.key === 'ArrowUp') setIndex((current) => Math.max(0, current - 1));
             else if (event.key === 'Enter') run(items[active]);
-            else if (event.key === 'Escape') onClose();
             else return;
             event.preventDefault();
           }}
@@ -117,7 +132,8 @@ export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
   const view = useView();
   const input = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
-  useEffect(() => input.current?.focus(), []);
+  useLayoutEffect(() => input.current?.focus(), []);
+  useEscape(onClose);
   const parsed = text.trim() ? parseQuickAdd(text, view.today, view.state.settings.weekStartsOn) : null;
   return (
     <div class="modal-backdrop palette-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -129,7 +145,6 @@ export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
           aria-label="New task"
           onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') onClose();
             if (event.key !== 'Enter' || !parsed?.title.trim()) return;
             void addParsedTask(client, linear, parsed, { kind: 'day', date: view.today }, 'bottom', view.today);
             onClose();

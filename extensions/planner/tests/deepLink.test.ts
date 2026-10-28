@@ -25,12 +25,12 @@ describe('deep links into the Planner page', () => {
     expect(parseRoute('/linear?issue=i1&workspace=<x>')).toEqual({ page: 'linear', openTaskId: null, openIssue: { id: 'i1', workspaceId: null } });
   });
 
-  test('Cmd/Ctrl/Shift-click and the middle button open a new tab; a plain click does not', () => {
+  test('Cmd/Ctrl-click and the middle button open a new tab; a plain or Shift click does not', () => {
     const click = (patch: Partial<MouseEvent>) => ({ button: 0, metaKey: false, ctrlKey: false, shiftKey: false, ...patch });
     expect(isNewTabClick(click({}))).toBe(false);
     expect(isNewTabClick(click({ metaKey: true }))).toBe(true);
     expect(isNewTabClick(click({ ctrlKey: true }))).toBe(true);
-    expect(isNewTabClick(click({ shiftKey: true }))).toBe(true);
+    expect(isNewTabClick(click({ shiftKey: true }))).toBe(false);
     expect(isNewTabClick(click({ button: 1 }))).toBe(true);
     expect(isNewTabClick(click({ button: 2, ctrlKey: true }))).toBe(false);
   });

@@ -66,7 +66,7 @@ export const parseRoute = (route: string | null | undefined): PlannerPlace | nul
 
 /**
  * A click the browser would open in a new tab on a link: Cmd (macOS) or Ctrl
- * held, or the middle button. Shift (a new window) is left to the browser too.
+ * held, or the middle button. Shift (a new window in Chrome) is not one.
  */
-export const isNewTabClick = (event: Pick<MouseEvent, 'button' | 'metaKey' | 'ctrlKey' | 'shiftKey'>): boolean =>
-  event.button === 1 || ((event.button === 0 || event.button === undefined) && (event.metaKey || event.ctrlKey || event.shiftKey));
+export const isNewTabClick = (event: Pick<MouseEvent, 'button' | 'metaKey' | 'ctrlKey'>): boolean =>
+  event.button === 1 || ((event.button === 0 || event.button === undefined) && (event.metaKey || event.ctrlKey));
