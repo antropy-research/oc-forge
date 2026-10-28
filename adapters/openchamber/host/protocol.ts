@@ -76,6 +76,11 @@ export type OcForgeManifest = {
   zone?: OcForgeZone;
   /** The service path the host polls for rail entries, and how often (ms). */
   rail?: { path: string; interval: number };
+  /**
+   * Its page. `keepBottomZone`: OpenChamber's bottom zone stays shown under the
+   * page instead of being covered with the chat (an editor over its terminal).
+   */
+  page?: { keepBottomZone: true };
 };
 
 export const OC_FORGE_RAIL_INTERVAL_DEFAULT = 3_000;
@@ -146,6 +151,8 @@ export type OcForgeRequest =
   | { type: 'tab-open'; payload: OcForgeTab & { activate?: boolean } }
   | { type: 'tab-update'; payload: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean } }
   | { type: 'tab-close'; payload: { id: string } }
+  /** The frame decides how its dirty tabs close (it then gets `tab-close-request`), or stops deciding. */
+  | { type: 'tab-close-handler'; payload: { on: boolean } }
   | { type: 'tab-activate'; payload: { id: string } }
   | { type: 'key'; payload: OcForgeKey }
   | { type: 'route'; payload: { route: string; push?: boolean } };
@@ -156,6 +163,8 @@ export type OcForgeEvent =
   | { type: 'rail-entry'; payload: { entry: string } }
   | { type: 'tab-activated'; payload: { id: string } }
   | { type: 'tab-closed'; payload: { id: string } }
+  /** The user asked to close this dirty tab; it stays until the frame closes it. */
+  | { type: 'tab-close-request'; payload: { id: string } }
   | { type: 'tabs'; payload: OcForgeTabsState }
   | { type: 'route'; payload: { route: string } }
   | { type: 'shortcuts'; payload: OcForgeShortcuts }
@@ -233,6 +242,8 @@ export const readOcForgeRequest = (data: unknown): { id: string | null; request:
       }
       return { id, request: { type: 'tab-update', payload: update } };
     }
+    case 'tab-close-handler':
+      return typeof payload.on === 'boolean' ? { id, request: { type: 'tab-close-handler', payload: { on: payload.on } } } : null;
     case 'tab-close':
     case 'tab-activate':
       return typeof payload.id === 'string' && payload.id.length > 0 && payload.id.length <= OC_FORGE_LIMITS.tabId
@@ -325,6 +336,7 @@ export const readOcForgeManifest = (value: unknown): OcForgeManifest | undefined
       : OC_FORGE_RAIL_INTERVAL_DEFAULT;
     manifest.rail = { path: value.rail.path, interval };
   }
+  if (isObject(value.page) && value.page.keepBottomZone === true) manifest.page = { keepBottomZone: true };
   return manifest;
 };
 

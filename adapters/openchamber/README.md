@@ -10,8 +10,8 @@ end-to-end check compares screenshots: 0.00% of pixels differ).
 | API | `AGENTS.md` | What an extension gets |
 |---|---|---|
 | **rail** | 2.ii.a | A list of rail entries polled from its service: each its own rail icon with its own highlight; the panel's frame is told which entry was clicked. Entries come and go within a poll (1 s in the check). |
-| **tabs** | 2.ii.b | Tabs in the header's strip, after the session tabs: choosing one shows the extension's page on that tab, kept mounted while it has tabs; OpenChamber's tab shortcuts cover them. |
-| **zones** | 2.ii.c | A default zone (`bottom`) for its panel, or for one rail entry, which then gets a panel of its own. |
+| **tabs** | 2.ii.b | Tabs in the header's strip, after the session tabs: choosing one shows the extension's page on that tab, kept mounted while it has tabs; OpenChamber's tab shortcuts cover them. The extension may decide how an unsaved tab closes (a save prompt). |
+| **zones** | 2.ii.c | A default zone (`bottom`) for its panel, or for one rail entry, which then gets a panel of its own; its page may keep the bottom zone shown under it (an editor over its terminal). |
 | **keys** | tab shortcuts | Forward a key press to OpenChamber, which runs it through its own shortcut handlers, for navigation actions only and only with a user activation; the frame is told the current bindings. |
 | **links** | Cmd+click | `?extension=<id>&route=<route>` deep links to its page; URL prefixes for real `<a href>` links to its page and to chats; its page can keep its route in the address bar. |
 
@@ -33,6 +33,8 @@ if (forge?.has('tabs') && forge.tabs.state().strip) {
   await forge.tabs.open({ id: uri, title: 'main.ts', dirty: false }, { activate: true });
   forge.tabs.onActivate((id) => showEditor(id));
   forge.tabs.onClose((id) => closeEditor(id));
+  // An unsaved tab the user closes is left to this frame: close it after the save prompt, or keep it.
+  forge.tabs.onCloseRequest((id) => void closeEditorAsking(id).then((closed) => closed && forge.tabs.close(id)));
 }
 forge?.keys.forwardHostShortcuts({ except: ['toggle_sidebar'] });   // OpenChamber's tab keys go to OpenChamber
 link.href = forge?.links.pageUrl(`/task/${id}`) ?? fallbackUrl;     // Cmd+click opens a new browser tab
@@ -49,7 +51,8 @@ package installs and runs on a stock OpenChamber.
   "ocForge": {
     "apiVersion": 1,
     "zone": "bottom",
-    "rail": { "path": "/rail", "interval": 3000 }
+    "rail": { "path": "/rail", "interval": 3000 },
+    "page": { "keepBottomZone": true }
   }
 }
 ```
@@ -64,6 +67,7 @@ package installs and runs on a stock OpenChamber.
 | `zone` | `left`, `right` or `bottom`: where the panel opens until the user moves it | `panel.entry` |
 | `rail.path` | The service path the host polls with `GET` for rail entries (`/…`, no `..`) | `panel.entry`, `contributes.service` (approved) |
 | `rail.interval` | Poll interval in ms, 1000–60000, default 3000; never while the page is hidden | |
+| `page.keepBottomZone` | `true`: while its page shows, OpenChamber's bottom zone stays shown under the page instead of being covered with the chat (an editor area over a terminal); any other page still covers it | `panel.entry`, `page.entry` |
 
 The server reads the block from the same `package.json` OpenChamber parsed
 (`server/manifest.js`) and publishes it in the catalog row as `ocForge`.
@@ -106,7 +110,8 @@ or not approved gets `ok: false`.
 | `rail-active` | `{ entry }` | The extension's one panel shows this entry now (rail panels of `rail` extensions). |
 | `tab-open` | `{ id, title, icon?, dirty?, activate? }` | Opens or updates a header tab; `activate` shows the page on it. Needs `contributes.page`; at most 64 tabs. |
 | `tab-update` | `{ id, title?, icon? (null clears), dirty? }` | |
-| `tab-close` | `{ id }` | The extension closed its tab (no `tab-closed` event comes back). |
+| `tab-close` | `{ id }` | The extension closed its tab (no `tab-closed` event comes back). After a `tab-close-request` for it, the host goes on as for the user's close (back to the chat after the last tab). |
+| `tab-close-handler` | `{ on }` | This frame decides how the extension's unsaved tabs close (the client sends it with the first `tabs.onCloseRequest` listener, and `on: false` after the last). A frame's `hello` resets it. |
 | `tab-activate` | `{ id }` | Shows the page on that tab. |
 | `key` | `{ key, code, ctrlKey, metaKey, altKey, shiftKey, repeat? }` | Runs the press through OpenChamber's own key handlers if it is one of the navigation actions below and the page has a user activation; answers `{ action }` or an error. |
 | `route` | `{ route, push? }` | Pages only: the page's own route; while the page shows, the address bar names it (`push` adds a history entry). |
@@ -117,6 +122,7 @@ or not approved gets `ok: false`.
 | `rail-entry` | `{ entry }`: the user picked this entry of the panel |
 | `tab-activated` | `{ id }`: the user chose this tab, or it became the shown one |
 | `tab-closed` | `{ id }`: the user closed it in the header (it is gone there already) |
+| `tab-close-request` | `{ id }`: the user closed this unsaved (`dirty`) tab while this frame decides; the tab stays, and the page shows it, until the frame sends `tab-close` |
 | `tabs` | `{ list, active, shown, strip }` after any change; `strip` follows OpenChamber's "Session tabs" setting |
 | `route` | `{ route }`: a deep link or back/forward handed the frame a route |
 | `shortcuts` | the bindings again, after the user rebinds |
@@ -141,7 +147,11 @@ activation (a key press or click in the frame gives one for about 5 s).
   in the order they opened. `mod+<digit>` counts across both; previous/next
   wraps across both; the close-tab shortcut and a tab's × close the selected
   extension tab, the page moving to the extension's neighbouring tab, or back
-  to the chat after the last one. While an extension tab is selected no session
+  to the chat after the last one. When a frame of the extension decides
+  (`tabs.onCloseRequest`), closing a `dirty` tab that way asks that frame
+  instead (`tab-close-request`): the page shows the tab, and the tab stays
+  until the frame closes it, after its own save prompt, or stays if the user
+  cancels. Clean tabs, and every tab while no frame decides, close at once. While an extension tab is selected no session
   tab is; choosing a session tab hides the page (it stays mounted) and shows
   that chat. A page whose extension has tabs keeps the strip instead of
   "← title". Tabs need OpenChamber's "Session tabs" setting (off by default in
@@ -153,6 +163,10 @@ activation (a key press or click in the frame gives one for about 5 s).
 - **Zones.** A default zone is placed once per device, the first time the
   surface is known, unless the user already placed it; after that only the
   user moves it (the placement is OpenChamber's own, per device).
+- **The bottom zone under a page.** The release hides the bottom zone (it
+  belongs to the chat column) whenever a page covers the chat. While the page
+  of an extension with `page.keepBottomZone` shows, it stays: the page takes
+  the chat column's height above it (edits/pages.ts, host/pages.ts).
 - **Deep links.** `?extension=<id>&route=<route>` opens the extension's page (or
   its rail panel when it has none) once the catalog has loaded, and hands the
   frame the route in `hello`/`route`. The URL keeps the parameters while the

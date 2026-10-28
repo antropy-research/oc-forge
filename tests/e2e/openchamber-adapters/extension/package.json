@@ -31,6 +31,9 @@
     "rail": {
       "path": "/rail",
       "interval": 1000
+    },
+    "page": {
+      "keepBottomZone": true
     }
   }
 }

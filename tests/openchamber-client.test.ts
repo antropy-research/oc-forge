@@ -49,6 +49,8 @@ describe("frame requests", () => {
     expect(readOcForgeRequest(envelope({ type: "rail-active", payload: { entry: "a--b" } }))).toBeNull()
     expect(readOcForgeRequest(envelope({ type: "key", payload: press("1", "Digit1", { ctrlKey: true }) }))?.request.type).toBe("key")
     expect(readOcForgeRequest(envelope({ type: "key", payload: { key: "1", code: "Digit1" } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: true } }))?.request).toEqual({ type: "tab-close-handler", payload: { on: true } })
+    expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: "yes" } }))).toBeNull()
   })
 })
 
@@ -87,6 +89,15 @@ describe("the ocForge manifest block", () => {
     expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 2, zone: "left" } }), manifest)).toBeNull()
     expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, rail: { path: "../x" } } }), manifest)).toBeNull()
     expect(parseOcForgeManifest("{", manifest)).toBeNull()
+  })
+  test("a page may keep the bottom zone under it; that needs a page, and only `true` counts", () => {
+    const raw = JSON.stringify({ ocForge: { apiVersion: 1, page: { keepBottomZone: true } } })
+    const withPage = { contributes: { panel: { entry: "panel/index.html" }, page: { entry: "page/index.html" } } }
+    expect(parseOcForgeManifest(raw, withPage)).toEqual({ apiVersion: 1, page: { keepBottomZone: true } })
+    expect(parseOcForgeManifest(raw, manifest)).toBeNull()
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, page: { keepBottomZone: "yes" } } }), withPage)).toBeNull()
+    expect(readOcForgeManifest({ apiVersion: 1, page: { keepBottomZone: true } })).toEqual({ apiVersion: 1, page: { keepBottomZone: true } })
+    expect(readOcForgeManifest({ apiVersion: 1, page: { keepBottomZone: 1 } })).toEqual({ apiVersion: 1 })
   })
   test("the UI reads the catalog row's field the same way", () => {
     expect(readOcForgeManifest({ apiVersion: 1, rail: { path: "/rail" } })).toEqual({ apiVersion: 1, rail: { path: "/rail", interval: 3000 } })
@@ -196,6 +207,29 @@ describe("the client module", () => {
     expect(forge!.rail.entry()).toBe("beta")
     expect(forge!.links.route()).toBe("/x")
     forge!.dispose()
+  })
+
+  test("onCloseRequest: the frame decides how dirty tabs close while it listens", async () => {
+    const { frame, host, deliver } = fakeFrame()
+    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
+    deliver(envelope({ type: "hello", payload: hello }))
+    const forge = (await connecting)!
+    const handlerPosts = () => host.posted.map((post) => post.data as { type: string; payload?: { on: boolean } }).filter((data) => data.type === "tab-close-handler").map((data) => data.payload?.on)
+    const asked: string[] = []
+    const first = forge.tabs.onCloseRequest((id) => asked.push(`one:${id}`))
+    const second = forge.tabs.onCloseRequest((id) => asked.push(`two:${id}`))
+    // Said once when the first listener comes, and once when the last goes.
+    expect(handlerPosts()).toEqual([true])
+    deliver(envelope({ type: "tab-close-request", payload: { id: "file:///a.ts" } }))
+    expect(asked).toEqual(["one:file:///a.ts", "two:file:///a.ts"])
+    first()
+    expect(handlerPosts()).toEqual([true])
+    second()
+    second()
+    expect(handlerPosts()).toEqual([true, false])
+    deliver(envelope({ type: "tab-close-request", payload: { id: "b" } }))
+    expect(asked).toHaveLength(2)
+    forge.dispose()
   })
 
   test("forwardHostShortcuts takes OpenChamber's keys from the frame and leaves the rest", async () => {

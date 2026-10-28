@@ -49,6 +49,14 @@ export type OcForgeClient = {
     onActivate(listener: (id: string) => void): () => void;
     /** The user closed this tab in the header; it is already gone there. */
     onClose(listener: (id: string) => void): () => void;
+    /**
+     * While this has a listener, a dirty tab the user closes (its ×, its menu,
+     * the close-tab key) stays open and its page shows it; the listener gets
+     * the id and runs the extension's own flow (a save prompt), then calls
+     * `close(id)` if the tab really closes, or leaves it. Clean tabs, and every
+     * tab while nothing listens, close at once (`onClose`).
+     */
+    onCloseRequest(listener: (id: string) => void): () => void;
     onChange(listener: (state: OcForgeTabsState) => void): () => void;
   };
   keys: {
@@ -131,6 +139,7 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
     const entryListeners = new Set<Listener<string>>();
     const activateListeners = new Set<Listener<string>>();
     const closeListeners = new Set<Listener<string>>();
+    const closeRequestListeners = new Set<Listener<string>>();
     const tabsListeners = new Set<Listener<OcForgeTabsState>>();
     const routeListeners = new Set<Listener<string>>();
     const shortcutListeners = new Set<Listener<OcForgeShortcuts>>();
@@ -190,6 +199,15 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
         },
         onActivate: (listener) => subscribe(activateListeners, listener),
         onClose: (listener) => subscribe(closeListeners, listener),
+        onCloseRequest: (listener) => {
+          if (closeRequestListeners.size === 0) post('tab-close-handler', { on: true });
+          const unsubscribe = subscribe(closeRequestListeners, listener);
+          return () => {
+            const had = closeRequestListeners.size > 0;
+            unsubscribe();
+            if (had && closeRequestListeners.size === 0) post('tab-close-handler', { on: false });
+          };
+        },
         onChange: (listener) => subscribe(tabsListeners, listener),
       },
       keys: {
@@ -270,6 +288,9 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
           return;
         case 'tab-closed':
           emit(closeListeners, event.payload.id);
+          return;
+        case 'tab-close-request':
+          emit(closeRequestListeners, event.payload.id);
           return;
         case 'tabs':
           hello = { ...hello, tabs: event.payload };

@@ -53,6 +53,24 @@ if (!forge) {
   $('open-a').onclick = tabCall('opened a', () => forge.tabs.open({ id: 'a', title: 'Tab A', icon: 'file-code' }, { activate: true }));
   $('open-b').onclick = tabCall('opened b', () => forge.tabs.open({ id: 'b', title: 'Tab B', dirty: true }, { activate: true }));
   $('close-a').onclick = tabCall('closed a', () => forge.tabs.close('a'));
+  // Off until asked, so the plain close checks stay as they are: then an unsaved tab the user closes is left to this frame.
+  let stopDeciding: (() => void) | null = null;
+  $('decide-close').onclick = () => {
+    if (stopDeciding) {
+      stopDeciding();
+      stopDeciding = null;
+      log('stopped deciding');
+      return;
+    }
+    stopDeciding = forge.tabs.onCloseRequest((id) => { $('close-request').textContent = id; log(`close-request ${id}`); });
+    log('deciding');
+  };
+  // Closing the tab it was asked about ends the deciding too, so the next round starts as this one did.
+  $('confirm-close').onclick = tabCall('confirmed close', async () => {
+    await forge.tabs.close($('close-request').textContent ?? '');
+    stopDeciding?.();
+    stopDeciding = null;
+  });
 
   // Every press OpenChamber binds to navigation goes to it; the rest stays here.
   forge.keys.forwardHostShortcuts({

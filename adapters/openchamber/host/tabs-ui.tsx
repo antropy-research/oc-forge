@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 
 import { useOcForgeStore, type OcForgeHeaderTab } from './store.ts';
-import { activateOcForgeTab, closeOcForgeTab, useOcForgeTabActive } from './tabs-state.ts';
+import { activateOcForgeTab, requestCloseOcForgeTab, useOcForgeTabActive } from './tabs-state.ts';
 
 const stop = (event: React.SyntheticEvent) => event.stopPropagation();
 
@@ -33,7 +33,7 @@ const tabIcon = (tab: OcForgeHeaderTab, guest: InstalledGuest | undefined): { ic
 const HeaderTab: React.FC<{ tab: OcForgeHeaderTab; guest: InstalledGuest | undefined; isActive: boolean }> = ({ tab, guest, isActive }) => {
   const { t } = useI18n();
   const select = () => activateOcForgeTab(tab.guestId, tab.id);
-  const close = () => closeOcForgeTab(tab.guestId, tab.id, true);
+  const close = () => requestCloseOcForgeTab(tab.guestId, tab.id);
   const { icon, iconSrc } = tabIcon(tab, guest);
   return (
     <div

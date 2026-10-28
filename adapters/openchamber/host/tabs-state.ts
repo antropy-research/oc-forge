@@ -13,7 +13,7 @@ import { useSessionTabsStore } from '@/stores/useSessionTabsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 
-import { broadcastOcForge } from './bus.ts';
+import { broadcastOcForge, listeningFrames, postToFrame } from './bus.ts';
 import { OC_FORGE_LIMITS, type OcForgeTab } from './protocol.ts';
 import { useOcForgeStore, type OcForgeHeaderTab } from './store.ts';
 
@@ -116,15 +116,21 @@ export const updateOcForgeTab = (guestId: string, update: { id: string; title?: 
   return { ok: true };
 };
 
+// Dirty tabs the user asked to close, left to their extension (`tab-close-request`).
+const closeRequests = new Set<string>();
+const requestKey = (guestId: string, id: string): string => `${guestId}\n${id}`;
+
 /**
  * Closes a tab. The page moves to the neighbouring tab of the same extension
  * (right, then left). A user who closes the last tab the page shows goes back
- * to the chat; the extension is told whenever the user closed one.
+ * to the chat; the extension is told whenever the user closed one, unless it
+ * closed the tab itself (`notify`).
  */
-export const closeOcForgeTab = (guestId: string, id: string, byUser: boolean): void => {
+export const closeOcForgeTab = (guestId: string, id: string, byUser: boolean, notify = byUser): void => {
   const state = useOcForgeStore.getState();
   const own = state.tabs.filter((tab) => tab.guestId === guestId);
   const index = own.findIndex((tab) => tab.id === id);
+  closeRequests.delete(requestKey(guestId, id));
   if (index === -1) return;
   const shownBefore = ocForgeTabbedPageShown() === guestId;
   const wasActive = state.activeTab[guestId] === id;
@@ -135,12 +141,37 @@ export const closeOcForgeTab = (guestId: string, id: string, byUser: boolean): v
     else delete activeTab[guestId];
   }
   useOcForgeStore.setState({ tabs: state.tabs.filter((tab) => !(tab.guestId === guestId && tab.id === id)), activeTab });
-  if (byUser) broadcastOcForge(guestId, { type: 'tab-closed', payload: { id } });
+  if (byUser && notify) broadcastOcForge(guestId, { type: 'tab-closed', payload: { id } });
   if (shownBefore && wasActive) {
     if (neighbour) broadcastOcForge(guestId, { type: 'tab-activated', payload: { id: neighbour.id } });
     else if (byUser) useUIStore.getState().setOpenGuestPage(null);
   }
   broadcastOcForgeTabs(guestId);
+};
+
+/**
+ * The user closes a tab (its ×, its menu, the close-tab key). A dirty tab of an
+ * extension with a frame that decides (`tabs.onCloseRequest`) stays: the page
+ * shows it and the frame is asked, and runs its own flow (a save prompt), then
+ * closes it or not. Any other tab closes at once.
+ */
+export const requestCloseOcForgeTab = (guestId: string, id: string): void => {
+  const tab = useOcForgeStore.getState().tabs.find((entry) => entry.guestId === guestId && entry.id === id);
+  if (!tab) return;
+  const deciders = listeningFrames(guestId).filter((frame) => frame.closeHandler);
+  if (!tab.dirty || deciders.length === 0) {
+    closeOcForgeTab(guestId, id, true);
+    return;
+  }
+  closeRequests.add(requestKey(guestId, id));
+  if (ocForgeTabbedPageShown() !== guestId || useOcForgeStore.getState().activeTab[guestId] !== id) activateOcForgeTab(guestId, id);
+  for (const frame of deciders) postToFrame(frame, { type: 'tab-close-request', payload: { id } });
+};
+
+/** A frame closes one of its tabs: after a close the user asked for, as the user's close (without echoing it). */
+export const closeOcForgeTabFromFrame = (guestId: string, id: string): void => {
+  if (closeRequests.has(requestKey(guestId, id))) closeOcForgeTab(guestId, id, true, false);
+  else closeOcForgeTab(guestId, id, false);
 };
 
 /** Drops every tab of an extension that went away (disabled, removed, no page). */
@@ -149,6 +180,7 @@ export const dropOcForgeTabsOf = (guestId: string): void => {
   if (!state.tabs.some((tab) => tab.guestId === guestId)) return;
   const activeTab = { ...state.activeTab };
   delete activeTab[guestId];
+  for (const key of [...closeRequests]) if (key.startsWith(requestKey(guestId, ''))) closeRequests.delete(key);
   useOcForgeStore.setState({ tabs: state.tabs.filter((tab) => tab.guestId !== guestId), activeTab });
 };
 
@@ -204,7 +236,7 @@ export const ocForgeCloseActiveTab = (): boolean => {
   const shown = ocForgeTabbedPageShown();
   const id = shown ? useOcForgeStore.getState().activeTab[shown] : null;
   if (!shown || !id) return false;
-  closeOcForgeTab(shown, id, true);
+  requestCloseOcForgeTab(shown, id);
   return true;
 };
 

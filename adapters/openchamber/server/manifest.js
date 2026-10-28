@@ -6,7 +6,8 @@
 //   "ocForge": {
 //     "apiVersion": 1,
 //     "zone": "bottom",                                  // the panel's zone until the user moves it
-//     "rail": { "path": "/rail", "interval": 3000 }      // the service path polled for rail entries
+//     "rail": { "path": "/rail", "interval": 3000 },     // the service path polled for rail entries
+//     "page": { "keepBottomZone": true }                 // the bottom zone stays shown under its page
 //   }
 
 const ZONES = new Set(['left', 'right', 'bottom']);
@@ -45,5 +46,6 @@ export const parseOcForgeManifest = (raw, manifest) => {
       : INTERVAL_DEFAULT;
     result.rail = { path: block.rail.path, interval };
   }
-  return result.zone || result.rail ? result : null;
+  if (contributes.page?.entry && isObject(block.page) && block.page.keepBottomZone === true) result.page = { keepBottomZone: true };
+  return result.zone || result.rail || result.page ? result : null;
 };

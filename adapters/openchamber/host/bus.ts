@@ -10,6 +10,8 @@ export type OcForgeFrame = {
   ownEntry: string | null;
   /** Its client said hello on the oc-forge channel; only such frames get events. */
   listening: boolean;
+  /** Its client decides how the extension's dirty tabs close (`tabs.onCloseRequest`). */
+  closeHandler: boolean;
   window: () => Window | null;
 };
 

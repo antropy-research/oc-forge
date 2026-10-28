@@ -22,7 +22,7 @@ import { ocForgeLinks, setOcForgeRoute } from './routes.ts';
 import { useOcForgeStore } from './store.ts';
 import {
   activateOcForgeTab,
-  closeOcForgeTab,
+  closeOcForgeTabFromFrame,
   ocForgeTabbedPageShown,
   ocForgeTabStripShown,
   ocForgeTabsOf,
@@ -76,7 +76,9 @@ type Answer = { ok: true; payload?: unknown } | { ok: false; error: string };
 const answer = (frame: OcForgeFrame, guest: InstalledGuest, request: OcForgeRequest): Answer | null => {
   switch (request.type) {
     case 'hello':
+      // A (re)loaded client: it says again whether it decides how tabs close.
       frame.listening = true;
+      frame.closeHandler = false;
       postToFrame(frame, { type: 'hello', payload: ocForgeHello(frame, guest) });
       return null;
     case 'rail-active':
@@ -92,7 +94,10 @@ const answer = (frame: OcForgeFrame, guest: InstalledGuest, request: OcForgeRequ
     case 'tab-update':
       return updateOcForgeTab(guest.id, request.payload);
     case 'tab-close':
-      closeOcForgeTab(guest.id, request.payload.id, false);
+      closeOcForgeTabFromFrame(guest.id, request.payload.id);
+      return { ok: true };
+    case 'tab-close-handler':
+      frame.closeHandler = request.payload.on;
       return { ok: true };
     case 'tab-activate':
       return activateOcForgeTab(guest.id, request.payload.id) ? { ok: true } : { ok: false, error: 'No such tab.' };
@@ -123,6 +128,7 @@ export const useOcForgeFrame = ({ iframeRef, mode, surface, enabled }: FrameOpti
       surface,
       ownEntry: null,
       listening: false,
+      closeHandler: false,
       window: () => iframeRef.current?.contentWindow ?? null,
     };
     identify(frame);

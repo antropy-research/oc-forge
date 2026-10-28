@@ -156,6 +156,19 @@ const text = async (frame, selector) => (await frame.locator(selector).textConte
 const shot = async (page, name) => page.screenshot({ path: join(out, `${name}.png`) });
 const headerTab = (page, id) => page.locator(`[data-oc-forge-tab="${TEST}:${id}"]`);
 const activeHeaderTab = (page) => page.$$eval('[role="tablist"] [role="tab"][aria-selected="true"]', (tabs) => tabs.map((tab) => tab.textContent?.trim() ?? ''));
+// An extension's page from the sidebar header: its own button while the pages fit there inline (a click on a pressed
+// one closes the page), else the "Extension pages" menu.
+const openExtensionPage = async (page, title, timeout = 60_000) => {
+  const inline = page.locator(`button[aria-label="${title}"][aria-pressed]:not([data-context-surface])`).first();
+  const menu = page.getByRole('button', { name: 'Extension pages' });
+  await inline.or(menu).first().waitFor({ timeout });
+  if (await inline.isVisible().catch(() => false)) {
+    if ((await inline.getAttribute('aria-pressed')) !== 'true') await inline.click();
+    return;
+  }
+  await menu.click();
+  await page.getByRole('menuitem', { name: title }).click();
+};
 const pageShown = (page) => page.evaluate((id) => {
   const element = document.querySelector(`[data-oc-forge-page="${id}"]`);
   return Boolean(element) && getComputedStyle(element).visibility === 'visible';
@@ -187,8 +200,12 @@ const apiRound = async (browser, base, viewport, seeded, request) => {
 
 const apiChecks = async (context, page, base, size, seeded, request) => {
 
-  // R1: rail entries.
-  const ids = (await rail(page)).map((entry) => entry.id);
+  // R1: rail entries. The extension was just turned back on: its service starts with the first poll, so wait for its list.
+  const replaced = (now) => ENTRIES.every((entry) => now.includes(`plugin:${TEST}--${entry.id}`)) && !now.includes(`plugin:${TEST}`);
+  const ids = await until(async () => {
+    const now = (await rail(page)).map((entry) => entry.id);
+    return replaced(now) ? now : null;
+  }, 30_000) ?? (await rail(page)).map((entry) => entry.id);
   check(`[${size}] R1 the extension's icon is replaced by its entries`, ENTRIES.every((entry) => ids.includes(`plugin:${TEST}--${entry.id}`)) && !ids.includes(`plugin:${TEST}`), ids.filter((id) => id.startsWith(`plugin:${TEST}`)).join(' '));
   const mask = await page.locator(`[data-context-surface="plugin:${TEST}--gamma"] span[style*="mask"]`).getAttribute('style').catch(() => '');
   check(`[${size}] R1 an inline SVG icon is drawn as a mask`, /data:image\/svg\+xml/.test(mask ?? ''));
@@ -235,6 +252,24 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   check(`[${size}] R3 an extension with ocForge.zone bottom opens at the bottom`, await until(async () => (await page.locator(`[data-context-zone="bottom"] iframe[title="oc-forge bottom panel"]`).count()) > 0));
   await page.waitForTimeout(800);
   await shot(page, `${size}-r3-extension-bottom`);
+  // The bottom zone under a page: kept under one whose extension asks for it (ocForge.page.keepBottomZone, the test
+  // extension's), covered by any other (the Planner's), as the release covers it.
+  // Shown: the zone open (a covered zone collapses to height 0, its frame laid out below the window) and its frame there.
+  const zoneShown = async () => ((await page.locator('[data-context-zone="bottom"]').boundingBox())?.height ?? 0) >= 100
+    && await page.locator('[data-context-zone="bottom"] iframe[title="oc-forge bottom panel"]').first().isVisible().catch(() => false);
+  await openExtensionPage(page, 'oc-forge test');
+  const kept = await until(async () => await pageShown(page) && await zoneShown());
+  await page.waitForTimeout(500);
+  const pageBox = await page.locator(`[data-oc-forge-page="${TEST}"]`).boundingBox();
+  const keptBox = await page.locator('[data-context-zone="bottom"]').boundingBox();
+  check(`[${size}] R3 a page with ocForge.page.keepBottomZone keeps the bottom zone shown under it`, kept && pageBox && keptBox && pageBox.y + pageBox.height <= keptBox.y + 2 && keptBox.height >= 160,
+    pageBox && keptBox ? `page y ${Math.round(pageBox.y)}–${Math.round(pageBox.y + pageBox.height)}, bottom zone y ${Math.round(keptBox.y)}–${Math.round(keptBox.y + keptBox.height)}` : 'not shown');
+  await shot(page, `${size}-r3-page-keeps-bottom`);
+  await openExtensionPage(page, 'Planner');
+  check(`[${size}] R3 any other page covers the bottom zone, as the release does`,
+    await until(async () => (await page.frameLocator('iframe[title="Planner"]').getByRole('heading', { name: 'Home' }).count()) > 0 && !await zoneShown(), 60_000));
+  await page.getByRole('button', { name: 'Back to chat' }).click();
+  check(`[${size}] R3 back on the chat, the bottom zone shows again`, await until(() => zoneShown()));
   await page.locator(`[data-context-surface="plugin:${ZONE}"]`).click();
 
   // R2: header tabs.
@@ -267,6 +302,29 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   await headerTab(page, 'b').getByRole('button', { name: 'Close tab' }).click();
   check(`[${size}] R2 the tab's own close button closes it and returns to the chat`, await until(async () => await headerTab(page, 'b').count() === 0 && !await pageShown(page)));
   check(`[${size}] R2 the extension is told about the close`, await until(async () => (await text(right, '#log'))?.includes('tab-closed b')));
+  // A frame that decides how unsaved tabs close (tabs.onCloseRequest): clean tabs still close at once; closing an unsaved
+  // one asks the frame and leaves the tab, until the frame closes it.
+  await right.locator('#open-a').click();
+  await until(async () => await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+  await pageFrame(page).locator('#decide-close').click();
+  await until(async () => (await text(pageFrame(page), '#log'))?.includes('deciding'));
+  await pageFrame(page).locator('#open-b').click();
+  await until(async () => (await text(pageFrame(page), '#tab')) === 'b');
+  await headerTab(page, 'a').click();
+  await until(async () => (await text(pageFrame(page), '#tab')) === 'a');
+  await headerTab(page, 'a').hover();
+  await headerTab(page, 'a').getByRole('button', { name: 'Close tab' }).click();
+  check(`[${size}] R2 with a frame deciding, a clean tab still closes at once`, await until(async () => await headerTab(page, 'a').count() === 0 && (await text(pageFrame(page), '#tab')) === 'b'));
+  const echoes = async () => ((await text(pageFrame(page), '#log')) ?? '').split('\n').filter((line) => line.endsWith('tab-closed b')).length;
+  const echoesBefore = await echoes();
+  await headerTab(page, 'b').hover();
+  await headerTab(page, 'b').getByRole('button', { name: 'Close tab' }).click();
+  check(`[${size}] R2 closing an unsaved tab asks the frame that decides, and the tab stays`,
+    await until(async () => (await text(pageFrame(page), '#close-request')) === 'b' && await headerTab(page, 'b').count() === 1 && await pageShown(page)));
+  await shot(page, `${size}-r2-close-request`);
+  await pageFrame(page).locator('#confirm-close').click();
+  check(`[${size}] R2 the tab goes once the frame closes it, back to the chat as for the user's close`, await until(async () => await headerTab(page, 'b').count() === 0 && !await pageShown(page)));
+  check(`[${size}] R2 …and the frame that closed it is not told it was closed`, (await echoes()) === echoesBefore);
   await page.locator('[role="tablist"] [role="tab"]', { hasText: CHATS[2] }).click();
   check(`[${size}] R2 session tabs still switch chats`, await until(() => page.url().includes(seeded.sessions[2])));
 
@@ -333,8 +391,7 @@ const compare = async (browser, seeded, request, viewport) => {
     await page.screenshot({ path: join(out, `${size}-compare-${name}-chat.png`) });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (attempt > 0) await page.reload();
-      await page.getByRole('button', { name: 'Extension pages' }).click({ timeout: 60_000 });
-      await page.getByRole('menuitem', { name: 'Planner' }).click();
+      await openExtensionPage(page, 'Planner');
       const home = await page.frameLocator('iframe[title="Planner"]').getByRole('heading', { name: 'Home' }).waitFor({ timeout: 60_000 }).then(() => true).catch(() => false);
       if (home) break;
     }
@@ -385,8 +442,7 @@ const realExtensions = async (browser, name, base, seeded, request) => {
 };
 
 const plannerAndVscode = async (page, name) => {
-  await page.getByRole('button', { name: 'Extension pages' }).click();
-  await page.getByRole('menuitem', { name: 'Planner' }).click();
+  await openExtensionPage(page, 'Planner');
   const planner = page.frameLocator('.inset-0 > iframe[title="Planner"]');
   check(`[${name}] the Planner page loads`, await planner.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 120_000 }).then(() => true).catch(() => false));
   const title = `oc-forge e2e ${name} ${Date.now().toString(36)}`;
@@ -399,7 +455,8 @@ const plannerAndVscode = async (page, name) => {
   check(`[${name}] the Planner works: a task added to Today stays there`, await until(() => today.locator('li.task-card', { hasText: title }).count(), 15_000));
   await page.screenshot({ path: join(out, `extensions-${name}-planner.png`) });
   await page.getByRole('button', { name: 'Back to chat' }).click();
-  await page.locator('[data-context-surface="plugin:oc-forge-vscode"]').click();
+  // Its one rail icon on the release; on the adapted build, its first rail entry (VS Code's Explorer).
+  await page.locator('[data-context-surface="plugin:oc-forge-vscode"], [data-context-surface^="plugin:oc-forge-vscode--"]').first().click();
   const panel = page.frameLocator('iframe[title="VS Code"][src*="/workbench/index.html"]').first();
   const form = await panel.getByRole('textbox', { name: 'VS Code Server address' }).waitFor({ timeout: 30_000 }).then(() => true).catch(() => false);
   if (form) {
@@ -420,12 +477,15 @@ const request = (await browser.newContext()).request;
 const seeded = {};
 for (const [name, base] of Object.entries(instances)) seeded[name] = await seed(name, base, request);
 
-// With no extension using the APIs.
+// With no extension using the APIs: the test extensions off, and the VS Code extension too (on the adapted build its
+// rail shows one icon per VS Code view container). The Planner only uses links and keys, which show nothing.
+const usingTheApis = [TEST, ZONE, 'oc-forge-vscode'];
 for (const base of Object.values(instances)) {
   await request.post(`${base}/auth/session`, { data: { password } });
-  for (const id of [TEST, ZONE]) await setEnabled(request, base, id, false);
+  for (const id of usingTheApis) await setEnabled(request, base, id, false);
 }
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await compare(browser, seeded, request, viewport);
+for (const base of Object.values(instances)) await setEnabled(request, base, 'oc-forge-vscode', true);
 for (const [name, base] of Object.entries(instances)) await realExtensions(browser, name, base, seeded[name], request);
 
 // Every API, with the test extensions on.
