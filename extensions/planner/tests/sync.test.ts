@@ -26,6 +26,40 @@ const replica = async (dir: string) => {
 };
 const task = (cmd: string, id: string, title: string) => ({ cmd, type: 'task.created', task: { id, title, placement: { kind: 'day', date: '2026-10-24' }, position: 1024 } });
 
+describe('the history stays packed', () => {
+  const loose = (dir: string) => Number(/^count: (\d+)$/m.exec(execFileSync('git', ['-C', dir, 'count-objects', '-v'], { encoding: 'utf8' }))?.[1]);
+  const packs = (dir: string) => Number(/^packs: (\d+)$/m.exec(execFileSync('git', ['-C', dir, 'count-objects', '-v'], { encoding: 'utf8' }))?.[1]);
+  const until = async (probe: () => boolean) => {
+    for (let i = 0; i < 100 && !probe(); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    return probe();
+  };
+
+  test('loose objects past the limit are packed every few commits, and at start', async () => {
+    const dir = temp();
+    const store = new EventStore({ dir, commitDelayMs: 5, packLooseObjects: 40, packCheckCommits: 5 });
+    await store.init();
+    const planner = new Planner(store, () => new Date('2026-10-24T18:00:00Z'));
+    for (let i = 0; i < 30; i++) {
+      planner.execute([task(`c${i}`, `t${i}`, `Task ${i}`)]);
+      await store.flush();
+    }
+    // Each commit adds a few objects; past 40 they are packed at the next check.
+    expect(await until(() => packs(dir) >= 1 && loose(dir) < 40)).toBe(true);
+
+    // A history left loose (as before this change) is packed when the store starts.
+    const saved = temp();
+    execFileSync('sh', ['-c', `mv '${dir}'/.git/objects/pack/pack-* '${saved}'/ && for p in '${saved}'/*.pack; do git -C '${dir}' unpack-objects -q < "$p"; done`]);
+    expect(packs(dir)).toBe(0);
+    expect(loose(dir)).toBeGreaterThan(40);
+    const restarted = new EventStore({ dir, commitDelayMs: 5, packLooseObjects: 40 });
+    await restarted.init();
+    expect(await until(() => packs(dir) >= 1 && loose(dir) < 40)).toBe(true);
+    const again = new Planner(restarted, () => new Date('2026-10-24T18:00:00Z'));
+    expect(Object.keys(again.state.tasks)).toHaveLength(30);
+    expect(execFileSync('git', ['-C', dir, 'fsck', '--no-progress'], { encoding: 'utf8' })).toBe('');
+  });
+});
+
 describe('remote urls', () => {
   test('accepted and refused', () => {
     for (const url of ['git@github.com:qihang-zhang/planner-data.git', 'https://github.com/x/y.git', 'ssh://git@host/x.git', 'file:///srv/planner.git', '/home/node/planner.git']) expect(isRemoteUrl(url)).toBe(true);

@@ -598,6 +598,7 @@ class EventStore {
   gitChain = Promise.resolve();
   commitTimer = null;
   pendingSummaries = [];
+  commitsSincePackCheck = 0;
   lastCommitAt = null;
   lastError = null;
   skippedLines = 0;
@@ -615,6 +616,8 @@ class EventStore {
     mkdirSync(this.eventsDir, { recursive: true });
     if (this.options.git !== false)
       this.gitEnabled = await this.ensureRepo();
+    if (this.gitEnabled)
+      this.pack();
   }
   load() {
     const events = [];
@@ -690,6 +693,10 @@ ${summaries.map((line) => `- ${line}`).join(`
       this.lastCommitAt = new Date().toISOString();
       this.lastError = null;
       this.options.onCommit?.();
+      if (++this.commitsSincePackCheck >= (this.options.packCheckCommits ?? 20)) {
+        this.commitsSincePackCheck = 0;
+        this.pack();
+      }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (!/nothing to commit/.test(text)) {
@@ -764,6 +771,17 @@ ${stderr}${stdout}`)) : resolve(stdout));
       return;
     });
     return next;
+  }
+  async pack() {
+    try {
+      const count = Number(/^count: (\d+)$/m.exec(await this.git(["count-objects", "-v"]))?.[1] ?? 0);
+      if (count < (this.options.packLooseObjects ?? 256))
+        return;
+      await this.git(["repack", "-d", "-q"], 120000);
+      await this.git(["-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"], 120000);
+    } catch (error) {
+      this.log(`git pack failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+    }
   }
   async ensureRepo() {
     try {
@@ -5140,6 +5158,7 @@ if (!port || !token) {
   process.exit(1);
 }
 var BODY_LIMIT = 1e6;
+var SYNC_ANSWER_MS = 20000;
 var dir = process.env.PLANNER_DATA_DIR || join4(homedir2(), ".local", "share", "openchamber-planner", "data");
 var log = (message) => console.error(`[planner] ${message}`);
 var sync = null;
@@ -5458,7 +5477,8 @@ var server = http2.createServer(async (req, res) => {
         return;
       }
       if (req.method === "POST") {
-        const status = await sync.run().catch((error) => ({ ...sync.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        const done = sync.run().catch((error) => ({ ...sync.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        const status = await Promise.race([done, new Promise((resolve) => setTimeout(() => resolve(sync.status()), SYNC_ANSWER_MS).unref?.())]);
         json(res, 200, { status, ...snapshot() });
         syncAgentCommands();
         return;

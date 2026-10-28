@@ -67,6 +67,9 @@ export type Origin = 'user' | 'linear' | 'github' | 'google' | 'agent';
 export type CommitListener = (commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin) => void;
 
 const POLL_MS = 5000;
+/** A sync the service answered as still running is followed every two seconds, for up to five minutes. */
+const SYNC_FOLLOW_MS = 2000;
+const SYNC_FOLLOW_CHECKS = 150;
 
 const UNDO_WINDOW_MS = 8000;
 
@@ -195,6 +198,15 @@ export class PlannerClient {
     const answer = await this.request<Snapshot & { status: SyncStatus }>('POST', '/sync');
     this.accept(answer);
     this.set({ sync: answer.status });
+    // The service answers before a long sync ends (a first push of a long history): follow it to its end, then take
+    // what it merged.
+    for (let check = 0; check < SYNC_FOLLOW_CHECKS && this.view.sync?.syncing; check++) {
+      await new Promise((resolve) => setTimeout(resolve, SYNC_FOLLOW_MS));
+      const status = await this.request<SyncStatus>('GET', '/sync').catch(() => null);
+      if (!status) continue;
+      if (!status.syncing) this.accept(await this.request<Snapshot>('GET', '/state'));
+      this.set({ sync: status });
+    }
   }
 
   /** Occurrences from the subscribed calendars for [from, to]. */

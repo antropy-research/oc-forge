@@ -26,6 +26,8 @@ if (!port || !token) {
 }
 
 const BODY_LIMIT = 1_000_000;
+/** How long "Sync now" waits for the sync before answering; well inside the time OpenChamber waits for a service. */
+const SYNC_ANSWER_MS = 20_000;
 const dir = process.env.PLANNER_DATA_DIR || join(homedir(), '.local', 'share', 'openchamber-planner', 'data');
 const log = (message: string): void => console.error(`[planner] ${message}`);
 let sync: SyncManager | null = null;
@@ -363,7 +365,10 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST') {
-        const status = await sync!.run().catch((error) => ({ ...sync!.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        // Answer within the time OpenChamber waits for a service (a first push of a long history can take longer):
+        // a sync still running answers `syncing`, and the panel follows it to its end.
+        const done = sync!.run().catch((error) => ({ ...sync!.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        const status = await Promise.race([done, new Promise<ReturnType<SyncManager['status']>>((resolve) => setTimeout(() => resolve(sync!.status()), SYNC_ANSWER_MS).unref?.())]);
         json(res, 200, { status, ...snapshot() });
         syncAgentCommands();
         return;
