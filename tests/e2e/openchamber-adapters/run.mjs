@@ -110,10 +110,15 @@ const open = async (browser, base, viewport, sessions, path = `/?session=${sessi
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto(`${base}${path}`);
-  await until(() => page.locator('[data-context-surface="plugin:oc-forge-planner"]').count(), 120_000);
-  await until(async () => (await page.locator('[role="tablist"] [role="tab"]').count()) >= 3, 120_000);
-  await until(() => page.getByText(CHATS[2], { exact: true }).first().count(), 60_000);
+  // A page that loaded while OpenCode was restarting (it does under load) can
+  // stay on its loading state; load it again rather than compare that.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await (attempt === 0 ? page.goto(`${base}${path}`) : page.reload());
+    const loaded = await until(() => page.locator('[data-context-surface="plugin:oc-forge-planner"]').count(), 60_000)
+      && await until(async () => (await page.locator('[role="tablist"] [role="tab"]').count()) >= 3, 60_000)
+      && await until(() => page.getByText(CHATS[2], { exact: true }).first().count(), 30_000);
+    if (loaded) break;
+  }
   return { context, page, errors };
 };
 
@@ -303,9 +308,13 @@ const compare = async (browser, seeded, request, viewport) => {
       headerShot: await page.screenshot({ clip: headerBox ?? undefined }),
     };
     await page.screenshot({ path: join(out, `${size}-compare-${name}-chat.png`) });
-    await page.getByRole('button', { name: 'Extension pages' }).click();
-    await page.getByRole('menuitem', { name: 'Planner' }).click();
-    await page.frameLocator('iframe[title="Planner"]').getByRole('heading', { name: 'Home' }).waitFor({ timeout: 120_000 }).catch(() => undefined);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) await page.reload();
+      await page.getByRole('button', { name: 'Extension pages' }).click({ timeout: 60_000 });
+      await page.getByRole('menuitem', { name: 'Planner' }).click();
+      const home = await page.frameLocator('iframe[title="Planner"]').getByRole('heading', { name: 'Home' }).waitFor({ timeout: 60_000 }).then(() => true).catch(() => false);
+      if (home) break;
+    }
     await page.waitForTimeout(2_000);
     view.back = await page.getByRole('button', { name: 'Back to chat' }).count();
     view.pageShot = await page.screenshot();
