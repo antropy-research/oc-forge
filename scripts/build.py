@@ -51,8 +51,15 @@ def main() -> None:
         # Match the official release build: stable channel and upstream version. The
         # compile runtime is mise's official Bun, so BUN_COMPILE_RELEASE is not set:
         # upstream resolves it through the unauthenticated GitHub API, which is rate
-        # limited on shared CI runners.
-        env={**os.environ, "OPENCODE_VERSION": version, "OPENCODE_CHANNEL": "latest"},
+        # limited on shared CI runners. Since v2.2.0 upstream takes the target from
+        # OPENCODE_TARGET (without the "opencode-" prefix) and ignores --target=, so
+        # without it every platform is built, the musl ones included.
+        env={
+            **os.environ,
+            "OPENCODE_VERSION": version,
+            "OPENCODE_CHANNEL": "latest",
+            "OPENCODE_TARGET": target.removeprefix("opencode-"),
+        },
     )
     require_clean("after build")
     binary = outdir / target.replace("opencode", "cli") / "bin/opencode"
