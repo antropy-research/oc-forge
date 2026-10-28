@@ -7,6 +7,7 @@ import { TestClock } from "effect/testing"
 import { AppNodeBuilder } from "../vendors/opencode/packages/core/src/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "../vendors/opencode/packages/core/src/bus"
+import { Config } from "../vendors/opencode/packages/core/src/config"
 import { Database } from "../vendors/opencode/packages/core/src/database/database"
 import { Location } from "../vendors/opencode/packages/core/src/location"
 import { LocationActivity } from "../vendors/opencode/packages/core/src/location-activity"
@@ -20,13 +21,18 @@ const locations = Layer.effect(
   LocationServiceMap.Service,
   LayerMap.make(
     (ref) =>
-      Layer.succeed(
-        Location.Service,
-        Location.Service.of({
-          directory: ref.directory,
-          workspaceID: ref.workspaceID,
-          project: { id: Project.ID.global, directory: ref.directory, canonical: ref.directory },
-        }),
+      // LocationActivity reads each location's Config for an
+      // experimental.location_idle_timeout override; none here, so the default applies.
+      Layer.mergeAll(
+        Config.testLayer(),
+        Layer.succeed(
+          Location.Service,
+          Location.Service.of({
+            directory: ref.directory,
+            workspaceID: ref.workspaceID,
+            project: { id: Project.ID.global, directory: ref.directory, canonical: ref.directory },
+          }),
+        ),
       ) as unknown as Layer.Layer<LocationServices>,
     { idleTimeToLive: Duration.infinity },
   ),

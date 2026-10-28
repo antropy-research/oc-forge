@@ -3,7 +3,7 @@
 // a tool-call event. Run via `mise run test:adapters`.
 import { describe, expect } from "bun:test"
 import { Effect, Option } from "effect"
-import { LLM, LLMRequest, ToolDefinition } from "../vendors/opencode/packages/ai/src/index.js"
+import { LLM, LLMRequest, ToolDefinition } from "../vendors/opencode/packages/ai/src/effect.js"
 import { Auth, LLMClient, Route } from "../vendors/opencode/packages/ai/src/route.js"
 import * as AnthropicMessages from "../vendors/opencode/packages/ai/src/protocols/anthropic-messages.js"
 import { toolStreamStrict } from "../adapters/opencode/tool-stream-strict"
