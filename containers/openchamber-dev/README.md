@@ -41,10 +41,15 @@ Code - OSS cannot check extension signatures: the checker, `@vscode/vsce-sign`, 
 sources (Microsoft's distro adds it). So each install from the gallery asks to *Install Anyway
 (Don't Verify Signature)*; the setting `extensions.verifySignature` is left at its default.
 
-`OPENCHAMBER_BUILD` (a build arg) is the hook for oc-forge's OpenChamber adapters. It builds
-`packages/web`; today with upstream's own build, unadapted. When `adapters/openchamber/` has
-adapters and a build script of its own, copy that script into the `openchamber` stage beside the
-adapters and set `OPENCHAMBER_BUILD` to run it.
+`OPENCHAMBER_BUILD` (a build arg) is the hook for oc-forge's OpenChamber adapters: the command that
+builds the web package from `vendors/openchamber` and leaves its tarball in `/out`. Today it is
+upstream's own build and `bun pm pack`, unadapted. To build with the adapters instead
+(`scripts/build-openchamber.py`, on the planner branch), add `!scripts/build-openchamber.py` to
+`Dockerfile.dockerignore`, copy it into the `openchamber` stage beside `adapters/openchamber`, and
+set `OPENCHAMBER_BUILD` to `cd /oc-forge && python3 scripts/build-openchamber.py && cp
+dist/openchamber-web-*.tgz /out/`. That script first needs a way to run on a source without git
+metadata, as `build.py` has: it copies its source with `git archive` and checks with git that the
+source stayed pristine, and the stage's copy has no `.git` (`build.sh` checks the checkout instead).
 
 ## Files
 

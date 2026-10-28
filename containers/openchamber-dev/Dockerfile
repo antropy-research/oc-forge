@@ -54,20 +54,19 @@ RUN npm install -g --allow-scripts=bun \
     "bun@$(node -p 'require("./vendors/openchamber/package.json").packageManager.replace(/^bun@/, "")')"
 COPY vendors/openchamber vendors/openchamber
 WORKDIR /oc-forge/vendors/openchamber
-# OPENCHAMBER_BUILD is the hook for oc-forge's OpenChamber adapters: the command that builds
-# packages/web, run here in vendors/openchamber. Today it is upstream's own build, unadapted. When
-# adapters/openchamber/ has adapters and a build script (OpenChamber's counterpart of scripts/build.py),
-# COPY that script in beside the adapters and set OPENCHAMBER_BUILD to run it.
+# OPENCHAMBER_BUILD is the hook for oc-forge's OpenChamber adapters: the command, run here in
+# vendors/openchamber after the install, that builds the web package and leaves its tarball in /out.
+# Today it is upstream's own build, unadapted; README.md says how scripts/build-openchamber.py, the
+# adapted build, takes its place.
 COPY adapters/openchamber /oc-forge/adapters/openchamber
-ARG OPENCHAMBER_BUILD="bun run --cwd packages/web build"
+ARG OPENCHAMBER_BUILD="bun run --cwd packages/web build && bun pm pack --cwd packages/web --destination /out"
 # The root postinstall builds the SDK and the built-in extensions (the desktop app's Electron is not
 # needed). One step: the install, the build and the web package's prepack each rebuild
 # packages/web/server/built-in-extensions by renaming the last one aside, and overlayfs refuses that
 # rename (EXDEV) for a folder an earlier layer made.
 RUN ELECTRON_SKIP_BINARY_DOWNLOAD=1 bun install --frozen-lockfile \
   && sh -c "$OPENCHAMBER_BUILD" \
-  && bun pm pack --cwd packages/sdk --destination /out \
-  && bun pm pack --cwd packages/web --destination /out
+  && bun pm pack --cwd packages/sdk --destination /out
 
 # VS Code Server for the web, built the way Microsoft's Linux pipeline builds its own.
 FROM toolchain AS vscode
