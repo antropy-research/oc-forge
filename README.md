@@ -35,7 +35,7 @@ extension using them, OpenChamber looks and behaves as the release.
 | `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `build-openchamber.py` (OpenChamber's web package with its adapters), `upstream.py`, `verify.py`. |
 | `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`; `e2e/openchamber-adapters/` runs the OpenChamber adapters against the release in a browser, with a scratch extension. |
 | `extensions/` | OpenChamber extensions, installed on the latest OpenChamber release: `planner/` (Sunsama-style planning with Linear, GitHub, Google Calendar, Google Tasks, Gmail and agents) and `vscode/` (the compiled workbench of your own VS Code Server, rendered in OpenChamber's panel and page). Both are checked by `mise run test:extensions` in CI. |
-| `containers/` | `openchamber-dev/`: OpenChamber, OpenCode, VS Code Server and the GitHub CLI for developing the extensions. |
+| `containers/` | `openchamber-dev/`: OpenChamber, OpenCode and VS Code Server, built from `vendors/` at their pins, and the GitHub CLI, for developing the extensions. |
 
 How it works:
 

@@ -1,0 +1,18 @@
+# The build context is the repository root; only what the stages copy goes in.
+*
+!adapters/opencode
+!adapters/openchamber
+!containers/openchamber-dev/vscode-product.json
+!scripts/adapter-plugin.ts
+!scripts/build-preload.ts
+!scripts/build.py
+!upstream.json
+!vendors.json
+!vendors/opencode
+!vendors/openchamber
+!vendors/vscode
+# The vendors as committed: no git metadata (a submodule's .git points outside the context) and nothing
+# installed on the host (`mise run setup` installs into vendors/opencode). VS Code commits one
+# node_modules folder, a test fixture its build does not read.
+**/.git
+**/node_modules
