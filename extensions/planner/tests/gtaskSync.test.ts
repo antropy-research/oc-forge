@@ -8,6 +8,8 @@
 // all or nothing (Google first, then what the Planner keeps); completing a
 // task completes its subtasks, and reopening a subtask its task, however
 // little the panel has loaded; a timed task's deadline has its all-day entry.
+// Deleting "This task" of a series is all or nothing too (its next one first,
+// then the delete).
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
 import { GoogleStore, listKey, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
@@ -621,6 +623,11 @@ const tasksWorld = (start: GoogleTaskItem[] = []) => {
       const list = new URLSearchParams(path.split('?')[1]).get('list');
       return { tasks: [...tasks.values()].filter((task) => task.listId === list), complete: true };
     }
+    if (method === 'DELETE' && path.startsWith('/google/tasks?')) {
+      const id = new URLSearchParams(path.split('?')[1]).get('id');
+      for (const [key, task] of tasks) if (key === id || task.parent === id) tasks.delete(key);
+      return {};
+    }
     if (method === 'POST' && path === '/google/tasks/linked') return { tasks: [...tasks.values()].filter((task) => body.groups.some((group: { ids: string[] }) => group.ids.includes(task.id))), missing: [] };
     if (method === 'GET' && path === '/google/tasklists') return { lists: [{ account: ME, id: 'L1', title: 'My Tasks' }, { account: ME, id: 'L2', title: 'Errands' }], errors: [] };
     return {};
@@ -843,6 +850,125 @@ describe('a repeating task and subtasks never go together, as in Google Tasks', 
     // A task without subtasks still takes a repeat, and a repeating one keeps its series on other edits.
     await store.saveListTask(item({ id: 'gt1' }), { ...daily, title: 'Send the full report' });
     expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.rule).toBe('RRULE:FREQ=DAILY');
+  });
+});
+
+/** Lets what a write started in the background (its sync) finish. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+describe('deleting "This task" of a repeating task is all or nothing (review 7)', () => {
+  /** The review's case: a daily task on the 27th at 11am in Google Tasks behind the store; `refuse` fails each matching call until cleared. */
+  const daily = async () => {
+    const world = tasksWorld();
+    let refusing: ((method: string, path: string) => boolean) | null = null;
+    const fake = fakeClient(emptyState(), (method, path, body) => {
+      if (refusing?.(method, path)) throw new Error('Backend Error');
+      return world.answer(method, path, body);
+    });
+    const store = new GoogleStore(host, fake.client, 'page');
+    const first = await store.addListTask(ME, 'L1', { title: 'Daily standup', notes: 'Agenda', due: '2026-10-27' }, { time: 11 * 60, rule: 'RRULE:FREQ=DAILY' });
+    return { world, fake, store, id: first.id, google: () => world.tasks.get(first.id) ?? null, refuse: (when: typeof refusing) => (refusing = when) };
+  };
+  const posts = (fake: ReturnType<typeof fakeClient>) => fake.calls.filter((call) => call.method === 'POST' && call.path === '/google/tasks');
+  const open = (world: ReturnType<typeof tasksWorld>) => [...world.tasks.values()].filter((task) => !task.completed);
+  /** The dates the series shows upcoming this week, from the 27th. */
+  const projected = (state: PlannerState) => upcomingTasks(state.googleTasks, [], '2026-10-26', '2026-11-01', '2026-10-27').map((task) => task.date);
+  const WEEK = ['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01'];
+  const refusedPost = (method: string, path: string) => method === 'POST' && path === '/google/tasks';
+
+  test('the next one is made first, from the series on its next date, with its kept record and the link; only then is this one deleted', async () => {
+    const { world, fake, store, id, google } = await daily();
+    await store.deleteListTask(google()!, 'this');
+    // The task added, its next one, then the delete.
+    expect(fake.calls.filter((call) => call.method !== 'GET').map((call) => call.method)).toEqual(['POST', 'POST', 'DELETE']);
+    expect(google()).toBeNull();
+    expect(open(world)).toHaveLength(1);
+    const next = open(world)[0]!;
+    expect(next).toMatchObject({ title: 'Daily standup', notes: 'Agenda', due: '2026-10-28' });
+    expect(keptFor(fake.state(), next)).toMatchObject({ time: 660, repeat: { index: 2, next: null, on: '2026-10-28', template: { title: 'Daily standup', notes: 'Agenda', time: 660, start: '2026-10-27' } } });
+    expect(keptFor(fake.state(), { account: ME, id })).toBeNull();
+    expect(projected(fake.state())).toEqual(WEEK.slice(1));
+  });
+
+  test('Google refuses the next one: nothing is deleted; the task, its series and its projections stay, after a reload too; deleting again makes exactly one', async () => {
+    const { world, fake, store, id, google, refuse } = await daily();
+    await store.loadBoard(ME, 'L1');
+    const kept = keptFor(fake.state(), { account: ME, id });
+    expect(projected(fake.state())).toEqual(WEEK);
+    refuse(refusedPost);
+    await expect(store.deleteListTask(google()!, 'this')).rejects.toThrow(`the next "Daily standup" couldn't be made, so this one stays (Backend Error)`);
+    expect(fake.calls.some((call) => call.method === 'DELETE')).toBe(false);
+    expect(google()).toMatchObject({ title: 'Daily standup', due: '2026-10-27', completed: false });
+    expect(open(world)).toHaveLength(1);
+    expect(keptFor(fake.state(), { account: ME, id })).toEqual(kept);
+    expect(projected(fake.state())).toEqual(WEEK);
+    // A reload folds the service's log again: the same.
+    expect(keptFor(foldEvents(fake.log), { account: ME, id })).toEqual(kept);
+    expect(projected(foldEvents(fake.log))).toEqual(WEEK);
+    // The Tasks view shows it again.
+    expect(store.getView().board[listKey(ME, 'L1')]!.items.map((task) => task.id)).toEqual([id]);
+    // Google takes it now: Delete → This task again deletes it and makes exactly one, on the 28th, as the series has it.
+    refuse(null);
+    await store.deleteListTask(google()!, 'this');
+    expect(google()).toBeNull();
+    expect(open(world)).toHaveLength(1);
+    const next = open(world)[0]!;
+    expect(next).toMatchObject({ title: 'Daily standup', notes: 'Agenda', due: '2026-10-28' });
+    expect(keptFor(fake.state(), next)).toMatchObject({ time: 660, repeat: { index: 2, on: '2026-10-28', template: kept!.repeat!.template } });
+    // The refused one and the one made.
+    expect(posts(fake).filter((call) => call.body.due === '2026-10-28')).toHaveLength(2);
+    expect(projected(fake.state())).toEqual(WEEK.slice(1));
+  });
+
+  test('Google refuses the delete once the next one is made: both stay, linked, and it says so; deleting again finishes, with no second one', async () => {
+    const { world, fake, store, id, google, refuse } = await daily();
+    refuse((method) => method === 'DELETE');
+    await expect(store.deleteListTask(google()!, 'this')).rejects.toThrow('Backend Error; its next task, Wednesday, October 28, is made, so deleting this one again finishes');
+    const next = open(world).find((task) => task.id !== id)!;
+    expect(google()).not.toBeNull();
+    expect(next).toMatchObject({ title: 'Daily standup', due: '2026-10-28' });
+    expect(keptFor(fake.state(), { account: ME, id })?.repeat).toMatchObject({ next: next.id, template: { title: 'Daily standup' } });
+    expect(keptFor(fake.state(), next)).toMatchObject({ time: 660, repeat: { index: 2, next: null, on: '2026-10-28' } });
+    // The series goes on from the next one: each date once.
+    expect(projected(fake.state())).toEqual(WEEK.slice(1));
+    refuse(null);
+    await store.deleteListTask(google()!, 'this');
+    expect(google()).toBeNull();
+    expect(open(world).map((task) => task.id)).toEqual([next.id]);
+    expect(posts(fake)).toHaveLength(2);
+    expect(keptFor(fake.state(), { account: ME, id })).toBeNull();
+    expect(keptFor(fake.state(), next)?.repeat).toMatchObject({ next: null, on: '2026-10-28' });
+  });
+
+  test('completed, its next refused: it keeps its series and projections, the next read makes exactly one; deleted first, it makes that one before it goes', async () => {
+    const { world, fake, store, id, google, refuse } = await daily();
+    refuse(refusedPost);
+    await store.completeListTask(google()!, true);
+    // Its sync in the background tries again, refused too.
+    await flush();
+    expect(fake.notes.filter((note) => note.startsWith('Google Tasks did not take the next "Daily standup"')).length).toBeGreaterThanOrEqual(1);
+    expect(google()).toMatchObject({ completed: true });
+    expect(open(world)).toEqual([]);
+    expect(keptFor(foldEvents(fake.log), { account: ME, id })?.repeat).toMatchObject({ next: null, on: '2026-10-27', template: { title: 'Daily standup', time: 660 } });
+    expect(projected(foldEvents(fake.log))).toEqual(WEEK);
+    // The next read, once Google takes it: one, from the series, on the 28th; read again, no second.
+    refuse(null);
+    await store.syncItems([google()!]);
+    await store.syncItems([google()!]);
+    expect(open(world)).toHaveLength(1);
+    expect(open(world)[0]).toMatchObject({ title: 'Daily standup', due: '2026-10-28' });
+    expect(keptFor(fake.state(), { account: ME, id })?.repeat?.next).toBe(open(world)[0]!.id);
+
+    // The same, deleted with This task before a read: its next one first, so the series never goes.
+    const other = await daily();
+    other.refuse(refusedPost);
+    await other.store.completeListTask(other.google()!, true);
+    await flush();
+    other.refuse(null);
+    await other.store.deleteListTask(other.google()!, 'this');
+    expect(other.google()).toBeNull();
+    expect(open(other.world)).toHaveLength(1);
+    expect(keptFor(other.fake.state(), open(other.world)[0]!)).toMatchObject({ time: 660, repeat: { index: 2, on: '2026-10-28', template: { title: 'Daily standup' } } });
   });
 });
 

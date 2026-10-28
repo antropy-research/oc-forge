@@ -185,20 +185,31 @@ export interface NextOccurrence {
   template: GoogleTaskTemplate | null;
   /** Null when the series ends with this occurrence. */
   date: DateKey | null;
+  /** Which occurrence of the series it is. */
+  index: number;
 }
 
 /**
+ * The occurrence a series makes after `item` (completed, or deleted with
+ * "This task"): the series' next date after the one it put `item` on,
+ * whatever `item` was moved to.
+ */
+export const nextOccurrence = (item: GoogleTaskItem, kept: GoogleTaskKept): NextOccurrence => {
+  const on = scheduledOn(kept, item);
+  return { item, kept, template: seriesTemplate(kept, item), date: on && kept.repeat ? nextRepeatDate(kept.repeat.rule, on, kept.repeat.index) : null, index: (kept.repeat?.index ?? 0) + 1 };
+};
+
+/**
  * Repeating tasks completed (in the Planner or in Google) whose next
- * occurrence is not made yet, and its date: the series' next one after the
- * date it put this occurrence on, whatever this one was moved to.
+ * occurrence is not made yet, and its date (`nextOccurrence`). One whose
+ * next Google refused stays so, and is made on the next read.
  */
 export const dueOccurrences = (state: Pick<PlannerState, 'googleTasks'>, items: Iterable<GoogleTaskItem>): NextOccurrence[] => {
   const out: NextOccurrence[] = [];
   for (const item of items) {
     const kept = keptFor(state, item);
     if (!item.completed || !kept?.repeat || kept.repeat.next) continue;
-    const on = scheduledOn(kept, item);
-    out.push({ item, kept, template: seriesTemplate(kept, item), date: on ? nextRepeatDate(kept.repeat.rule, on, kept.repeat.index) : null });
+    out.push(nextOccurrence(item, kept));
   }
   return out;
 };
