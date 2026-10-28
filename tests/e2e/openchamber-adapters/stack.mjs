@@ -24,10 +24,12 @@ const work = process.env.WORK ?? '/tmp/opencode/oc-adapters/e2e';
 const version = process.env.OPENCHAMBER_VERSION ?? '2.5.2';
 const packageFile = process.env.PACKAGE ?? join(repo, `dist/openchamber-web-${version}.tgz`);
 const VSCODE_VERSION = process.env.VSCODE_VERSION ?? '1.140.0';
-export const VSCODE_PORT = 35352;
+// Two stacks can run side by side with their own WORK and STACK_PORT_BASE (stock, adapted, VS Code Server).
+const BASE = Number(process.env.STACK_PORT_BASE ?? 35350);
+export const VSCODE_PORT = BASE + 2;
 export const instances = {
-  stock: { port: 35350, install: `@openchamber/web@${version}` },
-  adapted: { port: 35351, install: packageFile },
+  stock: { port: BASE, install: `@openchamber/web@${version}` },
+  adapted: { port: BASE + 1, install: packageFile },
 };
 
 const env = () => {

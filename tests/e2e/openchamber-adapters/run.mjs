@@ -24,8 +24,9 @@ const { chromium } = await import(join(work, 'deps/node_modules/playwright-core/
 const secrets = readFileSync(join(work, 'secrets.env'), 'utf8');
 const password = /^OPENCHAMBER_UI_PASSWORD=(.+)$/m.exec(secrets)[1].trim();
 const vscodeToken = /^VSCODE_CONNECTION_TOKEN=(.+)$/m.exec(secrets)[1].trim();
-const VSCODE_SERVER = 'http://127.0.0.1:35352';
-const instances = { stock: 'http://127.0.0.1:35350', adapted: 'http://127.0.0.1:35351' };
+const BASE = Number(process.env.STACK_PORT_BASE ?? 35350);
+const VSCODE_SERVER = `http://127.0.0.1:${BASE + 2}`;
+const instances = { stock: `http://127.0.0.1:${BASE}`, adapted: `http://127.0.0.1:${BASE + 1}` };
 const TEST = 'ocforge-test';
 const ZONE = 'ocforge-test-zone';
 const CHATS = ['First chat', 'Second chat', 'Third chat'];
