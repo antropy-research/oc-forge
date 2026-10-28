@@ -45,6 +45,7 @@ const routeIn = (url) => new URL(url).searchParams.get('route');
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+let cleanup = async () => {};
 const request = context.request;
 try {
   // ── Seed: the demo project, a chat (a header tab: OpenChamber's session tabs on), the Planner installed ──
@@ -69,6 +70,10 @@ try {
   };
   // A task linked to the chat, as "Track chat in Planner" makes one.
   const taskId = `${run}-task`;
+  cleanup = async () => {
+    await service('POST', '/commands', { commands: [{ cmd: `${run}-cleanup`, type: 'task.deleted', taskId }] });
+    await request.delete(`${base}/api/session/${chatId}?directory=${encodeURIComponent(project)}`);
+  };
   const today = (await service('GET', '/state')).today;
   await service('POST', '/commands', { commands: [{ cmd: `${run}-c1`, type: 'task.created', task: { id: taskId, title: `${run} write the brief`, placement: { kind: 'day', date: today }, position: 1024, sessionRef: { sessionId: chatId, title: `${run} chat`, directory: project } } }] });
 
@@ -195,6 +200,8 @@ try {
   check('journey completed', false, String(error).split('\n')[0]);
   await context.pages()[0]?.screenshot({ path: join(out, '99-failure.png') }).catch(() => {});
 } finally {
+  // What this run made: its task and its chat, so the stack stays as the other checks expect it.
+  await cleanup().catch(() => {});
   await browser.close();
   writeFileSync(join(out, 'results.json'), JSON.stringify(results, null, 2));
 }
