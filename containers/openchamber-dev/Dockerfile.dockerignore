@@ -5,6 +5,7 @@
 !containers/openchamber-dev/vscode-product.json
 !scripts/adapter-plugin.ts
 !scripts/build-preload.ts
+!scripts/build-openchamber.py
 !scripts/build.py
 !upstream.json
 !vendors.json

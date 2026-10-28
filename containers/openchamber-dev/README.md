@@ -8,7 +8,7 @@ Docker build stages on copies of the vendors, so `vendors/` stays pristine.
 | Component | Built from | How |
 |---|---|---|
 | OpenCode | `vendors/opencode` with `adapters/opencode/` | `scripts/build.py opencode-linux-<arch>`, as the releases are built: upstream's `packages/cli/script/build.ts` with `scripts/build-preload.ts` preloaded. build.py checks the binary has the adapted location TTL and starts. Installed as `opencode` and `opencode2`; OpenChamber starts and manages it |
-| OpenChamber | `vendors/openchamber` | `bun install --frozen-lockfile`, the web package's build (`OPENCHAMBER_BUILD`, below), `bun pm pack` of `packages/sdk` and `packages/web`, then `npm install -g` of both tarballs; their npm dependencies resolve when they are installed, as the published package's do |
+| OpenChamber | `vendors/openchamber` with `adapters/openchamber/` | `bun install --frozen-lockfile`, the web package's adapted build (`OPENCHAMBER_BUILD`, below: `scripts/build-openchamber.py`), `bun pm pack` of `packages/sdk`, then `npm install -g` of both tarballs; their npm dependencies resolve when they are installed, as the published package's do |
 | VS Code Server for the web | `vendors/vscode` | Node as its `.nvmrc` says, `npm ci`, then the steps of Microsoft's Linux pipeline: `npm run gulp core-ci`, the built-in Copilot extension packed as a VSIX (`npm run build`, `vsce package`) and unpacked into `.build/extensions/copilot`, and `npm run gulp vscode-reh-web-linux-<arch>-min-ci`. First `vscode-product.json` is merged into `product.json` (below), and the pinned commit is given as `BUILD_SOURCEVERSION` (the copy has no git), with `VSCODE_QUALITY` as the pipeline sets it. Code - OSS (MIT), in `/opt/vscode-server`; `vscode-server` starts it (the `vscode` service) |
 | GitHub CLI | release tarball, `GH_VERSION` | the Planner reads GitHub with it and agents open pull requests with it (`gh auth login` once in the container; the agent journey points it at a fake GitHub instead) |
 | Node | `NODE_IMAGE`, `node:26.12.0-trixie-slim` | the image's runtime, and the base of every build stage, so what they compile runs in the image |
@@ -41,15 +41,15 @@ Code - OSS cannot check extension signatures: the checker, `@vscode/vsce-sign`, 
 sources (Microsoft's distro adds it). So each install from the gallery asks to *Install Anyway
 (Don't Verify Signature)*; the setting `extensions.verifySignature` is left at its default.
 
-`OPENCHAMBER_BUILD` (a build arg) is the hook for oc-forge's OpenChamber adapters: the command that
-builds the web package from `vendors/openchamber` and leaves its tarball in `/out`. Today it is
-upstream's own build and `bun pm pack`, unadapted. To build with the adapters instead
-(`scripts/build-openchamber.py`, on the planner branch), add `!scripts/build-openchamber.py` to
-`Dockerfile.dockerignore`, copy it into the `openchamber` stage beside `adapters/openchamber`, and
-set `OPENCHAMBER_BUILD` to `cd /oc-forge && python3 scripts/build-openchamber.py && cp
-dist/openchamber-web-*.tgz /out/`. That script first needs a way to run on a source without git
-metadata, as `build.py` has: it copies its source with `git archive` and checks with git that the
-source stayed pristine, and the stage's copy has no `.git` (`build.sh` checks the checkout instead).
+`OPENCHAMBER_BUILD` (a build arg) is the command that builds the web package from
+`vendors/openchamber` and leaves its tarball in `/out`. By default it is oc-forge's adapted build,
+`scripts/build-openchamber.py --source vendors/openchamber` (`adapters/openchamber/README.md`): the
+adapters are applied to a copy of the vendor's sources (each anchor exactly once, or the build
+stops), the UI is built and type-checked with OpenChamber's own tooling, and the package must
+contain the adapted code. The stage's copy has no git metadata, so the script copies its files and
+leaves the pristine check to `build.sh`, which checks the checkout. Upstream's own build, unadapted,
+is `--build-arg OPENCHAMBER_BUILD="bun run --cwd packages/web build && bun pm pack --cwd
+packages/web --destination /out"`.
 
 ## Files
 

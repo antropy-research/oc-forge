@@ -54,12 +54,13 @@ RUN npm install -g --allow-scripts=bun \
     "bun@$(node -p 'require("./vendors/openchamber/package.json").packageManager.replace(/^bun@/, "")')"
 COPY vendors/openchamber vendors/openchamber
 WORKDIR /oc-forge/vendors/openchamber
-# OPENCHAMBER_BUILD is the hook for oc-forge's OpenChamber adapters: the command, run here in
-# vendors/openchamber after the install, that builds the web package and leaves its tarball in /out.
-# Today it is upstream's own build, unadapted; README.md says how scripts/build-openchamber.py, the
-# adapted build, takes its place.
+# OPENCHAMBER_BUILD builds the web package and leaves its tarball in /out; it runs here in
+# vendors/openchamber after the install. By default it is oc-forge's adapted build
+# (scripts/build-openchamber.py: the adapters applied to a copy of the vendor's sources, checked,
+# type-checked and packed; README.md); upstream's own build is the one-line alternative there.
 COPY adapters/openchamber /oc-forge/adapters/openchamber
-ARG OPENCHAMBER_BUILD="bun run --cwd packages/web build && bun pm pack --cwd packages/web --destination /out"
+COPY scripts/build-openchamber.py /oc-forge/scripts/build-openchamber.py
+ARG OPENCHAMBER_BUILD="cd /oc-forge && python3 scripts/build-openchamber.py --source vendors/openchamber && mkdir -p /out && cp dist/openchamber-web-*.tgz /out/"
 # The root postinstall builds the SDK and the built-in extensions (the desktop app's Electron is not
 # needed). One step: the install, the build and the web package's prepack each rebuild
 # packages/web/server/built-in-extensions by renaming the last one aside, and overlayfs refuses that
