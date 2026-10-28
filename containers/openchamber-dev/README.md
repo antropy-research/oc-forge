@@ -16,6 +16,8 @@ Docker build stages on copies of the vendors, so `vendors/` stays pristine.
 
 No vendor version is written in these files: the image is whatever the pins check out
 (`vendors.json`; OpenChamber v2.5.1, OpenCode v2.1.4 and VS Code 1.140.0 when this was written).
+OpenChamber still offers *OpenCode update* when npm has a newer OpenCode; it fails and changes
+nothing (OpenCode cannot tell how this binary was installed), so OpenCode moves only with its pin.
 
 The one-task local build, `npm run gulp vscode-reh-web-linux-<arch>-min`, does not work at this
 pin. It packs the Copilot extension itself, without the `node_modules/@github/copilot/sdk` that its
