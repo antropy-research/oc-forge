@@ -102,8 +102,8 @@ export interface PrintPage {
 
 /**
  * The pages of a printout of `from`–`to`: a Day a page; a Week a page (its days in the range); a Month a page (its
- * weeks, the range's days in them); Schedule one run of days, broken between days. Without weekends, Saturdays and
- * Sundays are left out, as the view leaves them out.
+ * weeks, the range's days in them); Schedule one run of days, broken between days. Without weekends ("Show
+ * weekends" off), Saturdays and Sundays are left out of every view.
  */
 export const printPages = (layout: PrintLayout, from: DateKey, to: DateKey, weekStartsOn: 0 | 1, weekends: boolean): PrintPage[] => {
   if (to < from) return [];
@@ -111,7 +111,7 @@ export const printPages = (layout: PrintLayout, from: DateKey, to: DateKey, week
   const all: DateKey[] = [];
   for (let date = from; date <= to; date = addDays(date, 1)) all.push(date);
   if (layout === 'day') return all.filter(keep).map((date) => ({ title: `${longDay(date)}, ${date.slice(0, 4)}`, days: [date] }));
-  if (layout === 'schedule') return [{ title: rangeTitle('schedule', from, all), days: all }];
+  if (layout === 'schedule') return [{ title: rangeTitle('schedule', from, all), days: all.filter(keep) }];
   if (layout === 'week') {
     const pages: PrintPage[] = [];
     for (const date of all) {

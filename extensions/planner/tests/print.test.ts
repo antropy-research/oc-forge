@@ -115,6 +115,8 @@ describe("Google Calendar's Print: the preview's range and options, and each vie
       ['November 2026', '2026-11-01', '2026-11-20', 5],
     ]);
     expect(printPages('schedule', TODAY, '2026-11-27', 0, true).map((page) => [page.title, page.days.length])).toEqual([['Oct 29 – Nov 27, 2026', 30]]);
+    // Show weekends off: Schedule leaves them out too (Oct 31, Nov 1).
+    expect(printPages('schedule', TODAY, '2026-11-02', 0, false)[0]!.days).toEqual(['2026-10-29', '2026-10-30', '2026-11-02']);
     expect(printPages('week', '2026-11-02', '2026-11-01', 0, true)).toEqual([]);
   });
 

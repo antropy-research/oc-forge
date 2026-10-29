@@ -1159,6 +1159,7 @@ const printJourney = async (viewport) => {
     check(`${size}: Portrait, Black and white, Biggest and no weekends change the page: five days, larger type`, await until(async () => /pc-bw/.test(await sheetClass()) && /is-portrait/.test(await sheetClass()) && (await dayHeads()) === 5 && (await paper.locator('.print-sheet').getAttribute('style'))?.includes('1.5'), 5000), `${await sheetClass()} ${await dayHeads()}`);
     await preview.getByRole('combobox', { name: 'View' }).selectOption('schedule');
     check(`${size}: View Schedule offers Print descriptions and Print your response`, (await preview.getByRole('checkbox', { name: 'Print descriptions' }).count()) === 1 && (await preview.getByRole('checkbox', { name: 'Print your response' }).count()) === 1);
+    check(`${size}: Show weekends off leaves Saturdays and Sundays out of the Schedule too`, await until(async () => !/(Saturday|Sunday), /.test(await paper.innerText()), 5000), (await paper.innerText()).slice(0, 300));
     await preview.getByRole('checkbox', { name: 'Print descriptions' }).check();
     await preview.getByRole('checkbox', { name: 'Print your response' }).check();
     check(`${size}: they print each event's description and my answer (Quarter planning: "Agenda…"; Your response)`, await until(async () => (await paper.innerText()).includes('Agenda') && (await paper.innerText()).includes('Your response:'), 15_000), (await paper.innerText()).slice(0, 400));
