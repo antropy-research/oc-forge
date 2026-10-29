@@ -11,7 +11,7 @@ import { describeRecurrence } from '../../../src/domain/rrule.ts';
 import { descriptionText } from '../../../src/domain/gevents.ts';
 import { taskForGoogleTask, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google.ts';
 import { KEPT_HINT, advancedLabel, keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
-import { colorName, driveKind, quietLabel, taskOrigins, type DeclinedMeeting } from '../../../src/domain/gtaskAdvanced.ts';
+import { colorName, declineCarriesOn, driveKind, quietLabel, taskOrigins, type DeclinedMeeting } from '../../../src/domain/gtaskAdvanced.ts';
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
@@ -286,7 +286,8 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   const color = eventColor(event, view.state);
   const quiet = quietLabel(kept);
   // The meetings the Planner declined during it ("Automatically decline meetings").
-  const [declined, setDeclined] = useState<DeclinedMeeting[]>([]);
+  // While declining carries on after a pass stopped at one of its bounds, it says so (`more`).
+  const [{ declined, more }, setDeclined] = useState<{ declined: DeclinedMeeting[]; more: string | null }>({ declined: [], more: null });
   useEffect(() => {
     if (!kept?.decline) return;
     let live = true;
@@ -361,6 +362,7 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
                 {declined.map((meeting) => <li key={meeting.eventId}>Declined: {meeting.summary}</li>)}
               </ul>
             )}
+            {more && kept?.decline && <div class="muted pop-small" role="status">{declineCarriesOn(more, zone)}.</div>}
           </div>
         </div>
       )}

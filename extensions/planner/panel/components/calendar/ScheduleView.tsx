@@ -151,6 +151,7 @@ export const SearchResults = ({ query, onDay }: { query: string; onDay: (date: D
         </section>
       ))}
       {current && dates.length === 0 && <p class="empty schedule-empty">No events match "{query}" from a year ago to two years ahead.</p>}
+      {current && dates.length > 0 && <p class="hint schedule-empty">Searched your calendars from a year ago to two years ahead.</p>}
       {current?.more && <p class="hint schedule-empty">Google found more than this; add a word to narrow the search.</p>}
     </div>
   );

@@ -31,8 +31,8 @@ const CALENDAR = 'https://www.googleapis.com/calendar/v3';
 const TASKS = 'https://tasks.googleapis.com/tasks/v1';
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const DRIVE = 'https://www.googleapis.com/drive/v3';
-/** Files a Drive search lists at most, as a picker's first screen. */
-const DRIVE_MAX = 30;
+/** Files a page of a Drive search lists, as a picker's screen; the picker asks for the next page ("More files"). */
+const DRIVE_PAGE = 30;
 const EVENT_FIELDS =
   'accessRole,nextPageToken,items(id,status,summary,location,transparency,colorId,eventType,start,end,recurringEventId,originalStartTime,attendees(email,self,organizer,resource,responseStatus),organizer(email,self),guestsCanModify,locked,privateCopy,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),extendedProperties,htmlLink)';
 /** Pages read at most: Google's page sizes make each limit thousands of items. */
@@ -138,6 +138,24 @@ export const toMailItem = (raw: RawMessage, account: string): MailItem | null =>
     url: gmailUrl(account, raw.threadId),
   };
 };
+
+/** Timed events as "Automatically decline meetings" looks at them: my answer, who organizes it, its kind and when it was made. */
+const invitationsOf = (items: readonly RawGoogleEvent[]): Invitation[] =>
+  items.flatMap((raw) => {
+    if (!raw.id || raw.status === 'cancelled' || !raw.start?.dateTime || !raw.end?.dateTime) return [];
+    const self = raw.attendees?.find((attendee) => attendee.self);
+    const response = self?.responseStatus;
+    return [{
+      id: raw.id,
+      summary: raw.summary ?? '(No title)',
+      start: new Date(raw.start.dateTime).toISOString(),
+      end: new Date(raw.end.dateTime).toISOString(),
+      created: raw.created ?? new Date(0).toISOString(),
+      response: response === 'needsAction' || response === 'declined' || response === 'tentative' || response === 'accepted' ? response : null,
+      mine: Boolean(raw.organizer?.self || self?.organizer),
+      meeting: !raw.eventType || raw.eventType === 'default',
+    }];
+  });
 
 /** One working session as a Google Calendar event, keyed back to the session. */
 export interface TimeboxEvent {
@@ -442,46 +460,35 @@ export class GoogleData {
   }
 
   /**
-   * The events on the account's own calendar between two instants, as "Automatically decline meetings" looks at
-   * them: each occurrence on its own, with my answer, who organizes it, its kind and when it was made.
+   * One page of the events on the account's own calendar between two instants, in the order they start, as
+   * "Automatically decline meetings" looks at them: each occurrence on its own, with my answer, who organizes it,
+   * its kind and when it was made; `next` is the following page's token (null after the last page).
    */
-  async invitations(account: string, timeMin: string, timeMax: string): Promise<Invitation[]> {
-    const { items } = await this.pages<RawGoogleEvent>(
+  async invitationPage(account: string, timeMin: string, timeMax: string, pageToken?: string): Promise<{ items: Invitation[]; next: string | null }> {
+    const data = await this.accounts.request<{ items?: RawGoogleEvent[]; nextPageToken?: string }>(
       account,
-      (token) => `${CALENDAR}/calendars/primary/events?${new URLSearchParams({ singleEvents: 'true', orderBy: 'startTime', timeMin, timeMax, maxResults: '250', fields: 'nextPageToken,items(id,status,summary,start,end,created,eventType,organizer(email,self),attendees(email,self,organizer,responseStatus))', ...(token ? { pageToken: token } : {}) })}`,
-      2,
+      'GET',
+      `${CALENDAR}/calendars/primary/events?${new URLSearchParams({ singleEvents: 'true', orderBy: 'startTime', timeMin, timeMax, maxResults: '2500', fields: 'nextPageToken,items(id,status,summary,start,end,created,eventType,organizer(email,self),attendees(email,self,organizer,responseStatus))', ...(pageToken ? { pageToken } : {}) })}`,
     );
-    return items.flatMap((raw) => {
-      if (!raw.id || raw.status === 'cancelled' || !raw.start?.dateTime || !raw.end?.dateTime) return [];
-      const self = raw.attendees?.find((attendee) => attendee.self);
-      const response = self?.responseStatus;
-      return [{
-        id: raw.id,
-        summary: raw.summary ?? '(No title)',
-        start: new Date(raw.start.dateTime).toISOString(),
-        end: new Date(raw.end.dateTime).toISOString(),
-        created: raw.created ?? new Date(0).toISOString(),
-        response: response === 'needsAction' || response === 'declined' || response === 'tentative' || response === 'accepted' ? response : null,
-        mine: Boolean(raw.organizer?.self || self?.organizer),
-        meeting: !raw.eventType || raw.eventType === 'default',
-      }];
-    });
+    return { items: invitationsOf(data?.items ?? []), next: data?.nextPageToken ?? null };
   }
 
   // ── Google Drive ───────────────────────────────────────────────────────────
 
   /**
-   * Drive files whose name has `text`, newest first (the newest of all when empty), as Google's Drive picker finds
-   * them to attach to a task: their names, types and addresses, never their contents.
+   * A page of the Drive files whose name has `text`, newest first (the newest of all when empty), as Google's Drive
+   * picker finds them to attach to a task: their names, types and addresses, never their contents; `next` is the
+   * following page's token (null after the last).
    */
-  async driveFiles(account: string, text: string): Promise<DriveFile[]> {
-    const query = new URLSearchParams({ q: driveQuery(text), orderBy: 'recency desc', pageSize: String(DRIVE_MAX), fields: 'files(id,name,mimeType,webViewLink,modifiedTime)' });
-    const answer = await this.accounts.request<{ files?: { id?: string; name?: string; mimeType?: string; webViewLink?: string; modifiedTime?: string }[] }>(account, 'GET', `${DRIVE}/files?${query}`);
-    return (answer?.files ?? []).flatMap((file) =>
+  async driveFiles(account: string, text: string, pageToken?: string): Promise<{ files: DriveFile[]; next: string | null }> {
+    const query = new URLSearchParams({ q: driveQuery(text), orderBy: 'recency desc', pageSize: String(DRIVE_PAGE), fields: 'nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime)', ...(pageToken ? { pageToken } : {}) });
+    const answer = await this.accounts.request<{ files?: { id?: string; name?: string; mimeType?: string; webViewLink?: string; modifiedTime?: string }[]; nextPageToken?: string }>(account, 'GET', `${DRIVE}/files?${query}`);
+    const files = (answer?.files ?? []).flatMap((file) =>
       file.id && /^[A-Za-z0-9_-]{1,200}$/.test(file.id) && file.webViewLink && /^https:\/\//.test(file.webViewLink)
         ? [{ id: file.id, title: (file.name ?? '').trim().slice(0, 500) || '(Untitled)', mimeType: (file.mimeType ?? '').slice(0, 200), url: file.webViewLink, ...(file.modifiedTime ? { modifiedTime: file.modifiedTime } : {}) }]
         : [],
     );
+    return { files, next: answer?.nextPageToken ?? null };
   }
 
   /** Move an event (or a whole series) to another of the account's calendars. */

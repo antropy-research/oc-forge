@@ -47,6 +47,7 @@ export const sessionVisibility = (state: PlannerState, taskId: string): TaskVisi
 const READ_DEADLINE_MS = 14_000;
 /** A write that ended after a read began, give or take this, makes that read too old for its session. */
 const SLACK_MS = 10_000;
+/** Events missing from a read asked for on their own at most, per read; the ones asked for longest ago go first, so each has its turn. */
 const MAX_LOOKUPS = 10;
 
 const withDeadline = <T>(work: Promise<T>, ms: number, what: string): Promise<T> =>
@@ -206,6 +207,8 @@ export class GoogleTimeboxes {
   private readonly written = new Map<string, number>();
   /** Events made for sessions whose link is not in the log yet. */
   private readonly created = new Map<string, GoogleEventLink>();
+  /** When the event of each session missing from a read was last asked for on its own. */
+  private readonly lookedUp = new Map<string, number>();
   private internal = false;
   /** The last write that failed, until one works. */
   lastError: string | null = null;
@@ -256,8 +259,12 @@ export class GoogleTimeboxes {
       if (!session) missing.push({ blockId: block.id, link, readAt: read.readAt });
       else if (session.start !== block.start || session.end !== block.end) bodies.push({ type: 'block.updated', blockId: block.id, start: session.start, end: session.end });
     }
+    // More than a read asks for: the ones asked for longest ago (never, first), the rest at the next reads.
+    for (const blockId of [...this.lookedUp.keys()]) if (!state.blocks[blockId]?.google) this.lookedUp.delete(blockId);
+    const turn = missing.sort((a, b) => (this.lookedUp.get(a.blockId) ?? 0) - (this.lookedUp.get(b.blockId) ?? 0)).slice(0, MAX_LOOKUPS);
+    for (const { blockId } of turn) this.lookedUp.set(blockId, Date.now());
     await Promise.all(
-      missing.slice(0, MAX_LOOKUPS).map(async ({ blockId, link }) => {
+      turn.map(async ({ blockId, link }) => {
         let event: Awaited<ReturnType<TimeboxData['event']>>;
         try {
           event = await withDeadline(this.data.event(link.account, link.calendarId, link.eventId), READ_DEADLINE_MS, 'Google Calendar');

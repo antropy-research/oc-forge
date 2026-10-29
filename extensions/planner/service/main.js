@@ -4355,13 +4355,17 @@ var invitationsToDecline = (window, events, declined = new Set) => {
     return decline.mode === "all" || Date.parse(event.created) > since;
   });
 };
+var meetingsToDecline = (windows, events, declined = new Set) => events.flatMap((invitation) => {
+  const window = windows.find((one) => invitationsToDecline(one, [invitation], declined).length > 0);
+  return window ? [{ invitation, window }] : [];
+});
 
 // service/googleData.ts
 var CALENDAR = "https://www.googleapis.com/calendar/v3";
 var TASKS = "https://tasks.googleapis.com/tasks/v1";
 var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 var DRIVE = "https://www.googleapis.com/drive/v3";
-var DRIVE_MAX = 30;
+var DRIVE_PAGE = 30;
 var EVENT_FIELDS = "accessRole,nextPageToken,items(id,status,summary,location,transparency,colorId,eventType,start,end,recurringEventId,originalStartTime,attendees(email,self,organizer,resource,responseStatus),organizer(email,self),guestsCanModify,locked,privateCopy,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),extendedProperties,htmlLink)";
 var LIMITS = { calendars: 10, events: 8, lists: 5, tasks: 40, due: 20 };
 var MAIL_MAX = 25;
@@ -4424,6 +4428,22 @@ var toMailItem = (raw, account) => {
     url: gmailUrl(account, raw.threadId)
   };
 };
+var invitationsOf = (items) => items.flatMap((raw) => {
+  if (!raw.id || raw.status === "cancelled" || !raw.start?.dateTime || !raw.end?.dateTime)
+    return [];
+  const self = raw.attendees?.find((attendee) => attendee.self);
+  const response = self?.responseStatus;
+  return [{
+    id: raw.id,
+    summary: raw.summary ?? "(No title)",
+    start: new Date(raw.start.dateTime).toISOString(),
+    end: new Date(raw.end.dateTime).toISOString(),
+    created: raw.created ?? new Date(0).toISOString(),
+    response: response === "needsAction" || response === "declined" || response === "tentative" || response === "accepted" ? response : null,
+    mine: Boolean(raw.organizer?.self || self?.organizer),
+    meeting: !raw.eventType || raw.eventType === "default"
+  }];
+});
 var UNDO_MS = 10 * 60000;
 var RESTORED_FIELDS = ["summary", "description", "location", "colorId", "start", "end", "recurrence", "attendees", "reminders", "transparency", "visibility", "conferenceData", "guestsCanInviteOthers", "guestsCanModify", "guestsCanSeeOtherGuests", "anyoneCanAddSelf", "source", "extendedProperties"];
 
@@ -4666,29 +4686,15 @@ ${calendarId}`;
     const found = await this.withSeries(account, calendarId, eventId);
     return this.run(account, calendarId, planRsvp({ scope, response, ...found, ...comment ? { comment } : {} }), "all");
   }
-  async invitations(account, timeMin, timeMax) {
-    const { items } = await this.pages(account, (token) => `${CALENDAR}/calendars/primary/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: "nextPageToken,items(id,status,summary,start,end,created,eventType,organizer(email,self),attendees(email,self,organizer,responseStatus))", ...token ? { pageToken: token } : {} })}`, 2);
-    return items.flatMap((raw) => {
-      if (!raw.id || raw.status === "cancelled" || !raw.start?.dateTime || !raw.end?.dateTime)
-        return [];
-      const self = raw.attendees?.find((attendee) => attendee.self);
-      const response = self?.responseStatus;
-      return [{
-        id: raw.id,
-        summary: raw.summary ?? "(No title)",
-        start: new Date(raw.start.dateTime).toISOString(),
-        end: new Date(raw.end.dateTime).toISOString(),
-        created: raw.created ?? new Date(0).toISOString(),
-        response: response === "needsAction" || response === "declined" || response === "tentative" || response === "accepted" ? response : null,
-        mine: Boolean(raw.organizer?.self || self?.organizer),
-        meeting: !raw.eventType || raw.eventType === "default"
-      }];
-    });
+  async invitationPage(account, timeMin, timeMax, pageToken) {
+    const data = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/primary/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "2500", fields: "nextPageToken,items(id,status,summary,start,end,created,eventType,organizer(email,self),attendees(email,self,organizer,responseStatus))", ...pageToken ? { pageToken } : {} })}`);
+    return { items: invitationsOf(data?.items ?? []), next: data?.nextPageToken ?? null };
   }
-  async driveFiles(account, text) {
-    const query = new URLSearchParams({ q: driveQuery(text), orderBy: "recency desc", pageSize: String(DRIVE_MAX), fields: "files(id,name,mimeType,webViewLink,modifiedTime)" });
+  async driveFiles(account, text, pageToken) {
+    const query = new URLSearchParams({ q: driveQuery(text), orderBy: "recency desc", pageSize: String(DRIVE_PAGE), fields: "nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime)", ...pageToken ? { pageToken } : {} });
     const answer = await this.accounts.request(account, "GET", `${DRIVE}/files?${query}`);
-    return (answer?.files ?? []).flatMap((file) => file.id && /^[A-Za-z0-9_-]{1,200}$/.test(file.id) && file.webViewLink && /^https:\/\//.test(file.webViewLink) ? [{ id: file.id, title: (file.name ?? "").trim().slice(0, 500) || "(Untitled)", mimeType: (file.mimeType ?? "").slice(0, 200), url: file.webViewLink, ...file.modifiedTime ? { modifiedTime: file.modifiedTime } : {} }] : []);
+    const files = (answer?.files ?? []).flatMap((file) => file.id && /^[A-Za-z0-9_-]{1,200}$/.test(file.id) && file.webViewLink && /^https:\/\//.test(file.webViewLink) ? [{ id: file.id, title: (file.name ?? "").trim().slice(0, 500) || "(Untitled)", mimeType: (file.mimeType ?? "").slice(0, 200), url: file.webViewLink, ...file.modifiedTime ? { modifiedTime: file.modifiedTime } : {} }] : []);
+    return { files, next: answer?.nextPageToken ?? null };
   }
   async moveEvent(account, calendarId, eventId, destination, sendUpdates) {
     const instance = await this.mustEvent(account, calendarId, eventId);
@@ -4989,6 +4995,7 @@ class GoogleTimeboxes {
   queues = new Map;
   written = new Map;
   created = new Map;
+  lookedUp = new Map;
   internal = false;
   lastError = null;
   constructor(planner, data, options = {}) {
@@ -5033,7 +5040,13 @@ class GoogleTimeboxes {
       else if (session.start !== block.start || session.end !== block.end)
         bodies.push({ type: "block.updated", blockId: block.id, start: session.start, end: session.end });
     }
-    await Promise.all(missing.slice(0, MAX_LOOKUPS).map(async ({ blockId, link }) => {
+    for (const blockId of [...this.lookedUp.keys()])
+      if (!state.blocks[blockId]?.google)
+        this.lookedUp.delete(blockId);
+    const turn = missing.sort((a, b) => (this.lookedUp.get(a.blockId) ?? 0) - (this.lookedUp.get(b.blockId) ?? 0)).slice(0, MAX_LOOKUPS);
+    for (const { blockId } of turn)
+      this.lookedUp.set(blockId, Date.now());
+    await Promise.all(turn.map(async ({ blockId, link }) => {
       let event;
       try {
         event = await withDeadline(this.data.event(link.account, link.calendarId, link.eventId), READ_DEADLINE_MS, "Google Calendar");
@@ -5483,9 +5496,13 @@ class TaskNotifications {
       return none;
     const zone = state.settings.timezone ?? "UTC";
     const today = todayIn(zone, new Date(this.now()));
-    const [due, deadlines] = await Promise.all([this.reads.due(accounts, today), this.reads.byIds(deadlineGroups(state.googleTasks, accounts, today, today))]);
+    const yesterday = addDays(today, -1);
+    const [due, deadlines] = await Promise.all([this.reads.due(accounts, yesterday, today), this.reads.byIds(deadlineGroups(state.googleTasks, accounts, yesterday, today))]);
     const kept = this.state().googleTasks;
-    const all = quietNotifications(taskNotifications(due.items, deadlines.items, kept, today, zone), taskWindows(due.items, kept, today, today, today, zone));
+    const windows = taskWindows(due.items, kept, yesterday, today, today, zone);
+    const midnight = Date.parse(instantAt(today, 0, zone));
+    const held = quietNotifications(taskNotifications(due.items, deadlines.items, kept, yesterday, zone), windows).filter((item) => item.held && Date.parse(item.at) >= midnight);
+    const all = [...held, ...quietNotifications(taskNotifications(due.items, deadlines.items, kept, today, zone), windows)].sort((a, b) => a.at.localeCompare(b.at) || a.key.localeCompare(b.key));
     const given = await this.load();
     const now = this.now();
     const keys = new Set(given.keys());
@@ -5946,8 +5963,11 @@ import { dirname as dirname4 } from "node:path";
 var DECLINE_AHEAD_DAYS = 14;
 var EVERY_MS = 5 * 60000;
 var AFTER_CHANGE_MS = 1500;
+var CARRY_ON_MS = 5000;
 var KEEP_MS2 = 30 * 24 * 60 * 60000;
-var WINDOWS_MAX = 40;
+var PAGES_MAX = 4;
+var BUDGET_MS = 5000;
+var messageOf3 = (error) => error instanceof Error ? error.message : String(error);
 
 class MeetingDecliner {
   file;
@@ -5956,8 +5976,11 @@ class MeetingDecliner {
   calendar;
   options;
   queue = Promise.resolve();
+  waiting = null;
   timer = null;
   declined = null;
+  cursors = new Map;
+  failed = new Set;
   constructor(file, state, reads, calendar, options = {}) {
     this.file = file;
     this.state = state;
@@ -5968,8 +5991,11 @@ class MeetingDecliner {
   start(planner) {
     setInterval(() => this.soon(0), EVERY_MS).unref?.();
     planner.onPersist((events) => {
-      if (events.some((event) => event.type === "gtask.kept" && ["decline", "time", "duration", "busy", "repeat"].some((field) => (field in event.patch))))
+      if (events.some((event) => event.type === "gtask.kept" && ["decline", "time", "duration", "busy", "repeat"].some((field) => (field in event.patch)))) {
+        this.cursors.clear();
+        this.failed.clear();
         this.soon(AFTER_CHANGE_MS);
+      }
     });
     this.soon(AFTER_CHANGE_MS);
   }
@@ -5978,12 +6004,23 @@ class MeetingDecliner {
       clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.run().then((pass) => pass.errors.length && this.options.log?.(`declining meetings: ${pass.errors.join("; ")}`), (error) => this.options.log?.(`declining meetings: ${error instanceof Error ? error.message : String(error)}`));
+      this.run().then((pass) => {
+        if (pass.errors.length)
+          this.options.log?.(`declining meetings: ${pass.errors.join("; ")}`);
+        for (const left of pass.more)
+          this.options.log?.(`declining meetings: ${left.account}'s meetings from ${left.from} on come in the next pass`);
+      }, (error) => this.options.log?.(`declining meetings: ${messageOf3(error)}`));
     }, ms);
     this.timer.unref?.();
   }
   run() {
-    const next = this.queue.then(() => this.runNow());
+    if (this.waiting)
+      return this.waiting;
+    const next = this.queue.then(() => {
+      this.waiting = null;
+      return this.runNow();
+    });
+    this.waiting = next;
     this.queue = next.catch(() => {});
     return next;
   }
@@ -5991,13 +6028,18 @@ class MeetingDecliner {
     const declined = await this.load();
     return [...declined.values()].filter((entry) => entry.account === account && entry.taskId === taskId).sort((a, b) => b.at.localeCompare(a.at));
   }
+  clock() {
+    return this.options.clock?.() ?? Date.now();
+  }
+  progress(account) {
+    return this.cursors.get(account)?.from ?? null;
+  }
   async runNow() {
+    const started = this.clock();
     const state = this.state();
     const kept = state.googleTasks;
     const wanted = Object.values(kept).filter((entry) => entry.time !== null && (entry.busy && entry.decline || entry.repeat?.template?.busy && entry.repeat.template.decline && !entry.repeat.next));
-    if (!wanted.length)
-      return { declined: [], errors: [] };
-    const accounts = new Set(await this.reads.accounts());
+    const accounts = new Set(wanted.length ? await this.reads.accounts() : []);
     const groups = new Map;
     for (const entry of wanted) {
       if (!accounts.has(entry.account))
@@ -6008,42 +6050,100 @@ ${entry.listId}`;
       group.ids.push(entry.taskId);
       groups.set(key, group);
     }
-    if (!groups.size)
-      return { declined: [], errors: [] };
+    if (!groups.size) {
+      this.cursors.clear();
+      return { declined: [], errors: [], more: [] };
+    }
     const now = this.options.now?.() ?? Date.now();
     const zone = state.settings.timezone ?? "UTC";
     const today = todayIn(zone, new Date(now));
     const read = await this.reads.byIds([...groups.values()]);
     const errors = [...read.errors];
-    const windows = taskWindows(read.items, this.state().googleTasks, today, addDays(today, DECLINE_AHEAD_DAYS), today, zone).filter((window) => window.decline && accounts.has(window.account) && Date.parse(window.end) > now).slice(0, WINDOWS_MAX);
+    const byAccount = new Map;
+    for (const window of taskWindows(read.items, this.state().googleTasks, today, addDays(today, DECLINE_AHEAD_DAYS), today, zone)) {
+      if (window.decline && accounts.has(window.account) && Date.parse(window.end) > now)
+        byAccount.set(window.account, [...byAccount.get(window.account) ?? [], window]);
+    }
+    for (const account of [...this.cursors.keys()])
+      if (!byAccount.has(account))
+        this.cursors.delete(account);
     const declined = await this.load();
     const out = [];
-    for (const window of windows) {
-      let events;
-      try {
-        events = await this.calendar.invitations(window.account, window.start, window.end);
-      } catch (error) {
-        errors.push(`${window.account}: ${error instanceof Error ? error.message : String(error)}`);
-        continue;
-      }
-      const before = new Set([...declined.values()].filter((entry) => entry.account === window.account).map((entry) => entry.eventId));
-      for (const invitation of invitationsToDecline(window, events, before)) {
-        try {
-          await this.calendar.respond(window.account, "primary", invitation.id, "declined", "this", window.decline.message);
-          const entry = { account: window.account, taskId: window.taskId, task: window.title, eventId: invitation.id, summary: invitation.summary, start: invitation.start, at: new Date(now).toISOString() };
-          declined.set(`${window.account}
-${invitation.id}`, entry);
-          out.push(entry);
-        } catch (error) {
-          errors.push(`"${invitation.summary}": ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
+    const more = [];
+    const budget = this.options.budgetMs ?? BUDGET_MS;
+    const order = [...byAccount.keys()];
+    for (const [index, account] of order.entries()) {
+      const deadline = started + (index + 1) * budget / order.length;
+      const left = await this.decline(account, byAccount.get(account), now, deadline, declined, out, errors);
+      if (left)
+        more.push({ account, from: left });
     }
     if (out.length) {
       await this.save(declined, now);
       this.options.onDeclined?.();
     }
-    return { declined: out, errors };
+    if (more.length)
+      this.soon(CARRY_ON_MS);
+    return { declined: out, errors, more };
+  }
+  async decline(account, windows, now, deadline, declined, out, errors) {
+    const range = { timeMin: new Date(Math.max(now, Date.parse(windows[0].start))).toISOString(), timeMax: windows.reduce((last, window) => window.end > last ? window.end : last, windows[0].end) };
+    const fresh = () => ({ ...range, from: range.timeMin });
+    let cursor = this.cursors.get(account) ?? fresh();
+    let pages = 0;
+    let tried = 0;
+    let again = Boolean(cursor.page);
+    for (;; ) {
+      if (pages > 0 && (pages >= (this.options.pagesMax ?? PAGES_MAX) || this.clock() > deadline)) {
+        this.cursors.set(account, cursor);
+        return cursor.from;
+      }
+      let page;
+      try {
+        page = await this.calendar.invitationPage(account, cursor.timeMin, cursor.timeMax, cursor.page);
+      } catch (error) {
+        if (again) {
+          again = false;
+          cursor = fresh();
+          continue;
+        }
+        this.cursors.delete(account);
+        errors.push(`${account}: ${messageOf3(error)}`);
+        return null;
+      }
+      pages++;
+      const before = new Set([...declined.values()].filter((entry) => entry.account === account).map((entry) => entry.eventId));
+      for (const { invitation, window } of meetingsToDecline(windows, page.items, before)) {
+        const key = `${account}
+${invitation.id}`;
+        if (this.failed.has(key))
+          continue;
+        if (tried > 0 && this.clock() > deadline) {
+          cursor = { ...cursor, from: invitation.start };
+          this.cursors.set(account, cursor);
+          return cursor.from;
+        }
+        tried++;
+        try {
+          await this.calendar.respond(account, "primary", invitation.id, "declined", "this", window.decline.message);
+          const entry = { account, taskId: window.taskId, task: window.title, eventId: invitation.id, summary: invitation.summary, start: invitation.start, at: new Date(now).toISOString() };
+          declined.set(key, entry);
+          out.push(entry);
+        } catch (error) {
+          this.failed.add(key);
+          errors.push(`"${invitation.summary}": ${messageOf3(error)}`);
+        }
+      }
+      if (!page.next) {
+        this.cursors.delete(account);
+        for (const key of [...this.failed])
+          if (key.startsWith(`${account}
+`))
+            this.failed.delete(key);
+        return null;
+      }
+      cursor = { ...cursor, page: page.next, from: page.items.at(-1)?.start ?? cursor.from };
+    }
   }
   async load() {
     if (this.declined)
@@ -6363,7 +6463,7 @@ var MODELS_WAIT_MS = 3000;
 var LISTED_WAIT_MS = 6000;
 var LISTED_POLL_MS = 300;
 var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-var messageOf3 = (error) => {
+var messageOf4 = (error) => {
   const failure = error;
   if (failure.code === "ENOENT")
     return "The OpenCode CLI (opencode) is not on the PATH where OpenChamber runs.";
@@ -6421,7 +6521,7 @@ class OpenCodeInfo {
       const details = running ? await this.api(`/api/model?${locationQuery(cwd ?? homedir())}`).then(parseModelDetails).catch(() => new Map) : new Map;
       this.models = { at: this.now(), list: ids.map((id) => ({ id, name: details.get(id)?.name ?? null, variants: details.get(id)?.variants ?? [] })), error: ids.length ? null : "OpenCode lists no models; connect a provider in OpenChamber." };
     } catch (error) {
-      this.models = { at: this.now(), list: this.models?.list ?? [], error: messageOf3(error) };
+      this.models = { at: this.now(), list: this.models?.list ?? [], error: messageOf4(error) };
     }
   }
   async liveAgents(directory) {
@@ -6609,7 +6709,7 @@ var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle
 var taskAccounts = async () => (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email);
 var taskNotifications2 = new TaskNotifications(join4(dirname5(dir), "task-notifications.json"), () => planner.state, {
   accounts: taskAccounts,
-  due: (accounts, date) => googleDueTasks.read(accounts, date, date, false),
+  due: (accounts, from, to) => googleDueTasks.read(accounts, from, to, false),
   byIds: (groups) => googleDueTasks.byIds(groups, false)
 });
 var series = new GoogleSeries(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleDueTasks.forget() });
@@ -6723,16 +6823,16 @@ var googleRoute = async (req, url) => {
     const [email, task] = [url.searchParams.get("account"), url.searchParams.get("task")];
     if (!isEmail2(email) || !isGoogleId(task))
       return { status: 400, body: { error: "account and task are required" } };
-    return ok({ declined: await decliner.declinedFor(email, task) });
+    return ok({ declined: await decliner.declinedFor(email, task), more: decliner.progress(email) });
   }
   if (path === "/google/drive/files" && req.method === "GET") {
-    const [email, text] = [url.searchParams.get("account"), url.searchParams.get("q") ?? ""];
-    if (!isEmail2(email) || text.length > 200)
+    const [email, text, pageToken] = [url.searchParams.get("account"), url.searchParams.get("q") ?? "", url.searchParams.get("pageToken") ?? undefined];
+    if (!isEmail2(email) || text.length > 200 || pageToken !== undefined && pageToken.length > 500)
       return { status: 400, body: { error: "account is required, and the search must be at most 200 characters" } };
     const account = (await google.status()).accounts.find((item) => item.email === email.toLowerCase());
     if (!account?.features.includes("drive"))
       return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
-    return ok({ files: await googleData.driveFiles(email, text) });
+    return ok(await googleData.driveFiles(email, text, pageToken));
   }
   if (path === "/google/tasks/linked" && req.method === "POST") {
     const body = await readJson(req);

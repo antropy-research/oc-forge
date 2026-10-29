@@ -5,11 +5,12 @@
 // is kept a few days beside the data (never in its synced repository), so a
 // reload or a restart does not give one again; one missed while no Planner
 // surface was open comes when one opens, the same day. One that comes while a
-// task with Do not disturb is on waits until that task ends.
+// task with Do not disturb is on waits until that task ends, past midnight too
+// (a task that runs to midnight holds the last ones of its day until then).
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { DateKey, PlannerState } from '../src/domain/types.ts';
-import { todayIn } from '../src/domain/dates.ts';
+import { addDays, instantAt, todayIn } from '../src/domain/dates.ts';
 import { deadlineGroups } from '../src/domain/gtaskKept.ts';
 import { dueNotifications, nextNotificationAt, taskNotifications, type TaskNotification } from '../src/domain/gtaskNotify.ts';
 import { quietNotifications, taskWindows } from '../src/domain/gtaskAdvanced.ts';
@@ -21,8 +22,8 @@ const KEEP_MS = 3 * 24 * 60 * 60_000;
 export interface NotificationReads {
   /** The accounts that have Google Tasks. */
   accounts(): Promise<string[]>;
-  /** Tasks due on `date` in those accounts, completed ones too. */
-  due(accounts: readonly string[], date: DateKey): Promise<{ items: GoogleTaskItem[]; errors: string[] }>;
+  /** Tasks due between two days (inclusive) in those accounts, completed ones too. */
+  due(accounts: readonly string[], from: DateKey, to: DateKey): Promise<{ items: GoogleTaskItem[]; errors: string[] }>;
   /** Tasks by id, for the deadlines kept on `date`. */
   byIds(groups: readonly { account: string; listId: string; ids: string[] }[]): Promise<{ items: GoogleTaskItem[]; errors: string[] }>;
 }
@@ -63,10 +64,15 @@ export class TaskNotifications {
     if (!accounts.length) return none;
     const zone = state.settings.timezone ?? 'UTC';
     const today = todayIn(zone, new Date(this.now()));
-    const [due, deadlines] = await Promise.all([this.reads.due(accounts, today), this.reads.byIds(deadlineGroups(state.googleTasks, accounts, today, today))]);
+    // Yesterday's tasks too, for the ones Do not disturb held until midnight: they come today.
+    const yesterday = addDays(today, -1);
+    const [due, deadlines] = await Promise.all([this.reads.due(accounts, yesterday, today), this.reads.byIds(deadlineGroups(state.googleTasks, accounts, yesterday, today))]);
     const kept = this.state().googleTasks;
     // Do not disturb: what comes during a task with it on waits until the task ends.
-    const all = quietNotifications(taskNotifications(due.items, deadlines.items, kept, today, zone), taskWindows(due.items, kept, today, today, today, zone));
+    const windows = taskWindows(due.items, kept, yesterday, today, today, zone);
+    const midnight = Date.parse(instantAt(today, 0, zone));
+    const held = quietNotifications(taskNotifications(due.items, deadlines.items, kept, yesterday, zone), windows).filter((item) => item.held && Date.parse(item.at) >= midnight);
+    const all = [...held, ...quietNotifications(taskNotifications(due.items, deadlines.items, kept, today, zone), windows)].sort((a, b) => a.at.localeCompare(b.at) || a.key.localeCompare(b.key));
     const given = await this.load();
     const now = this.now();
     const keys = new Set(given.keys());

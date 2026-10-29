@@ -7,7 +7,7 @@
 // ends) and automatically declining the meetings it overlaps while it is Busy.
 import type { DateKey, GoogleTaskKept, PlannerState, Settings, TaskAttachment, TaskDecline } from './types.ts';
 import { googleTaskKey } from './types.ts';
-import { instantAt } from './dates.ts';
+import { clockLabel, instantAt, monthDay, zonedDateMinutes } from './dates.ts';
 import type { GoogleResponse, GoogleTaskItem } from './google.ts';
 import { TASK_MINUTES, keptFor, upcomingTasks, upcomingValues } from './gtaskKept.ts';
 import type { TaskNotification } from './gtaskNotify.ts';
@@ -243,6 +243,26 @@ export const invitationsToDecline = (window: TaskWindow, events: readonly Invita
     if (!(Date.parse(event.start) < end && Date.parse(event.end) > start)) return false;
     return decline.mode === 'all' || Date.parse(event.created) > since;
   });
+};
+
+/**
+ * The invitations among `events` (read once for all of an account's windows) that its windows decline: each once,
+ * for the earliest window that declines it (its task's message goes with it), in the order the events come.
+ */
+export const meetingsToDecline = (windows: readonly TaskWindow[], events: readonly Invitation[], declined: ReadonlySet<string> = new Set()): { invitation: Invitation; window: TaskWindow }[] =>
+  events.flatMap((invitation) => {
+    const window = windows.find((one) => invitationsToDecline(one, [invitation], declined).length > 0);
+    return window ? [{ invitation, window }] : [];
+  });
+
+/**
+ * What the Planner says while declining carries on after a pass stopped at one of its bounds (`from`: where the
+ * meetings still to be looked at start): "The Planner is still going through your meetings from November 5, 10 AM
+ * on: it declines the rest in a moment".
+ */
+export const declineCarriesOn = (from: string, zone: string): string => {
+  const { date, minutes } = zonedDateMinutes(from, zone);
+  return `The Planner is still going through your meetings from ${monthDay(date)}, ${clockLabel(minutes)} on: it declines the rest in a moment`;
 };
 
 /** A meeting the Planner declined for a task. */

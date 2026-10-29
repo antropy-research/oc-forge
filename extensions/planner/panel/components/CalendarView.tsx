@@ -21,6 +21,7 @@ import { YearView } from './calendar/YearView.tsx';
 import { CalendarOverlays } from './calendar/Overlays.tsx';
 import { Icon } from './calendar/Icon.tsx';
 import { isTaskEvent } from './calendar/items.ts';
+import { PrintPreview } from './calendar/PrintPreview.tsx';
 
 /** Today's tasks that have no working session today yet. */
 export const UnscheduledToday = () => {
@@ -102,6 +103,32 @@ const ViewMenu = ({ mode }: { mode: CalendarMode }) => {
   );
 };
 
+/** Google Calendar's Settings menu (⚙): Print, which opens the print preview of the range shown. */
+const SettingsMenu = ({ onPrint }: { onPrint: () => void }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => !ref.current?.contains(event.target as Node) && setOpen(false);
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  return (
+    <div class="menu-anchor" ref={ref}>
+      <button class="icon-button gcal-settings" aria-haspopup="menu" aria-expanded={open} aria-label="Settings menu" title="Settings menu" onClick={() => setOpen(!open)}>
+        <Icon name="settings" size={20} />
+      </button>
+      {open && (
+        <div class="menu gcal-settings-menu" role="menu" aria-label="Settings menu">
+          <button role="menuitem" aria-keyshortcuts="Control+P Meta+P" onClick={() => { setOpen(false); onPrint(); }}>
+            <Icon name="print" size={18} /> Print
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
 /**
  * The calendar as Google Calendar lays it out: Create, the mini month and the
  * calendars in a rail; Today, the arrows, the range and the view (Day, Week,
@@ -142,11 +169,20 @@ export const CalendarView = () => {
     if (search && search.shown === null) searchBox.current?.focus();
   }, [search !== null]);
   const leaveSearch = () => setSearch(null);
+  // Settings → Print (or Ctrl/⌘+P): the print preview of the range shown.
+  const [printing, setPrinting] = useState(false);
 
   // Google Calendar's keys: D, W, M (or 1, 2, 3), 5 for Schedule, J and K for next and previous.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      // Ctrl/⌘+P in the calendar (a field too): its print preview, as Google Calendar opens it.
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'p') {
+        if (event.defaultPrevented || calendarUi.get().prefs.page !== 'calendar' || !(target === document.body || target?.closest?.('.gcal-view'))) return;
+        event.preventDefault();
+        setPrinting(true);
+        return;
+      }
       if (event.metaKey || event.ctrlKey || event.altKey || (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable))) return;
       const ui = calendarUi.get();
       if (ui.popover || ui.draft || ui.editor || ui.question || ui.prefs.page !== 'calendar' || document.querySelector('.modal-backdrop')) return;
@@ -209,6 +245,7 @@ export const CalendarView = () => {
         <div class="gcal-actions">
           {!tasksPage && !search && <button class="icon-button gcal-search-button" aria-label="Search events" title="Search (/)" onClick={() => setSearch({ text: '', shown: null })}><Icon name="search" size={20} /></button>}
           {!tasksPage && !search && <ViewMenu mode={mode} />}
+          {!tasksPage && <SettingsMenu onPrint={() => setPrinting(true)} />}
           {tasksAccounts > 0 && (
             <div class="segmented gcal-switch" role="radiogroup" aria-label="Calendar or Tasks">
               <button role="radio" aria-checked={!tasksPage} aria-label="Calendar" title="Calendar" onClick={() => calendarUi.prefs({ page: 'calendar' })}><Icon name="calendar" size={20} /></button>
@@ -254,6 +291,7 @@ export const CalendarView = () => {
         </div>
       )}
       <CalendarOverlays onDay={goDay} />
+      {printing && !tasksPage && <PrintPreview mode={mode} anchor={anchor} days={days} onClose={() => setPrinting(false)} />}
     </section>
   );
 };

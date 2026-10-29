@@ -20,7 +20,7 @@ import { shortDay, weekdayShort } from '../../src/domain/gcalendar.ts';
 import { describeRecurrence } from '../../src/domain/rrule.ts';
 import { taskForGoogleTask, type GoogleTaskItem, type GoogleTaskList } from '../../src/domain/google.ts';
 import { KEPT_HINT, TASKS_API_REFERENCE, VISIBILITY_LABELS, keptFor, keptTimeLabel, starredKept, taskRepeatPresets, visibilityOf } from '../../src/domain/gtaskKept.ts';
-import { byTitle, completedItems, dateGroups, deadlineSections, dropTarget, indentTarget, moveBottomTarget, moveDownTarget, moveTopTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
+import { byTitle, completedItems, dateGroups, deadlineSections, dropTarget, dueChip, indentTarget, moveBottomTarget, moveDownTarget, moveTopTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
 import { DELETE_CHOICES, completeWithUndo, undoAction, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, advancedChanged, attachmentsChanged, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
@@ -28,6 +28,10 @@ import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
 import { CustomRepeat } from './calendar/EventEditor.tsx';
+import { TaskListSheet } from './PrintSheet.tsx';
+import { forgeNow, useForge } from '../lib/forge.ts';
+import { PRINT_NEEDS_HOST, canPrint, clearPrintable, printNow, printShown, setPrintable } from '../lib/print.ts';
+import { printedList, type PrintedList } from '../../src/domain/gtaskPrint.ts';
 import { endChoices, startChoices } from './calendar/form.ts';
 
 /** A task row dragged within or between lists: account, list and task ids. */
@@ -40,14 +44,7 @@ const REFRESH_MS = 2 * 60_000;
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** "Today", "Tomorrow", "Wed, Oct 28", as Google Tasks labels a date. */
-export const dueChip = (due: DateKey, today: DateKey): string => {
-  if (due === today) return 'Today';
-  if (due === addDays(today, 1)) return 'Tomorrow';
-  if (due === addDays(today, -1)) return 'Yesterday';
-  const label = `${weekdayShort(due).slice(0, 1)}${weekdayShort(due).slice(1).toLowerCase()}, ${shortDay(due)}`;
-  return due.slice(0, 4) === today.slice(0, 4) ? label : `${label}, ${due.slice(0, 4)}`;
-};
+export { dueChip };
 
 /** What the Planner keeps for Google tasks, and why it is kept here: Google's reference, opened in the browser. */
 export const KeptHint = () => {
@@ -118,7 +115,8 @@ export const COLOR_NOTE = "Color: the task's on the Planner's calendar, over its
 export const DND_NOTE =
   "Mutes the Planner's own task notifications during this task: they come when it ends. Google Chat, other apps and OpenChamber's own notifications aren't muted: the Planner can't reach them";
 /** What "Automatically decline meetings" does here. */
-export const DECLINE_NOTE = 'The Planner answers the invitations on your calendar that overlap this task "Declined", with this message to the organizer, as Google Calendar does';
+export const DECLINE_NOTE =
+  'The Planner answers the invitations on your calendar that overlap this task "Declined", with this message to the organizer, as Google Calendar does: its times in the next two weeks, and a later time once it comes within them';
 /** Google Calendar's own words for declining when a task is Free. */
 export const DECLINE_FREE = 'Unavailable for "Free" time entries';
 /** Why a personal account's task has no Do not disturb or declining. */
@@ -601,12 +599,14 @@ export const TASK_SHORTCUTS: readonly { keys: string; action: string; note?: str
   { keys: 'Home / End (Opt + Up / Down)', action: 'Select first / Select last' },
   { keys: 'Ctrl/⌘ + /', action: 'Show the list of shortcuts' },
   { keys: 'Ctrl/⌘ + z', action: 'Undo (a deletion)' },
-  { keys: 'Ctrl/⌘ + p', action: 'Print a task list', note: "The browser prints the page as shown: an extension's frame in OpenChamber can't open the print dialog itself" },
+  { keys: 'Ctrl/⌘ + p', action: 'Print the list: the one with the focus, else the one shown (List options → Print list)' },
   { keys: '!', action: 'Report spam', note: "Shared tasks are reported in the Doc or Chat space they come from: Google's Tasks API has no spam report" },
 ];
 
-/** The list of Google Tasks' shortcuts (Ctrl/⌘ + /). */
-const ShortcutsDialog = ({ onClose }: { onClose: () => void }) => (
+/** The list of Google Tasks' shortcuts (Ctrl/⌘ + /); Print says why it is unavailable where the host can't print. */
+const ShortcutsDialog = ({ onClose }: { onClose: () => void }) => {
+  const printing = canPrint(useForge());
+  return (
   <div class="modal-backdrop is-top" onMouseDown={(event) => event.target === event.currentTarget && onClose()} onKeyDown={(event) => event.key === 'Escape' && onClose()}>
     <div class="modal gt-shortcuts" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
       <div class="gt-editor-bar">
@@ -617,20 +617,37 @@ const ShortcutsDialog = ({ onClose }: { onClose: () => void }) => (
       </div>
       <table class="gt-shortcut-table">
         <tbody>
-          {TASK_SHORTCUTS.map((shortcut) => (
-            <tr key={shortcut.keys} class={shortcut.note ? 'is-unavailable' : ''}>
-              <td><kbd>{shortcut.keys}</kbd></td>
-              <td>
-                {shortcut.action}
-                {shortcut.note && <div class="gt-form-note">{shortcut.note}</div>}
-              </td>
-            </tr>
-          ))}
+          {TASK_SHORTCUTS.map((shortcut) => {
+            const note = shortcut.note ?? (shortcut.keys === 'Ctrl/⌘ + p' && !printing ? PRINT_NEEDS_HOST : undefined);
+            return (
+              <tr key={shortcut.keys} class={note ? 'is-unavailable' : ''}>
+                <td><kbd>{shortcut.keys}</kbd></td>
+                <td>
+                  {shortcut.action}
+                  {note && <div class="gt-form-note">{note}</div>}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
   </div>
-);
+  );
+};
+
+/**
+ * Keeps what `sheet` prints in the print sheet while `on` (what Print list and Ctrl/⌘+P would print now), so print
+ * media always finds the list shown; nothing once the view is closed.
+ */
+const usePrintable = (on: boolean, sheet: () => PrintedList) => {
+  const owner = useRef({}).current;
+  const signature = on ? JSON.stringify(sheet()) : '';
+  useEffect(() => {
+    if (on) setPrintable(owner, <TaskListSheet sheet={JSON.parse(signature) as PrintedList} />);
+  }, [on, signature]);
+  useEffect(() => () => clearPrintable(owner), []);
+};
 
 /** Delete, with Google Tasks' "Undo" in the snackbar (and on Ctrl/⌘+Z). */
 const deleteWithUndo = async (google: ReturnType<typeof usePlanner>['google'], notify: (message: string) => void, item: GoogleTaskItem, scope: DeleteScope) => {
@@ -723,8 +740,9 @@ const SORTS: readonly { id: SortBy; label: string }[] = [
 ];
 
 /** One list, as a Google Tasks column: "Add a task", its tasks and subtasks, "Completed". */
-const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: GoogleTaskList[]; several: boolean }) => {
+const ListColumn = ({ list, lists, several, printTarget, onFocus }: { list: GoogleTaskList; lists: GoogleTaskList[]; several: boolean; printTarget: boolean; onFocus: () => void }) => {
   const { google, client } = usePlanner();
+  const forge = useForge();
   const gv = useGoogle();
   const view = useView();
   const { setUi } = useUi();
@@ -748,6 +766,15 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
   /** Google Tasks' "Sort by": the list's own order, by date, by deadline, starred recently or by title (where dragging does not reorder). */
   const [sort, setSort] = useState<SortBy>('mine');
   const [clearing, setClearing] = useState(false);
+  /**
+   * What Print list prints of this list, as it shows now: its tasks in its order (as sorted), each subtask under its
+   * task, and its completed ones when Completed is open, as Google Tasks prints them.
+   */
+  const sheet = () =>
+    printedList({ title: list.title, account: several ? list.account : null, items, kept: (item) => keptFor(view.state, item), sort, today: view.today, zone: view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, showCompleted: showDone, complete: board?.complete ?? true });
+  usePrintable(printTarget, sheet);
+  /** List options → Print list, and Ctrl/⌘+P in the list: the browser's print dialog, for this list alone. */
+  const printList = () => (canPrint(forge) ? printNow(<TaskListSheet sheet={sheet()} />) : client.notify(PRINT_NEEDS_HOST));
   const listRef = useRef<HTMLUListElement>(null);
   const sectionRef = useRef<HTMLElement>(null);
   const listMenuRef = useOutside(listMenu, () => {
@@ -769,6 +796,11 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
    * unstar; . and v open its menu (more actions, move to list). Enter edits it; Enter in its title adds one below.
    */
   const onKey = (event: KeyboardEvent) => {
+    // Ctrl/⌘+P anywhere in the list, a field too: Print list, as Google Tasks binds it.
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'p') {
+      event.preventDefault();
+      return printList();
+    }
     const target = event.target as HTMLElement;
     if (target.closest('.gt-form, .menu, .modal') || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
     const rowEl = target.closest<HTMLElement>('li[data-task]');
@@ -961,6 +993,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
       aria-label={list.title}
       ref={sectionRef}
       onKeyDown={onKey}
+      onFocusIn={onFocus}
       // Space completed the selected task on its way down: on its way up it must not click (edit) it too.
       onKeyUp={(event) => {
         const target = event.target as HTMLElement;
@@ -1038,6 +1071,20 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
               ) : (
                 <button role="menuitem" class="danger" disabled={!done.length} onClick={() => setClearing(true)}>Delete all completed tasks</button>
               )}
+              <button
+                role="menuitem"
+                disabled={!canPrint(forge)}
+                aria-describedby={canPrint(forge) ? undefined : `print-note-${encodeURIComponent(key)}`}
+                aria-keyshortcuts="Control+P Meta+P"
+                title={canPrint(forge) ? 'Ctrl/⌘ + P' : PRINT_NEEDS_HOST}
+                onClick={() => {
+                  setListMenu(false);
+                  printList();
+                }}
+              >
+                Print list
+              </button>
+              {!canPrint(forge) && <div class="menu-note" id={`print-note-${encodeURIComponent(key)}`}>{PRINT_NEEDS_HOST}</div>}
               <button role="menuitem" onClick={() => { setListMenu(false); void google.loadBoard(list.account, list.id); }}>Refresh</button>
             </div>
           )}
@@ -1210,6 +1257,10 @@ const StarredColumn = ({ lists }: { lists: GoogleTaskList[] }) => {
   // Google Tasks' Starred sorts by "Recently starred" or by "Date" (its date, then the ones without one).
   const rows = order === 'date' ? [...found].sort((a, b) => (a.item.due ?? '9999').localeCompare(b.item.due ?? '9999') || (a.kept.time ?? -1) - (b.kept.time ?? -1)) : found;
   const loading = keys.some((key) => gv.board[key]?.loading);
+  // Ctrl/⌘+P here prints Starred as it shows, each task with its list.
+  usePrintable(true, () =>
+    printedList({ title: 'Starred', account: null, items: rows.map((row) => row.item), kept: (item) => keptFor(view.state, item), sort: 'shown', today: view.today, zone: view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, showCompleted: false, complete: true, listOf: (item) => rows.find((row) => row.item.id === item.id)?.list ?? '' }),
+  );
   const target = lists.find((list) => listKey(list.account, list.id) === addTo) ?? lists[0];
   return (
     <section class="gt-list" aria-label="Starred">
@@ -1307,6 +1358,8 @@ export const TasksView = () => {
   const [creating, setCreating] = useState(false);
   const [shortcuts, setShortcuts] = useState(false);
   const [draggedList, setDraggedList] = useState<string | null>(null);
+  /** The list the focus was last in: Print list's target from the keyboard, among several. */
+  const [focusedList, setFocusedList] = useState<string | null>(null);
   // The lists in the order the user put them (dragged, or Alt+Up/Down), as Google Tasks keeps it; the Planner's.
   const lists = orderedLists(gv.lists, view.state.settings.googleTaskListOrder);
   const reorder = (from: number, to: number, focus = false) => {
@@ -1326,6 +1379,13 @@ export const TasksView = () => {
       if (event.key === '/') {
         event.preventDefault();
         setShortcuts(true);
+        return;
+      }
+      if (event.key.toLowerCase() === 'p' && !event.shiftKey) {
+        // Ctrl/⌘+P outside a list (a list prints itself): the list shown, the one the focus was last in, or Starred.
+        event.preventDefault();
+        if (!canPrint(forgeNow())) client.notify(PRINT_NEEDS_HOST);
+        else printShown();
         return;
       }
       if (event.key.toLowerCase() === 'z' && !event.shiftKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) && !target.isContentEditable && google.canUndo()) {
@@ -1367,6 +1427,8 @@ export const TasksView = () => {
   const several = accounts.length > 1;
   const shown = selected === 'all' ? lists.filter((list) => !hidden.has(listKey(list.account, list.id))) : lists.filter((list) => listKey(list.account, list.id) === selected);
   const openCount = (list: GoogleTaskList) => gv.board[listKey(list.account, list.id)]?.items.filter((item) => !item.completed).length;
+  // What prints (print media, Print list from the keyboard): the list with the focus, else the first shown.
+  const printKey = shown.some((list) => listKey(list.account, list.id) === focusedList) ? focusedList : shown[0] ? listKey(shown[0].account, shown[0].id) : null;
   const create = (title: string) => {
     const owner = account ?? accounts[0]!.email;
     setCreating(false);
@@ -1469,7 +1531,11 @@ export const TasksView = () => {
         {gv.tasksError && <p class="feed-errors" role="alert">{gv.tasksError}</p>}
       </nav>
       <div class="tasks-board">
-        {selected === 'starred' ? <StarredColumn lists={lists} /> : shown.map((list) => <ListColumn key={listKey(list.account, list.id)} list={list} lists={lists} several={several} />)}
+        {selected === 'starred' ? (
+          <StarredColumn lists={lists} />
+        ) : (
+          shown.map((list) => <ListColumn key={listKey(list.account, list.id)} list={list} lists={lists} several={several} printTarget={printKey === listKey(list.account, list.id)} onFocus={() => setFocusedList(listKey(list.account, list.id))} />)
+        )}
         {selected !== 'starred' && !shown.length && <p class="hint tasks-hint">{gv.lists.length ? 'Tick a list to show it here.' : 'No task lists yet: create one.'}</p>}
       </div>
     </div>

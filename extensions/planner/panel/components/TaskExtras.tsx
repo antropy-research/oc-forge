@@ -117,18 +117,22 @@ const DrivePicker = ({ account, have, onClose, onInsert }: { account: string; ha
   const allowed = google.allows(account, 'drive');
   const [text, setText] = useState('');
   const [files, setFiles] = useState<DriveFile[] | null>(null);
+  /** Drive's next page of them ("More files"), as its picker scrolls on to more. */
+  const [next, setNext] = useState<string | null>(null);
   const [chosen, setChosen] = useState<DriveFile[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!allowed) return;
     let live = true;
+    setNext(null);
     const timer = setTimeout(() => {
       google
         .searchDrive(account, text)
         .then((found) => {
           if (!live) return;
-          setFiles(found);
+          setFiles(found.files);
+          setNext(found.next);
           setProblem(null);
         })
         .catch((error) => live && setProblem(messageOf(error)));
@@ -141,6 +145,14 @@ const DrivePicker = ({ account, have, onClose, onInsert }: { account: string; ha
   useEffect(() => {
     if (allowed) searchRef.current?.focus();
   }, [allowed]);
+  const more = () =>
+    google
+      .searchDrive(account, text, next)
+      .then((found) => {
+        setFiles([...(files ?? []), ...found.files.filter((file) => !files?.some((other) => other.id === file.id))]);
+        setNext(found.next);
+      })
+      .catch((error) => setProblem(messageOf(error)));
   const room = ATTACHMENTS_MAX - have.length;
   const signingIn = gv.signIn && gv.signIn.result.status !== 'connected';
   return (
@@ -204,6 +216,7 @@ const DrivePicker = ({ account, have, onClose, onInsert }: { account: string; ha
                 })}
               </ul>
             )}
+            {files !== null && next && <button class="link drive-more" onClick={() => void more()}>More files</button>}
             <div class="row drive-actions">
               <span class="muted">{chosen.length > room ? `A task has at most ${ATTACHMENTS_MAX} attachments: ${Math.max(0, room)} more fit` : `${chosen.length} selected`}</span>
               <span class="nav-spacer" />

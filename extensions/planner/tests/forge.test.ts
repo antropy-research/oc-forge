@@ -97,3 +97,27 @@ describe("Google Tasks' shortcuts in the Tasks view, and OpenChamber's history k
     expect(plannerKeeps(inTasks('z', { ctrl: true }, 'nav'), calendar)).toBe(true);
   });
 });
+
+describe('Ctrl/⌘+P: printing where Google binds it, OpenChamber\'s command palette elsewhere', () => {
+  // Focus in the Tasks view (inside the calendar's page), in the calendar, or elsewhere in the Planner.
+  const where = (place: 'tasks' | 'calendar' | 'elsewhere', tag = 'BUTTON') => ({
+    tagName: tag,
+    isContentEditable: false,
+    closest: (selector: string) => (selector.split(',').some((one) => (one.trim() === '.tasks-app' && place === 'tasks') || (one.trim() === '.gcal-view' && place !== 'elsewhere')) ? {} : null),
+  });
+  const printKey = (place: 'tasks' | 'calendar' | 'elsewhere', mods: { ctrl?: boolean; meta?: boolean; alt?: boolean; shift?: boolean }, tag?: string) => ({ ...press('p', mods), target: where(place, tag) }) as unknown as KeyboardEvent;
+  const calendarPage = { surface: 'page', page: 'calendar', mac: false };
+  test('kept in the Tasks view (Print list) and in the calendar (its print preview), from a field too', () => {
+    expect(plannerKeeps(printKey('tasks', { ctrl: true }), calendarPage)).toBe(true);
+    expect(plannerKeeps(printKey('tasks', { meta: true }), { ...calendarPage, mac: true })).toBe(true);
+    expect(plannerKeeps(printKey('tasks', { ctrl: true }, 'INPUT'), calendarPage)).toBe(true);
+    expect(plannerKeeps(printKey('calendar', { ctrl: true }), calendarPage)).toBe(true);
+    expect(plannerKeeps(printKey('calendar', { ctrl: true }, 'INPUT'), calendarPage)).toBe(true);
+  });
+  test("elsewhere, and with Shift or Alt, it is OpenChamber's", () => {
+    expect(plannerKeeps(printKey('elsewhere', { ctrl: true }), linux)).toBe(false);
+    expect(plannerKeeps(printKey('elsewhere', { meta: true }), mac)).toBe(false);
+    expect(plannerKeeps(printKey('tasks', { ctrl: true, shift: true }), calendarPage)).toBe(false);
+    expect(plannerKeeps(printKey('calendar', { ctrl: true, alt: true }), calendarPage)).toBe(false);
+  });
+});

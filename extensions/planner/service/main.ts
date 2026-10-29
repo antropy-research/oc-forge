@@ -56,7 +56,7 @@ const taskAccounts = async (): Promise<string[]> => (await google.status()).acco
 // The task notifications given so far stay on this machine, beside the data, never in its synced repository.
 const taskNotifications = new TaskNotifications(join(dirname(dir), 'task-notifications.json'), () => planner.state, {
   accounts: taskAccounts,
-  due: (accounts, date) => googleDueTasks.read(accounts, date, date, false),
+  due: (accounts, from, to) => googleDueTasks.read(accounts, from, to, false),
   byIds: (groups) => googleDueTasks.byIds(groups, false),
 });
 // Repeating Google tasks: one change of a series at a time, whichever window asks.
@@ -188,21 +188,23 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     return ok(await taskNotifications.take());
   }
   if (path === '/google/tasks/decline' && req.method === 'POST') {
-    // "Automatically decline meetings" now, after a task's change: the meetings it declined.
+    // "Automatically decline meetings" now, after a task's change: the meetings it declined, and where it carries on (`more`).
     return ok(await decliner.run());
   }
   if (path === '/google/tasks/declined' && req.method === 'GET') {
     const [email, task] = [url.searchParams.get('account'), url.searchParams.get('task')];
     if (!isEmail(email) || !isGoogleId(task)) return { status: 400, body: { error: 'account and task are required' } };
-    return ok({ declined: await decliner.declinedFor(email, task) });
+    // `more`: where the account's meetings are still to be looked at, while declining carries on after a bound.
+    return ok({ declined: await decliner.declinedFor(email, task), more: decliner.progress(email) });
   }
   if (path === '/google/drive/files' && req.method === 'GET') {
     // Drive's files by name, to attach to a task, as Google Calendar's "Add a Google Drive attachment" finds them.
-    const [email, text] = [url.searchParams.get('account'), url.searchParams.get('q') ?? ''];
-    if (!isEmail(email) || text.length > 200) return { status: 400, body: { error: 'account is required, and the search must be at most 200 characters' } };
+    const [email, text, pageToken] = [url.searchParams.get('account'), url.searchParams.get('q') ?? '', url.searchParams.get('pageToken') ?? undefined];
+    if (!isEmail(email) || text.length > 200 || (pageToken !== undefined && pageToken.length > 500)) return { status: 400, body: { error: 'account is required, and the search must be at most 200 characters' } };
     const account = (await google.status()).accounts.find((item) => item.email === email.toLowerCase());
     if (!account?.features.includes('drive')) return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
-    return ok({ files: await googleData.driveFiles(email, text) });
+    // A page of them, and the next page's token ("More files").
+    return ok(await googleData.driveFiles(email, text, pageToken));
   }
   if (path === '/google/tasks/linked' && req.method === 'POST') {
     // The tasks behind linked Planner tasks, to bring those up to date.
