@@ -2,7 +2,19 @@
 // list's order with their subtasks one level in, a "Completed" section, and
 // where a task goes (Google's parent and previous sibling) when it is dragged,
 // indented or outdented.
+import type { DateKey } from './types.ts';
+import { addDays } from './dates.ts';
+import { shortDay, weekdayShort } from './gcalendar.ts';
 import type { GoogleTaskItem } from './google.ts';
+
+/** "Today", "Tomorrow", "Wed, Oct 28", as Google Tasks labels a date. */
+export const dueChip = (due: DateKey, today: DateKey): string => {
+  if (due === today) return 'Today';
+  if (due === addDays(today, 1)) return 'Tomorrow';
+  if (due === addDays(today, -1)) return 'Yesterday';
+  const label = `${weekdayShort(due).slice(0, 1)}${weekdayShort(due).slice(1).toLowerCase()}, ${shortDay(due)}`;
+  return due.slice(0, 4) === today.slice(0, 4) ? label : `${label}, ${due.slice(0, 4)}`;
+};
 
 export interface TaskRow {
   item: GoogleTaskItem;

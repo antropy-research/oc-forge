@@ -16,6 +16,9 @@ export const forgeClient = (): Promise<OcForgeClient | null> =>
     .then((client) => (resolved = client))
     .catch(() => null));
 
+/** The client, if it has answered already (a key handler's view of it); null before, and on a stock OpenChamber. */
+export const forgeNow = (): OcForgeClient | null => resolved;
+
 /** The client as soon as it has answered (re-renders then), else null. */
 export const useForge = (): OcForgeClient | null => {
   const [forge, setForge] = useState<OcForgeClient | null>(resolved);
@@ -121,6 +124,9 @@ const editsText = (event: KeyboardEvent, mac: boolean): boolean => {
  * command palette (Cmd/Ctrl+K), the Linear page's Cmd/Ctrl+B (list or
  * board), and in the Tasks view Google Tasks' own shortcuts: its list and
  * Undo anywhere there, the ones on a task while a task has the focus.
+ * Cmd/Ctrl+P prints where Google binds it, in the Tasks view (Print list) and
+ * the calendar (its print preview); elsewhere it is OpenChamber's command
+ * palette.
  */
 export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; page: string; mac: boolean }): boolean => {
   const target = event.target as HTMLElement | null;
@@ -129,6 +135,8 @@ export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; pag
   const key = event.key.toLowerCase();
   if (where.surface === 'page' && mod && key === 'k') return true;
   if (where.surface === 'page' && where.page === 'linear' && mod && key === 'b') return true;
+  // Print: the Tasks view's list, or the calendar's print preview, as Google Tasks and Google Calendar bind it.
+  if (mod && key === 'p' && !event.altKey && !event.shiftKey && target?.closest?.('.tasks-app, .gcal-view')) return true;
   if (mod && target?.closest?.('.tasks-app')) {
     // The Tasks view's shortcut list (/) and Undo (z), anywhere in it.
     if (key === '/' || key === 'z') return true;

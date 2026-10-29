@@ -1643,3 +1643,99 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gt-shortcut-table kbd { font: inherit; font-size: 12px; background: var(--pl-soft); border-radius: 4px; padding: 1px 6px; }
 .gt-shortcut-table tr.is-unavailable td { color: var(--oc-muted); }
 .mail-to-tasks { padding: 0 4px; font-size: 12px; white-space: nowrap; }
+
+/* Printing (panel/lib/print.ts): the print sheet alone, beside the app, in OpenChamber's light colors
+   (openchamber-light: ink #44443d, muted #696960, lines #e5e1de, accent #b35017, danger #b7493f) on white paper,
+   with nothing clipped by the app's scrolling and pages breaking between tasks, days and weeks. */
+.print-root { display: none; }
+@media print {
+  html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; background: #fff !important; }
+  body > :not(.print-root) { display: none !important; }
+  .print-root { display: block; }
+}
+.print-sheet { --p-ink: #44443d; --p-muted: #696960; --p-line: #e5e1de; --p-accent: #b35017; --p-danger: #b7493f; color: var(--p-ink); background: #fff; font: 10.5pt/1.4 var(--oc-font, system-ui, sans-serif); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.print-sheet h1 { font-size: 16pt; margin: 0 0 2pt; font-weight: 600; }
+.print-sheet h2 { font-size: 11pt; margin: 12pt 0 4pt; font-weight: 600; }
+.print-meta { color: var(--p-muted); font-size: 9pt; margin: 0; }
+.print-head { margin-bottom: 8pt; padding-bottom: 6pt; border-bottom: 1px solid var(--p-line); }
+.print-list { list-style: none; margin: 0; padding: 0; }
+.print-task { display: flex; gap: 8pt; padding: 5pt 0; border-bottom: 1px solid var(--p-line); break-inside: avoid; page-break-inside: avoid; }
+.print-task.depth-1 { padding-left: 22pt; }
+.print-check { flex: none; width: 10pt; height: 10pt; margin-top: 2pt; border: 1.2px solid var(--p-muted); border-radius: 50%; font-size: 8pt; line-height: 10pt; text-align: center; }
+.print-task.is-done .print-title { text-decoration: line-through; color: var(--p-muted); }
+.print-body { min-width: 0; flex: 1; }
+.print-title { font-weight: 500; overflow-wrap: anywhere; }
+.print-star { color: var(--p-accent); }
+.print-chips { display: flex; flex-wrap: wrap; gap: 2pt 10pt; color: var(--p-muted); font-size: 9pt; }
+.print-chips .is-overdue { color: var(--p-danger); }
+.print-notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 9.5pt; margin-top: 2pt; }
+
+/* The calendar's printout: Day and Week grids, Month tables, the Schedule, at the chosen font size. */
+.print-calendar { font-size: calc(9pt * var(--print-scale, 1)); }
+.print-calendar h1 { font-size: calc(13pt * var(--print-scale, 1)); }
+.print-page { break-after: page; page-break-after: always; }
+.print-page:last-child { break-after: auto; page-break-after: auto; }
+.print-page-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12pt; margin-bottom: 6pt; }
+.pc-item { overflow: hidden; border-radius: 3px; padding: 0 3pt; margin: 0 0 1.5pt; border: 1px solid var(--c); background: #fff; color: var(--p-ink); overflow-wrap: anywhere; break-inside: avoid; }
+.pc-full .pc-item { background: var(--c); color: #fff; }
+.pc-full .pc-item.is-unanswered, .pc-full .pc-item.is-declined { background: #fff; color: var(--p-ink); }
+.pc-outline .pc-item { border-left-width: 4px; }
+.pc-bw .pc-item { border-color: #000; color: #000; }
+.pc-item.is-declined .pc-title, .ps-item.is-declined .pc-title, .pc-item.is-done .pc-title, .ps-item.is-done .pc-title { text-decoration: line-through; }
+.pc-time { font-weight: 600; }
+.pc-where { opacity: 0.85; }
+.pg-grid { display: flex; flex-direction: column; border: 1px solid var(--p-line); }
+.pg-row { display: grid; grid-template-columns: 34pt repeat(var(--days), minmax(0, 1fr)); }
+.pg-day-head { text-align: center; padding: 3pt; border-left: 1px solid var(--p-line); font-size: 0.95em; }
+.pg-allday { border-top: 1px solid var(--p-line); min-height: 12pt; }
+.pg-allday-cell { border-left: 1px solid var(--p-line); padding: 1.5pt; }
+.pg-body { border-top: 1px solid var(--p-line); height: 5.6in; }
+.is-day.is-portrait .pg-body { height: 8in; }
+.pg-hours { display: grid; grid-template-rows: repeat(var(--hours), 1fr); }
+.pg-hour { color: var(--p-muted); font-size: 0.85em; text-align: right; padding-right: 3pt; border-top: 1px solid var(--p-line); }
+.pg-col { position: relative; border-left: 1px solid var(--p-line); background-image: linear-gradient(var(--p-line) 1px, transparent 1px); background-size: 100% calc(100% / var(--hours)); }
+.pg-slot { position: absolute; padding: 0 1px; box-sizing: border-box; }
+.pg-slot .pc-item { height: 100%; box-sizing: border-box; margin: 0; }
+.pm-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.pm-table th { font-weight: 600; font-size: 0.9em; color: var(--p-muted); padding: 2pt; border: 1px solid var(--p-line); }
+.pm-table td { vertical-align: top; border: 1px solid var(--p-line); padding: 2pt; height: 0.9in; break-inside: avoid; }
+.pm-table td.is-outside { color: var(--p-muted); background: #faf9f7; }
+.pm-date { font-weight: 600; margin-bottom: 1.5pt; }
+.pm-table .pc-item { border-width: 0 0 0 3px; padding-left: 2pt; }
+.pc-full .pm-table .pc-item { border-width: 1px; }
+.ps-day { display: grid; grid-template-columns: 1.6in minmax(0, 1fr); gap: 8pt; padding: 4pt 0; border-top: 1px solid var(--p-line); break-inside: avoid; page-break-inside: avoid; }
+.ps-date { font-weight: 600; }
+.ps-items { list-style: none; margin: 0; padding: 0; }
+.ps-item { display: grid; grid-template-columns: 1.1in 8pt minmax(0, 1fr); gap: 4pt; padding: 1.5pt 0; break-inside: avoid; }
+.ps-dot { width: 7pt; height: 7pt; border-radius: 50%; background: var(--c); margin-top: 3pt; }
+.pc-outline .ps-dot { background: #fff; border: 1.5px solid var(--c); }
+.pc-bw .ps-dot { background: #000; }
+.ps-what { display: flex; flex-direction: column; }
+.ps-response, .ps-description { color: var(--p-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Settings → Print: the options beside the page as it will print. */
+.modal-backdrop.print-preview-backdrop { z-index: 65; padding-top: 3vh; }
+.modal.print-preview { width: min(1100px, 100%); max-height: 92vh; display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 16px; padding: 0; overflow: hidden; }
+.pp-options { display: flex; flex-direction: column; gap: 10px; padding: 18px 0 18px 20px; overflow: auto; }
+.pp-options h2 { margin: 0 0 4px; font-size: 18px; font-weight: 500; }
+.pp-range { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; border: 0; padding: 0; margin: 0; }
+.pp-range legend { padding: 0; margin-bottom: 4px; font-size: 12px; color: var(--oc-muted); }
+.pp-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--oc-muted); }
+.pp-field select { font-size: 13px; color: var(--oc-fg); }
+.pp-check { display: flex; align-items: center; gap: 8px; }
+.pp-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.pp-actions .primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.pp-pane { background: color-mix(in srgb, var(--oc-fg) 55%, #808080); padding: 20px; overflow: auto; max-height: 92vh; box-sizing: border-box; }
+.pp-paper { background: #fff; margin: 0 auto; padding: 0.4in; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); width: 8.5in; zoom: 0.62; }
+.pp-paper.is-landscape { width: 11in; zoom: 0.5; }
+.pp-paper .print-page { margin-bottom: 0.4in; padding-bottom: 0.4in; border-bottom: 2px dashed #c9c5c0; }
+.pp-paper .print-page:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+.gcal-settings-menu button { display: flex; align-items: center; gap: 8px; }
+.menu .menu-note { padding: 0 8px 6px 8px; font-size: 11.5px; color: var(--oc-muted); max-width: 220px; }
+@media (max-width: 860px) {
+  .modal.print-preview { grid-template-columns: minmax(0, 1fr); overflow: auto; }
+  .pp-options { padding: 16px 16px 0; }
+  .pp-pane { max-height: none; }
+  .pp-paper { zoom: 0.4; }
+  .pp-paper.is-landscape { zoom: 0.32; }
+}

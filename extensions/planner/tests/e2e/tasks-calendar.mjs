@@ -10,6 +10,9 @@
 // - Task notifications as OpenChamber notifications: a date-only task's 9 AM and a deadline's 9 AM, missed while the
 //   Planner was closed (set yesterday), come when it opens; a task's time comes at that time; none comes twice, after
 //   a reload either; the setting turns them off.
+// - Printing (round 11, `print`): Print list and Ctrl/⌘+P in the Tasks view, the list alone and whole in print
+//   media; Google Calendar's Settings → Print, its preview and options, Day, Week, Month and Schedule.
+// - Declining meetings (round 11, `decline`): review 10's three daily series, and passes that carry on after a bound.
 // The zone is one where it is between 10 AM and 10 PM now, so 9 AM has passed and today lasts the journey.
 // Run on the host after `bun run build`, in the netns: node extensions/planner/tests/e2e/tasks-calendar.mjs [outDir]
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -792,7 +795,12 @@ const inventoryJourney = async (viewport) => {
     check(`${size}: Space completes the selected task, in Google`, await until(() => googleTask('L1', 't-mailed')?.status === 'completed', 10_000));
     await page.keyboard.press('Control+/');
     const help = f.getByRole('dialog', { name: 'Keyboard shortcuts' });
-    check(`${size}: Ctrl+/ lists Google Tasks' shortcuts, Print and Report spam marked as not here (and why)`, await help.waitFor({ timeout: 5000 }).then(async () => (await help.innerText()).includes('Move to bottom') && (await help.innerText()).includes("can't open the print dialog")).catch(() => false));
+    // Print prints since round 11 where the host lets the frame open the print dialog (allow-modals); elsewhere it says why.
+    const modals = ((await page.locator('.inset-0 > iframe[title="Planner"]').getAttribute('sandbox')) ?? '').split(/\s+/).includes('allow-modals');
+    check(`${size}: Ctrl+/ lists Google Tasks' shortcuts with Print; Report spam marked as not here (and why)${modals ? '' : ', and Print as needing oc-forge\'s host'}`, await help.waitFor({ timeout: 5000 }).then(async () => {
+      const text = await help.innerText();
+      return text.includes('Move to bottom') && text.includes('Print the list') && text.includes("Shared tasks are reported in the Doc") && text.includes("Printing needs OpenChamber with oc-forge's host") === !modals;
+    }).catch(() => false));
     await shot('tc-32-shortcuts');
     await page.keyboard.press('Escape');
 
@@ -929,17 +937,396 @@ const inventoryJourney = async (viewport) => {
   }
 };
 
+/**
+ * Round 11: printing, as Google Tasks' Print list and Google Calendar's Print.
+ * - Tasks: List options → Print list, and Ctrl/⌘+P in the list. Where the host lets the frame open the print dialog
+ *   (oc-forge's, with allow-modals), print() runs for the frame: beforeprint finds that list's sheet alone, and the
+ *   console has no "Ignored call to 'print()'". Where it can't, Print list is disabled, with the reason, and Ctrl/⌘+P
+ *   says it.
+ * - In print media the frame shows that list alone and whole (longer than the window): subtasks indented, completed
+ *   tasks only while Completed is open, no other list, nothing of the Planner's page; in All tasks, the list with the
+ *   focus.
+ * - Calendar: Settings → Print opens the "Print preview" of the range shown, with Google's options; Ctrl/⌘+P opens it
+ *   too; Day, Week, Month and Schedule each print their range; the printout has its events and tasks, and is what
+ *   prints while the preview is open.
+ */
+const printJourney = async (viewport) => {
+  const size = `${viewport.width}`;
+  const today = dayOf(Date.now());
+  const due = (days) => `${addDays(today, days)}T00:00:00.000Z`;
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  const world = defaultFakeWorld({ account: ME, today, zone: ZONE });
+  // My Tasks: 30 tasks, each sixth with two subtasks, each fourth with details, each fifth with a date; 3 completed.
+  const open = [];
+  for (let n = 1; n <= 30; n++) {
+    open.push({ id: `p-${n}`, title: `Print task ${String(n).padStart(2, '0')}`, notes: n % 4 === 0 ? `Details of task ${n}\nand a second line` : '', ...(n % 5 === 0 ? { due: due(n % 3) } : {}), status: 'needsAction', updated: yesterday });
+    if (n % 6 === 0) open.push({ id: `p-${n}-a`, title: `Subtask ${n}a`, notes: '', status: 'needsAction', parent: `p-${n}`, updated: yesterday }, { id: `p-${n}-b`, title: `Subtask ${n}b`, notes: '', status: 'needsAction', parent: `p-${n}`, updated: yesterday });
+  }
+  const completed = [1, 2, 3].map((n) => ({ id: `p-done-${n}`, title: `Done task ${n}`, notes: '', status: 'completed', completed: new Date(Date.now() - n * 3600_000).toISOString(), updated: yesterday }));
+  world.tasks.L1 = [...open, ...completed];
+  world.tasks.L2 = [{ id: 'e-1', title: 'Errand one', notes: '', status: 'needsAction', updated: yesterday }, { id: 'e-2', title: 'Errand two', notes: '', status: 'needsAction', updated: yesterday }];
+  const expected = open.map((task) => task.title);
+  const fake = await startFakeGoogle(world);
+  const seeded = [
+    { type: 'settings.updated', patch: { timezone: ZONE } },
+    { type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'p-2', patch: { starred: true } },
+    { type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'p-5', patch: { time: 10 * 60, duration: 30, deadline: addDays(today, 7) } },
+  ].map((body, index) => ({ v: 1, id: `seed${index}`, at: yesterday, ...body }));
+  const h = await startHarness({
+    out,
+    viewport,
+    timezoneId: ZONE,
+    serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base },
+    homeFiles: { 'google-accounts.json': fake.accountsFile(), [`data/events/${yesterday.slice(0, 7)}.jsonl`]: `${seeded.map((event) => JSON.stringify(event)).join('\n')}\n` },
+  });
+  const { page } = h;
+  const consoleLines = [];
+  const plannerErrors = [];
+  page.on('console', (message) => {
+    consoleLines.push(`${message.type()}: ${message.text().slice(0, 300)}`);
+    if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(message.text().slice(0, 300));
+  });
+  page.on('pageerror', (error) => plannerErrors.push(`pageerror: ${error.message}`));
+  const shot = (name) => h.shot(`${name}-${size}`);
+  const toast = (text) => page.locator('li[data-sonner-toast]', { hasText: text });
+  const NEEDS_HOST = "Printing needs OpenChamber with oc-forge's host";
+  let f;
+  try {
+    f = await h.openPlanner();
+    const go = async (name) => {
+      if (!(await h.nav(name).isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
+      await h.nav(name).click();
+    };
+    const iframe = page.locator('.inset-0 > iframe[title="Planner"]');
+    const sandbox = (await iframe.getAttribute('sandbox')) ?? '';
+    const modals = sandbox.split(/\s+/).includes('allow-modals');
+    console.log(`${size}: the Planner's frame: sandbox="${sandbox}"`);
+    const frame = await (await iframe.elementHandle()).contentFrame();
+    // Each print() of the frame, as the browser's beforeprint finds the print sheet.
+    await frame.evaluate(() => {
+      window.__prints = [];
+      window.__after = 0;
+      addEventListener('beforeprint', () =>
+        window.__prints.push({
+          heading: document.querySelector('.print-root h1')?.textContent ?? '',
+          titles: [...document.querySelectorAll('.print-root .print-task')].map((row) => [row.querySelector('.print-title')?.firstChild?.textContent ?? '', row.classList.contains('depth-1'), row.classList.contains('is-done')]),
+          calendar: Boolean(document.querySelector('.print-root .print-calendar')),
+        }),
+      );
+      addEventListener('afterprint', () => (window.__after += 1));
+    });
+    const prints = () => frame.evaluate(() => ({ prints: window.__prints ?? [], after: window.__after ?? 0 }));
+    const ignored = () => consoleLines.filter((line) => line.includes("Ignored call to 'print()'"));
+    /** The print sheet in print media, whole: the frame zoomed out to fit it for the picture (only for it). */
+    const sheetShot = async (name) => {
+      await frame.evaluate(() => {
+        const sheet = document.querySelector('.print-root .print-sheet');
+        const fit = sheet ? Math.min(1, innerHeight / sheet.getBoundingClientRect().height) : 1;
+        document.documentElement.style.zoom = String(fit);
+      });
+      await iframe.screenshot({ path: join(out, `${name}-${size}.png`) }).catch(() => shot(name));
+      await frame.evaluate(() => (document.documentElement.style.zoom = ''));
+    };
+    /** What print media shows in the frame: the print sheet, and whether the rest is hidden and nothing clipped. */
+    const printMedia = () =>
+      frame.evaluate(() => {
+        const root = document.querySelector('.print-root');
+        const sheet = root?.querySelector('.print-sheet');
+        const rows = [...(root?.querySelectorAll('.print-task') ?? [])];
+        const shown = (node) => Boolean(node) && getComputedStyle(node).display !== 'none' && node.getBoundingClientRect().height > 0;
+        return {
+          printMedia: matchMedia('print').matches,
+          rootShown: shown(root),
+          restHidden: [...document.body.children].filter((node) => node !== root).every((node) => getComputedStyle(node).display === 'none'),
+          heading: root?.querySelector('h1')?.textContent ?? '',
+          titles: rows.map((row) => [row.querySelector('.print-title')?.firstChild?.textContent ?? '', row.classList.contains('depth-1'), row.classList.contains('is-done')]),
+          allShown: rows.every(shown),
+          indented: rows.filter((row) => row.classList.contains('depth-1')).every((row) => parseFloat(getComputedStyle(row).paddingLeft) > 10),
+          breaks: rows.every((row) => getComputedStyle(row).breakInside === 'avoid'),
+          sheetHeight: Math.round(sheet?.getBoundingClientRect().height ?? 0),
+          docHeight: document.documentElement.scrollHeight,
+          viewport: innerHeight,
+          overflow: [getComputedStyle(document.documentElement).overflowY, getComputedStyle(document.body).overflowY],
+          text: root?.textContent ?? '',
+          calendar: Boolean(root?.querySelector('.print-calendar')),
+          pages: [...(root?.querySelectorAll('.print-page') ?? [])].map((node) => node.getAttribute('aria-label')),
+        };
+      });
+
+    await go('Calendar');
+    await f.getByRole('radio', { name: 'Tasks' }).click();
+    await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'My Tasks', exact: true }).click();
+    const myTasks = f.getByRole('region', { name: 'My Tasks' });
+    await myTasks.getByRole('listitem', { name: 'Print task 30' }).waitFor({ timeout: 20_000 });
+    const tall = await myTasks.evaluate((node) => ({ list: node.scrollHeight, window: innerHeight }));
+    check(`${size}: My Tasks (40 open tasks, 10 of them subtasks) is longer than the window`, tall.list > tall.window, JSON.stringify(tall));
+
+    // ── List options → Print list.
+    await myTasks.getByRole('button', { name: 'List options for My Tasks' }).click();
+    const listMenu = f.getByRole('menu', { name: 'List options for My Tasks' });
+    const printItem = listMenu.getByRole('menuitem', { name: 'Print list' });
+    await printItem.waitFor();
+    await shot('tc-40-list-options-print');
+    if (modals) {
+      check(`${size}: List options has Print list, enabled (the frame may open the print dialog)`, await printItem.isEnabled());
+      await printItem.click();
+      const got = (await until(async () => (await prints()).prints.length === 1, 5000)) ? (await prints()).prints[0] : null;
+      check(`${size}: Print list prints the frame: beforeprint finds My Tasks alone, its open tasks in order, subtasks indented, no completed one`, got && got.heading === 'My Tasks' && JSON.stringify(got.titles.map(([title]) => title)) === JSON.stringify(expected) && got.titles.filter(([, sub]) => sub).length === 10 && !got.titles.some(([, , done]) => done), JSON.stringify(got).slice(0, 500));
+      check(`${size}: afterprint follows, and the console has no "Ignored call to 'print()'"`, (await until(async () => (await prints()).after >= 1, 5000)) && ignored().length === 0, ignored().join(' | '));
+    } else {
+      check(`${size}: where the host can't print, Print list is in List options, disabled, with the reason`, (await printItem.isDisabled()) && (await listMenu.innerText()).includes(NEEDS_HOST), await listMenu.innerText());
+      await myTasks.getByRole('heading', { name: 'My Tasks' }).click();
+    }
+
+    // ── Ctrl+P in the list, Completed open: its completed tasks print too.
+    await myTasks.getByRole('button', { name: /^Completed \(3\)/ }).click();
+    await myTasks.getByRole('listitem', { name: 'Print task 01' }).locator('.gt-body-edit').focus();
+    await page.keyboard.press('Control+p');
+    if (modals) {
+      const got = (await until(async () => (await prints()).prints.length === 2, 5000)) ? (await prints()).prints[1] : null;
+      check(`${size}: Ctrl+P in the list prints it, with its 3 completed tasks now that Completed is open`, got && got.titles.length === 43 && got.titles.slice(40).every(([, , done]) => done) && ignored().length === 0, JSON.stringify(got?.titles?.slice(38)));
+    } else {
+      // The Planner's own notice (its error line), not the browser's print of OpenChamber's page.
+      check(`${size}: Ctrl+P in the list says why it can't print`, await until(async () => (await f.getByText(NEEDS_HOST).count()) > 0, 5000));
+      check(`${size}: and nothing calls print() where it would be ignored`, ignored().length === 0, ignored().join(' | '));
+    }
+
+    // ── Print media: My Tasks alone and whole, its completed tasks with it (Completed is open).
+    await page.emulateMedia({ media: 'print' });
+    const printed = await printMedia();
+    check(`${size}: in print media the frame shows the print sheet alone (the Planner's page hidden)`, printed.printMedia && printed.rootShown && printed.restHidden, JSON.stringify({ ...printed, titles: printed.titles.length, text: '' }));
+    check(`${size}: the sheet is My Tasks, whole: its 40 open tasks in order, subtasks indented, then its 3 completed ones; no other list`, printed.heading === 'My Tasks' && JSON.stringify(printed.titles.slice(0, 40).map(([title]) => title)) === JSON.stringify(expected) && printed.titles.slice(40).map(([title]) => title).join() === 'Done task 1,Done task 2,Done task 3' && printed.indented && !printed.text.includes('Errand'), JSON.stringify(printed.titles.map(([title]) => title)));
+    check(`${size}: longer than the window, and nothing clipped: every task laid out, the page as tall as the sheet, no scrolling box`, printed.allShown && printed.sheetHeight > printed.viewport && printed.docHeight >= printed.sheetHeight && printed.overflow.every((value) => value === 'visible'), JSON.stringify({ sheet: printed.sheetHeight, doc: printed.docHeight, viewport: printed.viewport, overflow: printed.overflow }));
+    check(`${size}: pages break between tasks, not inside one; the star, the time and the deadline print`, printed.breaks && printed.text.includes('★') && printed.text.includes('Deadline '), printed.text.slice(0, 300));
+    await sheetShot('tc-41-print-media-list');
+    await page.emulateMedia({ media: 'screen' });
+    await myTasks.getByRole('button', { name: /^Completed \(3\)/ }).click();
+    await page.emulateMedia({ media: 'print' });
+    // The sheet follows the list once it has drawn again.
+    let closed = await printMedia();
+    await until(async () => (closed = await printMedia()).titles.length === 40, 5000);
+    check(`${size}: with Completed closed again, it prints the 40 open tasks alone`, closed.titles.length === 40 && !closed.titles.some(([, , done]) => done), String(closed.titles.length));
+    await page.emulateMedia({ media: 'screen' });
+
+    // ── All tasks, lists side by side: the list the focus is in prints.
+    await f.getByRole('navigation', { name: 'Task lists' }).getByRole('button', { name: 'All tasks' }).click();
+    const errands = f.getByRole('region', { name: 'Errands' });
+    await errands.getByRole('listitem', { name: 'Errand one' }).locator('.gt-body-edit').focus();
+    await page.emulateMedia({ media: 'print' });
+    let both = await printMedia();
+    await until(async () => (both = await printMedia()).heading === 'Errands', 5000);
+    check(`${size}: in All tasks the list with the focus is the one that prints, alone (Errands)`, both.heading === 'Errands' && both.titles.length === 2 && !both.text.includes('Print task'), JSON.stringify({ heading: both.heading, rows: both.titles.length }));
+    await page.emulateMedia({ media: 'screen' });
+    if (modals) {
+      await page.keyboard.press('Control+p');
+      const got = (await until(async () => (await prints()).prints.length === 3, 5000)) ? (await prints()).prints[2] : null;
+      check(`${size}: and Ctrl+P there prints Errands`, got?.heading === 'Errands' && got.titles.length === 2, JSON.stringify(got));
+    }
+
+    // ── Google Calendar's Print: Settings → Print, the preview of the week shown.
+    await f.getByRole('radio', { name: 'Calendar' }).click();
+    await f.getByRole('button', { name: /^View:/ }).waitFor();
+    await f.getByRole('button', { name: 'Settings menu' }).click();
+    await f.getByRole('menu', { name: 'Settings menu' }).getByRole('menuitem', { name: 'Print' }).click();
+    const preview = f.getByRole('dialog', { name: 'Print preview' });
+    await preview.waitFor({ timeout: 10_000 });
+    const range = async () => [await preview.getByLabel('Print range from').inputValue(), await preview.getByLabel('Print range to').inputValue()];
+    const [weekFrom, weekTo] = await range();
+    const span = (from, to) => Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+    check(`${size}: Settings → Print opens the Print preview of the week shown`, span(weekFrom, weekTo) === 6 && weekFrom <= today && today <= weekTo, `${weekFrom} – ${weekTo}`);
+    const choices = async (label) => preview.getByRole('combobox', { name: label }).locator('option').allInnerTexts();
+    const values = async () => Promise.all(['View', 'Font size', 'Orientation', 'Color & style'].map((label) => preview.getByRole('combobox', { name: label }).locator('option:checked').innerText()));
+    check(`${size}: with Google's options: View, Font size, Orientation, Color & style`, JSON.stringify(await choices('View')) === JSON.stringify(['Auto', 'Day', 'Week', 'Month', 'Schedule']) && (await choices('Font size')).length === 7 && JSON.stringify(await choices('Orientation')) === JSON.stringify(['Auto', 'Portrait', 'Landscape']) && JSON.stringify(await choices('Color & style')) === JSON.stringify(['Full color', 'Outline', 'Black and white']), JSON.stringify([await choices('Font size')]));
+    check(`${size}: opened as Google's: Auto, Normal, Auto, Outline; Show weekends and Show events you have declined as the calendar shows them`, JSON.stringify(await values()) === JSON.stringify(['Auto', 'Normal', 'Auto', 'Outline']) && (await preview.getByRole('checkbox', { name: 'Show weekends' }).isChecked()) && (await preview.getByRole('checkbox', { name: 'Show events you have declined' }).isChecked()), JSON.stringify(await values()));
+    const paper = preview.locator('.pp-paper');
+    check(`${size}: its page has the week's events and tasks (Quarter planning; Print task 15, due today)`, await until(async () => (await paper.innerText()).includes('Quarter planning') && (await paper.innerText()).includes('Print task 15'), 15_000), (await paper.innerText()).slice(0, 300));
+    await shot('tc-42-calendar-print-preview');
+    await page.emulateMedia({ media: 'print' });
+    const calendarPrinted = await printMedia();
+    check(`${size}: while the preview is open, print media shows the calendar's printout alone: one Week page`, calendarPrinted.calendar && calendarPrinted.restHidden && calendarPrinted.pages.length === 1 && calendarPrinted.text.includes('Quarter planning'), JSON.stringify(calendarPrinted.pages));
+    await sheetShot('tc-43-print-media-week');
+    await page.emulateMedia({ media: 'screen' });
+
+    // The options change the printout.
+    await preview.getByRole('combobox', { name: 'Orientation' }).selectOption('portrait');
+    await preview.getByRole('combobox', { name: 'Color & style' }).selectOption('bw');
+    await preview.getByRole('combobox', { name: 'Font size' }).selectOption('biggest');
+    await preview.getByRole('checkbox', { name: 'Show weekends' }).uncheck();
+    const sheetClass = () => paper.locator('.print-sheet').getAttribute('class');
+    const dayHeads = () => paper.locator('.pg-day-head').count();
+    check(`${size}: Portrait, Black and white, Biggest and no weekends change the page: five days, larger type`, await until(async () => /pc-bw/.test(await sheetClass()) && /is-portrait/.test(await sheetClass()) && (await dayHeads()) === 5 && (await paper.locator('.print-sheet').getAttribute('style'))?.includes('1.5'), 5000), `${await sheetClass()} ${await dayHeads()}`);
+    await preview.getByRole('combobox', { name: 'View' }).selectOption('schedule');
+    check(`${size}: View Schedule offers Print descriptions and Print your response`, (await preview.getByRole('checkbox', { name: 'Print descriptions' }).count()) === 1 && (await preview.getByRole('checkbox', { name: 'Print your response' }).count()) === 1);
+    await preview.getByRole('checkbox', { name: 'Print descriptions' }).check();
+    await preview.getByRole('checkbox', { name: 'Print your response' }).check();
+    check(`${size}: they print each event's description and my answer (Quarter planning: "Agenda…"; Your response)`, await until(async () => (await paper.innerText()).includes('Agenda') && (await paper.innerText()).includes('Your response:'), 15_000), (await paper.innerText()).slice(0, 400));
+    await shot('tc-44-calendar-print-schedule');
+    const printButton = preview.getByRole('button', { name: 'Print', exact: true });
+    if (modals) {
+      const before = (await prints()).prints.length;
+      await printButton.click();
+      const got = (await until(async () => (await prints()).prints.length === before + 1, 5000)) ? (await prints()).prints[before] : null;
+      check(`${size}: Print prints the frame: beforeprint finds the calendar's printout; no "Ignored call to 'print()'"`, got?.calendar === true && ignored().length === 0, JSON.stringify(got));
+    } else check(`${size}: where the host can't print, Print is disabled, with the reason`, (await printButton.isDisabled()) && (await preview.innerText()).includes(NEEDS_HOST));
+    await preview.getByRole('button', { name: 'Cancel' }).click();
+    await preview.waitFor({ state: 'detached', timeout: 5000 });
+
+    // ── Ctrl+P from the calendar opens the preview; Day, Month and Schedule each print their range.
+    const pickView = async (name) => {
+      await f.getByRole('button', { name: /^View:/ }).click();
+      await f.getByRole('menuitemradio', { name: new RegExp(`^${name}`) }).click();
+    };
+    const monthEnd = (key) => new Date(Date.UTC(Number(key.slice(0, 4)), Number(key.slice(5, 7)), 0)).toISOString().slice(0, 10);
+    for (const [view, from, to] of [['Day', today, today], ['Month', `${today.slice(0, 8)}01`, monthEnd(today)], ['Schedule', today, addDays(today, 29)]]) {
+      await pickView(view);
+      // The calendar's Today (the Planner's menu has one too).
+      await f.locator('.gcal-today').click();
+      await f.locator('.gcal-today').focus();
+      await page.keyboard.press('Control+p');
+      const opened = await preview.waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+      const [gotFrom, gotTo] = opened ? await range() : ['', ''];
+      const pageTitles = opened ? await paper.locator('.print-page').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('aria-label'))) : [];
+      check(`${size}: Ctrl+P in ${view} opens the preview of its range (${from} – ${to})`, opened && gotFrom === from && gotTo === to, `${gotFrom} – ${gotTo}`);
+      check(`${size}: ${view} prints ${view === 'Day' ? 'that day' : view === 'Month' ? 'the month on one page' : 'one run of days'}`, pageTitles.length === 1, JSON.stringify(pageTitles));
+      await shot(`tc-45-calendar-print-${view.toLowerCase()}`);
+      await page.keyboard.press('Escape');
+      await preview.waitFor({ state: 'detached', timeout: 5000 });
+    }
+    check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
+  } catch (error) {
+    check(`${size}: the printing journey ran to its end`, false, error?.stack ?? String(error));
+    await shot('tc-49-print-failure').catch(() => {});
+  } finally {
+    await page.emulateMedia({ media: 'screen' }).catch(() => {});
+    await h.close();
+    await fake.close();
+  }
+};
+
+/**
+ * Review 10's declining check (P1-2): three daily Busy series at 9, 10 and 11 declining new and existing meetings make
+ * 42 times in the two weeks after today; the invitations at 11 on day 1 and on day 14 are each declined once, with the
+ * 11 o'clock series' message, in at most two passes, and no series turned off; a repeated pass declines nothing twice.
+ * Then a calendar longer than a pass reads (pages of 2 events, 4 a pass): the passes carry on from where each stopped,
+ * and the Planner says so.
+ */
+const declineJourney = async (viewport) => {
+  const size = `${viewport.width}`;
+  const today = dayOf(Date.now());
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  const world = defaultFakeWorld({ account: ME, today, zone: ZONE });
+  world.hostedDomain = 'example.com';
+  world.granted = [...DEFAULT_SCOPES];
+  const atIso = (key, minutes) => new Date(atZone(key, minutes)).toISOString();
+  const invitation = (id, day, minutes) => ({ id, summary: id, created: '2026-01-05T10:00:00.000Z', start: { dateTime: atIso(addDays(today, day), minutes) }, end: { dateTime: atIso(addDays(today, day), minutes + 30) }, organizer: { email: 'lead@example.com' }, attendees: [{ email: 'lead@example.com', organizer: true, responseStatus: 'accepted' }, { email: ME, self: true, responseStatus: 'needsAction' }] });
+  world.events.primary = [invitation('meeting-day-1', 1, 11 * 60), invitation('meeting-day-14', 14, 11 * 60)];
+  const series = [['daily-9', 9 * 60, 'Deep work at nine'], ['daily-10', 10 * 60, 'Deep work at ten'], ['daily-11', 11 * 60, 'Deep work at eleven']];
+  world.tasks.L1 = series.map(([id]) => ({ id, title: id, notes: '', due: `${today}T00:00:00.000Z`, status: 'needsAction', updated: yesterday }));
+  world.tasks.L2 = [];
+  const fake = await startFakeGoogle(world);
+  const seeded = [
+    { type: 'settings.updated', patch: { timezone: ZONE } },
+    ...series.map(([id, time, message]) => ({
+      type: 'gtask.kept',
+      account: ME,
+      listId: 'L1',
+      taskId: id,
+      patch: { time, busy: true, decline: { mode: 'all', message }, repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: `s-${id}`, index: 1, next: null, on: today, template: { title: id, notes: '', time, duration: null, deadline: null, start: today, busy: true, decline: { mode: 'all', message, since: yesterday } } } },
+    })),
+  ].map((body, index) => ({ v: 1, id: `seed${index}`, at: yesterday, ...body }));
+  const h = await startHarness({
+    out,
+    viewport,
+    timezoneId: ZONE,
+    serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base },
+    homeFiles: { 'google-accounts.json': fake.accountsFile(), [`data/events/${yesterday.slice(0, 7)}.jsonl`]: `${seeded.map((event) => JSON.stringify(event)).join('\n')}\n` },
+  });
+  const { page } = h;
+  const plannerErrors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(message.text().slice(0, 300));
+  });
+  page.on('pageerror', (error) => plannerErrors.push(`pageerror: ${error.message}`));
+  const shot = (name) => h.shot(`${name}-${size}`);
+  const toast = (text) => page.locator('li[data-sonner-toast]', { hasText: text });
+  const self = (id) => fake.calendars.get('primary').events.get(id)?.attendees?.find((guest) => guest.self);
+  /** The decline passes' reads of the account's calendar (their own fields); a pass starts with a page without a token. */
+  const reads = () => fake.requests.filter((request) => request.method === 'GET' && request.path === '/calendar/v3/calendars/primary/events' && String(request.query.fields ?? '').startsWith('nextPageToken,items(id,status,summary,start,end,created,eventType'));
+  const passes = () => reads().filter((request) => !request.query.pageToken).length;
+  const patchesOf = (id) => fake.requests.filter((request) => request.method === 'PATCH' && request.path.endsWith(`/events/${id}`));
+  const declinedFor = async (task) => (await h.call('GET', `/google/tasks/declined?account=${encodeURIComponent(ME)}&task=${task}`)).json;
+  let f;
+  try {
+    // The service's first pass comes soon after it starts.
+    const both = await until(() => self('meeting-day-1')?.responseStatus === 'declined' && self('meeting-day-14')?.responseStatus === 'declined', 30_000);
+    const passesThen = passes();
+    check(`${size}: with three daily Busy series (9, 10, 11), the meetings at 11 on day 1 and on day 14 are both declined`, both, JSON.stringify([self('meeting-day-1'), self('meeting-day-14')]));
+    check(`${size}: in at most two passes, each reading the calendar once over all the times`, passesThen >= 1 && passesThen <= 2 && reads().length === passesThen, `${passesThen} passes, ${reads().length} reads: ${JSON.stringify(reads().map((request) => [request.query.timeMin, request.query.timeMax]))}`);
+    check(`${size}: each with the 11 o'clock series' message, once, the organizer told`, self('meeting-day-1')?.comment === 'Deep work at eleven' && self('meeting-day-14')?.comment === 'Deep work at eleven' && patchesOf('meeting-day-1').length === 1 && patchesOf('meeting-day-14').length === 1 && [...patchesOf('meeting-day-1'), ...patchesOf('meeting-day-14')].every((request) => request.query.sendUpdates === 'all'));
+    const again = await h.call('POST', '/google/tasks/decline');
+    check(`${size}: a repeated pass declines nothing twice, and has nothing left`, again.status === 200 && again.json.declined.length === 0 && again.json.errors.length === 0 && again.json.more.length === 0 && patchesOf('meeting-day-1').length === 1 && patchesOf('meeting-day-14').length === 1, JSON.stringify(again.json));
+    const kept = (await h.call('GET', '/state')).json.state.googleTasks;
+    check(`${size}: no series was turned off for it: all three still decline`, series.every(([id]) => kept[`${ME}\n${id}`]?.decline?.mode === 'all' && kept[`${ME}\n${id}`]?.repeat?.rule === 'RRULE:FREQ=DAILY'), JSON.stringify(series.map(([id]) => kept[`${ME}\n${id}`]?.decline)));
+    const eleven = await declinedFor('daily-11');
+    check(`${size}: the 11 o'clock task's details list both; nothing is still being gone through`, eleven.declined.map((meeting) => meeting.eventId).sort().join() === 'meeting-day-1,meeting-day-14' && eleven.more === null, JSON.stringify(eleven));
+
+    // ── Longer than a pass reads: pages of 2 events, 4 a pass; 24 events of my own and two more invitations.
+    fake.world.pageSize.events = 2;
+    const events = fake.calendars.get('primary').events;
+    for (let day = 1; day <= 12; day++) {
+      for (const minutes of [13 * 60, 15 * 60]) events.set(`mine-${day}-${minutes}`, { id: `mine-${day}-${minutes}`, summary: 'My own block', created: '2026-01-05T10:00:00.000Z', start: { dateTime: atIso(addDays(today, day), minutes) }, end: { dateTime: atIso(addDays(today, day), minutes + 60) }, organizer: { email: ME, self: true }, attendees: [{ email: ME, self: true, organizer: true, responseStatus: 'accepted' }] });
+    }
+    events.set('meeting-late-a', invitation('meeting-late-a', 2, 10 * 60));
+    events.set('meeting-late-b', invitation('meeting-late-b', 13, 9 * 60));
+    // A change from the Tasks view (the ten o'clock series' message, All tasks) declines at once, and says so.
+    f = await h.openPlanner();
+    if (!(await h.nav('Calendar').isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
+    await h.nav('Calendar').click();
+    await f.getByRole('radio', { name: 'Tasks' }).click();
+    const myTasks = f.getByRole('region', { name: 'My Tasks' });
+    await myTasks.getByRole('button', { name: 'Edit daily-10' }).click({ timeout: 20_000 });
+    const form = myTasks.getByRole('group', { name: 'Edit daily-10' });
+    if (!(await form.getByRole('textbox', { name: 'Message' }).isVisible().catch(() => false))) await form.getByRole('button', { name: 'Advanced settings' }).click();
+    await form.getByRole('textbox', { name: 'Message' }).fill('Deep work at ten, still');
+    await form.getByRole('button', { name: 'Done' }).click();
+    const question = f.getByRole('alertdialog', { name: 'Edit repeating task' });
+    await question.waitFor({ timeout: 10_000 });
+    await question.getByRole('radio', { name: 'All tasks' }).check();
+    await question.getByRole('button', { name: 'OK' }).click();
+    const sawMore = await until(async () => (await declinedFor('daily-10')).more !== null, 20_000);
+    check(`${size}: while the passes carry on, the task's details say from where (the service's \`more\`)`, sawMore);
+    // The Planner's own notice after the change: what it declined, and that it carries on.
+    const carryOn = f.getByText(/still going through your meetings from .* on: it declines the rest in a moment/);
+    check(`${size}: the Planner says it is still going through the meetings and declines the rest in a moment`, await until(async () => (await carryOn.count()) > 0, 20_000));
+    await shot('tc-46-decline-carries-on');
+    const late = await until(() => self('meeting-late-a')?.responseStatus === 'declined' && self('meeting-late-b')?.responseStatus === 'declined', 90_000);
+    check(`${size}: the passes carry on from where each stopped until the last meeting is declined: day 2 with ten's new message, day 13 with nine's`, late && self('meeting-late-a')?.comment === 'Deep work at ten, still' && self('meeting-late-b')?.comment === 'Deep work at nine', JSON.stringify([self('meeting-late-a'), self('meeting-late-b')]));
+    check(`${size}: read on with Google's page tokens, a pass at a time`, reads().some((request) => request.query.pageToken), String(reads().length));
+    check(`${size}: each declined once; my own blocks left alone`, ['meeting-day-1', 'meeting-day-14', 'meeting-late-a', 'meeting-late-b'].every((id) => patchesOf(id).length === 1) && !fake.requests.some((request) => request.method === 'PATCH' && /\/events\/mine-/.test(request.path)));
+    check(`${size}: once through, nothing is said to be left`, await until(async () => (await declinedFor('daily-10')).more === null && (await declinedFor('daily-9')).more === null, 20_000));
+    check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
+  } catch (error) {
+    check(`${size}: the declining journey ran to its end`, false, error?.stack ?? String(error));
+    await shot('tc-47-decline-failure').catch(() => {});
+  } finally {
+    await h.close();
+    await fake.close();
+  }
+};
+
 /** The instant of a wall-clock time in ZONE (minutes may run past midnight). */
 const atZone = (key, minutes) => at(key, minutes);
 
 mkdirSync(out, { recursive: true });
 console.log(`zone ${ZONE}, local ${clock(Math.floor(minutesIn(ZONE)))}`);
-// TC_PARTS=tasks, advanced or inventory runs one journey alone (while it is written); the full run has all three.
+// TC_PARTS=tasks, advanced, inventory, print or decline runs one journey alone (while it is written); the full run has all five.
 const parts = process.env.TC_PARTS ?? 'all';
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) {
   if (parts === 'all' || parts === 'tasks') await journey(viewport);
   if (parts === 'all' || parts === 'advanced') await advancedJourney(viewport);
   if (parts === 'all' || parts === 'inventory') await inventoryJourney(viewport);
+  if (parts === 'all' || parts === 'print') await printJourney(viewport);
+  if (parts === 'all' || parts === 'decline') await declineJourney(viewport);
 }
 const failed = results.filter((result) => !result.ok);
 writeFileSync(join(out, 'results.json'), JSON.stringify({ zone: ZONE, results }, null, 2));

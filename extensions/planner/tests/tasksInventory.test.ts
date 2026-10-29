@@ -183,8 +183,9 @@ describe("Google Tasks' keyboard shortcuts", () => {
     expect(press(']', 'outside')).toBe(false);
     expect(press('Tab', 'task')).toBe(false);
   });
-  test('the list of them is Google\'s, with the two this surface cannot do and why', () => {
+  test("the list of them is Google's, with the one this surface cannot do and why (Print prints since round 11)", () => {
     expect(TASK_SHORTCUTS).toHaveLength(17);
-    expect(TASK_SHORTCUTS.filter((shortcut) => shortcut.note).map((shortcut) => shortcut.action)).toEqual(['Print a task list', 'Report spam']);
+    expect(TASK_SHORTCUTS.filter((shortcut) => shortcut.note).map((shortcut) => shortcut.action)).toEqual(['Report spam']);
+    expect(TASK_SHORTCUTS.find((shortcut) => shortcut.keys === 'Ctrl/⌘ + p')?.action).toContain('Print the list');
   });
 });
