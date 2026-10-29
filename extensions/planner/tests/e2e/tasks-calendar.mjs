@@ -698,6 +698,8 @@ const advancedJourney = async (viewport) => {
  *   show where they came from.
  * - Keyboard shortcuts: s stars, Ctrl+Shift+Down moves to the bottom, Space completes, Ctrl+/ lists them.
  * - Delete, then Undo (the snackbar's, and Ctrl+Z): Google has the task back, with what the Planner kept.
+ * - Complete, then Undo ("Task completed · Undo", and Ctrl+Z): a plain task open again; a daily one too, its next task
+ *   gone again.
  * - Lists reordered with Alt+Up; Starred sorted by Date, a starred task added to the list chosen, moved to another.
  * - Gmail's "Add to Tasks".
  */
@@ -812,6 +814,43 @@ const inventoryJourney = async (viewport) => {
     await row('Send the report').locator('.gt-body-edit').focus();
     await page.keyboard.press('Control+z');
     check(`${size}: Ctrl+Z undoes a deletion too: the task and its subtask are back in Google, still starred`, await until(async () => Boolean(googleTask('L1', 't-trip')) && Boolean(googleTask('L1', 't-hotel')) && Boolean((await state()).googleTasks?.[`${ME}\nt-trip`]?.starredAt), 10_000));
+
+    // ── Complete, then Undo, as Google Tasks and Google Calendar offer it ("Task completed · Undo", and Ctrl+Z): at 1440
+    //    a plain task, by the snackbar's Undo; at 1024 a daily one, by Ctrl+Z, its next task going again.
+    const completedSnack = f.locator('.gcal-snack', { hasText: 'Task completed' });
+    const saysCompleted = async () => (await completedSnack.waitFor({ timeout: 5000 }).then(() => true).catch(() => false)) && (await completedSnack.getByRole('button', { name: 'Undo' }).count()) === 1;
+    if (size === '1440') {
+      await row('Send the report').getByRole('checkbox', { name: 'Mark Send the report complete' }).click();
+      const offered = await saysCompleted();
+      check(`${size}: completing a task says "Task completed" with Undo, as Google Tasks and Google Calendar do`, offered && (await until(() => googleTask('L1', 't-report')?.status === 'completed', 10_000)));
+      await shot('tc-38-completed-undo');
+      await completedSnack.getByRole('button', { name: 'Undo' }).click();
+      check(`${size}: the snackbar's Undo opens it again in Google, back in the list with its deadline`, await until(async () => googleTask('L1', 't-report')?.status === 'needsAction' && (await row('Send the report').count()) === 1 && (await state()).googleTasks?.[`${ME}\nt-report`]?.deadline === addDays(today, 5), 10_000));
+    } else {
+      await myTasks.getByRole('button', { name: 'Add a task' }).click();
+      const daily = myTasks.getByRole('group', { name: 'New task' });
+      await daily.getByRole('textbox', { name: 'Title' }).fill('Stretch');
+      await daily.getByLabel('Date', { exact: true }).fill(today);
+      await daily.getByRole('combobox', { name: 'Time', exact: true }).selectOption('540');
+      await daily.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
+      await daily.getByRole('button', { name: 'Add', exact: true }).click();
+      const stretch = await until(() => (fake.tasks.get('L1') ?? []).find((task) => task.title === 'Stretch')?.id, 10_000);
+      await until(async () => Boolean((await state()).googleTasks?.[`${ME}\n${stretch}`]?.repeat?.template), 10_000);
+      await daily.getByRole('button', { name: 'Cancel' }).click();
+      await row('Stretch').getByRole('checkbox', { name: 'Mark Stretch complete' }).click();
+      const offered = await saysCompleted();
+      const next = await until(() => (fake.tasks.get('L1') ?? []).find((task) => task.title === 'Stretch' && task.id !== stretch && task.status !== 'completed'), 15_000);
+      check(`${size}: completing a daily task says "Task completed" with Undo, as Google Tasks and Google Calendar do, and makes tomorrow's`, offered && next?.due === due(1), JSON.stringify({ offered, next }));
+      await shot('tc-38-completed-undo');
+      await row('Send the report').locator('.gt-body-edit').focus();
+      await page.keyboard.press('Control+z');
+      const undone = await until(async () => {
+        const plan = await state();
+        return googleTask('L1', stretch)?.status === 'needsAction' && !googleTask('L1', next?.id) && plan.googleTasks?.[`${ME}\n${stretch}`]?.repeat?.next === null && !plan.googleTasks?.[`${ME}\n${next?.id}`];
+      }, 15_000);
+      check(`${size}: Ctrl+Z takes the daily task's completion back: open again in Google, tomorrow's task gone again, the series going on from it`, undone && (await until(async () => (await row('Stretch').count()) === 1, 10_000)));
+      await shot('tc-38b-completed-undone');
+    }
 
     // ── Lists in the order the user puts them: Alt+Up on Errands.
     const sidebar = f.getByRole('navigation', { name: 'Task lists' });
