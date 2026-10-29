@@ -8,11 +8,12 @@ import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
 import { GoogleStore, listKey } from '../panel/lib/google.ts';
 import type { PlannerClient, Snapshot } from '../panel/lib/client.ts';
+import { GoogleError } from '../service/google.ts';
 import { GoogleSeries, type SeriesData } from '../service/googleSeries.ts';
 import type { ExecuteResult } from '../service/planner.ts';
 import { commandBody, validateCommand, type Command, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import type { GoogleTaskItem } from '../src/domain/google.ts';
-import { endedBefore, keptFor, nextRepeatDate, ruleEndingBefore, seriesCut, seriesHeads, seriesNextIn, upcomingTasks } from '../src/domain/gtaskKept.ts';
+import { endedBefore, keptFor, mergeOccurrence, nextRepeatDate, occurrenceIndex, ruleEndingBefore, seriesCut, seriesHeads, seriesNextIn, upcomingTasks } from '../src/domain/gtaskKept.ts';
 import { newId } from '../src/domain/ids.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { describeRecurrence } from '../src/domain/rrule.ts';
@@ -44,7 +45,7 @@ const service = () => {
       throw new Error('Backend Error');
     }
   };
-  const data: SeriesData & { updateTask(account: string, listId: string, id: string, patch: { completed?: boolean }): Promise<GoogleTaskItem | null> } = {
+  const data: SeriesData = {
     allTasks: async (_account, listId) => {
       asked.push({ what: 'read' });
       await wait('read');
@@ -63,14 +64,16 @@ const service = () => {
       google.delete(id);
     },
     updateTask: async (_account, _listId, id, patch) => {
-      asked.push({ what: 'update', id });
+      asked.push({ what: 'update', id, ...(patch.due !== undefined ? { due: patch.due } : {}) });
       await wait('update');
       const task = google.get(id);
-      if (!task) throw new Error('This task is no longer in Google Tasks');
-      const next = { ...task, ...(patch.completed !== undefined ? { completed: patch.completed } : {}) };
+      if (!task) throw new GoogleError(404, 'This task is no longer in Google Tasks');
+      const next = { ...task, ...patch };
       google.set(id, next);
       return { ...next };
     },
+    // Google's other lists: what moved there in Google's own apps.
+    locateTasks: async (_account, ids, except) => [...google.values()].filter((task) => ids.includes(task.id) && task.listId !== except).map((task) => ({ ...task })),
   };
   // The plan, as the service keeps it: an event log folded in order.
   const log: PlannerEvent[] = [];
@@ -107,8 +110,20 @@ const service = () => {
     const client = {
       getView: () => ({ state: view, today: '2026-10-29' }),
       call: async (method: string, path: string, body?: any) => {
-        if (path === '/google/tasks/next') return { ...(await series.next(body.account, body.listId, body.id)), ...snapshot() };
+        if (path === '/google/tasks/next') return { ...(await series.next(body.account, body.listId, body.id, { completed: body.completed, due: body.due })), ...snapshot() };
         if (path.startsWith('/google/tasks/series?')) return { ...(await series.remove(query(path).get('account')!, query(path).get('series')!, query(path).get('from'), query(path).get('task'))), ...snapshot() };
+        if (path === '/google/tasks/occurrence') {
+          await series.occurrence(body.account, body.seriesId, body.on, body.skip ? { skip: true } : 'restore' in body ? { restore: body.restore } : { before: body.before, after: body.after });
+          return snapshot();
+        }
+        if (path === '/google/tasks/series/edit') {
+          await series.edit(body.account, body.listId, body.taskId, body.seriesId, body.own, body.before, body.after);
+          return snapshot();
+        }
+        if (path === '/google/tasks/gone') {
+          await series.gone(body.account, body.listId, body.id);
+          return snapshot();
+        }
         if (method === 'GET' && path.startsWith('/google/tasks/all')) return data.allTasks(ME, query(path).get('list')!);
         if (method === 'POST' && path === '/google/tasks') return { task: await data.createTask(body.account, body.listId, body) };
         if (method === 'PATCH' && path === '/google/tasks') return { task: await data.updateTask(body.account, body.listId, body.id, body) };
@@ -147,7 +162,7 @@ const service = () => {
       held = { what, gate: new Promise<void>((resolve) => (release = resolve)), times };
       return () => release();
     },
-    refuse: (what: 'create' | 'delete' | null) => (refusing = what),
+    refuse: (what: 'create' | 'delete' | 'update' | null) => (refusing = what),
     open: (title: string) => [...google.values()].filter((task) => task.title === title && !task.completed),
     creates: () => asked.filter((call) => call.what === 'create'),
     /** The series' open tasks as kept: where it goes on from. */
@@ -267,6 +282,304 @@ describe('two windows complete one occurrence at once (review 8)', () => {
     // Kept before those dates were: by number.
     const legacy = { googleTasks: { [`${ME}\nold3`]: kept('old3', 3) } };
     expect(seriesNextIn(legacy, [{ ...items[0]!, id: 'old3' }], { seriesId: 's1', index: 2 }, 'gt1')?.id).toBe('old3');
+  });
+});
+
+/** A series' upcoming task on `date`, as a window shows it. */
+const upcomingOn = (state: PlannerState, date: string) => upcomingTasks(state.googleTasks, [], date, date, '2026-10-29')[0]!;
+/** A task form's values: these title and time, the rest as given. */
+const form = (title: string, due: string, time: number | null, extra: Partial<{ notes: string; deadline: string | null; rule: string | null }> = {}) => ({
+  title,
+  notes: extra.notes ?? 'Series notes',
+  due,
+  kept: { time, duration: null, deadline: extra.deadline ?? null, rule: extra.rule === undefined ? null : extra.rule },
+});
+const openTask = (world: ReturnType<typeof service>) => [...world.google.values()].filter((task) => !task.completed);
+
+describe('a change to a series while another window makes its next task (review 9)', () => {
+  test('tomorrow edited alone in one window while another completes today, Google slow to make the next one: the edit is kept, the next task has it, after a reload too', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Race');
+    const b = world.window();
+    const tomorrow = upcomingOn(b.view(), '2026-10-30');
+    const release = world.hold('create', 1);
+    const completing = a.store.completeListTask(first, true);
+    // Google is making tomorrow's while the other window saves its edit of it.
+    await flush();
+    const editing = b.store.editOccurrence(tomorrow, form('Race with Ann', '2026-10-30', 900));
+    await flush();
+    release();
+    await Promise.all([completing, editing]);
+    const next = openTask(world);
+    expect(next.map((task) => [task.title, task.due])).toEqual([['Race with Ann', '2026-10-30']]);
+    expect(keptFor(world.state(), next[0]!)).toMatchObject({ time: 900, repeat: { seriesId, index: 2, on: '2026-10-30', next: null, template: { title: 'Race', time: 540 } } });
+    expect(keptFor(world.state(), first)?.repeat?.next).toBe(next[0]!.id);
+    expect(keptFor(foldEvents(world.log), next[0]!)).toMatchObject({ time: 900 });
+    expect(world.creates()).toHaveLength(2);
+    // The day after is the series' own again.
+    expect(upcomingOn(world.state(), '2026-10-31')).toMatchObject({ on: '2026-10-31', template: { title: 'Race', time: 540 } });
+    expect(upcomingOn(world.state(), '2026-10-31').change).toBeUndefined();
+  });
+
+  test('a change kept past the lock while Google makes the next task (a window not reloaded since an update, a sync): the next task is made as the series is then, in Google too', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Race');
+    const release = world.hold('create', 1);
+    const completing = a.store.completeListTask(first, true);
+    await flush();
+    // Written as commands, as an older panel writes it: tomorrow at 3pm with its own title.
+    const head = keptFor(world.state(), first)!;
+    await a.dispatch([{ type: 'gtask.kept', account: ME, listId: 'L1', taskId: first.id, patch: { repeat: { ...head.repeat!, exceptions: { '2026-10-30': { title: 'Race with Ann', time: 900, duration: null } } } } }]);
+    release();
+    await completing;
+    const next = openTask(world);
+    expect(next.map((task) => [task.title, task.due])).toEqual([['Race with Ann', '2026-10-30']]);
+    expect(keptFor(world.state(), next[0]!)).toMatchObject({ time: 900, repeat: { on: '2026-10-30' } });
+    // The link went onto the series as it was then: its change stays with it.
+    expect(keptFor(world.state(), first)?.repeat).toMatchObject({ next: next[0]!.id, exceptions: { '2026-10-30': { title: 'Race with Ann' } } });
+    expect(world.asked.filter((call) => call.what === 'update' && call.id === next[0]!.id)).toHaveLength(1);
+  });
+
+  test('all tasks edited in one window while another completes the open one, Google slow: the next task is made, then takes the new title and time; the series has them, after a reload too', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Race');
+    const b = world.window();
+    const release = world.hold('create', 1);
+    const completing = a.store.completeListTask(first, true);
+    await flush();
+    const editing = b.store.saveListTask(first, form('Race daily', '2026-10-29', 900, { rule: 'RRULE:FREQ=DAILY' }), 'all');
+    await flush();
+    release();
+    await Promise.all([completing, editing]);
+    const next = openTask(world);
+    expect(next.map((task) => [task.title, task.due])).toEqual([['Race daily', '2026-10-30']]);
+    expect(keptFor(world.state(), next[0]!)).toMatchObject({ time: 900, repeat: { seriesId, on: '2026-10-30', template: { title: 'Race daily', time: 900, start: '2026-10-29' } } });
+    expect(keptFor(foldEvents(world.log), next[0]!)?.repeat?.template).toMatchObject({ title: 'Race daily', time: 900 });
+    expect(world.creates()).toHaveLength(2);
+    // The one after it comes from the new template.
+    await a.store.completeListTask(next[0]!, true);
+    expect(openTask(world).map((task) => [task.title, task.due])).toEqual([['Race daily', '2026-10-31']]);
+    expect(keptFor(world.state(), openTask(world)[0]!)).toMatchObject({ time: 900 });
+  });
+
+  test('an edit of all tasks that arrives first is what the next task is made with', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Race');
+    const b = world.window();
+    await b.store.saveListTask(first, form('Race daily', '2026-10-29', 900, { rule: 'RRULE:FREQ=DAILY' }), 'all');
+    // A's view is from before the edit; the service makes the next one from the series as it is.
+    await a.store.completeListTask(first, true);
+    expect(openTask(world).map((task) => [task.title, task.due])).toEqual([['Race daily', '2026-10-30']]);
+    expect(keptFor(world.state(), openTask(world)[0]!)).toMatchObject({ time: 900 });
+  });
+});
+
+describe('an occurrence told by the date its series puts it on (review 9)', () => {
+  const template = { title: 'Pair', notes: '', time: 540, duration: null, deadline: null, start: '2026-10-25' };
+  test('the number a series gives a date, counting one deleted on its own; none off its schedule, at or before its open task, or past its end', () => {
+    const repeat = { rule: 'RRULE:FREQ=DAILY;INTERVAL=2;UNTIL=20261106', seriesId: 's', index: 3, next: null, on: '2026-10-29', template, exceptions: { '2026-10-31': { skip: true as const } } };
+    expect(['2026-10-31', '2026-11-02', '2026-11-06'].map((date) => occurrenceIndex(repeat, date))).toEqual([4, 5, 7]);
+    expect(['2026-10-30', '2026-10-29', '2026-10-27', '2026-11-08'].map((date) => occurrenceIndex(repeat, date))).toEqual([null, null, null, null]);
+  });
+
+  test('an edit of one occurrence goes over it as it is now, field by field; a time goes with its length', () => {
+    const before = { title: 'Pair', notes: '', due: '2026-10-31', time: 540, duration: null, deadline: null };
+    // Meanwhile another window gave it a title, 3pm for half an hour, and a deadline.
+    const latest = { title: 'Pair with Ann', notes: '', due: '2026-10-31', time: 900, duration: 30, deadline: '2026-11-01' };
+    expect(mergeOccurrence(latest, before, { ...before, notes: 'Bring the slides' })).toEqual({ ...latest, notes: 'Bring the slides' });
+    expect(mergeOccurrence(latest, before, { ...before, time: 600 })).toEqual({ ...latest, time: 600, duration: null });
+    expect(mergeOccurrence(latest, before, { ...before, title: 'Pair with Bo', due: '2026-11-01' })).toEqual({ ...latest, title: 'Pair with Bo', due: '2026-11-01' });
+  });
+});
+
+describe('one occurrence, two windows, and a cut (review 9 audit)', () => {
+  test('an upcoming task the series has made meanwhile, its title alone edited: Google has it, and its kept entry is written again, so every window reads it again', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Made');
+    const b = world.window();
+    const shown = upcomingOn(b.view(), '2026-10-30');
+    await a.store.completeListTask(first, true);
+    const made = openTask(world)[0]!;
+    const before = keptFor(world.state(), made)!;
+    await b.store.editOccurrence(shown, form('Made with Ann', '2026-10-30', 540));
+    expect(world.google.get(made.id)?.title).toBe('Made with Ann');
+    const after = keptFor(world.state(), made)!;
+    expect(after).toMatchObject({ time: 540, repeat: before.repeat! });
+    expect(after.updatedAt > before.updatedAt).toBe(true);
+  });
+
+  test('a new rule saved in a window that never saw two upcoming tasks edited alone: the edit still on its schedule stays, the one on a day it no longer makes goes', async () => {
+    const world = service();
+    const a = world.window();
+    // Thursday, October 29.
+    const { first } = await daily(world, a, 'Gym');
+    const b = world.window();
+    await a.store.editOccurrence(upcomingOn(a.view(), '2026-10-30'), form('Gym with Ann', '2026-10-30', 900));
+    await a.store.editOccurrence(upcomingOn(a.view(), '2026-10-31'), form('Gym on Saturday', '2026-10-31', 600));
+    expect(Object.keys(keptFor(b.view(), first)?.repeat?.exceptions ?? {})).toEqual([]);
+    await b.store.saveListTask(first, form('Gym', '2026-10-29', 540, { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR' }), 'all');
+    const repeat = keptFor(world.state(), first)!.repeat!;
+    expect(repeat.rule).toBe('RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR');
+    expect(repeat.exceptions).toEqual({ '2026-10-30': { title: 'Gym with Ann', time: 900, duration: null } });
+    expect(upcomingTasks(world.state().googleTasks, [], '2026-10-30', '2026-11-03', '2026-10-29').map((task) => [task.on, task.change?.title ?? null])).toEqual([
+      ['2026-10-30', 'Gym with Ann'],
+      ['2026-11-02', null],
+      ['2026-11-03', null],
+    ]);
+    // The first window still shows Saturday: its edit of a day the rule no longer makes is refused, not kept where nothing shows it.
+    await expect(a.store.editOccurrence(upcomingOn(a.view(), '2026-10-31'), form('Gym on Saturday at 11', '2026-10-31', 660))).rejects.toThrow('This task is no longer in its series');
+    expect(Object.keys(keptFor(world.state(), first)!.repeat!.exceptions ?? {})).toEqual(['2026-10-30']);
+  });
+
+  test('two windows edit the same upcoming task: what each changed is kept; the same field, the last one', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Pair');
+    const b = world.window();
+    const shownA = upcomingOn(a.view(), '2026-10-31');
+    const shownB = upcomingOn(b.view(), '2026-10-31');
+    await a.store.editOccurrence(shownA, form('Pair with Ann', '2026-10-31', 540));
+    await b.store.editOccurrence(shownB, form('Pair', '2026-10-31', 900));
+    expect(keptFor(world.state(), first)?.repeat?.exceptions).toEqual({ '2026-10-31': { title: 'Pair with Ann', time: 900, duration: null } });
+    await b.store.editOccurrence(shownB, form('Pair with Bo', '2026-10-31', 540));
+    expect(keptFor(world.state(), first)?.repeat?.exceptions?.['2026-10-31']).toEqual({ title: 'Pair with Bo', time: 900, duration: null });
+  });
+
+  test('an upcoming task deleted alone, then edited from a window that still shows it: refused, it stays deleted', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Pair');
+    const b = world.window();
+    const shown = upcomingOn(b.view(), '2026-10-31');
+    await a.store.setOccurrence(upcomingOn(a.view(), '2026-10-31'), { skip: true });
+    await expect(b.store.editOccurrence(shown, form('Pair with Ann', '2026-10-31', 900))).rejects.toThrow('This task was deleted meanwhile');
+    expect(keptFor(world.state(), first)?.repeat?.exceptions).toEqual({ '2026-10-31': { skip: true } });
+  });
+
+  test('while "This and following tasks" deletes the open task in Google, an edit of an upcoming task it takes waits for it and is refused, never accepted and then lost', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Cut');
+    await a.store.completeListTask(first, true);
+    const head = openTask(world)[0]!;
+    const b = world.window();
+    const shown = upcomingOn(b.view(), '2026-10-31');
+    const release = world.hold('delete', 1);
+    const cutting = a.store.deleteListTask(head, 'following');
+    await flush();
+    const editing = b.store.editOccurrence(shown, form('Cut late', '2026-10-31', 900)).then(
+      () => 'accepted',
+      (error: Error) => error.message,
+    );
+    await flush();
+    // It waits for the cut: nothing of it is kept meanwhile.
+    expect(keptFor(world.state(), head)?.repeat?.exceptions).toBeUndefined();
+    release();
+    await cutting;
+    expect(await editing).toBe('This task is no longer in its series');
+    expect(world.google.has(head.id)).toBe(false);
+    expect(world.heads(seriesId)).toEqual([]);
+    expect(upcomingTasks(world.state().googleTasks, [], '2026-10-29', '2026-11-05', '2026-10-29')).toEqual([]);
+  });
+
+  test('after "This and following tasks": an upcoming task it took is refused, one before it kept, and All tasks saved in a window that still shows the series without its end keeps the end', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Cut');
+    const b = world.window();
+    // Opened before the cut and not reloaded since.
+    const c = world.window();
+    const later = upcomingOn(b.view(), '2026-11-01');
+    const earlier = upcomingOn(b.view(), '2026-10-30');
+    await a.store.deleteSeries({ account: ME, seriesId, from: '2026-10-31' });
+    await expect(b.store.editOccurrence(later, form('Cut late', '2026-11-01', 900))).rejects.toThrow('This task is no longer in its series');
+    await b.store.editOccurrence(earlier, form('Cut early', '2026-10-30', 900));
+    expect(keptFor(world.state(), first)?.repeat).toMatchObject({ rule: 'RRULE:FREQ=DAILY;UNTIL=20261030', exceptions: { '2026-10-30': { title: 'Cut early', time: 900, duration: null } } });
+    expect(keptFor(c.view(), first)?.repeat?.rule).toBe('RRULE:FREQ=DAILY');
+    await c.store.saveListTask(first, form('Cut', '2026-10-29', 600, { rule: 'RRULE:FREQ=DAILY' }), 'all');
+    expect(keptFor(world.state(), first)).toMatchObject({ time: 600, repeat: { rule: 'RRULE:FREQ=DAILY;UNTIL=20261030', template: { time: 600 }, exceptions: { '2026-10-30': { title: 'Cut early', time: 900 } } } });
+    expect(upcomingTasks(world.state().googleTasks, [], '2026-10-29', '2026-11-05', '2026-10-29').map((task) => task.on)).toEqual(['2026-10-30']);
+  });
+
+  test('an upcoming task the series has made meanwhile (a window still shows it upcoming): edited alone, the task in Google changes; deleted alone, its next one is made first', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Made');
+    const b = world.window();
+    const shown = upcomingOn(b.view(), '2026-10-30');
+    await a.store.completeListTask(first, true);
+    const made = openTask(world)[0]!;
+    await b.store.editOccurrence(shown, form('Made with Ann', '2026-10-30', 900));
+    expect(world.google.get(made.id)).toMatchObject({ title: 'Made with Ann', due: '2026-10-30' });
+    expect(keptFor(world.state(), made)).toMatchObject({ time: 900, repeat: { on: '2026-10-30', next: null } });
+    await b.store.setOccurrence(shown, { skip: true });
+    expect(world.google.has(made.id)).toBe(false);
+    expect(openTask(world).map((task) => [task.title, task.due])).toEqual([['Made', '2026-10-31']]);
+  });
+});
+
+describe('an occurrence moved onto another one, and its task gone from Google (review 9)', () => {
+  test('today moved alone to tomorrow at 1pm: tomorrow shows it and its own 9am; completing either leaves the other as it is, after a reload too', async () => {
+    const world = service();
+    const window = world.window();
+    const { first, seriesId } = await daily(world, window, 'Water');
+    await window.store.saveListTask(first, form('Water', '2026-10-30', 780, { rule: 'RRULE:FREQ=DAILY' }), 'this');
+    const moved = world.google.get(first.id)!;
+    expect(moved.due).toBe('2026-10-30');
+    expect(keptFor(world.state(), first)).toMatchObject({ time: 780, repeat: { on: '2026-10-29', template: { time: 540 } } });
+    const shownTomorrow = (state: PlannerState, items: GoogleTaskItem[]) => upcomingTasks(state.googleTasks, items, '2026-10-30', '2026-10-30', '2026-10-29').map((task) => [task.on, task.date]);
+    expect(shownTomorrow(world.state(), [moved])).toEqual([['2026-10-30', '2026-10-30']]);
+    expect(shownTomorrow(foldEvents(world.log), [moved])).toEqual([['2026-10-30', '2026-10-30']]);
+    // Moved again in Google's own apps (the day after): still today's occurrence, wherever it shows; tomorrow and the day after keep theirs.
+    expect(upcomingTasks(world.state().googleTasks, [{ ...moved, due: '2026-10-31' }], '2026-10-30', '2026-10-31', '2026-10-29').map((task) => task.on)).toEqual(['2026-10-30', '2026-10-31']);
+    // The moved one done: tomorrow's own is made, at 9am, beside it.
+    await window.store.completeListTask(moved, true);
+    const own = openTask(world);
+    expect(own.map((task) => task.due)).toEqual(['2026-10-30']);
+    expect(keptFor(world.state(), own[0]!)).toMatchObject({ time: 540, repeat: { on: '2026-10-30', index: 2 } });
+    expect(world.google.get(first.id)).toMatchObject({ completed: true, due: '2026-10-30' });
+    expect(keptFor(world.state(), first)?.time).toBe(780);
+    // Tomorrow's own done: the day after's, and the moved one stays as it was.
+    await window.store.completeListTask(own[0]!, true);
+    expect(openTask(world).map((task) => task.due)).toEqual(['2026-10-31']);
+    expect(world.creates()).toHaveLength(3);
+    expect(world.heads(seriesId)).toHaveLength(1);
+  });
+
+  test('moved alone past tomorrow, then deleted alone: tomorrow’s own is made first, once', async () => {
+    const world = service();
+    const window = world.window();
+    const { first, seriesId } = await daily(world, window, 'Water');
+    await window.store.saveListTask(first, form('Water', '2026-10-31', 780, { rule: 'RRULE:FREQ=DAILY' }), 'this');
+    // Moved past tomorrow: deleting it alone makes tomorrow's (its next by the series) first.
+    await window.store.deleteListTask(world.google.get(first.id)!, 'this');
+    expect(openTask(world).map((task) => task.due)).toEqual(['2026-10-30']);
+    expect(keptFor(world.state(), openTask(world)[0]!)).toMatchObject({ time: 540, repeat: { on: '2026-10-30' } });
+    expect(world.heads(seriesId)).toHaveLength(1);
+  });
+
+  test('its open task deleted in Google’s own apps: a read of its list makes the next one (as This task) instead of showing upcoming tasks after a task Google no longer has; one moved to another list there is followed', async () => {
+    const world = service();
+    const window = world.window();
+    const { first, seriesId } = await daily(world, window, 'Gone');
+    world.google.delete(first.id);
+    await window.store.loadBoard(ME, 'L1');
+    await world.series.settled();
+    expect(openTask(world).map((task) => [task.title, task.due])).toEqual([['Gone', '2026-10-30']]);
+    expect(keptFor(world.state(), first)).toBeNull();
+    expect(world.heads(seriesId).map((kept) => kept.taskId)).toEqual([openTask(world)[0]!.id]);
+    // Moved to another list there: the series goes with it, nothing is made.
+    const next = openTask(world)[0]!;
+    world.google.set(next.id, { ...next, listId: 'L2' });
+    await window.store.loadBoard(ME, 'L1');
+    await world.series.settled();
+    expect(keptFor(world.state(), next)).toMatchObject({ listId: 'L2', repeat: { seriesId, next: null } });
+    expect(world.creates()).toHaveLength(2);
   });
 });
 

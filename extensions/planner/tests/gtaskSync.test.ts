@@ -18,9 +18,8 @@ import { dropTarget } from '../src/domain/gtasks.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { GoogleData, toTaskItem } from '../service/googleData.ts';
 import { GoogleError, type GoogleAccounts } from '../service/google.ts';
-import { GoogleSeries } from '../service/googleSeries.ts';
-import type { ExecuteResult } from '../service/planner.ts';
-import { commandBody, validateCommand, type Command, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
+import { seriesRoutes } from './seriesRoutes.ts';
+import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { emptyState, googleTaskKey, type GoogleTaskException, type PlannerState } from '../src/domain/types.ts';
 import { findMovedTask, GONE_STATUS, gtaskSource, linkedGoogleTasks, mergeGoogleTask, planGoogleTaskSync, plannerEditTimes, TASK_GONE, taskFromGoogleTask, type GoogleTaskItem } from '../src/domain/google.ts';
@@ -81,42 +80,14 @@ const fakeClient = (start: PlannerState, answer: (method: string, path: string, 
     n += bodies.length;
     state = applyEvents(state, events);
   };
-  const enc = encodeURIComponent;
-  const series = new GoogleSeries(
-    {
-      get state() {
-        return state;
-      },
-      execute: (commands: readonly unknown[]): ExecuteResult => {
-        let working = state;
-        for (const [index, command] of commands.entries()) {
-          const error = validateCommand(command, working);
-          if (error) return { ok: false, error, index };
-          working = applyEvents(working, [ev(command as EventBody)]);
-        }
-        apply(commands.map((command) => commandBody(command as Command)));
-        return { ok: true, applied: commands.length };
-      },
-    },
-    {
-      allTasks: async (account, listId) => {
-        const read = (await google('GET', `/google/tasks/all?account=${enc(account)}&list=${enc(listId)}`)) as { tasks?: GoogleTaskItem[]; complete?: boolean };
-        return { tasks: read?.tasks ?? [], complete: read?.complete ?? true };
-      },
-      createTask: async (account, listId, task) => ((await google('POST', '/google/tasks', { account, listId, ...task })) as { task?: GoogleTaskItem | null })?.task ?? null,
-      deleteTask: async (account, listId, id) => {
-        await google('DELETE', `/google/tasks?account=${enc(account)}&list=${enc(listId)}&id=${enc(id)}`);
-      },
-    },
-  );
+  const { series, handle } = seriesRoutes({ state: () => state, apply }, google);
   const client = {
     getView: () => ({ state, today: '2026-10-26' }),
     call: async (method: string, path: string, body?: any) => {
-      if (path === '/google/tasks/next' || path.startsWith('/google/tasks/series?')) {
+      const answered = await handle(path, body);
+      if (answered) {
         routes.push({ method, path, ...(body === undefined ? {} : { body }) });
-        const query = new URLSearchParams(path.split('?')[1] ?? '');
-        const done = path === '/google/tasks/next' ? await series.next(body.account, body.listId, body.id) : await series.remove(query.get('account')!, query.get('series')!, query.get('from'), query.get('task'));
-        return { ...done, state };
+        return answered;
       }
       return google(method, path, body);
     },
@@ -588,8 +559,11 @@ describe('the calendar shows deadlines and upcoming occurrences, as Google Calen
     // Completed, its next made (with what is kept for it): the series goes on from the new one.
     const made = foldEvents([kept('gt1', { time: 600, repeat: repeat({ next: 'gt2' }) }), kept('gt2', { time: 600, repeat: repeat({ index: 2, on: '2026-10-28' }) })]).googleTasks;
     expect(dates(upcomingTasks(made, [item({ id: 'gt2', due: '2026-10-28' })], ...WEEK, '2026-10-27'))).toEqual(['2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']);
-    // Shown already on a date (one occurrence moved there): not projected there.
-    expect(dates(upcomingTasks(daily(), [item({ id: 'gt1', due: '2026-10-29' })], ...WEEK, '2026-10-27'))).not.toContain('2026-10-29');
+    // The open one moved onto another occurrence's date (review 9): that occurrence still shows there, beside it.
+    expect(dates(upcomingTasks(daily(), [item({ id: 'gt1', due: '2026-10-29' })], ...WEEK, '2026-10-27'))).toEqual(['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']);
+    // Its next one made and moved elsewhere: it is that occurrence, wherever it shows, so its date shows no projection.
+    const movedNext = foldEvents([kept('gt1', { repeat: repeat({ next: 'gt2' }) }), kept('gt2', { repeat: repeat({ index: 2, on: '2026-10-28' }) })]).googleTasks;
+    expect(dates(upcomingTasks(movedNext, [item({ id: 'gt2', due: '2026-10-31' })], ...WEEK, '2026-10-27'))).toEqual(['2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']);
     // Two open occurrences of one series project each date once.
     const twice = foldEvents([kept('gt1', { repeat: repeat() }), kept('gt5', { repeat: repeat() })]).googleTasks;
     expect(dates(upcomingTasks(twice, [], ...WEEK, '2026-10-27'))).toEqual(['2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']);

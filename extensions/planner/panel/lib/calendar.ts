@@ -21,8 +21,10 @@ const REFRESH_MS = 10 * 60_000;
 
 /**
  * Subscribed-calendar occurrences and Google tasks due in [from, to]; refetches
- * when the range or the subscriptions change, and after the Planner changed
- * something in Google. Changes on their way to Google show at once. Events I
+ * when the range or the subscriptions change, after the Planner changed
+ * something in Google, and when a repeating task's open task changed in the
+ * plan (made or edited in another window, or by the service). Changes on their
+ * way to Google show at once. Events I
  * declined are left out unless asked for (the calendar views show them). With
  * `tasks`, the calendar's own views also get Google tasks as Google Calendar
  * shows them beside their date: deadlines on their day, the upcoming
@@ -39,6 +41,14 @@ export const useCalendarEvents = (from: DateKey, to: DateKey, options: { decline
   // Google tasks show on their due day whenever an account with Tasks is connected, subscribed calendars or not.
   const tasks = view.state.settings.googleTasksOnCalendar && google.accountsWith('tasks').length > 0;
   const signature = [...Object.values(calendars).map((calendar) => `${calendar.id}:${calendar.url}:${calendar.visible}`), ...(tasks ? ['google-tasks'] : [])].join('|');
+  // The open task of each repeating series, as the plan has it now: one made or changed elsewhere (another window, the
+  // service) is read from Google again, so the calendar never shows a series going on past a task it has not read.
+  const heads = tasks
+    ? Object.values(view.state.googleTasks ?? {})
+        .flatMap((kept) => (kept.repeat && !kept.repeat.next ? [`${kept.taskId}@${kept.updatedAt}`] : []))
+        .sort()
+        .join('|')
+    : '';
 
   useEffect(() => {
     if (!signature) {
@@ -64,7 +74,7 @@ export const useCalendarEvents = (from: DateKey, to: DateKey, options: { decline
       live = false;
       clearInterval(timer);
     };
-  }, [client, from, to, signature, view.state.settings.timezone, ui.tick]);
+  }, [client, from, to, signature, heads, view.state.settings.timezone, ui.tick]);
 
   const zone = view.state.settings.timezone ?? 'UTC';
   const kept = view.state.googleTasks;

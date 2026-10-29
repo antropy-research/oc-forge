@@ -2,16 +2,22 @@
 // events read in full, created, changed, answered, moved and deleted (with
 // Google Calendar's "This event", "This and following events" and "All
 // events"), task lists made, renamed and deleted, and tasks read with the
-// completed ones, moved, nested and deleted; a repeating task's next
-// occurrence made once, and its series deleted from one of its tasks on
-// ("This and following tasks") or whole ("All tasks"), answered with the plan
-// as it is then. Each write makes the next calendar read ask Google again.
+// completed ones, moved, nested and deleted; and a repeating task's series,
+// one change of it at a time (`GoogleSeries`): its next occurrence made once,
+// one upcoming occurrence changed or deleted on its own, an edit of all its
+// tasks, its open task gone from Google, and its deletion from one of its
+// tasks on ("This and following tasks") or whole ("All tasks"), each answered
+// with the plan as it is then. Each write makes the next calendar read ask
+// Google again.
 import type http from 'node:http';
 import { isDateKey } from '../src/domain/dates.ts';
+import { GOOGLE_NOTES_MAX } from '../src/domain/events.ts';
 import { EDIT_SCOPES, type EditScope, type EventInput } from '../src/domain/gevents.ts';
 import type { GoogleResponse } from '../src/domain/google.ts';
+import type { OccurrenceValues, SeriesSide } from '../src/domain/gtaskKept.ts';
+import type { GoogleTaskException } from '../src/domain/types.ts';
 import type { GoogleData, SendUpdates } from './googleData.ts';
-import type { GoogleSeries } from './googleSeries.ts';
+import type { GoogleSeries, OccurrenceEdit } from './googleSeries.ts';
 
 export interface GoogleRouteContext {
   data: GoogleData;
@@ -36,6 +42,24 @@ const bad = (error: string) => ({ status: 400, body: { error } });
 const sendOf = (value: unknown): SendUpdates => (value === 'all' ? 'all' : 'none');
 const scopeOf = (value: unknown): EditScope | null => (value === undefined ? 'this' : EDIT_SCOPES.includes(value as EditScope) ? (value as EditScope) : null);
 const RESPONSES: readonly string[] = ['accepted', 'declined', 'tentative'];
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isDay = (value: unknown): value is string => typeof value === 'string' && isDateKey(value);
+const isMinutes = (value: unknown, low: number, high: number): boolean => value === null || (Number.isInteger(value) && (value as number) >= low && (value as number) <= high);
+/** An occurrence as a window showed it, or as its form left it. */
+const isOccurrence = (value: unknown): value is OccurrenceValues =>
+  isRecord(value) && typeof value.title === 'string' && value.title.length <= 1024 && typeof value.notes === 'string' && value.notes.length <= GOOGLE_NOTES_MAX
+  && isDay(value.due) && isMinutes(value.time, 0, 24 * 60 - 1) && isMinutes(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline));
+/** One side of an edit of all tasks of a series; the template's every field is checked again when it is kept. */
+const isSeriesSide = (value: unknown): value is SeriesSide =>
+  isRecord(value) && (value.rule === null || (typeof value.rule === 'string' && value.rule.length <= 500)) && (value.due === null || isDay(value.due))
+  && isRecord(value.template) && typeof value.template.title === 'string' && typeof value.template.notes === 'string' && isDay(value.template.start);
+const OWN_FIELDS = ['time', 'duration', 'deadline', 'starred', 'busy', 'visibility'];
+const occurrenceEditOf = (input: Record<string, unknown>): OccurrenceEdit | null => {
+  if (input.skip === true) return { skip: true };
+  // What it had (its change is checked again when it is kept), or null: as its series has it.
+  if ('restore' in input) return input.restore === null || isRecord(input.restore) ? { restore: input.restore as GoogleTaskException | null } : null;
+  return isOccurrence(input.before) && isOccurrence(input.after) ? { before: input.before, after: input.after } : null;
+};
 
 /** A Google write route's answer; null when the path is not one of them. */
 export const googleWriteRoute = async (req: http.IncomingMessage, url: URL, ctx: GoogleRouteContext): Promise<Answer> => {
@@ -145,8 +169,44 @@ export const googleWriteRoute = async (req: http.IncomingMessage, url: URL, ctx:
   if (path === '/google/tasks/next' && method === 'POST') {
     const input = await body();
     if (!isEmail(input.account) || !isId(input.listId) || !isId(input.id)) return bad('account, listId and id are required');
+    if ((input.completed !== undefined && typeof input.completed !== 'boolean') || (input.due !== undefined && input.due !== null && !isDay(input.due))) return bad('completed must be true or false, due a date');
+    const hint = { ...(input.completed !== undefined ? { completed: input.completed as boolean } : {}), ...(input.due !== undefined ? { due: input.due as string | null } : {}) };
     try {
-      return ok({ ...(await ctx.series.next(input.account, input.listId, input.id)), ...ctx.snapshot() });
+      return ok({ ...(await ctx.series.next(input.account, input.listId, input.id, hint)), ...ctx.snapshot() });
+    } finally {
+      ctx.changed('tasks');
+    }
+  }
+  if (path === '/google/tasks/occurrence' && method === 'POST') {
+    const input = await body();
+    if (!isEmail(input.account) || !isId(input.seriesId) || !isDay(input.on)) return bad('account, seriesId and on (a date) are required');
+    const edit = occurrenceEditOf(input);
+    if (!edit) return bad('skip, restore, or before and after (an occurrence each) are required');
+    try {
+      await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
+      return ok({ changed: true, ...ctx.snapshot() });
+    } finally {
+      ctx.changed('tasks');
+    }
+  }
+  if (path === '/google/tasks/series/edit' && method === 'POST') {
+    const input = await body();
+    if (!isEmail(input.account) || !isId(input.listId) || !isId(input.taskId) || !isId(input.seriesId)) return bad('account, listId, taskId and seriesId are required');
+    if (!isRecord(input.own) || Object.keys(input.own).some((key) => !OWN_FIELDS.includes(key))) return bad(`own may only carry ${OWN_FIELDS.join(', ')}`);
+    if (!isSeriesSide(input.before) || !isSeriesSide(input.after)) return bad('before and after (rule, template and due) are required');
+    try {
+      await ctx.series.edit(input.account, input.listId, input.taskId, input.seriesId, input.own, input.before, input.after);
+      return ok({ changed: true, ...ctx.snapshot() });
+    } finally {
+      ctx.changed('tasks');
+    }
+  }
+  if (path === '/google/tasks/gone' && method === 'POST') {
+    const input = await body();
+    if (!isEmail(input.account) || !isId(input.listId) || !isId(input.id)) return bad('account, listId and id are required');
+    try {
+      await ctx.series.gone(input.account, input.listId, input.id);
+      return ok({ ...ctx.snapshot() });
     } finally {
       ctx.changed('tasks');
     }
