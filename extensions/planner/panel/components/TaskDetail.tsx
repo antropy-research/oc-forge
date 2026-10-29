@@ -17,6 +17,7 @@ import { LinearTaskSection } from './LinearPanel.tsx';
 import { AgentSection } from './Agents.tsx';
 import { GitHubTaskSection } from './GitHubPanel.tsx';
 import { GoogleTaskSection } from './GooglePanel.tsx';
+import { ConflictBanner, quoted, useDraft } from './Conflicts.tsx';
 
 const PRIORITIES: { id: Priority; label: string }[] = [
   { id: 'urgent', label: 'Urgent' },
@@ -77,15 +78,58 @@ const StartPicker = ({ task }: { task: Task }) => {
   );
 };
 
-export const Subtasks = ({ task }: { task: Task }) => {
+/**
+ * A task's subtasks changed as the plan has them now, read again first: the
+ * list is written whole, so one added, ticked or renamed in another window
+ * meanwhile stays. `also`: what goes with it in the same step.
+ */
+const useSubtasks = (taskId: string) => {
   const { client } = usePlanner();
+  return async (change: (subtasks: Subtask[]) => Subtask[], also: EventBody[] = [], undo?: string) => {
+    const now = (await client.refresh().catch(() => client.getView().state)).tasks[taskId];
+    if (now) await client.dispatch([...also, { type: 'task.updated', taskId, patch: { subtasks: change(now.subtasks) } }], undo ? { undo } : undefined);
+  };
+};
+
+/** A subtask's title, edited in place over the title as it is (`useDraft`): renamed meanwhile too is asked. */
+const SubtaskTitle = ({ task, subtask }: { task: Task; subtask: Subtask }) => {
+  const { client } = usePlanner();
+  const change = useSubtasks(task.id);
+  const title = useDraft(
+    subtask.title,
+    (value) => void change((subtasks) => subtasks.map((item) => (item.id === subtask.id ? { ...item, title: value } : item))),
+    async () => (await client.refresh()).tasks[task.id]?.subtasks.find((item) => item.id === subtask.id)?.title ?? subtask.title,
+  );
+  return (
+    <>
+      <input
+        class="subtask-title"
+        value={title.shown}
+        aria-label="Subtask"
+        onFocus={title.begin}
+        onInput={(event) => title.change(event.currentTarget.value)}
+        onBlur={(event) => {
+          const value = event.currentTarget.value.trim();
+          if (value) void title.end(value);
+          else title.cancel();
+        }}
+        onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
+      />
+      {title.conflict && (
+        <ConflictBanner lines={[`This subtask was renamed ${quoted(title.conflict.theirs)} elsewhere (yours: ${quoted(title.conflict.mine)})`]} onTheirs={title.theirs} onMine={title.mine} />
+      )}
+    </>
+  );
+};
+
+export const Subtasks = ({ task }: { task: Task }) => {
   const view = useView();
   const [draft, setDraft] = useState('');
-  const save = (subtasks: Subtask[]) => void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { subtasks } }]);
+  const change = useSubtasks(task.id);
   const add = () => {
     const title = draft.trim();
     if (!title) return;
-    save([...task.subtasks, { id: newId(), title, done: false }]);
+    void change((subtasks) => [...subtasks, { id: newId(), title, done: false }]);
     setDraft('');
   };
   const done = task.subtasks.filter((subtask) => subtask.done).length;
@@ -99,18 +143,9 @@ export const Subtasks = ({ task }: { task: Task }) => {
               type="checkbox"
               checked={subtask.done}
               aria-label={`Complete ${subtask.title}`}
-              onChange={() => save(task.subtasks.map((item) => (item.id === subtask.id ? { ...item, done: !item.done } : item)))}
+              onChange={() => void change((subtasks) => subtasks.map((item) => (item.id === subtask.id ? { ...item, done: !subtask.done } : item)))}
             />
-            <input
-              class="subtask-title"
-              defaultValue={subtask.title}
-              aria-label="Subtask"
-              onBlur={(event) => {
-                const title = event.currentTarget.value.trim();
-                if (title && title !== subtask.title) save(task.subtasks.map((item) => (item.id === subtask.id ? { ...item, title } : item)));
-              }}
-              onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
-            />
+            <SubtaskTitle task={task} subtask={subtask} />
             <button
               class="link"
               aria-label={`Turn ${subtask.title} into a task`}
@@ -118,18 +153,16 @@ export const Subtasks = ({ task }: { task: Task }) => {
               onClick={() => {
                 const list = tasksIn(view.state, task.placement);
                 const position = positionAt(view.state, task.placement, list.findIndex((item) => item.id === task.id) + 1);
-                void client.dispatch(
-                  [
-                    { type: 'task.created', task: { id: newId(), title: subtask.title, placement: task.placement, position, channelId: task.channelId, folderId: task.folderId, objectiveId: task.objectiveId } },
-                    { type: 'task.updated', taskId: task.id, patch: { subtasks: task.subtasks.filter((item) => item.id !== subtask.id) } },
-                  ],
-                  { undo: 'Subtask became a task' },
+                void change(
+                  (subtasks) => subtasks.filter((item) => item.id !== subtask.id),
+                  [{ type: 'task.created', task: { id: newId(), title: subtask.title, placement: task.placement, position, channelId: task.channelId, folderId: task.folderId, objectiveId: task.objectiveId } }],
+                  'Subtask became a task',
                 );
               }}
             >
               ↗
             </button>
-            <button class="link danger" aria-label={`Delete ${subtask.title}`} onClick={() => save(task.subtasks.filter((item) => item.id !== subtask.id))}>×</button>
+            <button class="link danger" aria-label={`Delete ${subtask.title}`} onClick={() => void change((subtasks) => subtasks.filter((item) => item.id !== subtask.id))}>×</button>
           </li>
         ))}
       </ul>
@@ -137,6 +170,39 @@ export const Subtasks = ({ task }: { task: Task }) => {
     </section>
   );
 };
+
+/**
+ * A task's notes, edited in place over the notes as they are (`useDraft`):
+ * left as they were, nothing is written (notes changed in another window
+ * meanwhile show); changed there too meanwhile, it is asked.
+ */
+export const NotesField = ({ task, className }: { task: Task; className: string }) => {
+  const { client } = usePlanner();
+  const notes = useDraft(task.notes, (value) => void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { notes: value } }]), async () => (await client.refresh()).tasks[task.id]?.notes ?? task.notes);
+  return (
+    <>
+      <textarea
+        class={className}
+        placeholder="Notes…"
+        aria-label="Notes"
+        value={notes.shown}
+        onFocus={notes.begin}
+        onInput={(event) => notes.change(event.currentTarget.value)}
+        onBlur={(event) => void notes.end(event.currentTarget.value)}
+      />
+      {notes.conflict && (
+        <ConflictBanner
+          lines={[`Notes were changed elsewhere to ${notes.conflict.theirs.trim() ? quoted(notes.conflict.theirs) : 'none'} (yours: ${notes.conflict.mine.trim() ? quoted(notes.conflict.mine) : 'none'})`]}
+          onTheirs={notes.theirs}
+          onMine={notes.mine}
+        />
+      )}
+    </>
+  );
+};
+
+/** Planned time as typed: none when empty, null when it does not read as one. */
+const minutesOf = (text: string): number | null => (text.trim() ? parseDuration(text.trim()) : null);
 
 const ActualTime = ({ task }: { task: Task }) => {
   const { client } = usePlanner();
@@ -220,6 +286,15 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
     return () => document.removeEventListener('keydown', onKey);
   }, []);
 
+  // The title and planned time, edited in place over the task as it is: changed elsewhere meanwhile too is asked.
+  const fresh = async () => (await client.refresh()).tasks[taskId];
+  const title = useDraft(task?.title ?? '', (value) => update({ title: value }), async () => (await fresh())?.title ?? task?.title ?? '');
+  const planned = useDraft(
+    formatMinutes(task?.plannedMinutes ?? null),
+    (value) => update({ plannedMinutes: minutesOf(value) }),
+    async () => formatMinutes((await fresh())?.plannedMinutes ?? null),
+    (a, b) => minutesOf(a) === minutesOf(b),
+  );
   if (!task) return null;
   const update = (patch: TaskPatch) => void client.dispatch([{ type: 'task.updated', taskId, patch }]);
   const act = (body: EventBody, label: string) => {
@@ -299,8 +374,9 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
             class="detail-title"
             rows={1}
             aria-label="Title"
-            defaultValue={task.title}
-            key={`title-${task.title}`}
+            value={title.shown}
+            onFocus={title.begin}
+            onInput={(event) => title.change(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
@@ -308,22 +384,24 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
               }
             }}
             onBlur={(event) => {
-              const title = event.currentTarget.value.replace(/\s+/g, ' ').trim();
-              if (title && title !== task.title) update({ title });
+              const value = event.currentTarget.value.replace(/\s+/g, ' ').trim();
+              if (value) void title.end(value);
+              else title.cancel();
             }}
           />
           <label class="detail-planned">
             <span>Planned</span>
             <input
-              key={`planned-${task.plannedMinutes}`}
-              defaultValue={formatMinutes(task.plannedMinutes)}
+              value={planned.shown}
               placeholder="0:00"
               aria-label="Planned time"
+              onFocus={planned.begin}
+              onInput={(event) => planned.change(event.currentTarget.value)}
               onBlur={(event) => {
-                const raw = event.currentTarget.value.trim();
-                const minutes = raw ? parseDuration(raw) : null;
-                if (raw && minutes === null) return;
-                if (minutes !== task.plannedMinutes) update({ plannedMinutes: minutes });
+                const raw = event.currentTarget.value;
+                // Not a time: left as typed, to correct.
+                if (raw.trim() && minutesOf(raw) === null) return;
+                void planned.end(raw);
               }}
               onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
             />
@@ -337,17 +415,12 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
             })()}
           </label>
         </div>
+        {title.conflict && <ConflictBanner lines={[`Title was changed to ${quoted(title.conflict.theirs)} elsewhere (yours: ${quoted(title.conflict.mine)})`]} onTheirs={title.theirs} onMine={title.mine} />}
+        {planned.conflict && (
+          <ConflictBanner lines={[`Planned time was changed to ${planned.conflict.theirs || 'none'} elsewhere (yours: ${planned.conflict.mine.trim() || 'none'})`]} onTheirs={planned.theirs} onMine={planned.mine} />
+        )}
 
-        <textarea
-          class="detail-notes"
-          placeholder="Notes…"
-          aria-label="Notes"
-          key={`notes-${task.id}`}
-          defaultValue={task.notes}
-          onBlur={(event) => {
-            if (event.currentTarget.value !== task.notes) update({ notes: event.currentTarget.value });
-          }}
-        />
+        <NotesField task={task} className="detail-notes" key={`notes-${task.id}`} />
         <Subtasks task={task} />
         {task.sessionRef && (
           <section class="detail-section" aria-label="From chat">

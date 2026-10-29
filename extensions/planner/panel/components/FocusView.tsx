@@ -6,7 +6,7 @@ import { usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
-import { Subtasks } from './TaskDetail.tsx';
+import { NotesField, Subtasks } from './TaskDetail.tsx';
 
 /** The task Focus shows: the chosen one, else the running timer's, else the first open task today. */
 export const focusTask = (open: Task[], chosen: string | null, running: string | null): Task | null =>
@@ -117,14 +117,8 @@ export const FocusView = ({ onExit }: { onExit: () => void }) => {
               {pomodoro?.cycles ? <span class="muted">{pomodoro.cycles} done</span> : null}
             </div>
             <Subtasks task={task} />
-            <textarea
-              class="detail-notes focus-notes"
-              placeholder="Notes…"
-              aria-label="Notes"
-              key={`focus-notes-${task.id}`}
-              defaultValue={task.notes}
-              onBlur={(event) => event.currentTarget.value !== task.notes && void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { notes: event.currentTarget.value } }])}
-            />
+            {/* Over the notes as they are: one left as it was writes nothing, one changed elsewhere too is asked. */}
+            <NotesField task={task} className="detail-notes focus-notes" key={`focus-notes-${task.id}`} />
             <div class="focus-nav">
               <button onClick={() => go(-1)} disabled={open.length < 2}>↑ Previous</button>
               <button onClick={() => go(1)} disabled={open.length < 2}>Next ↓</button>

@@ -45,6 +45,8 @@ import { blockText } from '../src/domain/gcalendar.ts';
 import type { CalendarEvent } from '../src/domain/ics.ts';
 
 const ME = 'me@example.com';
+/** A call that only reads: Google's tasks, or the plan and a task read again by a form's save. */
+const reads = (call: { method: string; path: string }): boolean => call.method === 'GET' || call.path === '/google/tasks/linked';
 let clock = Date.parse('2026-10-26T16:00:00Z');
 const ev = (body: EventBody): PlannerEvent => {
   clock += 1000;
@@ -419,8 +421,8 @@ describe('repeating tasks', () => {
     await store.saveListTask(item(), fields('RRULE:FREQ=DAILY'), 'all');
     expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.repeat?.rule).toBe('RRULE:FREQ=DAILY');
     expect(keptFor(fake.state(), { account: ME, id: 'gt3' })?.repeat).toMatchObject({ rule: 'RRULE:FREQ=DAILY', seriesId: 's1', index: 2 });
-    // Google's own fields did not change, so Google was not written.
-    expect(fake.calls).toEqual([]);
+    // Google's own fields did not change, so Google was not written (the save read the plan and the task again).
+    expect(fake.calls.filter((call) => !reads(call))).toEqual([]);
   });
 });
 
@@ -716,7 +718,7 @@ describe('an edit Google refuses leaves everything as it was; Save again applies
       expect(reloaded(fake, id)).toEqual(before.kept);
     }
     // Nothing was made in Google either.
-    expect(fake.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.method === 'POST' && !reads(call))).toHaveLength(1);
   });
 
   test('with the list shown in the Tasks view, it shows the task as Google has it again', async () => {
@@ -888,8 +890,8 @@ describe('a repeating task and subtasks never go together, as in Google Tasks', 
     const daily = { title: 'Send the report', notes: 'To Ann', due: '2026-10-26', kept: { time: null, duration: null, deadline: null, rule: 'RRULE:FREQ=DAILY' } };
     expect(await refused(store.saveListTask(item({ id: 'gt2' }), daily))).toBe(SUBTASKS_NO_REPEAT);
     expect(await refused(store.saveListTask(item({ id: 'gt3', parent: 'gt2' }), daily))).toBe(SUBTASK_NO_REPEAT);
-    // Nothing reached Google but a read of the list, and nothing was kept.
-    expect(fake.calls.every((call) => call.method === 'GET')).toBe(true);
+    // Nothing reached Google but reads (of the list, and of the task by the save), and nothing was kept.
+    expect(fake.calls.every(reads)).toBe(true);
     expect(fake.dispatched).toEqual([]);
     // A task without subtasks still takes a repeat, and a repeating one keeps its series on other edits.
     await store.saveListTask(item({ id: 'gt1' }), { ...daily, title: 'Send the full report' });

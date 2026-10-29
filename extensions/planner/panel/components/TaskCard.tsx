@@ -19,6 +19,7 @@ import type { PlaylistEntry } from '../../src/domain/schedule.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { useUi } from '../lib/ui.ts';
+import { ConflictBanner, useDraft } from './Conflicts.tsx';
 
 const PRIORITY_LABEL = { urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' } as const;
 
@@ -131,6 +132,14 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
   const view = useView();
   const { setUi } = useUi();
   const [editingTime, setEditingTime] = useState(false);
+  // Planned time, edited in place over the task as it is: left as it was writes nothing; changed elsewhere too is asked.
+  const minutesOf = (value: string) => (value.trim() ? parseDuration(value) : null);
+  const planned = useDraft(
+    formatMinutes(task.plannedMinutes),
+    (value) => void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { plannedMinutes: minutesOf(value) } }]),
+    async () => formatMinutes((await client.refresh()).tasks[task.id]?.plannedMinutes ?? null),
+    (a, b) => minutesOf(a) === minutesOf(b),
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   // "Assign to an agent…" from the menu: the assignee picker, in place.
   const [assigning, setAssigning] = useState(false);
@@ -158,7 +167,7 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
   return (
     <li
       data-task={task.id}
-      class={`task-card${done ? ' is-done' : ''}${menuOpen || assigning ? ' has-menu' : ''}${running ? ' is-running' : ''}`}
+      class={`task-card${done ? ' is-done' : ''}${menuOpen || assigning ? ' has-menu' : ''}${running ? ' is-running' : ''}${planned.conflict ? ' has-conflict' : ''}`}
       draggable={!editingTime}
       onMouseEnter={() => setHoveredTask(task.id)}
       onMouseLeave={() => setHoveredTask(null)}
@@ -210,21 +219,31 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
       {editingTime ? (
         <InlineInput
           className="inline-input time-input"
-          value={formatMinutes(task.plannedMinutes)}
+          value={planned.shown}
           onCommit={(value) => {
             setEditingTime(false);
-            const minutes = value.trim() ? parseDuration(value) : null;
-            if (value.trim() && minutes === null) return;
-            if (minutes !== task.plannedMinutes) void client.dispatch([{ type: 'task.updated', taskId: task.id, patch: { plannedMinutes: minutes } }]);
+            if (value.trim() && minutesOf(value) === null) return planned.cancel();
+            void planned.end(value);
           }}
-          onCancel={() => setEditingTime(false)}
+          onCancel={() => {
+            setEditingTime(false);
+            planned.cancel();
+          }}
         />
       ) : (
         <span class="times">
           <TimerButton task={task} />
           {actual > 0 && <span class={`actual${running ? ' is-running' : ''}`} title="Actual time">{running ? formatClock(actual) : formatMinutes(actual)}</span>}
           {actual > 0 && <span class="slash">/</span>}
-          <button class={`planned${task.plannedMinutes ? '' : ' is-empty'}`} title="Planned time" aria-label="Planned time" onClick={() => setEditingTime(true)}>
+          <button
+            class={`planned${task.plannedMinutes ? '' : ' is-empty'}`}
+            title="Planned time"
+            aria-label="Planned time"
+            onClick={() => {
+              planned.begin();
+              setEditingTime(true);
+            }}
+          >
             {task.plannedMinutes ? formatMinutes(task.plannedMinutes) : '–:––'}
           </button>
         </span>
@@ -243,6 +262,9 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
         )}
         {assigning && <AssignPopover taskId={task.id} onClose={() => setAssigning(false)} />}
       </div>
+      {planned.conflict && (
+        <ConflictBanner lines={[`Planned time was changed to ${planned.conflict.theirs || 'none'} elsewhere (yours: ${planned.conflict.mine.trim() || 'none'})`]} onTheirs={planned.theirs} onMine={planned.mine} />
+      )}
     </li>
   );
 };

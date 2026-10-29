@@ -36,9 +36,11 @@ import {
   templateOf,
   upcomingValues,
   type MadeTask,
+  type OccurrenceValues,
   type SeriesSide,
   type UpcomingTask,
 } from '../../src/domain/gtaskKept.ts';
+import { SERIES_FIELDS, formChanges, formConflicts, formValuesOf, occurrenceNow, occurrenceOf, seriesShown, withOccurrence, type FormField, type FormValues } from '../../src/domain/gtaskForm.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { addDays } from '../../src/domain/dates.ts';
@@ -67,39 +69,80 @@ export interface TaskFields {
     doNotDisturb?: boolean;
     decline?: DeclineInput | null;
   };
+  /**
+   * What the form showed when it opened, as it saves its values: the save is
+   * the change from this, so a field it left alone keeps what was given it
+   * meanwhile (in another window, or by the service). Without it, the task as
+   * this window has it is taken for what the form showed.
+   */
+  base?: FormValues;
 }
 
-/** The advanced settings a form's fields give a task, from what is kept for it now where the form leaves one out. */
-export const advancedOf = (fields: TaskFields['kept'], kept: GoogleTaskKept | null) => {
-  const timed = fields.time !== null;
-  const busy = timed && (fields.busy ?? Boolean(kept?.busy));
-  const decline = busy ? (fields.decline !== undefined ? fields.decline : kept?.decline ?? null) : null;
+/** The form's values its fields give, `base`'s where they leave one out (as it is), with the form's rules (`formValuesOf`). */
+export const formValuesOfFields = (fields: TaskFields, base: FormValues, extra: { starred?: boolean; listId?: string } = {}): FormValues => {
+  const timed = fields.kept.time !== null;
+  const busy = timed && (fields.kept.busy ?? base.busy);
   return {
+    title: fields.title,
+    notes: fields.notes,
+    due: fields.due,
+    time: fields.kept.time,
+    duration: fields.kept.time === null ? null : fields.kept.duration,
+    deadline: fields.kept.deadline,
+    rule: fields.due ? fields.kept.rule : null,
     busy,
-    visibility: timed ? fields.visibility ?? kept?.visibility ?? ('default' as TaskVisibility) : ('default' as TaskVisibility),
-    doNotDisturb: timed && (fields.doNotDisturb ?? Boolean(kept?.doNotDisturb)),
-    // Declining stays on since it was turned on; a new message or mode keeps that.
-    decline: decline ? { mode: decline.mode, message: decline.message, ...(decline.since ?? kept?.decline?.since ? { since: decline.since ?? kept!.decline!.since } : {}) } : null,
-    color: fields.color !== undefined ? fields.color : kept?.color ?? null,
+    visibility: timed ? fields.kept.visibility ?? base.visibility : 'default',
+    color: fields.kept.color !== undefined ? fields.kept.color : base.color,
+    attachments: fields.kept.attachments ?? base.attachments,
+    doNotDisturb: timed && (fields.kept.doNotDisturb ?? base.doNotDisturb),
+    decline: busy ? (fields.kept.decline !== undefined ? fields.kept.decline : base.decline) : null,
+    starred: extra.starred ?? base.starred,
+    listId: extra.listId || base.listId,
   };
 };
 
-/** Whether the form changes a task's series-wide advanced settings (availability, visibility, color, Do not disturb, declining). */
-export const advancedChanged = (fields: TaskFields['kept'], kept: GoogleTaskKept | null): boolean => {
-  const next = advancedOf(fields, kept);
-  return (
-    next.busy !== Boolean(kept?.busy) ||
-    next.visibility !== (kept?.visibility ?? 'default') ||
-    next.doNotDisturb !== Boolean(kept?.doNotDisturb) ||
-    next.color !== (kept?.color ?? null) ||
-    (next.decline?.mode ?? null) !== (kept?.decline?.mode ?? null) ||
-    (next.decline?.message ?? null) !== (kept?.decline?.message ?? null)
-  );
-};
+/**
+ * A form's save the user settles first, as an editor asks: fields it changed
+ * that changed meanwhile too (in another window, by the service, or in
+ * Google), with what each is now (`now`), the form's (`mine`) and what it
+ * showed (`base`). Nothing was written.
+ */
+export class TaskConflict extends Error {
+  constructor(
+    readonly fields: FormField[],
+    readonly now: FormValues,
+    readonly mine: FormValues,
+    readonly base: FormValues,
+  ) {
+    super(`changed meanwhile (${fields.join(', ')}): open it again to see how it is now`);
+    this.name = 'TaskConflict';
+  }
+}
 
-/** Whether the form changes a task's attachments. */
-export const attachmentsChanged = (fields: TaskFields['kept'], kept: GoogleTaskKept | null): boolean =>
-  fields.attachments !== undefined && JSON.stringify(fields.attachments.map((file) => file.id)) !== JSON.stringify((kept?.attachments ?? []).map((file) => file.id));
+/**
+ * How a form's save is made: its star and list (left out: as they were), and
+ * what it shows (`series`: Edit → All tasks, its template on the open task's
+ * date; else the task as it is).
+ */
+export interface SaveExtra {
+  starred?: boolean;
+  listId?: string;
+  shows?: 'task' | 'series';
+}
+
+/** A form's save against the task as it is now (`GoogleStore.formCheck`). */
+export interface FormCheck {
+  /** The task as Google has it now, and what is kept for it. */
+  item: GoogleTaskItem;
+  kept: GoogleTaskKept | null;
+  base: FormValues;
+  mine: FormValues;
+  /** The task as the form would show it now. */
+  now: FormValues;
+  /** What the form changed from what it showed, and which of those changed meanwhile too. */
+  changes: FormField[];
+  conflicts: FormField[];
+}
 
 /** Why a repeating task cannot go to another list: Google Tasks keeps it in its own. */
 export const REPEATING_STAYS = 'A repeating task stays in its list, as in Google Tasks';
@@ -997,100 +1040,144 @@ export class GoogleStore {
   }
 
   /**
-   * A task's form saved, all or nothing: Google's fields (title, details,
-   * date) and a move to another list are written first, and what the Planner
-   * keeps (time, deadline, repeat with the series' template, star) changes
-   * only once Google has taken them, so an edit Google refuses leaves the
-   * task, what is kept for it and its series as they were, for the form to
+   * The plan as the service has it now: this window's view moves on to it
+   * (another window's change since it last looked included).
+   */
+  private async freshPlan(): Promise<PlannerState> {
+    const answer = await this.client.call<Snapshot>('GET', '/state').catch(() => null);
+    if (answer?.state) await this.client.adopt(answer);
+    return this.client.getView().state;
+  }
+
+  /** A Google task as Google has it now, read again (wherever it is in its account); null when it cannot be read. */
+  private async freshTask(task: { account: string; listId: string; id: string }): Promise<GoogleTaskItem | null> {
+    const answer = await this.client.call<{ tasks?: GoogleTaskItem[] }>('POST', '/google/tasks/linked', { groups: [{ account: task.account, listId: task.listId, ids: [task.id] }] }).catch(() => null);
+    return answer?.tasks?.find((one) => one.id === task.id) ?? null;
+  }
+
+  /**
+   * A form's save against the task as it is now: the plan read again from the
+   * service and the task from Google, as the form would show it now (`shows`).
+   * What the form changed from what it showed (`fields.base`), and which of
+   * those changed meanwhile too. Without a baseline, the task as this window
+   * had it is taken for what the form showed, and nothing conflicts.
+   */
+  async formCheck(item: GoogleTaskItem, fields: TaskFields, extra: SaveExtra = {}): Promise<FormCheck> {
+    const had = keptFor(this.client.getView().state, item);
+    const state = await this.freshPlan();
+    const task = (await this.freshTask(item)) ?? item;
+    const kept = keptFor(state, task);
+    const shown = (at: GoogleTaskItem, entry: GoogleTaskKept | null) => (extra.shows === 'series' && entry ? seriesShown(at, entry) : null) ?? { item: at, kept: entry };
+    const now = formValuesOf(shown(task, kept).item, shown(task, kept).kept);
+    const base = fields.base ?? formValuesOf(shown(item, had).item, shown(item, had).kept);
+    const mine = formValuesOfFields(fields, base, extra);
+    return { item: task, kept, base, mine, now, changes: formChanges(base, mine), conflicts: fields.base ? formConflicts(base, mine, now) : [] };
+  }
+
+  /**
+   * A task's form saved, all or nothing, as the change from what the form
+   * showed (`fields.base`) over the task as it is now: a field the form left
+   * alone keeps what another window, the service or Google gave it meanwhile,
+   * and one the form changed that changed meanwhile too is not written but
+   * thrown (`TaskConflict`), for the user to settle. Google's fields (title,
+   * details, date) and a move to another list are written first, and what the
+   * Planner keeps (time, deadline, repeat with the series' template, star)
+   * changes only once Google has taken them, so an edit Google refuses leaves
+   * the task, what is kept for it and its series as they were, for the form to
    * try again. A change of what the Planner keeps alone needs no Google write.
    * For a repeating task, `scope` says whether the change is for this task or
    * all of the series, as Google Tasks asks (a new rule is for all); either
    * way it is all or nothing. "This task" changes this occurrence alone, in
    * Google and in what is kept for it; the series' template and schedule
-   * stay. "All tasks" changes the template (and the series' other open
-   * occurrences), then this occurrence to match; a new rule or a new date
-   * starts the schedule there. Upcoming occurrences changed on their own
-   * (`setOccurrence`) keep their changes, but for those a new rule or start
-   * no longer has. A subtask, or a task with subtasks, does not
+   * stay. "All tasks" is the service's (`GoogleSeries.edit`): the series as
+   * the form showed it and as it leaves it, which the service puts over the
+   * series as it is then (a rule the form left alone stays as it is then, a
+   * cut by This and following tasks included). Upcoming occurrences changed
+   * on their own (`setOccurrence`) keep their changes, but for those a new
+   * rule or start no longer has. A subtask, or a task with subtasks, does not
    * repeat, and a repeating task stays in its list, as in Google Tasks:
    * refused before anything changes.
    */
-  async saveListTask(item: GoogleTaskItem, fields: TaskFields, scope: RepeatScope = 'this', extra: { starred?: boolean; listId?: string } = {}): Promise<void> {
-    const kept = keptFor(this.client.getView().state, item);
+  async saveListTask(item: GoogleTaskItem, fields: TaskFields, scope: RepeatScope = 'this', extra: SaveExtra = {}): Promise<void> {
+    // Changed meanwhile (while it was asked which tasks it is for, say): the user's to settle, before anything is written.
+    const check = await this.formCheck(item, fields, extra);
+    if (check.conflicts.length) throw new TaskConflict(check.conflicts, check.now, check.mine, check.base);
+    const { base, mine, kept } = check;
+    const task = check.item;
+    const changed = (field: FormField) => check.changes.includes(field);
     const repeat = kept?.repeat ?? null;
-    const rule = fields.kept.rule && fields.due ? fields.kept.rule : null;
-    const moveTo = extra.listId && extra.listId !== item.listId ? extra.listId : null;
-    if (rule && !repeat && item.parent) throw new Error(SUBTASK_NO_REPEAT);
-    if (rule && !repeat && item.assigned) throw new Error(SHARED_NO_REPEAT);
+    const rule = mine.rule;
+    const ruleChanged = changed('rule');
+    const moveTo = changed('listId') && mine.listId !== task.listId ? mine.listId : null;
+    if (ruleChanged && rule && !repeat && task.parent) throw new Error(SUBTASK_NO_REPEAT);
+    if (ruleChanged && rule && !repeat && task.assigned) throw new Error(SHARED_NO_REPEAT);
     if (moveTo && (repeat || rule)) throw new Error(REPEATING_STAYS);
-    if (rule && !repeat && (await this.hasSubtasks(item))) throw new Error(SUBTASKS_NO_REPEAT);
-    const state = this.client.getView().state;
-    const google = { ...(fields.title !== item.title ? { title: fields.title } : {}), ...(fields.notes !== item.notes ? { notes: fields.notes } : {}), ...(fields.due !== item.due ? { due: fields.due } : {}) };
-    const patch: GoogleTaskKeptPatch = {};
-    if ((kept?.time ?? null) !== fields.kept.time) patch.time = fields.kept.time;
-    if ((kept?.duration ?? null) !== fields.kept.duration) patch.duration = fields.kept.duration;
-    if ((kept?.deadline ?? null) !== fields.kept.deadline) patch.deadline = fields.kept.deadline;
-    // Availability, visibility, Do not disturb and declining come with a time (left out of the fields: as they are),
-    // and they and its color are a series' own, as Google Calendar keeps one for a whole series: a change of them is
-    // for all its tasks. Attachments are this task's, or (All tasks) the series'.
-    const next = advancedOf(fields.kept, kept);
-    const { busy, visibility, doNotDisturb, color } = next;
-    const decline = next.decline && !next.decline.since ? { ...next.decline, since: new Date().toISOString() } : next.decline;
-    const advanced = advancedChanged(fields.kept, kept);
-    if (busy !== Boolean(kept?.busy)) patch.busy = busy;
-    if (visibility !== (kept?.visibility ?? 'default')) patch.visibility = visibility;
-    if (doNotDisturb !== Boolean(kept?.doNotDisturb)) patch.doNotDisturb = doNotDisturb;
-    if ((decline?.mode ?? null) !== (kept?.decline?.mode ?? null) || (decline?.message ?? null) !== (kept?.decline?.message ?? null)) patch.decline = decline;
-    if (color !== (kept?.color ?? null)) patch.color = color;
-    if (attachmentsChanged(fields.kept, kept)) patch.attachments = fields.kept.attachments ?? [];
-    const attachments = fields.kept.attachments ?? kept?.attachments ?? [];
-    const timing = { ...fields.kept, busy, visibility, doNotDisturb, decline, color, attachments };
-    const all = scope === 'all' || Boolean(repeat && rule && (rule !== repeat.rule || advanced));
+    if (ruleChanged && rule && !repeat && (await this.hasSubtasks(task))) throw new Error(SUBTASKS_NO_REPEAT);
+    const google = { ...(changed('title') ? { title: mine.title } : {}), ...(changed('notes') ? { notes: mine.notes } : {}), ...(changed('due') ? { due: mine.due } : {}) };
+    // Declining stays on since it was turned on; a new message or mode keeps that.
+    const decline = mine.decline ? { mode: mine.decline.mode, message: mine.decline.message, since: kept?.decline?.since ?? mine.decline.since ?? new Date().toISOString() } : null;
+    // What the Planner keeps for it: what the form changed, over what is kept now. Availability, visibility, Do not
+    // disturb and declining come with a time, and they and its color are a series' own, as Google Calendar keeps one for
+    // a whole series: a change of them is for all its tasks. Attachments are this task's, or (All tasks) the series'.
+    const patch: GoogleTaskKeptPatch = {
+      ...(changed('time') ? { time: mine.time, duration: mine.time === null ? null : mine.duration } : {}),
+      ...(changed('deadline') ? { deadline: mine.deadline } : {}),
+      ...(changed('busy') ? { busy: mine.busy } : {}),
+      ...(changed('visibility') ? { visibility: mine.visibility } : {}),
+      ...(changed('doNotDisturb') ? { doNotDisturb: mine.doNotDisturb } : {}),
+      ...(changed('decline') ? { decline } : {}),
+      ...(changed('color') ? { color: mine.color } : {}),
+      ...(changed('attachments') ? { attachments: mine.attachments } : {}),
+      // A star is the Planner's alone: no Google write.
+      ...(changed('starred') ? { starred: mine.starred } : {}),
+    };
+    const advanced = check.changes.some((field) => field !== 'rule' && SERIES_FIELDS.includes(field));
+    const all = scope === 'all' || Boolean(repeat && ((ruleChanged && rule) || advanced));
     // An edit of all tasks of a series, or no repeat any more, is the service's, against the series as it is then
-    // (`GoogleSeries.edit`): the series as this window shows it (`before`) and as the form leaves it (`after`).
+    // (`GoogleSeries.edit`): the series as the form showed it (`before`) and as the form leaves it (`after`), so what the
+    // form left alone (a rule cut short meanwhile, a time given meanwhile) stays as it is then.
     let series: { before: SeriesSide; after: SeriesSide } | null = null;
-    if (!rule || !fields.due) {
-      if (kept && repeat) {
-        const template = seriesTemplate(kept, item) ?? templateOf(item, kept, scheduledOn(kept, item) ?? this.client.getView().today);
-        series = { before: { rule: repeat.rule, template, due: item.due }, after: { rule: null, template, due: fields.due } };
-      }
-    } else if (!kept || !repeat) {
-      patch.repeat = { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template: templateOf(fields, timing, fields.due) };
-    } else {
-      const on = scheduledOn(kept, item) ?? fields.due;
-      const template = seriesTemplate(kept, item) ?? templateOf(item, kept, on);
-      if (all) {
-        const moved = rule !== repeat.rule || (fields.due !== item.due && fields.due !== on);
-        series = { before: { rule: repeat.rule, template, due: item.due }, after: { rule, template: templateOf(fields, timing, fields.due, moved ? fields.due : template.start), due: fields.due } };
+    if (kept && repeat) {
+      const on = scheduledOn(kept, task) ?? mine.due ?? base.due ?? this.client.getView().today;
+      const template = seriesTemplate(kept, task) ?? templateOf(task, kept, on);
+      // A rule the form showed none of (given meanwhile) is the one it has now: left alone, it stays.
+      const shownRule = base.rule ?? repeat.rule;
+      const nextRule = ruleChanged ? rule : shownRule;
+      const shown = templateOf(base, base, base.due ?? on, template.start);
+      if (nextRule === null || (changed('due') && !mine.due)) {
+        series = { before: { rule: shownRule, template: shown, due: base.due }, after: { rule: null, template: shown, due: mine.due } };
+      } else if (all) {
+        const moved = (ruleChanged && rule !== null) || (changed('due') && mine.due !== on);
+        series = { before: { rule: shownRule, template: shown, due: base.due }, after: { rule: nextRule, template: templateOf(mine, { ...mine, decline }, mine.due ?? on, moved && mine.due ? mine.due : template.start), due: mine.due } };
       } else if (!repeat.on || !repeat.template) {
         // First sight of a series kept before templates: kept as this occurrence was, before this one-off change.
         patch.repeat = { ...repeat, on, template };
       }
+    } else if (ruleChanged && rule && mine.due) {
+      patch.repeat = { rule, seriesId: newId(), index: 1, next: null, on: mine.due, template: templateOf(mine, { ...mine, decline }, mine.due) };
     }
-    // A star is the Planner's alone: no Google write.
-    if (extra.starred !== undefined && extra.starred !== Boolean(kept?.starredAt)) patch.starred = extra.starred;
+    // What Google has now, put back when the rest of the edit cannot be made.
+    const back = { ...(google.title !== undefined ? { title: task.title } : {}), ...(google.notes !== undefined ? { notes: task.notes } : {}), ...(google.due !== undefined ? { due: task.due } : {}) };
     // Google first. A refusal throws here, before anything kept in the Planner has changed.
-    const answers = Object.keys(google).length ? await this.writeListTask([item], () => google, google.due !== undefined || google.title !== undefined) : [];
+    const answers = Object.keys(google).length ? await this.writeListTask([task], () => google, google.due !== undefined || google.title !== undefined) : [];
     let now: GoogleTaskItem | null = answers[0] ?? null;
     if (moveTo) {
       try {
-        now = await this.moveListTask(now ?? item, { parent: null, previous: null }, moveTo);
+        now = await this.moveListTask(now ?? task, { parent: null, previous: null }, moveTo);
       } catch (error) {
         // Google took the fields but not the move: they go back as they were, so nothing of the edit stays.
-        const back = { ...(google.title !== undefined ? { title: item.title } : {}), ...(google.notes !== undefined ? { notes: item.notes } : {}), ...(google.due !== undefined ? { due: item.due } : {}) };
         if (answers[0] && Object.keys(back).length) await this.writeListTask([answers[0]], () => back, true).catch(() => {});
         throw error;
       }
     }
     // Google has it: now what the Planner keeps, for the task where it is now.
-    const at = now ?? item;
+    const at = now ?? task;
     if (series && repeat) {
       const { repeat: _none, ...own } = patch;
       try {
         await this.client.adopt(await this.client.call<Snapshot>('POST', '/google/tasks/series/edit', { account: at.account, listId: at.listId, taskId: at.id, seriesId: repeat.seriesId, own, ...series }));
       } catch (error) {
         // Google took the fields but the series did not change: they go back as they were, so nothing of the edit stays.
-        const back = { ...(google.title !== undefined ? { title: item.title } : {}), ...(google.notes !== undefined ? { notes: item.notes } : {}), ...(google.due !== undefined ? { due: item.due } : {}) };
         if (answers[0] && Object.keys(back).length) await this.writeListTask([answers[0]], () => back, true).catch(() => {});
         throw error;
       }
@@ -1364,17 +1451,40 @@ export class GoogleStore {
 
   /**
    * One upcoming occurrence edited on its own ("This task"), from what the
-   * editor showed to its form: the service puts what the edit changed over
-   * the occurrence as it is then (a change made meanwhile in another window,
-   * or of the series, stays), and a task the series has made for it
-   * meanwhile is changed instead, in Google too.
+   * editor showed (`fields.base`, else the occurrence as it was opened) to its
+   * form: the service puts what the edit changed over the occurrence as it is
+   * then (a change made meanwhile in another window, or of the series, stays),
+   * and a task the series has made for it meanwhile is changed instead, in
+   * Google too. A field the edit changed that changed meanwhile too is not
+   * written but thrown (`TaskConflict`), for the user to settle.
    */
-  editOccurrence(upcoming: UpcomingTask, fields: TaskFields): Promise<void> {
-    if (!fields.due) return Promise.reject(new Error(OCCURRENCE_KEEPS_DATE));
-    if (fields.title.length > 1024 || fields.notes.length > GOOGLE_NOTES_MAX) return Promise.reject(new Error(`Google Tasks takes a title of at most 1024 characters and details of at most ${GOOGLE_NOTES_MAX}`));
+  async editOccurrence(upcoming: UpcomingTask, fields: TaskFields): Promise<void> {
+    if (!fields.due) throw new Error(OCCURRENCE_KEEPS_DATE);
+    if (fields.title.length > 1024 || fields.notes.length > GOOGLE_NOTES_MAX) throw new Error(`Google Tasks takes a title of at most 1024 characters and details of at most ${GOOGLE_NOTES_MAX}`);
     // Its attachments too: This task attaches files to this occurrence alone, as Google Calendar does.
     const after = { title: fields.title, notes: fields.notes, due: fields.due, time: fields.kept.time, duration: fields.kept.duration, deadline: fields.kept.deadline, ...(fields.kept.attachments ? { attachments: fields.kept.attachments } : {}) };
-    return this.changeOccurrence(upcoming, { before: upcomingValues(upcoming), after });
+    const base = fields.base;
+    if (base) {
+      const now = await this.occurrenceNow(upcoming);
+      // Deleted alone or gone with its series meanwhile: the service refuses the edit, and says so.
+      if (now) {
+        const mine = formValuesOfFields(fields, base);
+        const values = withOccurrence(base, now);
+        const conflicts = formConflicts(base, mine, values);
+        if (conflicts.length) throw new TaskConflict(conflicts, values, mine, base);
+      }
+    }
+    return this.changeOccurrence(upcoming, { before: base ? occurrenceOf(base, upcoming.on) : upcomingValues(upcoming), after });
+  }
+
+  /** One upcoming occurrence as it is now: as its series has it, or as the task the series made for it meanwhile; null when it is gone. */
+  private async occurrenceNow(upcoming: UpcomingTask): Promise<OccurrenceValues | null> {
+    const found = occurrenceNow(await this.freshPlan(), upcoming.account, upcoming.seriesId, upcoming.on, upcoming.taskId);
+    if (!found) return null;
+    if ('values' in found) return found.values;
+    const made = found.task;
+    const task = await this.freshTask({ account: made.account, listId: made.listId, id: made.taskId });
+    return task ? { title: task.title, notes: task.notes, due: task.due ?? upcoming.on, time: made.time, duration: made.duration, deadline: made.deadline, attachments: made.attachments ?? [] } : null;
   }
 
   private async changeOccurrence(upcoming: Pick<UpcomingTask, 'account' | 'listId' | 'seriesId' | 'on'>, edit: Record<string, unknown>): Promise<void> {

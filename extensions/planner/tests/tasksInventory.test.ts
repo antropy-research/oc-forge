@@ -112,7 +112,8 @@ describe('shared tasks, and where a task came from', () => {
     await expect(store.addListTask(ME, 'L1', { title: 'Sub', parent: 's1' })).rejects.toThrow(SHARED_NO_SUBTASKS);
     const fields: TaskFields = { title: shared.title, notes: '', due: TODAY, kept: { time: null, duration: null, deadline: null, rule: 'RRULE:FREQ=DAILY' } };
     await expect(store.saveListTask(shared, fields)).rejects.toThrow(SHARED_NO_REPEAT);
-    expect(fake.calls.filter((call) => call.method === 'POST' || call.method === 'PATCH')).toEqual([]);
+    // The save reads the task again (a read, not a write); nothing was written.
+    expect(fake.calls.filter((call) => (call.method === 'POST' || call.method === 'PATCH') && call.path !== '/google/tasks/linked')).toEqual([]);
   });
 });
 

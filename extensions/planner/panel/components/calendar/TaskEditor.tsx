@@ -5,12 +5,13 @@
 // on the view and date it was on. A repeating task asks This task or All
 // tasks; opened from an upcoming occurrence it edits all of its series, which
 // the form shows as the series has it, or (This task) that occurrence alone,
-// as it is: kept with its series until the series makes it. It closes once
+// as it is: kept with its series until the series makes it. Either way the
+// save is the change from what it showed, over the task or the series as it
+// is then; a field changed meanwhile too is asked about. It closes once
 // Google has the edit; a refusal stays in it, with the edit, to save again.
 import { useEffect } from 'preact/hooks';
-import { addDays } from '../../../src/domain/dates.ts';
-import type { GoogleTaskTemplate } from '../../../src/domain/types.ts';
-import { keptFor, seriesTemplate, upcomingValues } from '../../../src/domain/gtaskKept.ts';
+import { keptFor, upcomingValues } from '../../../src/domain/gtaskKept.ts';
+import { seriesShown, templateAdvanced } from '../../../src/domain/gtaskForm.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
 import { calendarUi, type TaskEditorTarget } from '../../lib/gcal.ts';
 import { listKey, REPEATING_STAYS } from '../../lib/google.ts';
@@ -40,24 +41,15 @@ export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
   const block = board ? repeatBlock(item, board.items) : item.parent ? repeatBlock(item, []) : null;
   // Until its list is read, a task that does not repeat yet is not offered one; one occurrence keeps its series' repeat.
   const canRepeat = !occurrence && (Boolean(kept?.repeat) || (Boolean(board) && !block));
-  // All tasks of a series: its template's title, details, time and deadline, on the open occurrence's date.
-  const template = target.series && kept ? seriesTemplate(kept, item) : null;
   // One upcoming occurrence: as it is, its series' values with its own changes.
   const values = occurrence ? upcomingValues(occurrence) : null;
-  // Availability, visibility, color, Do not disturb, declining and attachments are the series' template's, as it makes each task.
-  const advanced = (from: GoogleTaskTemplate) => ({
-    busy: from.busy,
-    visibility: from.visibility,
-    color: from.color,
-    doNotDisturb: from.doNotDisturb,
-    decline: from.decline ? { ...from.decline, since: from.decline.since ?? kept?.decline?.since ?? kept?.updatedAt ?? new Date().toISOString() } : undefined,
-    attachments: from.attachments,
-  });
+  // All tasks of a series: its template's title, details, time, deadline and advanced settings, on the open
+  // occurrence's date (`seriesShown`, as the save reads the series again). One occurrence's availability, visibility,
+  // color, Do not disturb and declining are the series' template's, as it makes each task.
+  const series = target.series && kept && !occurrence ? seriesShown(item, kept) : null;
   const shown = values && kept
-    ? { item: { ...item, title: values.title, notes: values.notes, due: values.due }, kept: { ...kept, time: values.time, duration: values.duration, deadline: values.deadline, ...advanced(occurrence!.template), attachments: values.attachments } }
-    : template && kept
-      ? { item: { ...item, title: template.title, notes: template.notes }, kept: { ...kept, time: template.time, duration: template.duration, deadline: template.deadline !== null && item.due ? addDays(item.due, template.deadline) : null, ...advanced(template) } }
-      : { item, kept };
+    ? { item: { ...item, title: values.title, notes: values.notes, due: values.due }, kept: { ...kept, time: values.time, duration: values.duration, deadline: values.deadline, ...templateAdvanced(occurrence!.template, kept, new Date().toISOString()), attachments: values.attachments } }
+    : series ?? { item, kept };
   const title = target.series ? 'Edit all tasks' : 'Edit task';
   return (
     <div class="modal-backdrop is-top" onMouseDown={(click) => click.target === click.currentTarget && close()}>
@@ -80,7 +72,7 @@ export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
           onCancel={close}
           // Open until Google has it: a refusal shows in the form, with the edit, to try again.
           onSave={(fields, starred, listId) =>
-            occurrence ? google.editOccurrence(occurrence, fields).then(close) : save(item, fields, starred, target.series ? 'all' : undefined, listId).then((saved) => saved && close())
+            occurrence ? google.editOccurrence(occurrence, fields).then(close) : save(item, fields, starred, target.series ? 'all' : undefined, listId, series ? 'series' : 'task').then((saved) => saved && close())
           }
         />
       </div>

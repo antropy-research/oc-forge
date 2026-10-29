@@ -12,7 +12,8 @@ import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, advancedChanged, attachmentsChanged, type TaskFields } from '../panel/lib/google.ts';
+import { GoogleStore, formValuesOfFields, type TaskFields } from '../panel/lib/google.ts';
+import { SERIES_FIELDS, formChanges, formValuesOf } from '../src/domain/gtaskForm.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { eventColor, inHiddenList } from '../panel/components/calendar/items.ts';
 import { GoogleAccounts, identityFromIdToken, type Fetcher } from '../service/google.ts';
@@ -487,17 +488,27 @@ describe('saved from the form', () => {
     const fake = fakeClient(start);
     const store = new GoogleStore(host, fake.client, 'page');
     const repeating = (patch: Partial<TaskFields['kept']>) => ({ ...fields({ duration: null, rule: 'RRULE:FREQ=DAILY', ...patch }) });
-    expect(advancedChanged(repeating({ color: '#d50000' }).kept, kept(start))).toBe(true);
-    expect(attachmentsChanged(repeating({ attachments: [doc('a1', 'Q4 plan')] }).kept, kept(start))).toBe(true);
+    // A color is the series' own (a change of it is for all its tasks); attachments are this task's or all of them.
+    const shown = formValuesOf(item(), kept(start));
+    expect(formChanges(shown, formValuesOfFields(repeating({ color: '#d50000' }), shown))).toEqual(['color']);
+    expect(formChanges(shown, formValuesOfFields(repeating({ attachments: [doc('a1', 'Q4 plan')] }), shown))).toEqual(['attachments']);
+    expect([SERIES_FIELDS.includes('color'), SERIES_FIELDS.includes('attachments')]).toEqual([true, false]);
     // This task: the attachment is this occurrence's alone; the series makes the next ones without it.
     await store.saveListTask(item(), repeating({ attachments: [doc('a1', 'Q4 plan')] }), 'this');
     expect(kept(fake.state())!.attachments).toEqual([doc('a1', 'Q4 plan')]);
     expect(kept(fake.state())!.repeat!.template!.attachments).toBeUndefined();
-    // A color asked for "this task" is for the whole series, as Google Calendar keeps one per series.
+    // A color asked for "this task" is for the whole series, as Google Calendar keeps one per series; only what this
+    // save changed goes to the series (the attachment this task had already stays its own).
     await store.saveListTask(item(), repeating({ color: '#d50000', attachments: [doc('a1', 'Q4 plan')] }), 'this');
-    expect(kept(fake.state())!.repeat!.template).toMatchObject({ color: '#d50000', attachments: [doc('a1', 'Q4 plan')] });
+    expect(kept(fake.state())!.repeat!.template).toMatchObject({ color: '#d50000' });
+    expect(kept(fake.state())!.repeat!.template!.attachments).toBeUndefined();
+    expect(kept(fake.state())).toMatchObject({ color: '#d50000', attachments: [doc('a1', 'Q4 plan')] });
     const next = occurrenceTask(kept(fake.state())!.repeat!, kept(fake.state())!.repeat!.template!, addDays(TODAY, 1), 2);
-    expect(next.kept).toMatchObject({ color: '#d50000', attachments: [doc('a1', 'Q4 plan')], busy: true });
+    expect(next.kept).toMatchObject({ color: '#d50000', busy: true });
+    expect(next.kept.attachments).toBeUndefined();
+    // All tasks with an attachment the form adds: the series takes it.
+    await store.saveListTask(item(), repeating({ color: '#d50000', attachments: [doc('a1', 'Q4 plan'), doc('a2', 'Notes')] }), 'all');
+    expect(kept(fake.state())!.repeat!.template).toMatchObject({ color: '#d50000', attachments: [doc('a1', 'Q4 plan'), doc('a2', 'Notes')] });
   });
 });
 

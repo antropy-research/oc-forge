@@ -23,7 +23,9 @@ import { KEPT_HINT, TASKS_API_REFERENCE, VISIBILITY_LABELS, keptFor, keptTimeLab
 import { byTitle, completedItems, dateGroups, deadlineSections, dropTarget, dueChip, indentTarget, moveBottomTarget, moveDownTarget, moveTopTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
-import { DELETE_CHOICES, completeWithUndo, undoAction, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, advancedChanged, attachmentsChanged, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { DELETE_CHOICES, completeWithUndo, undoAction, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, TaskConflict, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { SERIES_FIELDS, settleConflicts, type FormField, type FormValues } from '../../src/domain/gtaskForm.ts';
+import { ConflictBanner, taskConflictLines } from './Conflicts.tsx';
 import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
@@ -183,6 +185,11 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   const [decline, setDecline] = useState<DeclineInput | null>(kept?.decline ?? null);
   const [advanced, setAdvanced] = useState(Boolean(kept?.busy || kept?.visibility || kept?.color || kept?.doNotDisturb || kept?.decline));
   const [listId, setListId] = useState(item.listId ?? '');
+  // What the form showed when it opened: its save is the change from this, so a field it leaves alone keeps what
+  // another window or the service gave it meanwhile (a time, a repeat cut short). Settling a conflict moves it on.
+  const [shownAt, setShownAt] = useState<FormValues>(() => ({ title, notes, due, time, duration, deadline, rule, busy, visibility, color, attachments, doNotDisturb, decline, starred, listId }));
+  const [conflict, setConflict] = useState<TaskConflict | null>(null);
+  const [again, setAgain] = useState(false);
   const account = item.account ?? accountProp ?? null;
   // Google Calendar gives only work and school accounts Do not disturb and declining meetings (null: not known yet).
   const eligible = account && gv.status ? google.isWorkspace(account) : null;
@@ -207,11 +214,71 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   const dated = () => {
     if (!due) setDue(view.today);
   };
+  /**
+   * The form's values as it saves them: a time only with a date, an end only
+   * without a repeat, availability, visibility, Do not disturb and declining
+   * only with a time (declining only Busy, the last two only for a work or
+   * school account), a repeat only where it may repeat.
+   */
+  const valuesOf = (raw: FormValues): FormValues => {
+    const timedThen = Boolean(raw.due) && raw.time !== null;
+    const busyThen = timedThen && raw.busy;
+    return {
+      ...raw,
+      title: raw.title.trim(),
+      time: raw.due ? raw.time : null,
+      duration: raw.due && raw.time !== null && !raw.rule ? raw.duration : null,
+      rule: raw.due && canRepeat ? raw.rule : null,
+      busy: busyThen,
+      visibility: timedThen ? raw.visibility : 'default',
+      doNotDisturb: timedThen && eligible !== false && raw.doNotDisturb,
+      decline: busyThen && eligible !== false ? raw.decline : null,
+    };
+  };
+  /** The form takes these fields' values (a conflict settled with theirs). */
+  const take = (values: FormValues, fields: readonly FormField[]) => {
+    const setters: { [K in FormField]: () => void } = {
+      title: () => setTitle(values.title),
+      notes: () => setNotes(values.notes),
+      due: () => setDue(values.due),
+      time: () => {
+        setTime(values.time);
+        setDuration(values.duration);
+      },
+      deadline: () => setDeadline(values.deadline),
+      rule: () => setRule(values.rule),
+      busy: () => setBusy(values.busy),
+      visibility: () => setVisibility(values.visibility),
+      color: () => setColor(values.color),
+      attachments: () => setAttachments(values.attachments),
+      doNotDisturb: () => setDoNotDisturb(values.doNotDisturb),
+      decline: () => setDecline(values.decline),
+      starred: () => setStarred(values.starred),
+      listId: () => setListId(values.listId),
+    };
+    for (const field of fields) setters[field]();
+  };
+  /** A conflict settled: theirs (the form takes what each is now) or mine (saved over it); the save goes on either way. */
+  const settle = (choice: 'theirs' | 'mine') => {
+    if (!conflict) return;
+    const settled = settleConflicts(valuesOf(shownAt), conflict.mine, conflict.now, conflict.fields, choice);
+    setShownAt(settled.base);
+    if (choice === 'theirs') take(settled.mine, conflict.fields);
+    setConflict(null);
+    setAgain(true);
+  };
+  // Saved again once the form has the settled values.
+  useEffect(() => {
+    if (!again) return;
+    setAgain(false);
+    save();
+  }, [again]);
   const save = (fromEnter = false) => {
     if (saving) return;
     if (!title.trim()) return onCancel();
     setSaving(true);
     setProblem(null);
+    setConflict(null);
     // Google Calendar's repeating tasks have no end time; availability, visibility, Do not disturb and declining come
     // with a time, declining with Busy; an account not known yet to be a work or school one keeps the last two as they are.
     const fields = {
@@ -226,7 +293,7 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
       doNotDisturb: eligible === null ? undefined : timed && eligible && doNotDisturb,
       decline: eligible === null ? undefined : timed && eligible && busy ? decline : null,
     };
-    onSave({ title: title.trim(), notes, due, kept: fields }, starred, listId || undefined).then(
+    onSave({ title: title.trim(), notes, due, kept: fields, base: valuesOf(shownAt) }, starred, listId || undefined).then(
       (saved) => {
         if (fromEnter && saved !== false) onAddBelow?.();
         if (!mounted.current) return;
@@ -250,10 +317,12 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
         titleRef.current?.focus();
       },
       (error: unknown) => {
-        const message = `Google Tasks did not take it: ${messageOf(error)}`;
+        const message = error instanceof TaskConflict ? `"${title.trim()}" was not saved: it ${error.message}` : `Google Tasks did not take it: ${messageOf(error)}`;
         // Closed meanwhile: said where it shows.
         if (!mounted.current) return client.notify(message);
         setSaving(false);
+        // Changed elsewhere too since the form opened: the user says which stays.
+        if (error instanceof TaskConflict) return setConflict(error);
         setProblem(message);
       },
     );
@@ -434,6 +503,7 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
       )}
       <KeptHint />
       {problem && <p class="danger gt-form-problem" role="alert">{problem}</p>}
+      {conflict && <ConflictBanner lines={taskConflictLines(conflict, { zone, today: view.today, lists: gv.lists })} onTheirs={() => settle('theirs')} onMine={() => settle('mine')} />}
       <div class="gt-form-row gt-form-actions">
         {(onSubtask || subtaskNote) && (
           <button class="link" aria-disabled={subtaskNote ? 'true' : undefined} title={subtaskNote ?? undefined} onClick={() => !subtaskNote && onSubtask?.()}>
@@ -529,9 +599,12 @@ const StarButton = ({ item, kept }: { item: GoogleTaskItem; kept: GoogleTaskKept
   );
 };
 
-/** Ask which tasks of a series a change is for, as Google Calendar asks (This task or All tasks; a new rule is for all); null when cancelled. */
-const askRepeat = async (ruleChanged = false): Promise<RepeatScope | null> => {
-  const choices = ruleChanged ? [{ id: 'all', label: 'All tasks' }] : [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All tasks' }];
+/**
+ * Ask which tasks of a series a change is for, as Google Calendar asks (This task or All tasks; a new rule, or a
+ * change of the series' own settings, is for all: `forAll`); null when cancelled.
+ */
+const askRepeat = async (forAll = false): Promise<RepeatScope | null> => {
+  const choices = forAll ? [{ id: 'all', label: 'All tasks' }] : [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All tasks' }];
   const choice = await calendarUi.ask({ title: 'Edit repeating task', style: 'radio', choices });
   return choice === 'this' || choice === 'all' ? choice : null;
 };
@@ -543,34 +616,35 @@ const askDelete = async (): Promise<DeleteScope | null> => {
 };
 
 /**
- * Save a task's form: a repeating one asks which tasks the change is for
- * (unless `scope` says), and a new list moves it there. All or nothing, as
- * `saveListTask` writes it: Google takes its fields and the move first, and
- * what the Planner keeps, the star too, changes only once it has. True when
- * saved, false when the question was cancelled; Google's refusal is thrown,
- * for the form to show beside what was typed.
+ * Save a task's form, as the change from what it showed (`fields.base`) over
+ * the task as it is now: a field changed meanwhile too (in another window, by
+ * the service, in Google) is thrown (`TaskConflict`) for the form to ask
+ * about. A repeating one asks which tasks the change is for (unless `scope`
+ * says), as its series is now: a new rule, or a change of what the series
+ * keeps for all its tasks, is for all of them; and a new list moves it there.
+ * All or nothing, as `saveListTask` writes it: Google takes its fields and
+ * the move first, and what the Planner keeps, the star too, changes only once
+ * it has. True when saved (or nothing changed), false when the question was
+ * cancelled; Google's refusal is thrown, for the form to show beside what was
+ * typed. `shows`: what the form showed (Edit → All tasks: the series').
  */
 export const useTaskSave = () => {
   const { google } = usePlanner();
-  const view = useView();
-  return async (item: GoogleTaskItem, fields: TaskFields, starred: boolean, scope?: RepeatScope, listId?: string): Promise<boolean> => {
-    const kept = keptFor(view.state, item);
-    // Availability, visibility, color, Do not disturb and declining are a series' own: changing them is for all its
-    // tasks, as a new rule is.
-    const advanced = advancedChanged(fields.kept, kept);
-    const changed =
-      fields.title !== item.title || fields.notes !== item.notes || fields.due !== item.due || fields.kept.time !== (kept?.time ?? null) || fields.kept.duration !== (kept?.duration ?? null) || fields.kept.deadline !== (kept?.deadline ?? null) || fields.kept.rule !== (kept?.repeat?.rule ?? null) || advanced || attachmentsChanged(fields.kept, kept);
-    const star = Boolean(kept?.starredAt) !== starred ? starred : undefined;
-    const moveTo = listId && listId !== item.listId ? listId : undefined;
-    if (changed) {
-      const chosen = scope ?? (kept?.repeat ? await askRepeat(fields.kept.rule !== kept.repeat.rule || advanced) : 'this');
-      if (!chosen) return false;
-      await google.saveListTask(item, fields, chosen, { starred: star, listId: moveTo });
+  return async (item: GoogleTaskItem, fields: TaskFields, starred: boolean, scope?: RepeatScope, listId?: string, shows: 'task' | 'series' = 'task'): Promise<boolean> => {
+    const extra = { starred, listId, shows };
+    const check = await google.formCheck(item, fields, extra);
+    if (check.conflicts.length) throw new TaskConflict(check.conflicts, check.now, check.mine, check.base);
+    const changes = check.changes;
+    if (!changes.length) return true;
+    if (changes.every((field) => field === 'starred' || field === 'listId')) {
+      // Only its list or its star: the move is Google's, made first; the star is the Planner's alone, with no Google write.
+      const now = changes.includes('listId') && check.mine.listId !== check.item.listId ? await google.moveListTask(check.item, { parent: null, previous: null }, check.mine.listId) : check.item;
+      if (changes.includes('starred')) await google.setKept(now, { starred: check.mine.starred });
       return true;
     }
-    // Only its list or its star: the move is Google's, made first; the star is the Planner's alone, with no Google write.
-    const now = moveTo ? await google.moveListTask(item, { parent: null, previous: null }, moveTo) : item;
-    if (star !== undefined) await google.setKept(now, { starred: star });
+    const chosen = scope ?? (check.kept?.repeat ? await askRepeat(changes.some((field) => SERIES_FIELDS.includes(field))) : 'this');
+    if (!chosen) return false;
+    await google.saveListTask(check.item, fields, chosen, extra);
     return true;
   };
 };
