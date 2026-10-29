@@ -27,6 +27,18 @@
 //      editor and the shell's in the terminal;
 //  10. "Open in VS Code" on a chat in another folder shows that folder's
 //      Explorer in the rail panel, and the page closes the other folder's tabs;
+//  11. with a file tab shown, the terminal entry opens VS Code's terminal under
+//      the editor (`ocForge.page.keepBottomZone`): both take input, both stay
+//      through a trip to a chat, and a file link Cmd/Ctrl+clicked there opens
+//      a new browser tab (8);
+//  12. closing the last unsaved file tab runs VS Code's close with its save
+//      prompt (`tabs.onCloseRequest`): Cancel keeps the tab, the editor and the
+//      change, Don't Save closes it without writing (opened again, the file is
+//      as on disk: VS Code's backup of the change went too), Save writes and
+//      closes, each back to the chat; a saved tab closes at once; across a reload the
+//      tabs come back once each (Markdown's preview, which VS Code revives
+//      under a new key, too), and closed tabs stay closed, VS Code's own state
+//      included;
 // and, with OpenChamber's session tabs off, the page keeps VS Code's own tab
 // bar. It also measures each workbench's start and memory (`<size>-frames.json`).
 //
@@ -201,6 +213,11 @@ const runCommand = async (page, frame, title) => {
   const label = new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
   await frame.locator('.quick-input-list .monaco-list-row').filter({ has: frame.locator('.label-name', { hasText: label }) }).first().click({ timeout: 10_000 });
 };
+/**
+ * A page that starts for a file handed to it opens that file last, taking the focus: until it has started (a command
+ * palette opened before would close under it).
+ */
+const pageStarted = (page) => until(async () => (await pageFrame(page).locator('html[data-oc-vscode-page-started="true"]').count()) > 0, 120_000);
 /** Markdown's preview in a workbench frame: the webview's content frame. */
 const previewContent = (frame) => frame.frameLocator('iframe.webview').first().frameLocator('#active-frame');
 const previewHeading = async (frame) => (await previewContent(frame).locator('h1').first().innerText({ timeout: 2_000 }).catch(() => '')).trim();
@@ -487,6 +504,7 @@ const journey = async (viewport, seeded, first) => {
     const editorShown = await until(async () => await pageShown(page) && await pageFrame(page).locator('.part.editor .monaco-editor[data-uri$="README.md"] .view-line').first().isVisible(), 120_000);
     marks.editor = { readyMs: Date.now() - pageStart, heap: await heap() };
     check(`[${size}] 3 its tab shows the editor in the main area`, editorShown);
+    await pageStarted(page);
     const pageParts = await partsOf(pageFrame(page)).catch(() => ({}));
     check(`[${size}] 3 the page is VS Code's editor area: no activity bar, side bar or panel, and no VS Code tab bar`, editorShown && pageParts.editor && !pageParts.activitybar && !pageParts.sidebar && !pageParts.panel && pageParts.tabs === 0, JSON.stringify(pageParts));
     await shot(page, `${size}-3-header-tab`);
@@ -570,7 +588,7 @@ const journey = async (viewport, seeded, first) => {
       check(`[${size}] 7 closed, the rail panel is the Explorer alone again`, bare);
     }
 
-    // ── 4. The terminal at the bottom (under the chat: OpenChamber covers the bottom zone with a page, as for its own panels) ──
+    // ── 4. The terminal at the bottom, under a chat first (under a file's editor in 11) ──
     await chatTab.click();
     await until(async () => !(await pageShown(page)), 10_000);
     await entryButton(page, 'terminal').click();
@@ -676,9 +694,60 @@ const journey = async (viewport, seeded, first) => {
       const went = await until(async () => !(await rail(page)).some((item) => item.id === entrySurface(PROBE.entry)), 30_000);
       check(`[${size}] 2 uninstalled, its icon goes, without a reload`, went, `${((Date.now() - removedAt) / 1000).toFixed(1)} s after the uninstall`);
 
-      // ── 8. Cmd/Ctrl+click on a file link in the terminal ──
+      // ── 11. The terminal under a file's editor: the page keeps OpenChamber's bottom zone ──
+      const terminalLit = async () => (await rail(page)).find((item) => item.id === entrySurface('terminal'))?.pressed;
+      await headerTab(page, 'notes.ts').click();
+      await until(async () => await pageShown(page) && await pageFrame(page).locator('.monaco-editor[data-uri$="notes.ts"] .view-line').first().isVisible(), 30_000);
+      // Closed first, so that the entry opens it with the page shown.
+      if (await terminalLit()) {
+        await entryButton(page, 'terminal').click();
+        await until(async () => !(await terminalLit()), 10_000);
+      }
+      await entryButton(page, 'terminal').click();
+      const stacking = async () => {
+        if (!(await pageShown(page)) || !(await bottom.locator('.xterm:visible').first().isVisible())) return null;
+        const pageBox = await page.locator(`[data-oc-forge-page="${VSCODE}"]`).boundingBox();
+        const zoneBox = await page.locator('[data-context-zone="bottom"]').boundingBox();
+        if (!pageBox || !zoneBox || zoneBox.height < 120) return null;
+        const gap = Math.round(zoneBox.y - (pageBox.y + pageBox.height));
+        const sameColumn = zoneBox.x < pageBox.x + pageBox.width && zoneBox.x + zoneBox.width > pageBox.x;
+        return { pageBox, zoneBox, gap, ok: sameColumn && Math.abs(gap) <= 12 };
+      };
+      const stacked = await until(async () => (await stacking())?.ok ? stacking() : null, 60_000) ?? await stacking();
+      const boxes = stacked ? `page ${Math.round(stacked.pageBox.y)}–${Math.round(stacked.pageBox.y + stacked.pageBox.height)}, zone ${Math.round(stacked.zoneBox.y)}–${Math.round(stacked.zoneBox.y + stacked.zoneBox.height)} (x ${Math.round(stacked.zoneBox.x)}–${Math.round(stacked.zoneBox.x + stacked.zoneBox.width)}), gap ${stacked.gap} px` : 'not both shown';
+      check(`[${size}] 11 with a file tab shown, the terminal entry opens VS Code's terminal under the editor: the page ends where the bottom zone begins`, stacked?.ok, boxes);
+      await shot(page, `${size}-11-terminal-under-editor`);
+      const underMarker = join('/tmp', `${run}-under-${viewport.width}.txt`);
+      let typed = false;
+      for (let attempt = 0; attempt < 3 && !typed; attempt++) {
+        await bottom.locator('.xterm:visible').first().click();
+        await wait(800);
+        await page.keyboard.type(`echo ${run}-under > ${underMarker}`);
+        await page.keyboard.press('Enter');
+        typed = Boolean(await until(() => existsSync(underMarker) && readFileSync(underMarker, 'utf8').trim() === `${run}-under`, 10_000));
+      }
+      // VS Code for the web saves a second after an edit (auto save is on again since 3).
+      await pageFrame(page).locator('.monaco-editor[data-uri$="notes.ts"] .view-line').first().click({ position: { x: 4, y: 4 } });
+      await page.keyboard.press('Control+End');
+      await page.keyboard.press('Enter');
+      await page.keyboard.type(`// ${run}-edited`);
+      const edited = await until(() => readFileSync(join(project, 'notes.ts'), 'utf8').includes(`${run}-edited`), 15_000);
+      check(`[${size}] 11 both take input: a command typed in the terminal runs, and an edit in the editor above it is saved`, typed && edited, `terminal ${typed ? 'ran it' : 'did not run it'}, editor ${edited ? 'saved' : 'did not save'}`);
+      await pageFrame(page).locator('.monaco-workbench').evaluate(() => {
+        window.__underMarker = 'page';
+      });
+      await bottom.locator('.monaco-workbench').evaluate(() => {
+        window.__underMarker = 'terminal';
+      });
       await chatTab.click();
-      await until(async () => !(await pageShown(page)), 10_000);
+      const underChat = await until(async () => !(await pageShown(page)) && await bottom.locator('.xterm:visible').first().isVisible(), 15_000);
+      await headerTab(page, 'notes.ts').click();
+      const bothBack = await until(async () => (await stacking())?.ok
+        && (await pageFrame(page).locator('.monaco-workbench').evaluate(() => window.__underMarker)) === 'page'
+        && (await bottom.locator('.monaco-workbench').evaluate(() => window.__underMarker)) === 'terminal', 15_000);
+      check(`[${size}] 11 to a chat and back: the terminal stays under the chat, then both are there again (the same two workbenches)`, underChat && bothBack, `under the chat ${Boolean(underChat)}, back ${Boolean(bothBack)}`);
+
+      // ── 8. Cmd/Ctrl+click on a file link in the terminal, under the editor ──
       const shell = bottom.locator('.xterm:visible').first();
       await shell.click();
       await page.keyboard.type('clear');
@@ -687,7 +756,11 @@ const journey = async (viewport, seeded, first) => {
       await page.keyboard.type("printf 'linked.md:2\\n%.0s' 1 2 3 4 5 6");
       await page.keyboard.press('Enter');
       await wait(1_500);
-      const cell = await terminalCell(bottom);
+      // Once xterm has put its helper on the cursor's cell, under the six lines.
+      const cell = await until(async () => {
+        const measured = await terminalCell(bottom);
+        return measured.cursorRow >= 6 && measured.height > 0 && measured.width > 0 ? measured : null;
+      }, 15_000) ?? await terminalCell(bottom);
       // The six lines are above the prompt: the third from the bottom, on its fifth character.
       const position = { x: cell.width * 4.5, y: (cell.cursorRow - 3 + 0.5) * cell.height };
       const screen = bottom.locator('.xterm:visible .xterm-screen').first();
@@ -702,7 +775,7 @@ const journey = async (viewport, seeded, first) => {
       if (viaTerminal.tab) deepLinks.push(viaTerminal.tab);
       await wait(1_500);
       const afterTerminal = await tabState(page);
-      check(`[${size}] 8 Ctrl+click on a file link in the terminal opens a new browser tab, which shows that file's editor at its line`, viaTerminal.ok, `${viaTerminal.detail}; clicked row ${cell.cursorRow - 3}`);
+      check(`[${size}] 8 Ctrl+click on a file link in the terminal, under the editor, opens a new browser tab, which shows that file's editor at its line`, viaTerminal.ok, `${viaTerminal.detail}; clicked row ${cell.cursorRow - 3}`);
       check(`[${size}] 8 ... and this tab stays as it was`, JSON.stringify(afterTerminal) === JSON.stringify(beforeTerminal), `${JSON.stringify(beforeTerminal)} → ${JSON.stringify(afterTerminal)}`);
       await shot(page, `${size}-8-after-ctrl-click-terminal`);
     }
@@ -752,7 +825,8 @@ const journey = async (viewport, seeded, first) => {
       await wait(1_500);
       const activeAfter = (await headerTabs(page)).find((tab) => tab.active)?.title;
       check(`[${size}] 9 Alt+W in the page's editor stays VS Code's (Toggle Match Whole Word): the file tab stays`, activeBefore && activeAfter === activeBefore && await pageShown(page), `${activeBefore} → ${activeAfter}`);
-      await railDigitFrom("the page's editor", () => pageFrame(page).locator('.monaco-editor[data-uri$="notes.ts"] .view-line').first().click());
+      // Into the editor's text, past its gutter: in a narrow group its lines may be scrolled sideways.
+      await railDigitFrom("the page's editor", () => pageFrame(page).locator('.monaco-editor[data-uri$="notes.ts"]').first().click({ position: { x: 90, y: 12 } }));
       await railDigitFrom('the rail view', async () => {
         const list = view.locator('.explorer-folders-view .monaco-list').first();
         const box = await list.boundingBox();
@@ -761,7 +835,7 @@ const journey = async (viewport, seeded, first) => {
     }
     await chatTab.click();
     const terminalKept = await until(async () => (await bottom.locator('.monaco-workbench').evaluate(() => window.__surfacesMarker)) === 'terminal kept', 15_000);
-    check(`[${size}] 4 back on a chat, the terminal at the bottom is the same one (kept while a file tab covered it)`, terminalKept);
+    check(`[${size}] 4 back on a chat, the terminal at the bottom is the same one (kept while file tabs showed)`, terminalKept);
     if (first) {
       await railDigitFrom('the terminal', () => bottom.locator('.xterm:visible').first().click());
       // Alt+W is the shell's in the terminal (Esc w: readline, tmux, Emacs): OpenChamber's chat tab stays.
@@ -769,6 +843,149 @@ const journey = async (viewport, seeded, first) => {
       await page.keyboard.press('Alt+w');
       await wait(1_500);
       check(`[${size}] 9 Alt+W in the terminal stays the shell's: OpenChamber's chat tab stays`, await chatTab.count() > 0 && new URL(page.url()).searchParams.get('session') === seeded[0], page.url());
+
+      // ── 12. Closing the last unsaved file tab: VS Code's own close, with its save prompt ──
+      const readmeFile = join(project, 'README.md');
+      const original = readFileSync(readmeFile, 'utf8');
+      const dialog = pageFrame(page).locator('.monaco-dialog-box').first();
+      // Every file tab closed first (they are saved: auto save is on), so that README.md is the last one.
+      for (let guard = 0; guard < 12 && (await headerTabs(page)).length > 0; guard++) {
+        const [tab] = await headerTabs(page);
+        const element = page.locator(`[data-oc-forge-tab="${VSCODE}:${tab.id}"]`).first();
+        await element.hover();
+        await element.getByRole('button', { name: 'Close tab' }).click();
+        if (await until(() => dialog.isVisible(), 1_500)) await dialog.locator('.monaco-button', { hasText: /^Don't Save$/ }).first().click();
+        await until(async () => !(await headerTabs(page)).some((item) => item.id === tab.id), 10_000);
+      }
+      const readmeRow = view.locator('.explorer-folders-view .monaco-list-row', { hasText: 'README.md' }).first();
+      const readmeEditor = pageFrame(page).locator('.monaco-editor[data-uri$="README.md"]').first();
+      const openReadmeAlone = async () => {
+        await readmeRow.click();
+        const alone = await until(async () => {
+          const tabs = await headerTabs(page);
+          return await pageShown(page) && tabs.length === 1 && tabs[0].title.includes('README.md') && await readmeEditor.locator('.view-line').first().isVisible();
+        }, 30_000);
+        await pageStarted(page);
+        return alone;
+      };
+      const changeReadme = async (text) => {
+        await readmeEditor.locator('.view-line').first().click();
+        await page.keyboard.press('End');
+        await page.keyboard.type(text);
+        return until(async () => (await headerTabs(page)).find((tab) => tab.title.includes('README.md') && tab.dirty), 10_000);
+      };
+      /** VS Code's save prompt for README.md in the page, answered. */
+      const answer = async (button) => {
+        const asked = await until(async () => (await dialog.innerText({ timeout: 1_000 })).includes('README.md'), 15_000);
+        if (asked) await dialog.locator('.monaco-button', { hasText: button }).first().click();
+        return Boolean(asked);
+      };
+      const backOnChat = () => until(async () => (await headerTabs(page)).length === 0 && !(await pageShown(page)) && new URL(page.url()).searchParams.get('session') === seeded[0], 15_000);
+      const lone = await openReadmeAlone();
+      await readmeEditor.locator('.view-line').first().click();
+      // Off, so that a change waits for the prompt.
+      await toggleAutoSave();
+      const dirtied = await changeReadme(` ${run}-cancelled`);
+      // A middle click closes a tab, as its × does.
+      await headerTab(page, 'README.md').click({ button: 'middle' });
+      const askedCancel = await answer(/^Cancel$/);
+      await shot(page, `${size}-12-cancel-asked`);
+      await wait(1_500);
+      const tabKept = (await headerTabs(page)).find((tab) => tab.title.includes('README.md') && tab.dirty);
+      const textKept = (await readmeEditor.locator('.view-lines').innerText().catch(() => '')).includes(`${run}-cancelled`);
+      const notWritten = !readFileSync(readmeFile, 'utf8').includes(`${run}-cancelled`);
+      check(`[${size}] 12 closing the last unsaved tab (a middle click) asks as VS Code does; Cancel keeps the tab, the editor and the unsaved change`, lone && dirtied && askedCancel && tabKept && await pageShown(page) && textKept && notWritten,
+        `asked ${askedCancel}; tab ${tabKept ? 'kept, unsaved' : 'gone'}; page ${await pageShown(page) ? 'shown' : 'hidden'}; change ${textKept ? 'in the editor' : 'lost'}, ${notWritten ? 'not written' : 'written'}`);
+      await shot(page, `${size}-12-cancelled`);
+      // The close-tab key, from the rail view (VS Code binds nothing to it there).
+      const explorerList = view.locator('.explorer-folders-view .monaco-list').first();
+      const listBox = await explorerList.boundingBox();
+      await explorerList.click({ position: { x: 40, y: Math.max(4, (listBox?.height ?? 40) - 8) } });
+      await page.keyboard.press('Alt+w');
+      const askedDont = await answer(/^Don't Save$/);
+      const closedDont = await backOnChat();
+      const unwritten = !readFileSync(readmeFile, 'utf8').includes(`${run}-cancelled`);
+      check(`[${size}] 12 the close-tab key (Alt+W) asks too; Don't Save closes it without writing the file, back to the chat`, askedDont && closedDont && unwritten, `asked ${askedDont}; closed and back on the chat ${Boolean(closedDont)}; file ${unwritten ? 'unchanged' : 'written'}`);
+      // Opened again, it is the file: what Don't Save threw away doesn't come back from VS Code's backup of it.
+      await openReadmeAlone();
+      const asOnDisk = async () => !(await readmeEditor.locator('.view-lines').innerText()).includes(`${run}-cancelled`) && !(await headerTabs(page)).some((tab) => tab.dirty);
+      const discarded = await until(asOnDisk, 10_000);
+      check(`[${size}] 12 opened again after Don't Save, the file is as on disk: the thrown-away change doesn't come back`, Boolean(discarded), `${(await headerTabs(page)).map((tab) => `${tab.title}${tab.dirty ? ' (unsaved)' : ''}`).join(' | ')}`);
+      await changeReadme(` ${run}-saved`);
+      await closeHeaderTab(page, 'README.md');
+      const askedSave = await answer(/^Save$/);
+      const closedSave = await backOnChat();
+      const written = readFileSync(readmeFile, 'utf8').includes(`${run}-saved`);
+      check(`[${size}] 12 its × asks too; Save writes the file and closes it, back to the chat`, askedSave && closedSave && written, `asked ${askedSave}; closed and back on the chat ${Boolean(closedSave)}; file ${written ? 'written' : 'not written'}`);
+      await shot(page, `${size}-12-saved`);
+      // As it was, and auto save on again; a saved tab closes at once.
+      writeFileSync(readmeFile, original);
+      await openReadmeAlone();
+      await until(async () => !(await readmeEditor.locator('.view-lines').innerText()).includes(`${run}-saved`), 10_000);
+      await readmeEditor.locator('.view-line').first().click();
+      await toggleAutoSave();
+      await closeHeaderTab(page, 'README.md');
+      const atOnce = await until(async () => (await headerTabs(page)).length === 0, 3_000);
+      const unasked = !(await dialog.isVisible().catch(() => false));
+      check(`[${size}] 12 a saved tab closes at once, as before (no prompt)`, atOnce && unasked, `closed ${Boolean(atOnce)}, prompt ${unasked ? 'none' : 'shown'}`);
+
+      // ── 12. Across a reload: the tabs come back once each, and closed tabs stay closed ──
+      const titles = async () => (await headerTabs(page)).map((tab) => tab.title);
+      const railBack = async () => {
+        if (!(await until(async () => (await rail(page)).find((item) => item.id === entrySurface('explorer'))?.pressed, 15_000))) await entryButton(page, 'explorer').click();
+        await view.locator('.explorer-folders-view .monaco-list-row', { hasText: 'notes.ts' }).first().waitFor({ timeout: 90_000 });
+      };
+      await openReadmeAlone();
+      await readmeEditor.locator('.view-line').first().click();
+      const commandAt = Date.now();
+      await runCommand(page, pageFrame(page), 'Markdown: Open Preview to the Side');
+      // Each page start is a new extension host, which takes its time on a server without DNS (the private network
+      // namespace): its built-in extensions wait out their lookups first.
+      const previewBefore = await until(async () => (await headerTabs(page)).find((tab) => tab.title.includes('Preview')), 120_000);
+      const previewAfter = ((Date.now() - commandAt) / 1000).toFixed(1);
+      // Rendered, the preview has its state (the file it shows), which VS Code saves every few seconds; a page that
+      // reloads can't save it on the way out.
+      const renderedBefore = await until(async () => (await previewHeading(pageFrame(page))) === 'demo', 90_000);
+      const renderedAfter = ((Date.now() - commandAt) / 1000).toFixed(1);
+      await wait(7_000);
+      await page.reload({ waitUntil: 'load' });
+      await railBack();
+      // The rail view brings the tabs back and the page starts behind them: VS Code revives the preview under a new
+      // key, which takes its old tab's place.
+      const revived = await until(async () => {
+        const tabs = await headerTabs(page);
+        const previews = tabs.filter((tab) => tab.title.includes('Preview'));
+        return tabs.length === 2 && previews.length === 1 && previews[0].id !== previewBefore?.id ? tabs : null;
+      }, 90_000);
+      await headerTab(page, 'Preview').click();
+      const rendered = await until(async () => (await previewHeading(pageFrame(page))) === 'demo', 90_000);
+      await wait(2_000);
+      check(`[${size}] 12 after a reload the tabs come back once each: Markdown's preview, which VS Code revives under a new key, takes its old tab's place`,
+        Boolean(previewBefore && revived) && (await titles()).length === 2, `${(await titles()).join(' | ')}; before the reload its tab came ${previewBefore ? `${previewAfter} s` : 'never'} after the command`);
+      check(`[${size}] 12 ... and the revived preview renders the file again`, Boolean(renderedBefore && rendered),
+        renderedBefore ? `rendered ${renderedAfter} s after the command before the reload; after it ${rendered ? 'rendered' : 'not rendered'}` : 'it never rendered before the reload (its extension host made no progress), so it had no state to come back with');
+      await shot(page, `${size}-12-reloaded`);
+      // Both closed, the last with the page (the rail view keeps the folder's tabs then): they stay closed.
+      await closeHeaderTab(page, 'Preview');
+      await until(async () => (await titles()).length === 1, 10_000);
+      await closeHeaderTab(page, 'README.md');
+      await until(async () => (await titles()).length === 0, 10_000);
+      await wait(1_500);
+      await page.reload({ waitUntil: 'load' });
+      await railBack();
+      await wait(5_000);
+      const afterReload = await titles();
+      await view.locator('.explorer-folders-view .monaco-list-row', { hasText: 'notes.ts' }).first().click();
+      const onlyNotes = await until(async () => {
+        const now = await titles();
+        return now.length === 1 && now[0].includes('notes.ts') && await pageFrame(page).locator('.monaco-editor[data-uri$="notes.ts"] .view-line').first().isVisible();
+      }, 90_000);
+      await wait(2_000);
+      const settled = await titles();
+      check(`[${size}] 12 closed tabs stay closed: none comes back after a reload, and the next file opened is the only tab (VS Code doesn't reopen them)`,
+        afterReload.length === 0 && Boolean(onlyNotes) && settled.length === 1, `after the reload: ${afterReload.join(' | ') || 'none'}; then: ${settled.join(' | ')}`);
+      await closeHeaderTab(page, 'notes.ts');
+      await until(async () => (await titles()).length === 0, 10_000);
     }
 
     // ── 6. Nothing else opened ──
@@ -878,7 +1095,7 @@ try {
     // Not installed.
   }
   for (const file of ['notes.ts', 'linked.md']) rmSync(join(project, file), { force: true });
-  for (const file of [`${run}-1440.txt`, `${run}-1024.txt`]) rmSync(join('/tmp', file), { force: true });
+  for (const file of [`${run}-1440.txt`, `${run}-1024.txt`, `${run}-under-1440.txt`]) rmSync(join('/tmp', file), { force: true });
   await browser.close();
   writeFileSync(join(out, 'results.json'), `${JSON.stringify(results, null, 2)}\n`);
 }
