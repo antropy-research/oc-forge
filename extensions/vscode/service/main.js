@@ -1,6 +1,6 @@
 // service/main.ts
 import http from "node:http";
-import { readFile as readFile5 } from "node:fs/promises";
+import { readFileSync as readFileSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname3, join as join4, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +65,7 @@ var readServerPage = (html) => {
 var commitOfBase = (base) => /\/(?:stable|insider|exploration)-([0-9a-f]{40})\/static\/?$/.exec(base)?.[1] ?? null;
 
 // service/assets.ts
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -254,6 +255,7 @@ class WorkbenchAssets {
   candidates;
   webviewHost;
   jobs = new Map;
+  stamp = null;
   constructor(cacheRoot, downloadList, log, candidates = localInstallCandidates, webviewHost = null) {
     this.cacheRoot = cacheRoot;
     this.downloadList = downloadList;
@@ -264,6 +266,10 @@ class WorkbenchAssets {
   static folder(commit) {
     return `vscode-web/${commit}`;
   }
+  listStamp() {
+    this.stamp ??= createHash("sha256").update(JSON.stringify(this.downloadList())).digest("hex").slice(0, 16);
+    return this.stamp;
+  }
   status(commit) {
     const job = this.jobs.get(commit);
     if (job && job.state !== "ready")
@@ -272,7 +278,7 @@ class WorkbenchAssets {
     if (existsSync(marker)) {
       try {
         const ready = JSON.parse(readFileSync(marker, "utf8"));
-        if (ready.format === CACHE_FORMAT) {
+        if (ready.format === CACHE_FORMAT && (ready.source !== "download" || ready.list === this.listStamp())) {
           this.refreshWebviewHost(commit);
           const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
           return { state: "ready", path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? "local", surfaces };
@@ -333,7 +339,7 @@ class WorkbenchAssets {
       for (const module of WEB_NODE_MODULES)
         await walk(local, join(local, "node_modules", module), sources);
     } else {
-      sources = await this.downloadList();
+      sources = this.downloadList();
     }
     const wanted = sources.filter((path) => clientFileName(path) !== null);
     const read = async (path) => local ? readFile(join(local, path)).catch(() => null) : server.staticFile(page.base, path);
@@ -371,7 +377,7 @@ class WorkbenchAssets {
         if (!existsSync(join(tmp, file)))
           throw new Error(`${file} is missing from the VS Code Server`);
       }
-      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, at: new Date().toISOString() }));
+      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, ...local ? {} : { list: this.listStamp() }, at: new Date().toISOString() }));
       const final = join(this.cacheRoot, page.commit);
       await rm(final, { recursive: true, force: true });
       await rename(tmp, final);
@@ -421,7 +427,7 @@ var transform = (path, body, codicon, missing = []) => {
 };
 
 // service/editors.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join2 } from "node:path";
 var REQUEST_TTL_MS = 60000;
@@ -480,7 +486,7 @@ class SavedTabs {
   }
   static keyOf(serverKey, folder) {
     const name = typeof folder === "string" && folder.startsWith("/") ? folder : "";
-    return `${serverKey}.${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
+    return `${serverKey}.${createHash2("sha256").update(name).digest("hex").slice(0, 16)}`;
   }
   file(key) {
     return join2(this.dir, `${key}.tabs.json`);
@@ -886,7 +892,7 @@ class VscodeServer {
 }
 
 // service/state.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { mkdir as mkdir4, readFile as readFile4, rename as rename4, stat as stat2, writeFile as writeFile4 } from "node:fs/promises";
 import { join as join3 } from "node:path";
 var LOAD_MAX = 7000000;
@@ -979,7 +985,7 @@ class WorkbenchState {
     this.log = log;
   }
   static keyOf(serverUrl, folder) {
-    return createHash2("sha256").update(serverUrl).digest("hex").slice(0, 32);
+    return createHash3("sha256").update(serverUrl).digest("hex").slice(0, 32);
   }
   static roleKeyOf(key, role) {
     return `${key}.${role}`;
@@ -1363,7 +1369,7 @@ if (!port || !token) {
 var BODY_LIMIT = 200000;
 var packageRoot = resolve(dirname3(fileURLToPath(import.meta.url)), "..");
 var log = (message) => console.error(`[vscode] ${message}`);
-var assets = new WorkbenchAssets(join4(packageRoot, "vscode-web"), async () => JSON.parse(await readFile5(join4(packageRoot, "service", "web-files.json"), "utf8")), log, undefined, join4(packageRoot, "webview"));
+var assets = new WorkbenchAssets(join4(packageRoot, "vscode-web"), () => JSON.parse(readFileSync2(join4(packageRoot, "service", "web-files.json"), "utf8")), log, undefined, join4(packageRoot, "webview"));
 var tunnels = new Tunnels;
 var stateDir = process.env.OPENCHAMBER_VSCODE_DATA_DIR || join4(homedir2(), ".local", "share", "openchamber-vscode", "state");
 var state = new WorkbenchState(stateDir, log);

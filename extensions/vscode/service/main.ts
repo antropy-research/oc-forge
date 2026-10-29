@@ -4,7 +4,7 @@
 // the compiled workbench for the frame, carries its web sockets, reads its
 // remote resources, fetches from the extension gallery, and keeps its storage.
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +29,7 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const log = (message: string): void => console.error(`[vscode] ${message}`);
 const assets = new WorkbenchAssets(
   join(packageRoot, 'vscode-web'),
-  async () => JSON.parse(await readFile(join(packageRoot, 'service', 'web-files.json'), 'utf8')) as string[],
+  () => JSON.parse(readFileSync(join(packageRoot, 'service', 'web-files.json'), 'utf8')) as string[],
   log,
   undefined,
   join(packageRoot, 'webview'),

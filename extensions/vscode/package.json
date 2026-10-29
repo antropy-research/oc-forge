@@ -60,7 +60,7 @@
     "build:webview": "bun scripts/build-webview.ts"
   },
   "devDependencies": {
-    "@openchamber/sdk": "2.5.2",
+    "@openchamber/sdk": "2.5.3",
     "@types/bun": "^1.4.4",
     "@types/node": "^26.6.5",
     "fake-indexeddb": "6.2.6",

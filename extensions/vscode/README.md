@@ -1,12 +1,12 @@
 # VS Code extension
 
-Renders compiled VS Code inside OpenChamber (manifest `apiVersion` 1, SDK 2.5.2, OpenChamber 2.5.1 or newer, tested on
-2.5.2; web and desktop): the workbench of your own VS Code Server for the web, the same commit, in OpenChamber's
-**VS Code** rail panel (beside the chat, expandable) and as a full **VS Code** page (Extension pages → VS Code).
-Nothing opens in another tab or window. Explorer, editor (VS Code's own grammars, themes and IntelliSense from the
-server's extensions), Search, Source Control with its diff editor, the integrated terminal, Run and Debug,
-extensions, webviews such as the Markdown preview, and the command palette are VS Code itself, running on the
-server's files.
+Renders compiled VS Code inside OpenChamber (manifest `apiVersion` 1, SDK 2.5.3, OpenChamber 2.5.1 or newer, tested on
+2.5.3 with VS Code 1.144.0; web and desktop): the workbench of your own VS Code Server for the web, the same commit,
+in OpenChamber's **VS Code** rail panel (beside the chat, expandable) and as a full **VS Code** page (Extension
+pages → VS Code). Nothing opens in another tab or window. Explorer, editor (VS Code's own grammars, themes and
+IntelliSense from the server's extensions), Search, Source Control with its diff editor, the integrated terminal, Run
+and Debug, extensions, webviews such as the Markdown preview, and the command palette are VS Code itself, running on
+the server's files.
 
 - **Open in VS Code** in a chat's menu shows that chat's folder (or worktree) in the VS Code panel (with oc-forge's
   adapters: in VS Code's Explorer, in the rail panel).
@@ -28,7 +28,7 @@ its server's origin. The extension's intermediate components close that gap:
 
 | VS Code needs | In an extension frame | What this extension does |
 |---|---|---|
-| Its compiled files (`out/`, a few `node_modules`) | Only its own package's `.html .js .css .svg .json .png` load | `service/assets.ts` copies the browser's files of the server's own commit into `vscode-web/<commit>/` (from the install on this machine, or over HTTP from the server's static route by `service/web-files.json`), WebAssembly renamed `.json` |
+| Its compiled files (`out/`, a few `node_modules`) | Only its own package's `.html .js .css .svg .json .png` load | `service/assets.ts` copies the browser's files of the server's own commit into `vscode-web/<commit>/` (from the install on this machine, or over HTTP from the server's static route by `service/web-files.json`; a copy made over HTTP from an older list is made again), WebAssembly renamed `.json` |
 | Its embedder (`create(document.body, options)`) | | `src/patch.ts` routes the compiled embedder's options through the frame, which adds the folder, the web socket factory, the workspace provider and OpenChamber's defaults; each patch fails loudly if a release moved its code |
 | A web socket to the server | `connect-src` is the package only | The workbench's `webSocketFactory` tunnels through the host's service channel: the service opens the connection, the frame sends batches and long-polls (`workbench/tunnel.ts`, `service/tunnel.ts`). The service connects as VS Code's own Node client does: an upgrade with `skipWebSocketFrames=true`, then the raw stream. A WebSocket can't be closed there, since the server ignores Close frames; it kept every closed tunnel's connection, and with it the server's extension host for that workbench. Tunnels no frame polls for 45 s are closed, and `/health` reports `tunnels` and the `sockets` still open |
 | vsda to sign the handshake | Needs `crypto.subtle`, which plain HTTP lacks | The client sends its connection token, which the VS Code Server accepts in place of the signature |
@@ -58,7 +58,7 @@ OpenChamber `connectOcForge()` answers null and every frame is the whole workben
 | Activity bar: Explorer, Search, Source Control, Run and Debug, Extensions, and every installed extension's view container | One rail icon each, in VS Code's order; installed or uninstalled on the VS Code Server, an icon comes or goes within the next poll (2 s), no reload | The manifest's `ocForge.rail` (`GET /rail`, every 2 s). The service lists the built-ins (Remixicons of OpenChamber's sprite: `file-copy-2`, `search`, `git-branch`, `bug`, `puzzle`) and each installed extension's `contributes.viewsContainers.activitybar`, read from the server's `extensions.json`, `package.json` (and `package.nls.json`) and SVG icon through the server's own `/vscode-remote-resource` route, so it needn't share the server's disk (`service/rail.ts`, `src/rail.ts`). An SVG is inlined (16 KB at most, cleaned for the mask), a `$(codicon)` maps to a Remixicon, anything else is `apps`. Where the extensions live, a workbench tells the service once (its default profile's `extensions.json`); it is kept with the server's address (mode 0600), so after a restart the rail is complete before any frame runs |
 | A view container in the side bar | The rail panel shows that container alone, filling it | The panel's frame is the **view** role: `rail-entry` opens the container (`IViewsService.openViewContainer`); VS Code switching containers by itself (Ctrl+Shift+F, *Reveal in Explorer*) moves the rail's light (`rail.setActive`) |
 | Editor tabs | Header tabs after the chats'; choosing one shows its editor in the main area; they switch and close like chat tabs | The page is the **editor** role: each editor it has open is a header tab (id: its resource, or `diff:<original> <modified>`; title; icon by type; the unsaved dot). Choosing one activates its editor; closing one (its ×, a middle click, the close-tab key) closes the editor. An unsaved one is left to the page (`forge.tabs.onCloseRequest`): VS Code closes it as its own tab, with its save prompt, and the tab goes only once the editor has (Save, Don't Save), back to the chat after the last one; Cancel keeps the tab, the editor and the changes. An editor VS Code closes or switches to moves the header with it. VS Code's own tab bar is off (`workbench.editor.showTabs: none`), and so is preview mode, as header tabs have none |
-| The panel's terminal | VS Code's panel at OpenChamber's bottom, maximized: several terminals, split, the shell picker, Problems and Output beside it; under a chat, and under a file's editor as in VS Code | A rail entry `terminal` with `zone: "bottom"`, so a panel of its own (`plugin:oc-forge-vscode--terminal`): the **terminal** role. Its workbench starts the first time that panel is shown. The manifest's `ocForge.page.keepBottomZone` keeps OpenChamber's bottom zone under the page, which OpenChamber 2.5.2 otherwise covers with it. The parts are one workspace, whose terminals VS Code reconnects every window to as it starts: only this part does (`terminal.integrated.enablePersistentSessions` is off in the views and the page), so after a reload its shells come back here |
+| The panel's terminal | VS Code's panel at OpenChamber's bottom, maximized: several terminals, split, the shell picker, Problems and Output beside it; under a chat, and under a file's editor as in VS Code | A rail entry `terminal` with `zone: "bottom"`, so a panel of its own (`plugin:oc-forge-vscode--terminal`): the **terminal** role. Its workbench starts the first time that panel is shown. The manifest's `ocForge.page.keepBottomZone` keeps OpenChamber's bottom zone under the page, which OpenChamber (2.5.2, 2.5.3) otherwise covers with it. The parts are one workspace, whose terminals VS Code reconnects every window to as it starts: only this part does (`terminal.integrated.enablePersistentSessions` is off in the views and the page), so after a reload its shells come back here |
 
 **Roles.** Each frame is a workbench of its own on the same server, in one role (`src/surfaces.ts`, `workbench/surfaces.ts`):
 `view` (the rail panel), `editor` (the page), `terminal` (the terminal's panel), or `classic` (the whole workbench: a
@@ -78,7 +78,7 @@ otherwise brings the panel back whenever the editor area hides). From there the 
 VS Code's service interfaces only (`workbench/vscode.ts`: the editor, editor groups, layout, views, pane composite,
 configuration, remote agent and file services). Unlike the others these patches may be missing: the prepared
 workbench records which (`ready.json`), and a release that moved them runs as the whole workbench per frame.
-They apply once each to VS Code 1.140.0 and 1.143.1.
+They apply once each to VS Code 1.140.0, 1.143.1 and 1.144.0.
 
 **Between frames.** Frames reach each other only through OpenChamber, plus the service for what doesn't fit a tab
 message:
@@ -232,15 +232,21 @@ that OpenChamber's own editor still opens a search hit at its line, and that no 
 the demo project's README, the extension's settings, the folders' saved tabs and its chats back afterwards, closes
 its tabs and terminal, and clears its Search query.
 
-After the VS Code pin moves, refresh `service/web-files.json` from a server of that release, and run the tests
-against it (every patch, the surface patches too, must apply once). Microsoft's web server of the pinned version
-has the same compiled workbench; `web-files.json` is now 1.143.1's, which holds all of 1.140.0's files:
+After the VS Code pin moves, refresh `service/web-files.json` from a server of that release and one of the release
+before it, and run the tests against the new one (every patch, the surface patches too, must apply once).
+Microsoft's web server of the pinned version has the same compiled workbench. The list is both releases' files, so
+a server one release behind the pin, prepared over HTTP, still gets all of its own (a listed file its release lacks
+answers 404 and is skipped); it is now 1.144.0's 310 files and 1.143.1's 397, 401 in all, which hold all of
+1.140.0's too. A copy prepared over HTTP records the list it came from and is prepared again from a newer one, so
+it gains the files added since; a copy made from the install on the same machine has them all already:
 
 ```sh
-mkdir -p /tmp/vscode-server
-curl -fsSL https://update.code.visualstudio.com/1.143.1/server-linux-x64-web/stable | tar -xz -C /tmp/vscode-server --strip-components=1
-bun run web-files /tmp/vscode-server
-VSCODE_SERVER_DIR=/tmp/vscode-server bun test tests/
+for v in 1.144.0 1.143.1; do
+  mkdir -p /tmp/vscode-server-$v
+  curl -fsSL https://update.code.visualstudio.com/$v/server-linux-x64-web/stable | tar -xz -C /tmp/vscode-server-$v --strip-components=1
+done
+bun run web-files /tmp/vscode-server-1.144.0 /tmp/vscode-server-1.143.1
+VSCODE_SERVER_DIR=/tmp/vscode-server-1.144.0 bun test tests/
 ```
 
 ## Install

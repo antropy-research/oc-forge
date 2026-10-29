@@ -4,6 +4,7 @@
 // OpenChamber serves, with `patch.ts` applied. It is written inside this
 // extension's folder (`vscode-web/<commit>/`), because an extension frame can
 // load files from its own package and from nowhere else.
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -54,12 +55,13 @@ const walk = async (root: string, dir: string, out: string[]): Promise<void> => 
 
 export class WorkbenchAssets {
   private readonly jobs = new Map<string, AssetState>();
+  private stamp: string | null = null;
 
   constructor(
     /** `<package>/vscode-web`. */
     private readonly cacheRoot: string,
     /** Install-relative paths the browser loads, for a server reached only over HTTP (`web-files.json`). */
-    private readonly downloadList: () => Promise<string[]>,
+    private readonly downloadList: () => string[],
     private readonly log: (message: string) => void,
     private readonly candidates: (commit: string) => string[] = localInstallCandidates,
     /** This extension's webview host (`webview/index.html`, `webview/host.js`), put in place of VS Code's. */
@@ -71,14 +73,22 @@ export class WorkbenchAssets {
     return `vscode-web/${commit}`;
   }
 
+  /** Which list a cache made over HTTP came from (the list changes when the VS Code pin moves). */
+  private listStamp(): string {
+    this.stamp ??= createHash('sha256').update(JSON.stringify(this.downloadList())).digest('hex').slice(0, 16);
+    return this.stamp;
+  }
+
   status(commit: string): AssetState {
     const job = this.jobs.get(commit);
     if (job && job.state !== 'ready') return job;
     const marker = join(this.cacheRoot, commit, MARKER);
     if (existsSync(marker)) {
       try {
-        const ready = JSON.parse(readFileSync(marker, 'utf8')) as { format?: number; files?: number; source?: 'local' | 'download'; missing?: unknown };
-        if (ready.format === CACHE_FORMAT) {
+        const ready = JSON.parse(readFileSync(marker, 'utf8')) as { format?: number; files?: number; source?: 'local' | 'download'; missing?: unknown; list?: string };
+        // One made over HTTP has the files its list named: from an older list it lacks those added since, and is
+        // prepared again. One made from an install on this machine has all of them.
+        if (ready.format === CACHE_FORMAT && (ready.source !== 'download' || ready.list === this.listStamp())) {
           this.refreshWebviewHost(commit);
           const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
           return { state: 'ready', path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? 'local', surfaces };
@@ -152,7 +162,7 @@ export class WorkbenchAssets {
       await walk(local, join(local, 'out'), sources);
       for (const module of WEB_NODE_MODULES) await walk(local, join(local, 'node_modules', module), sources);
     } else {
-      sources = await this.downloadList();
+      sources = this.downloadList();
     }
     const wanted = sources.filter((path) => clientFileName(path) !== null);
     const read = async (path: string): Promise<Buffer | null> => (local ? readFile(join(local, path)).catch(() => null) : server.staticFile(page.base, path));
@@ -186,7 +196,7 @@ export class WorkbenchAssets {
       for (const file of ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js']) {
         if (!existsSync(join(tmp, file))) throw new Error(`${file} is missing from the VS Code Server`);
       }
-      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, at: new Date().toISOString() }));
+      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, ...(local ? {} : { list: this.listStamp() }), at: new Date().toISOString() }));
       const final = join(this.cacheRoot, page.commit);
       await rm(final, { recursive: true, force: true });
       await rename(tmp, final);

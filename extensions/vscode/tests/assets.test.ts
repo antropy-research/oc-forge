@@ -83,7 +83,7 @@ describe('preparing the workbench of a VS Code Server', () => {
   test('from an install of the same commit on this machine', async () => {
     const install = fakeInstall();
     const cache = mkdtempSync(join(tmpdir(), 'vscode-cache-'));
-    const assets = new WorkbenchAssets(cache, async () => [], () => {}, () => [join(install, 'missing'), install]);
+    const assets = new WorkbenchAssets(cache, () => [], () => {}, () => [join(install, 'missing'), install]);
     const server = { staticFile: async () => null } as unknown as VscodeServer;
     expect(assets.prepare(server, page).state).toBe('preparing');
     const done = await settle(assets);
@@ -92,7 +92,7 @@ describe('preparing the workbench of a VS Code Server', () => {
     expect(JSON.parse(readFileSync(join(cache, commit, 'ready.json'), 'utf8')).missing).toEqual([]);
     // Once ready it is not prepared again.
     expect(assets.prepare(server, page).state).toBe('ready');
-    expect(new WorkbenchAssets(cache, async () => [], () => {}).status(commit).state).toBe('ready');
+    expect(new WorkbenchAssets(cache, () => [], () => {}).status(commit).state).toBe('ready');
   });
 
   test('a newer webview host replaces the one a prepared workbench carries, without preparing it again', async () => {
@@ -101,14 +101,14 @@ describe('preparing the workbench of a VS Code Server', () => {
     const webview = mkdtempSync(join(tmpdir(), 'vscode-webview-'));
     writeFileSync(join(webview, 'index.html'), '<script src="./host.js"></script>');
     writeFileSync(join(webview, 'host.js'), 'old();');
-    const assets = new WorkbenchAssets(cache, async () => [], () => {}, () => [install], webview);
+    const assets = new WorkbenchAssets(cache, () => [], () => {}, () => [install], webview);
     assets.prepare({ staticFile: async () => null } as unknown as VscodeServer, page);
     expect(await settle(assets)).toMatchObject({ state: 'ready' });
     const host = join(cache, commit, 'out/vs/workbench/contrib/webview/browser/pre/host.js');
     expect(readFileSync(host, 'utf8')).toBe('old();');
     writeFileSync(join(webview, 'host.js'), 'handshake(mountId, keyEventToken);');
     const marker = readFileSync(join(cache, commit, 'ready.json'), 'utf8');
-    expect(new WorkbenchAssets(cache, async () => [], () => {}, () => [], webview).status(commit).state).toBe('ready');
+    expect(new WorkbenchAssets(cache, () => [], () => {}, () => [], webview).status(commit).state).toBe('ready');
     expect(readFileSync(host, 'utf8')).toBe('handshake(mountId, keyEventToken);');
     expect(readFileSync(join(cache, commit, 'ready.json'), 'utf8')).toBe(marker);
   });
@@ -125,18 +125,43 @@ describe('preparing the workbench of a VS Code Server', () => {
       },
     } as unknown as VscodeServer;
     const list = ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js', 'out/media/codicon.ttf', 'out/media/loading.svg', 'out/vs/editor/common/services/editorWebWorkerMain.js', 'out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html', 'node_modules/vscode-oniguruma/release/onig.wasm', 'node_modules/vscode-oniguruma/release/main.js', 'out/gone.js'];
-    const assets = new WorkbenchAssets(cache, async () => list, () => {}, () => []);
+    const assets = new WorkbenchAssets(cache, () => list, () => {}, () => []);
     assets.prepare(server, page);
     expect(await settle(assets)).toMatchObject({ state: 'ready', source: 'download', surfaces: false });
     expectPrepared(cache);
     expect(requested.every((path) => path.startsWith(`/stable-${commit}/static/`))).toBe(true);
   });
 
+  test('a cache made over HTTP from an older list is prepared again and gains the files added since; one from an install here stays', async () => {
+    const install = fakeInstall();
+    const server = { staticFile: async (_base: string, path: string) => (existsSync(join(install, path)) ? readFileSync(join(install, path)) : null) } as unknown as VscodeServer;
+    const older = ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js', 'out/media/codicon.ttf'];
+    const cache = mkdtempSync(join(tmpdir(), 'vscode-cache-'));
+    const first = new WorkbenchAssets(cache, () => older, () => {}, () => []);
+    first.prepare(server, page);
+    expect(await settle(first)).toMatchObject({ state: 'ready', source: 'download' });
+    expect(existsSync(join(cache, commit, 'out/media/loading.svg'))).toBe(false);
+    // The same list: ready as it is.
+    expect(new WorkbenchAssets(cache, () => [...older], () => {}, () => []).status(commit).state).toBe('ready');
+    // The list refreshed for a new release: prepared again, with the added file.
+    const refreshed = new WorkbenchAssets(cache, () => [...older, 'out/media/loading.svg'], () => {}, () => []);
+    expect(refreshed.status(commit).state).toBe('idle');
+    refreshed.prepare(server, page);
+    expect(await settle(refreshed)).toMatchObject({ state: 'ready', source: 'download' });
+    expect(existsSync(join(cache, commit, 'out/media/loading.svg'))).toBe(true);
+    // Made from an install on this machine, it has every file whatever the list says.
+    const local = mkdtempSync(join(tmpdir(), 'vscode-cache-'));
+    const fromInstall = new WorkbenchAssets(local, () => older, () => {}, () => [install]);
+    fromInstall.prepare(server, page);
+    expect(await settle(fromInstall)).toMatchObject({ state: 'ready', source: 'local' });
+    expect(new WorkbenchAssets(local, () => [...older, 'out/other.js'], () => {}, () => []).status(commit).state).toBe('ready');
+  });
+
   test('a release whose workbench the patches do not fit fails with the reason', async () => {
     const install = fakeInstall();
     writeFileSync(join(install, 'out/vs/code/browser/workbench/workbench.js'), 'nothing to patch here; release/onig.wasm');
     const cache = mkdtempSync(join(tmpdir(), 'vscode-cache-'));
-    const assets = new WorkbenchAssets(cache, async () => [], () => {}, () => [install]);
+    const assets = new WorkbenchAssets(cache, () => [], () => {}, () => [install]);
     assets.prepare({} as VscodeServer, page);
     const done = await settle(assets);
     expect(done.state).toBe('failed');
