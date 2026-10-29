@@ -17,6 +17,7 @@ import {
   readEditorRoute,
   readOpenRequest,
   requestTitle,
+  restoredTabOf,
   roleSettings,
   tabIcon,
   tabTitle,
@@ -57,6 +58,8 @@ export interface SurfaceContext {
   folder: string | null;
   /** A POST to this extension's service, the server named. */
   call: <T>(path: string, body?: Record<string, unknown>) => Promise<T>;
+  /** VS Code saves its state and this frame's storage reaches the service, as before a reload. */
+  saveState: () => Promise<void>;
   /** The service's rail entries (`GET /rail`), with the view container each shows. */
   railEntries: () => Promise<RailEntry[]>;
   openUrl: (url: string) => void;
@@ -251,15 +254,22 @@ const handoffOf = (editor: unknown, optionsOrGroup: unknown): Handoff | null => 
   return { key, title: requestTitle(merged), icon: tabIcon(key), open: { kind: 'editor', editor: marshal(merged) }, route: editorRoute(key, line) };
 };
 
-/** A Cmd/Ctrl+click just now: what it opens goes to a new browser tab, not over the current view. */
+/**
+ * A Cmd/Ctrl+click just now: what it opens goes to a new browser tab, not over the current view. The open may come
+ * seconds later (a link's `command:` waits for VS Code's extensions to activate on it); a plain click or a key in
+ * between ends it (a Ctrl+click that only selected in a list, then Enter, opens here).
+ */
 const modifiedClicks = (): (() => boolean) => {
   let at = -Infinity;
   const note = (event: MouseEvent) => {
-    if (event.metaKey || event.ctrlKey) at = performance.now();
+    at = event.metaKey || event.ctrlKey ? performance.now() : -Infinity;
   };
   window.addEventListener('mousedown', note, true);
   window.addEventListener('mouseup', note, true);
-  return () => performance.now() - at < 1_000;
+  window.addEventListener('keydown', (event) => {
+    if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key)) at = -Infinity;
+  }, true);
+  return () => performance.now() - at < 10_000;
 };
 
 /**
@@ -321,6 +331,20 @@ const handEditorsToPage = (context: SurfaceContext): void => {
 };
 
 const editorsOf = (services: VscodeServices): readonly EditorIdentifier[] => services.get<EditorService>('editorService').getEditors(1);
+
+/**
+ * OpenChamber removes the page with its last tab, before the page hears that the user closed it: a part that stays
+ * (a rail view, the terminal) empties the folder's saved tabs then, so that the tab doesn't come back after a reload.
+ */
+const keepLastClose = (context: SurfaceContext): void => {
+  const { forge } = context;
+  if (!forge.has('tabs')) return;
+  // The host's new list comes after the close: the closed tab is still in it.
+  forge.tabs.onClose((id) => {
+    if (forge.tabs.state().list.some((tab) => tab.id !== id)) return;
+    void context.call('/tabs/save', { folder: context.folder, tabs: [] }).catch(() => undefined);
+  });
+};
 
 /** What the frame's boot can ask of its part once it runs. */
 export interface SurfaceController {
@@ -412,6 +436,8 @@ class EditorArea {
   private leaving = false;
   /** Until VS Code has restored its editors, the header doesn't follow them: what it restored is no choice made in it. */
   private started = false;
+  /** The editor a link names as the page starts (a reload, a new browser tab from Cmd/Ctrl+click). */
+  private linked: string | null = null;
 
   constructor(private readonly context: SurfaceContext) {
     this.editorService = context.services.get<EditorService>('editorService');
@@ -422,14 +448,26 @@ class EditorArea {
     this.strip = state.strip;
   }
 
-  /** Restored, with the VS Code Server's files reachable: before that, a file would open as a plain text resource. */
+  /**
+   * Restored, with the VS Code Server's files reachable (before that, a file would open as a plain text resource),
+   * and the editors the user closed closed again.
+   */
   private ready: Promise<void> = Promise.resolve();
 
   async start(): Promise<void> {
     const { forge, services } = this.context;
+    // What VS Code restored, taken before anyone can open more: only these may be editors whose tabs were closed.
+    const restored = new Set(this.editorService.getEditors(1).map((identifier) => identifier.editor));
+    // A file opened in a rail view or the terminal starts the page with its tab: that is what the user asked for. Only
+    // otherwise does the page's route count as a link, as OpenChamber keeps it after the page went with its last tab.
+    const active = forge.tabs.state().active;
+    const handed = active ? await this.take(active) : null;
+    const route = handed ? null : forge.links.route();
+    this.linked = readEditorRoute(route)?.key ?? null;
     this.ready = (async () => {
       await services.get<EditorGroupsService>('editorGroupsService').whenRestored;
       await services.get<FileService>('fileService').activateProvider('vscode-remote').catch(() => undefined);
+      await this.dropClosedEditors(restored).catch((error) => log('could not close the editors closed before', error));
     })();
     this.settings = roleSettings('editor', this.strip);
     await applySettings(services, this.settings);
@@ -446,22 +484,31 @@ class EditorArea {
     });
     forge.tabs.onActivate((id) => void this.show(id).catch((error) => log('could not show the tab', error)));
     forge.tabs.onClose((id) => void this.closeFromHeader(id).catch((error) => log('could not close the editor', error)));
+    // An unsaved tab the user closes stays until VS Code's own close, with its save prompt, has run here.
+    forge.tabs.onCloseRequest((id) => void this.closeAsked(id).catch((error) => log('could not close the editor', error)));
     forge.links.onRoute((route) => void this.openRoute(route));
     await this.ready;
     this.editorService.onDidEditorsChange(() => this.schedule());
     this.editorService.onDidActiveEditorChange(() => this.schedule());
     // The editor VS Code restored as active is no change made in VS Code: the header's selection stands.
     this.lastActive = this.activeKey();
-    // A link to an editor (a new browser tab from Cmd/Ctrl+click, a reload) shows that editor, before the header
-    // follows VS Code (the address bar would name VS Code's editor then). Otherwise the header's selection: a tab
-    // chosen while the page started behind the tabs the rail view brought back.
-    const route = forge.links.route();
-    const linked = readEditorRoute(route) !== null;
-    if (linked) await this.openRoute(route);
+    // A link to an editor shows that editor, before the header follows VS Code (the address bar would name VS Code's
+    // editor then). Otherwise the editor handed over, or the header's selection: a tab chosen while the page started
+    // behind the tabs the rail view brought back.
+    if (this.linked) await this.openRoute(route);
     this.started = true;
     await this.sync();
     const state = forge.tabs.state();
-    if (!linked && state.active && (state.shown || !this.strip)) await this.show(state.active);
+    if (handed && active) await this.show(active, handed);
+    else if (!this.linked && state.active && (state.shown || !this.strip)) await this.show(state.active);
+    // Started: the page follows VS Code now, and its first file has opened (it took the focus then).
+    document.documentElement.dataset.ocVscodePageStarted = 'true';
+  }
+
+  /** What a rail view or the terminal handed over for this tab (`/editors/request`), once. */
+  private async take(key: string): Promise<OpenRequest | null> {
+    const taken = await this.context.call<{ open?: unknown }>('/editors/take', { key }).catch(() => ({ open: null }));
+    return readOpenRequest(taken.open);
   }
 
   private current(): Map<string, { identifier: EditorIdentifier; title: string; dirty: boolean }> {
@@ -511,6 +558,8 @@ class EditorArea {
       const changed = active !== this.lastActive;
       if (this.showing === 0) this.lastActive = active;
       if (active && changed && this.showing === 0 && this.shown && forge.tabs.state().active !== active && current.has(active)) await forge.tabs.activate(active);
+      // Sent before a tab closes (OpenChamber takes the frame's messages in order): the last one may take the page with it.
+      void this.saveTabs(current);
       for (const key of [...this.hostTabs.keys()]) {
         if (current.has(key) || !this.adopted.has(key)) continue;
         await forge.tabs.close(key);
@@ -522,11 +571,6 @@ class EditorArea {
         this.route = route;
         if (route) await forge.links.setRoute(route).catch(() => undefined);
       }
-      const saved = JSON.stringify([...current].map(([id, item]) => ({ id, title: item.title, icon: tabIcon(id) })));
-      if (saved !== this.saved) {
-        this.saved = saved;
-        void this.context.call('/tabs/save', { folder: this.context.folder, tabs: JSON.parse(saved) }).catch(() => undefined);
-      }
     } finally {
       this.syncing = false;
       if (this.again) {
@@ -536,13 +580,61 @@ class EditorArea {
     }
   }
 
-  /** OpenChamber shows the page on this tab: its editor, maybe one another frame asked for. */
-  private async show(id: string): Promise<void> {
+  /** The folder's tabs, which a frame brings back after OpenChamber reloads: the editors here, when they changed. */
+  private async saveTabs(current: ReadonlyMap<string, { title: string }>): Promise<void> {
+    const saved = JSON.stringify([...current].map(([id, item]) => ({ id, title: item.title, icon: tabIcon(id) })));
+    if (saved === this.saved) return;
+    this.saved = saved;
+    await this.context.call('/tabs/save', { folder: this.context.folder, tabs: JSON.parse(saved) }).catch(() => undefined);
+  }
+
+  /**
+   * VS Code restores the editors of the state it last saved, which OpenChamber may have cut short: it removes the
+   * page with its last tab, before the page hears of the close. An editor that no saved or header tab stands for was
+   * closed by the user, and closes again (an unsaved one stays, and gets its tab). A webview panel VS Code revived
+   * (Markdown's preview) has a new key: it takes its old tab's place, as that tab can't open it. The editors opened
+   * since the page started (`restored` is what VS Code had before) are the user's.
+   */
+  private async dropClosedEditors(restored: ReadonlySet<EditorInput>): Promise<void> {
+    const { forge } = this.context;
+    const saved = await this.context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: this.context.folder }).catch(() => null);
+    if (!saved) return;
+    const tabs = [...(saved.tabs ?? []), ...forge.tabs.state().list];
+    const current = this.editorService.getEditors(1).map((identifier) => ({ identifier, key: keyOfEditor(identifier.editor) }));
+    const taken = new Set(current.map((editor) => editor.key));
+    for (const { identifier, key } of current.filter((editor) => restored.has(editor.identifier.editor))) {
+      const title = tabTitle(identifier.editor.getName());
+      const tab = restoredTabOf(tabs, key, title, taken);
+      if (tab === key) continue;
+      if (tab) {
+        taken.add(tab);
+        await this.replaceTab(tab, { id: key, title, icon: tabIcon(key), dirty: identifier.editor.isDirty() });
+      } else if (key !== this.linked && !identifier.editor.isDirty()) {
+        // Not waited on for long: the page's start (and its header) must not hang on one.
+        await Promise.race([this.editorService.closeEditor(identifier).catch(() => undefined), later(2_000)]);
+      }
+    }
+  }
+
+  /** A header tab's editor came back under another key: that key's tab in its place, selected if it was. */
+  private async replaceTab(old: string, tab: OcForgeTab): Promise<void> {
+    const { forge } = this.context;
+    const state = forge.tabs.state();
+    if (!state.list.some((item) => item.id === old)) return;
+    this.adopted.add(tab.id);
+    this.hostTabs.set(tab.id, tab);
+    // Opened before the old one closes: the page's last tab takes the page with it.
+    await forge.tabs.open(tab, { activate: state.shown && state.active === old }).catch(() => undefined);
+    await forge.tabs.close(old).catch(() => undefined);
+    this.hostTabs.delete(old);
+  }
+
+  /** OpenChamber shows the page on this tab: its editor, maybe one another frame asked for (`handed`: taken already). */
+  private async show(id: string, handed: OpenRequest | null = null): Promise<void> {
     this.showing += 1;
     try {
       await this.ready;
-      const taken = await this.context.call<{ open?: unknown }>('/editors/take', { key: id }).catch(() => ({ open: null }));
-      const request = readOpenRequest(taken.open);
+      const request = handed ?? await this.take(id);
       if (request) {
         await this.open(request, id);
         return;
@@ -570,7 +662,11 @@ class EditorArea {
       await services.get<CommandService>('commandService').executeCommand(request.command, ...request.args);
     } else {
       const uri = services.uriClass();
-      await this.openEditor(unmarshal(request.editor, (components) => uri.revive(components)));
+      const editor = unmarshal(request.editor, (components) => uri.revive(components)) as { options?: Record<string, unknown> };
+      // Where it is open already (VS Code may have restored it), not as a second one over the active group's editor.
+      const found = this.current().get(key);
+      if (found) await this.openEditor(found.identifier.editor, { ...editor.options, preserveFocus: false }, found.identifier.groupId);
+      else await this.openEditor(editor);
     }
     // The editor it became may be named otherwise (an extension's page): its own tab replaces this one.
     if (this.activeKey() !== key && !this.adopted.has(key)) {
@@ -622,11 +718,35 @@ class EditorArea {
     this.adopted.clear();
   }
 
-  /** The user closed the tab in the header: close its editors (one per group), asking to save as VS Code does. A cancel brings the tab back. */
+  /**
+   * The user closed the tab in the header, which OpenChamber has done already (a saved one, or any while no frame
+   * decides): close its editors (one per group). If VS Code asks to save and the user cancels, the tab comes back.
+   */
   private async closeFromHeader(id: string): Promise<void> {
     this.hostTabs.delete(id);
     const editors = this.editorService.getEditors(1).filter((identifier) => keyOfEditor(identifier.editor) === id);
     for (const identifier of editors) await this.editorService.closeEditor(identifier);
+    this.schedule();
+  }
+
+  /**
+   * The user closed an unsaved tab in the header (its ×, a middle click, the close-tab key), and OpenChamber left
+   * it to this page: VS Code closes its editors as it would close its own tab, asking to save. The tab goes once
+   * they all have; a cancel keeps the tab, the editor and its changes.
+   */
+  private async closeAsked(id: string): Promise<void> {
+    await this.ready;
+    const editors = this.editorService.getEditors(1).filter((identifier) => keyOfEditor(identifier.editor) === id);
+    for (const identifier of editors) await this.editorService.closeEditor(identifier);
+    const current = this.current();
+    if (current.has(id)) return;
+    this.hostTabs.delete(id);
+    this.adopted.delete(id);
+    // The last tab takes the page with it, back to the chat: the folder's tabs are kept before it goes, and VS Code's
+    // state, in which the file's backup is gone (else the next start would bring back what Don't Save threw away).
+    await this.saveTabs(current);
+    if (!this.context.forge.tabs.state().list.some((tab) => tab.id !== id)) await this.context.saveState().catch(() => undefined);
+    await this.context.forge.tabs.close(id).catch(() => undefined);
     this.schedule();
   }
 }
@@ -662,6 +782,7 @@ export const startSurface = async (context: SurfaceContext): Promise<SurfaceCont
     return { beforeFolderChange: () => area.closeAllTabs() };
   }
   handEditorsToPage(context);
+  keepLastClose(context);
   keepLayout(role, services, () => role === 'view' && editorsOf(services).length > 0);
   if (role === 'view') return startView(context);
   await startTerminal(context);

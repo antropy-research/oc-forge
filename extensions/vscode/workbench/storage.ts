@@ -205,6 +205,10 @@ export const saveThroughService = (storageService: StorageService, flush: () => 
     await save(reason);
     if (reason === SHUTDOWN) await flush();
   };
+  // VS Code for the web saves every few seconds only while its document has focus, as its state changes only then.
+  // In OpenChamber the focus is often outside the frame (the chat, the header, another frame) while its state changes
+  // (a webview's, the editors the header opens), and a frame that unloads can't save: it saves either way.
+  if (typeof storageService.shouldFlushWhenIdle === 'function') storageService.shouldFlushWhenIdle = () => !storageService.hasPendingUpdate;
   return () => storageService.flush(SHUTDOWN);
 };
 

@@ -163,4 +163,20 @@ describe('the frame runs an IndexedDB that persists through the service', () => 
     await own;
     expect(order).toEqual(['vscode 1', 'service', 'delivered']);
   });
+
+  test('VS Code saves every few seconds with the focus outside its frame too, unless a save is still on its way', () => {
+    // As VS Code for the web: only while the document has focus (a frame in OpenChamber often hasn't).
+    const storageService = {
+      pendingUpdate: false,
+      get hasPendingUpdate() {
+        return this.pendingUpdate;
+      },
+      shouldFlushWhenIdle: () => false,
+      flush: async () => {},
+    };
+    saveThroughService(storageService, async () => {});
+    expect(storageService.shouldFlushWhenIdle()).toBe(true);
+    storageService.pendingUpdate = true;
+    expect(storageService.shouldFlushWhenIdle()).toBe(false);
+  });
 });

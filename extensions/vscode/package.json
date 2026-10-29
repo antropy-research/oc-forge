@@ -43,6 +43,9 @@
     "rail": {
       "path": "/rail",
       "interval": 2000
+    },
+    "page": {
+      "keepBottomZone": true
     }
   },
   "scripts": {

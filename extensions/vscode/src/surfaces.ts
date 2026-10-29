@@ -41,7 +41,10 @@ export const roleSettings = (role: Role, strip = true): Record<string, unknown> 
   const common: Record<string, unknown> = { 'workbench.activityBar.location': 'hidden', 'workbench.layoutControl.enabled': false };
   // A view or the terminal is one part alone: no title bar (its command centre, its back and forward) and no status bar.
   const part: Record<string, unknown> = { ...common, 'workbench.statusBar.visible': false, 'window.commandCenter': false, 'workbench.navigationControl.enabled': false };
-  if (role === 'view') return part;
+  // The parts are one workspace (one folder), whose terminals VS Code reconnects each window to as it starts: only the
+  // terminal's part does, else a view or the page that started first would take the terminal panel's shells.
+  const noTerminals: Record<string, unknown> = { 'terminal.integrated.enablePersistentSessions': false };
+  if (role === 'view') return { ...part, ...noTerminals };
   if (role === 'terminal') {
     return {
       ...part,
@@ -52,8 +55,8 @@ export const roleSettings = (role: Role, strip = true): Record<string, unknown> 
   }
   // The editor area: its editors are OpenChamber's header tabs, which have no preview state.
   return strip
-    ? { ...common, 'workbench.editor.showTabs': 'none', 'workbench.editor.enablePreview': false, 'workbench.editor.enablePreviewFromQuickOpen': false }
-    : common;
+    ? { ...common, ...noTerminals, 'workbench.editor.showTabs': 'none', 'workbench.editor.enablePreview': false, 'workbench.editor.enablePreviewFromQuickOpen': false }
+    : { ...common, ...noTerminals };
 };
 
 /** VS Code's own `$mid` for a URI marshalled as JSON (`base/common/marshallingIds.ts`). */
@@ -139,6 +142,20 @@ export const editorKeyOf = (untyped: unknown, typeId?: string): string | null =>
   // `|` never appears in a URI's scheme: a typed key never reads as a resource.
   if (resource) return bounded(typeId ? `${typeId}|${resource}` : resource);
   return null;
+};
+
+/** A webview panel's key (Markdown's preview): its resource holds the panel's id, which VS Code makes anew when it revives the panel. */
+const WEBVIEW_PANEL = 'workbench.editors.webviewInput|';
+
+/**
+ * The saved or header tab an editor VS Code restored stands for: the tab with its key, or for a revived webview
+ * panel, a webview panel's tab with its title that no other editor stands for (`taken`). Null: none, so the user
+ * closed it.
+ */
+export const restoredTabOf = (tabs: readonly { id: string; title: string }[], key: string, title: string, taken: ReadonlySet<string>): string | null => {
+  if (tabs.some((tab) => tab.id === key)) return key;
+  if (!key.startsWith(WEBVIEW_PANEL)) return null;
+  return tabs.find((tab) => tab.id.startsWith(WEBVIEW_PANEL) && tab.title === title && !taken.has(tab.id))?.id ?? null;
 };
 
 /** Schemes whose editors belong to the frame that made them (its own terminals, output, chat). */

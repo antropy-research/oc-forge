@@ -333,6 +333,7 @@ const boot = async (): Promise<void> => {
       services,
       folder,
       call: serviceCall,
+      saveState: () => saveBeforeReload(),
       railEntries: async () => {
         const answer = await host.serviceRequest({ method: 'GET', path: '/rail' });
         return ((JSON.parse(answer.body || '{}') as { entries?: RailEntry[] }).entries ?? []);

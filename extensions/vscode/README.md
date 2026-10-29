@@ -57,8 +57,8 @@ OpenChamber `connectOcForge()` answers null and every frame is the whole workben
 |---|---|---|
 | Activity bar: Explorer, Search, Source Control, Run and Debug, Extensions, and every installed extension's view container | One rail icon each, in VS Code's order; installed or uninstalled on the VS Code Server, an icon comes or goes within the next poll (2 s), no reload | The manifest's `ocForge.rail` (`GET /rail`, every 2 s). The service lists the built-ins (Remixicons of OpenChamber's sprite: `file-copy-2`, `search`, `git-branch`, `bug`, `puzzle`) and each installed extension's `contributes.viewsContainers.activitybar`, read from the server's `extensions.json`, `package.json` (and `package.nls.json`) and SVG icon through the server's own `/vscode-remote-resource` route, so it needn't share the server's disk (`service/rail.ts`, `src/rail.ts`). An SVG is inlined (16 KB at most, cleaned for the mask), a `$(codicon)` maps to a Remixicon, anything else is `apps`. Where the extensions live, a workbench tells the service once (its default profile's `extensions.json`); it is kept with the server's address (mode 0600), so after a restart the rail is complete before any frame runs |
 | A view container in the side bar | The rail panel shows that container alone, filling it | The panel's frame is the **view** role: `rail-entry` opens the container (`IViewsService.openViewContainer`); VS Code switching containers by itself (Ctrl+Shift+F, *Reveal in Explorer*) moves the rail's light (`rail.setActive`) |
-| Editor tabs | Header tabs after the chats'; choosing one shows its editor in the main area; they switch and close like chat tabs | The page is the **editor** role: each editor it has open is a header tab (id: its resource, or `diff:<original> <modified>`; title; icon by type; the unsaved dot). Choosing one activates its editor; closing one closes the editor, asking to save as VS Code does, and a cancelled close brings the tab back; an editor VS Code closes or switches to moves the header with it. VS Code's own tab bar is off (`workbench.editor.showTabs: none`), and so is preview mode, as header tabs have none |
-| The panel's terminal | VS Code's panel at OpenChamber's bottom, maximized: several terminals, split, the shell picker, Problems and Output beside it | A rail entry `terminal` with `zone: "bottom"`, so a panel of its own (`plugin:oc-forge-vscode--terminal`): the **terminal** role. Its workbench starts the first time that panel is shown |
+| Editor tabs | Header tabs after the chats'; choosing one shows its editor in the main area; they switch and close like chat tabs | The page is the **editor** role: each editor it has open is a header tab (id: its resource, or `diff:<original> <modified>`; title; icon by type; the unsaved dot). Choosing one activates its editor; closing one (its ×, a middle click, the close-tab key) closes the editor. An unsaved one is left to the page (`forge.tabs.onCloseRequest`): VS Code closes it as its own tab, with its save prompt, and the tab goes only once the editor has (Save, Don't Save), back to the chat after the last one; Cancel keeps the tab, the editor and the changes. An editor VS Code closes or switches to moves the header with it. VS Code's own tab bar is off (`workbench.editor.showTabs: none`), and so is preview mode, as header tabs have none |
+| The panel's terminal | VS Code's panel at OpenChamber's bottom, maximized: several terminals, split, the shell picker, Problems and Output beside it; under a chat, and under a file's editor as in VS Code | A rail entry `terminal` with `zone: "bottom"`, so a panel of its own (`plugin:oc-forge-vscode--terminal`): the **terminal** role. Its workbench starts the first time that panel is shown. The manifest's `ocForge.page.keepBottomZone` keeps OpenChamber's bottom zone under the page, which OpenChamber 2.5.2 otherwise covers with it. The parts are one workspace, whose terminals VS Code reconnects every window to as it starts: only this part does (`terminal.integrated.enablePersistentSessions` is off in the views and the page), so after a reload its shells come back here |
 
 **Roles.** Each frame is a workbench of its own on the same server, in one role (`src/surfaces.ts`, `workbench/surfaces.ts`):
 `view` (the rail panel), `editor` (the page), `terminal` (the terminal's panel), or `classic` (the whole workbench: a
@@ -90,7 +90,13 @@ message:
   editor) opens in that frame.
 - The page keeps its tabs in the service, per server and folder (`/tabs/save`); after OpenChamber reloads, the rail
   view opens that folder's again (`/tabs/load`), which mounts the page behind them, and the page's VS Code restores
-  the same editors.
+  the same editors. OpenChamber removes the page with its last tab, before the page hears of the close: a part that
+  stays (a rail view, the terminal) hears it (`tab-closed`) and saves the folder's tabs empty. An unsaved last tab
+  the page closes itself: it saves the tabs and VS Code's state first (as before a reload), so the file's backup is
+  gone too and Don't Save's change doesn't come back. VS Code's own state may still name editors whose tabs were closed (the
+  page went before VS Code saved it): when the page starts it closes the editors no saved or header tab stands for
+  (an unsaved one stays). A webview panel (Markdown's preview) comes back under a new key, as VS Code revives it with
+  a new id: it takes the place of its old tab, which can't open it (`restoredTabOf`).
 - The page and the terminal follow the folder the rail view shows (host storage `folder`); the page closes its tabs
   first, as they are the other folder's editors. "Open in VS Code" on a chat is answered by the rail view: it shows
   the chat's folder in the Explorer (lit on the rail), and hands a file to the page.
@@ -98,15 +104,22 @@ message:
   copied link opens it again, and selects its tab, though the rail view may have brought the folder's saved tabs back
   (and OpenChamber selected the first) while the page started; until VS Code has restored its editors the header
   doesn't follow them. A Cmd/Ctrl+click in a view or the terminal that opens a file opens it in a new browser
-  tab on that link instead of over the current view; Cmd/Ctrl+click in VS Code's lists (multi-select) and in the
-  page's editor (Go to Definition) keeps its VS Code meaning. Web links open in a new tab as before.
+  tab on that link instead of over the current view (what opens within 10 s of it, before another click or key: a
+  link's `command:` first waits for VS Code's extensions to activate on it); Cmd/Ctrl+click in VS Code's lists
+  (multi-select) and in the page's editor (Go to Definition) keeps its VS Code meaning. Web links open in a new tab
+  as before.
+- A page that starts for a file a rail view or the terminal handed over shows that file, not the page's last route,
+  which OpenChamber keeps for the extension after the page went with its last tab.
 
 **State.** One store per server for the user's data (settings, keybindings, snippets: VS Code's `vscode-web-db`),
 shared by every frame and by the whole workbench of a stock OpenChamber; one store per role for VS Code's state
 databases (layout, open editors, view state, extensions' state: `vscode-web-state-db-*`), so the parts don't
 overwrite each other's layout (`service/state.ts`, `<server>.<role>.json`). The page starts from the whole
 workbench's state (its open editors), the others from nothing. Two frames that both write the same user file (each
-saved `settings.json`) still keep the later one, as two windows of the whole workbench did.
+saved `settings.json`) still keep the later one, as two windows of the whole workbench did. VS Code for the web
+saves its state every few seconds only while its document has focus; a frame here saves either way
+(`shouldFlushWhenIdle`), as the focus is often in OpenChamber while its state changes (a preview's, the editors the
+header opens) and a frame can't save as it unloads: a browser reload keeps what was saved a few seconds before.
 
 **Keys.** VS Code takes the keys while it has focus, in every frame: with the keyboard patch it keeps Cmd/Ctrl+1–9
 and Cmd/Ctrl+Alt+←/→ too, as VS Code's own default keybindings (not user keybindings, so `keybindings.json` stays
@@ -135,13 +148,17 @@ To keep it down the terminal's workbench starts only when its panel is first sho
 a tab or is opened.
 
 **Limits.**
-- OpenChamber's bottom zone belongs to the chat column, and a page covers it (OpenChamber 2.5.2,
-  `ContextPanel.tsx`: "a page covering the chat covers it too"): while a file's header tab shows the editor, the
-  terminal panel is hidden (kept, not reloaded); it comes back with a chat. Showing it under the page too would be
-  an adapters change (`coveredByPage` for a page shown on its own header tabs).
-- Closing the last header tab of the page while its editor has unsaved changes: OpenChamber removes the page at
-  once, so VS Code can't ask; the changes stay in VS Code's backup and come back unsaved when the page opens again.
-  Any other tab asks. VS Code for the web saves a second after each edit by default (`files.autoSave`), so this is rare.
+- Closing the last file tab while no other part of VS Code runs (no rail view, no terminal panel opened since
+  OpenChamber loaded): nothing of the extension hears the close, so the folder's saved tabs still name it, and it
+  comes back the next time the page starts (after a reload, or beside the next file). The page can't tell that
+  from a reload; OpenChamber would have to keep the page until it has heard (an adapters change).
+- A file a rail view or the terminal hands to a page that is still starting (VS Code restoring, the page closing
+  editors closed before) opens once the page is ready, and takes the focus then.
+- A Markdown preview that wasn't the editor on top in its group (behind the SCM diff) when OpenChamber reloads comes
+  back as its tab but stays blank when shown (dev container, Code - OSS 1.143.1); one that was on top renders again.
+- The terminal's part reconnects to the folder's terminals as it starts. Within about a minute of another window's
+  VS Code on that folder going away (a reload, a closed browser tab), VS Code's cross-window detach can stall it: the
+  panel opens without a terminal until that window's connection is gone.
 - Each part has its own extension host: an extension's webview or terminal opened from a view stays in that view's
   workbench; the Explorer doesn't show the page's unsaved dots; a task run in the page shows in the page's own panel.
 - Rail icons follow what is installed on the server (`extensions.json`), not VS Code's `when` clauses or a
@@ -180,7 +197,7 @@ connection to the VS Code Server ends and that the server starts the grace after
 as rail icons, each opening its view alone; an extension it builds and installs with the server's CLI getting
 its icon, opening its view, and losing the icon when uninstalled; files from the Explorer as header tabs (the
 editor in the main area, kept across a chat, the unsaved dot, closing asks to save, no VS Code tab bar); the
-terminal at the bottom (a command, a second terminal, a split, the shell picker, kept while a page covers it);
+terminal at the bottom (a command, a second terminal, a split, the shell picker, kept while file tabs show);
 Ctrl+Alt+→ and Ctrl+1 acting in VS Code; nothing opening another page but the Ctrl+click tabs; the page with
 session tabs off keeping VS Code's tab bar. At 1440×900 also: Markdown's preview in the stock instance's whole
 workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a rail
@@ -188,13 +205,24 @@ view; Ctrl+click on a link in a rail view (the probe extension's welcome view) a
 opening a new browser tab on that file's editor while this tab stays as it was, a plain click opening it here;
 OpenChamber's rail digits (Ctrl+Alt+digit) reaching it from the rail view, the page and the terminal, Alt+W from
 a rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; "Open in VS Code" on a chat in
-a second project and back. It writes each size's start times and memory to `<size>-frames.json`. Run the stack's
-`prepare` outside a private network namespace (it downloads), then `up`, the check and `down` inside one.
+a second project and back; the terminal under a file's editor (`keepBottomZone`: the page ends where the bottom
+zone begins, both take input, both stay through a chat); closing the last unsaved file tab (Cancel keeps the tab,
+the editor and the change; Don't Save closes without writing, and the file opens again as on disk; Save writes;
+each back to the chat), and across a
+reload the tabs coming back once each (Markdown's preview too) and closed ones staying closed. It writes each size's
+start times and memory to `<size>-frames.json`. Run the stack's `prepare` outside a private network namespace (it
+downloads), then `up`, the check and `down` inside one.
 
-The E2E check connects the panel to the dev container's VS Code Server, checks the Explorer, file icons, the
-editor's grammar colors, a save with Ctrl+S, Markdown's preview (a webview), Source Control and its diff editor, Search, the terminal, state kept
-across a reload, the page, "Open in VS Code" on a chat, that OpenChamber's own editor still opens a search hit at its line, and that no other page or tab opened. It puts the
-demo project's README, the extension's settings and its chats back afterwards.
+`run.mjs` checks the dev container, whichever OpenChamber it runs; its catalog tells (an adapted server publishes the
+extension's `ocForge` block). On a stock OpenChamber it connects the panel to the VS Code Server and checks the
+whole workbench there, then the page; on an adapted one it goes through the rail entries (Explorer, Source
+Control, Search), the editor page with its header tabs and the terminal at the bottom. Either way: the Explorer,
+file icons, the editor's grammar colors, a save with Ctrl+S, Markdown's preview (a webview), Source Control and its
+diff editor, Search, the terminal, state kept across a reload (on an adapted one: the tabs back once each, the
+cursor where it was, and once closed, the folder's saved tabs as before the run), "Open in VS Code" on a chat,
+that OpenChamber's own editor still opens a search hit at its line, and that no other page or tab opened. It puts
+the demo project's README, the extension's settings, the folders' saved tabs and its chats back afterwards, closes
+its tabs and terminal, and clears its Search query.
 
 After the VS Code pin moves, refresh `service/web-files.json` from a server of that release, and run the tests
 against it (every patch, the surface patches too, must apply once). Microsoft's web server of the pinned version

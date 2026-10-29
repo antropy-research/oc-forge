@@ -11,6 +11,7 @@ import {
   readEditorRoute,
   readOpenRequest,
   requestTitle,
+  restoredTabOf,
   roleOf,
   roleSettings,
   tabIcon,
@@ -64,6 +65,10 @@ describe('which part of VS Code a frame is', () => {
     expect(roleSettings('terminal')).toMatchObject({ 'workbench.panel.opensMaximized': 'always', 'workbench.panel.alignment': 'center' });
     expect(roleSettings('editor', true)).toMatchObject({ 'workbench.editor.showTabs': 'none', 'workbench.editor.enablePreview': false });
     expect(roleSettings('editor', false)['workbench.editor.showTabs']).toBeUndefined();
+    // Only the terminal's part reconnects to the folder's terminals.
+    for (const role of ['view', 'editor'] as const) expect(roleSettings(role)['terminal.integrated.enablePersistentSessions']).toBe(false);
+    expect(roleSettings('editor', false)['terminal.integrated.enablePersistentSessions']).toBe(false);
+    expect(roleSettings('terminal')['terminal.integrated.enablePersistentSessions']).toBeUndefined();
     const configuration = workbenchConfiguration({ remoteAuthority: 'vscode:8000' }, { folder: '/p', token: null, mode: 'dark', followTheme: true, defaults: roleSettings('view') });
     expect(configuration.configurationDefaults).toMatchObject({ 'chat.disableAIFeatures': true, 'workbench.activityBar.location': 'hidden' });
   });
@@ -79,6 +84,22 @@ describe('an editor between frames', () => {
     expect(editorKeyOf({ resource: remote('/p/a.png') }, 'imagePreview')).toBe('imagePreview|vscode-remote://vscode:8000/p/a.png');
     expect(editorKeyOf({ label: 'nothing' })).toBeNull();
     expect(editorKeyOf({ resource: remote(`/${'x'.repeat(2000)}`) })!.length).toBeLessThanOrEqual(1024);
+  });
+
+  test('which saved tab an editor VS Code restored stands for; a revived webview panel takes its old tab by title', () => {
+    const preview = (id: string) => `workbench.editors.webviewInput|webview-panel:webview-panel/webview-markdown.preview-${id}`;
+    const tabs = [
+      { id: 'vscode-remote://vscode:8000/p/README.md', title: 'README.md' },
+      { id: preview('old'), title: 'Preview README.md' },
+    ];
+    expect(restoredTabOf(tabs, 'vscode-remote://vscode:8000/p/README.md', 'README.md', new Set())).toBe('vscode-remote://vscode:8000/p/README.md');
+    // Closed by the user: no tab names it.
+    expect(restoredTabOf(tabs, 'vscode-remote://vscode:8000/p/notes.ts', 'notes.ts', new Set())).toBeNull();
+    expect(restoredTabOf(tabs, preview('new'), 'Preview README.md', new Set())).toBe(preview('old'));
+    expect(restoredTabOf(tabs, preview('new'), 'Preview README.md', new Set([preview('old')]))).toBeNull();
+    expect(restoredTabOf(tabs, preview('new'), 'Preview notes.md', new Set())).toBeNull();
+    // Only a webview panel is revived under a new key: a file of the same title is another file.
+    expect(restoredTabOf([{ id: 'vscode-remote://vscode:8000/q/README.md', title: 'README.md' }], 'vscode-remote://vscode:8000/p/README.md', 'README.md', new Set())).toBeNull();
   });
 
   test('marshalled as VS Code does, and back with its URI.revive', () => {

@@ -122,6 +122,9 @@ export const SHUTDOWN = 1;
 export interface StorageService {
   /** Saves VS Code's state to its databases (IndexedDB); VS Code reloads the window once this resolves. */
   flush(reason?: number): Promise<void>;
+  /** Whether its save every few seconds runs now: on the web, only while the document has focus. */
+  shouldFlushWhenIdle?: () => boolean;
+  readonly hasPendingUpdate?: boolean;
 }
 
 /** `ResultKind.NoMatchingKb`: VS Code binds nothing to the press. */
