@@ -124,22 +124,24 @@ export const OcForgeHeaderTabs: React.FC = () => {
 /**
  * Extension pages in the main area. The open one shows; a page whose
  * extension has header tabs stays mounted (hidden) while another tab or a
- * chat is shown, so switching back does not restart it. Without tabs a page
- * mounts and unmounts as in the release.
+ * chat is shown, so switching back does not restart it, and for a moment
+ * after its last tab closed (`lingering`), so its frame hears the close.
+ * Otherwise a page mounts and unmounts as in the release.
  */
 export const OcForgeGuestPages: React.FC<{ openPage: InstalledGuest | null | undefined }> = ({ openPage }) => {
   const tabs = useOcForgeStore((state) => state.tabs);
+  const lingering = useOcForgeStore((state) => state.lingering);
   const guests = useGuestsStore((state) => state.guests);
   const kept = React.useMemo(() => {
     const ids = new Set<string>();
-    for (const tab of tabs) {
-      const guest = guests.find((entry) => entry.id === tab.guestId);
+    for (const guestId of [...tabs.map((tab) => tab.guestId), ...Object.keys(lingering)]) {
+      const guest = guests.find((entry) => entry.id === guestId);
       if (guest?.pageEntry && isGuestActive(guest)) ids.add(guest.id);
     }
     return ids;
-  }, [guests, tabs]);
-  const ids = [...kept];
-  if (openPage && !kept.has(openPage.id)) ids.push(openPage.id);
+  }, [guests, lingering, tabs]);
+  // In a fixed order: React moves a node whose place in the list changes, and a moved iframe reloads.
+  const ids = [...new Set([...kept, ...(openPage ? [openPage.id] : [])])].sort();
   return (
     <>
       {ids.map((id) => {

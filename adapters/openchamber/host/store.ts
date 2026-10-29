@@ -17,6 +17,11 @@ type OcForgeState = {
   tabs: OcForgeHeaderTab[];
   /** The tab each extension's page shows (or will, when it opens). */
   activeTab: Record<string, string>;
+  /**
+   * Extensions whose last tab just closed, with when (ms) their page may go:
+   * until then it stays mounted, hidden, so its frame hears the close.
+   */
+  lingering: Record<string, number>;
   /** The route each extension's page was handed. */
   routes: Record<string, string>;
   /** The extension whose page the address bar names, if any. */
@@ -28,6 +33,7 @@ export const useOcForgeStore = create<OcForgeState>()(() => ({
   current: {},
   tabs: [],
   activeTab: {},
+  lingering: {},
   routes: {},
   linked: null,
 }));

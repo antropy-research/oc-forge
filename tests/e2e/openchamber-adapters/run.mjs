@@ -302,10 +302,15 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   await headerTab(page, 'b').getByRole('button', { name: 'Close tab' }).click();
   check(`[${size}] R2 the tab's own close button closes it and returns to the chat`, await until(async () => await headerTab(page, 'b').count() === 0 && !await pageShown(page)));
   check(`[${size}] R2 the extension is told about the close`, await until(async () => (await text(right, '#log'))?.includes('tab-closed b')));
+  // The page too: after its extension's last tab it stays mounted, hidden, for a moment (OC_FORGE_PAGE_LINGER_MS), where
+  // the release removes it before its frame hears anything.
+  check(`[${size}] R2 after its last tab the page stays a moment, hidden, and hears the close itself`,
+    await until(async () => !await pageShown(page) && (await text(pageFrame(page), '#log'))?.includes('tab-closed b'), 5_000));
   // A frame that decides how unsaved tabs close (tabs.onCloseRequest): clean tabs still close at once; closing an unsaved
   // one asks the frame and leaves the tab, until the frame closes it.
   await right.locator('#open-a').click();
   await until(async () => await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+  check(`[${size}] R2 a tab opened meanwhile brings that page back as it was, not reloaded`, (await text(pageFrame(page), '#loaded')) === pageLoaded);
   await pageFrame(page).locator('#decide-close').click();
   await until(async () => (await text(pageFrame(page), '#log'))?.includes('deciding'));
   await pageFrame(page).locator('#open-b').click();
@@ -325,6 +330,8 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   await pageFrame(page).locator('#confirm-close').click();
   check(`[${size}] R2 the tab goes once the frame closes it, back to the chat as for the user's close`, await until(async () => await headerTab(page, 'b').count() === 0 && !await pageShown(page)));
   check(`[${size}] R2 …and the frame that closed it is not told it was closed`, (await echoes()) === echoesBefore);
+  check(`[${size}] R2 a page left without tabs goes after a moment, as a page without tabs does in the release`,
+    await until(async () => await page.locator(`[data-oc-forge-page="${TEST}"]`).count() === 0, 20_000));
   await page.locator('[role="tablist"] [role="tab"]', { hasText: CHATS[2] }).click();
   check(`[${size}] R2 session tabs still switch chats`, await until(() => page.url().includes(seeded.sessions[2])));
 

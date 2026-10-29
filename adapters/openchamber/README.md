@@ -159,7 +159,12 @@ activation (a key press or click in the frame gives one for about 5 s).
   Tabs are not persisted: after a reload the extension opens the ones it wants.
 - **Kept-alive pages.** The page of an extension with tabs is mounted (hidden,
   with its size kept) as soon as it has a tab, and stays mounted while it has
-  any; switching away and back does not reload it.
+  any; switching away and back does not reload it. After its last tab closes
+  it stays mounted, hidden, for 8 s more (`OC_FORGE_PAGE_LINGER_MS`), so its
+  frame still gets that `tab-closed` and the empty `tabs` and can save (the
+  release removes a page that is not on screen at once, before its frame hears
+  anything); a tab opened meanwhile brings it back as it was. Pages are kept in
+  a fixed order, since a moved iframe reloads.
 - **Zones.** A default zone is placed once per device, the first time the
   surface is known, unless the user already placed it; after that only the
   user moves it (the placement is OpenChamber's own, per device).

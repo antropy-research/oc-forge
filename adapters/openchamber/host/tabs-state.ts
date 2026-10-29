@@ -116,6 +116,29 @@ export const updateOcForgeTab = (guestId: string, update: { id: string; title?: 
   return { ok: true };
 };
 
+/**
+ * How long a page stays mounted, hidden, after its extension's last tab closed.
+ * A page without tabs that is not on screen goes at once, as in the release,
+ * which was before its frame heard the close: an editor could not drop the
+ * closed file from what it restores. For this long it still can.
+ */
+export const OC_FORGE_PAGE_LINGER_MS = 8_000;
+const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** The lingering map with this extension's page kept for OC_FORGE_PAGE_LINGER_MS from now. */
+const lingerPage = (guestId: string): Record<string, number> => {
+  clearTimeout(lingerTimers.get(guestId));
+  lingerTimers.set(guestId, setTimeout(() => {
+    lingerTimers.delete(guestId);
+    const { lingering } = useOcForgeStore.getState();
+    if (!(guestId in lingering)) return;
+    const rest = { ...lingering };
+    delete rest[guestId];
+    useOcForgeStore.setState({ lingering: rest });
+  }, OC_FORGE_PAGE_LINGER_MS));
+  return { ...useOcForgeStore.getState().lingering, [guestId]: Date.now() + OC_FORGE_PAGE_LINGER_MS };
+};
+
 // Dirty tabs the user asked to close, left to their extension (`tab-close-request`).
 const closeRequests = new Set<string>();
 const requestKey = (guestId: string, id: string): string => `${guestId}\n${id}`;
@@ -124,7 +147,7 @@ const requestKey = (guestId: string, id: string): string => `${guestId}\n${id}`;
  * Closes a tab. The page moves to the neighbouring tab of the same extension
  * (right, then left). A user who closes the last tab the page shows goes back
  * to the chat; the extension is told whenever the user closed one, unless it
- * closed the tab itself (`notify`).
+ * closed the tab itself (`notify`). After its last tab the page lingers.
  */
 export const closeOcForgeTab = (guestId: string, id: string, byUser: boolean, notify = byUser): void => {
   const state = useOcForgeStore.getState();
@@ -140,7 +163,12 @@ export const closeOcForgeTab = (guestId: string, id: string, byUser: boolean, no
     if (neighbour) activeTab[guestId] = neighbour.id;
     else delete activeTab[guestId];
   }
-  useOcForgeStore.setState({ tabs: state.tabs.filter((tab) => !(tab.guestId === guestId && tab.id === id)), activeTab });
+  useOcForgeStore.setState({
+    tabs: state.tabs.filter((tab) => !(tab.guestId === guestId && tab.id === id)),
+    activeTab,
+    // In the same update that removes the last tab, or the page would unmount first.
+    ...(own.length === 1 ? { lingering: lingerPage(guestId) } : {}),
+  });
   if (byUser && notify) broadcastOcForge(guestId, { type: 'tab-closed', payload: { id } });
   if (shownBefore && wasActive) {
     if (neighbour) broadcastOcForge(guestId, { type: 'tab-activated', payload: { id: neighbour.id } });
@@ -174,7 +202,7 @@ export const closeOcForgeTabFromFrame = (guestId: string, id: string): void => {
   else closeOcForgeTab(guestId, id, false);
 };
 
-/** Drops every tab of an extension that went away (disabled, removed, no page). */
+/** Drops every tab of an extension that went away (disabled, removed, no page); its page does not linger. */
 export const dropOcForgeTabsOf = (guestId: string): void => {
   const state = useOcForgeStore.getState();
   if (!state.tabs.some((tab) => tab.guestId === guestId)) return;
