@@ -15,7 +15,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startHarness } from './harness.mjs';
-import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
+import { DEFAULT_SCOPES, defaultFakeWorld, fakeAuthCode, startFakeGoogle } from './fakeGoogle.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-tasks-calendar';
 const ME = 'harness@example.com';
@@ -286,6 +286,8 @@ const journey = async (viewport) => {
     const visibility = editor.getByRole('combobox', { name: 'Visibility' });
     check(`${size}: a timed task's Advanced settings offer Free or Busy, and Default visibility, Public or Private, as Google Calendar's`, (await availability.isEnabled()) && (await visibility.isEnabled()) && JSON.stringify(await availability.locator('option').allInnerTexts()) === '["Free","Busy"]' && JSON.stringify(await visibility.locator('option').allInnerTexts()) === '["Default visibility","Public","Private"]');
     check(`${size}: they say what they do here, and that they stay in the Planner`, (await editor.innerText()).includes('Busy: the Planner plans other work around it') && (await editor.innerText()).includes('working sessions') && (await editor.innerText()).includes('availability or visibility'));
+    // Round 10: a personal account has a task color and Drive attachments, but not Do not disturb or declining, as Google Calendar.
+    check(`${size}: a personal account's task has Task color and "Add a Google Drive attachment", but no Do not disturb or declining (work and school accounts only, as Google Calendar says)`, (await editor.getByRole('button', { name: /^Task color: / }).count()) === 1 && (await editor.getByRole('button', { name: 'Add a Google Drive attachment' }).count()) === 1 && (await editor.getByRole('checkbox', { name: 'Do not disturb' }).count()) === 0 && (await editor.getByRole('checkbox', { name: 'Automatically decline meetings' }).count()) === 0 && (await editor.innerText()).includes('for work and school accounts, as in Google Calendar'));
     await availability.selectOption('busy');
     await visibility.selectOption('private');
     await shot('tc-07-advanced-settings');
@@ -433,10 +435,473 @@ const expect200 = (answer) => {
   if (answer.status !== 200) throw new Error(`the service refused: ${answer.text}`);
 };
 
+/**
+ * Round 10 (review 9's P1): the rest of a task's settings in Google Calendar, for a work account (the fake's ID token
+ * says example.com) that has not allowed Drive yet.
+ * - Drive attachments: "Add a Google Drive attachment" asks Google for Drive (a sign-in whose redirect is pasted),
+ *   then finds the account's files by name; Insert; the file opens in Drive from the task's details; Remove attachment.
+ * - Task color: a task's own (Advanced settings) and a task list's (its row under "My calendars"), on the calendar;
+ *   a list's checkbox hides its tasks.
+ * - Do not disturb: a task notification due during such a task is held until it ends, then comes.
+ * - Automatically decline meetings (Busy): the invitation overlapping the task is declined in the fake Calendar, with
+ *   the task's message, for the organizer; the one after it and the one I organize are not.
+ * - All of it after a reload; Google Tasks gets none of it.
+ */
+const advancedJourney = async (viewport) => {
+  const size = `${viewport.width}`;
+  const today = dayOf(Date.now());
+  const tomorrow = addDays(today, 1);
+  const due = (days) => `${addDays(today, days)}T00:00:00.000Z`;
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  const world = defaultFakeWorld({ account: ME, today, zone: ZONE });
+  world.hostedDomain = 'example.com';
+  world.granted = [...DEFAULT_SCOPES];
+  world.driveFiles = [
+    { id: 'drive-plan', name: 'Q4 plan', mimeType: 'application/vnd.google-apps.document', webViewLink: 'https://docs.google.com/document/d/drive-plan/edit', modifiedTime: '2026-10-20T10:00:00Z' },
+    { id: 'drive-budget', name: 'Budget 2027', mimeType: 'application/vnd.google-apps.spreadsheet', webViewLink: 'https://docs.google.com/spreadsheets/d/drive-budget/edit', modifiedTime: '2026-10-25T10:00:00Z' },
+    { id: 'drive-folder', name: 'Plans folder', mimeType: 'application/vnd.google-apps.folder', webViewLink: 'https://drive.google.com/drive/folders/drive-folder' },
+  ];
+  // Send the report is tomorrow at 3–4pm once timed; Buy stamps (Errands) tomorrow too, for its list's color.
+  world.tasks.L1[0].due = due(1);
+  world.tasks.L2[0].due = due(1);
+  // Do not disturb: Focus block (today, from 3 minutes ago for 6) holds Call the bank's notification (a minute ago).
+  const now = Math.floor(minutesIn(ZONE));
+  world.tasks.L1.push({ id: 't-focus', title: 'Focus block', notes: '', due: due(0), status: 'needsAction', updated: yesterday }, { id: 't-call', title: 'Call the bank', notes: '', due: due(0), status: 'needsAction', updated: yesterday });
+  // Tomorrow's invitations: one overlaps 3–4pm, one comes after it, and one I organize overlaps it too.
+  const at = (key, minutes) => new Date(atZone(key, minutes)).toISOString();
+  const invitation = (id, summary, from, to) => ({ id, summary, created: '2026-01-05T10:00:00.000Z', start: { dateTime: at(tomorrow, from) }, end: { dateTime: at(tomorrow, to) }, organizer: { email: 'lead@example.com', displayName: 'Lead' }, attendees: [{ email: 'lead@example.com', organizer: true, responseStatus: 'accepted' }, { email: ME, self: true, responseStatus: 'needsAction' }] });
+  world.events.primary.push(
+    invitation('inv-overlap', 'Roadmap sync', 15 * 60 + 15, 15 * 60 + 45),
+    invitation('inv-after', 'Retro prep', 16 * 60 + 30, 17 * 60),
+    { id: 'inv-mine', summary: 'My review', created: '2026-01-05T10:00:00.000Z', start: { dateTime: at(tomorrow, 15 * 60) }, end: { dateTime: at(tomorrow, 15 * 60 + 30) }, organizer: { email: ME, self: true }, attendees: [{ email: ME, self: true, organizer: true, responseStatus: 'accepted' }, { email: 'ann@example.com', responseStatus: 'needsAction' }] },
+  );
+  const fake = await startFakeGoogle(world);
+  const seeded = [
+    { type: 'settings.updated', patch: { timezone: ZONE } },
+    { type: 'gtask.kept', account: ME, listId: 'L1', taskId: 't-focus', patch: { time: now - 3, duration: 6, doNotDisturb: true } },
+    { type: 'gtask.kept', account: ME, listId: 'L1', taskId: 't-call', patch: { time: now - 1 } },
+  ].map((body, index) => ({ v: 1, id: `seed${index}`, at: yesterday, ...body }));
+  const focusEnd = atZone(today, now + 3);
+  // The sign-in Google's page would make: the service's answer to "connect", read on its way to the page.
+  const connects = [];
+  let h;
+  h = await startHarness({
+    out,
+    viewport,
+    timezoneId: ZONE,
+    taskNotifications: true,
+    serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base },
+    homeFiles: { 'google-accounts.json': fake.accountsFile(), [`data/events/${yesterday.slice(0, 7)}.jsonl`]: `${seeded.map((event) => JSON.stringify(event)).join('\n')}\n` },
+    serviceOverride: async ({ method, path, body }) => {
+      if (method !== 'POST' || path !== '/google/connect') return undefined;
+      const answer = await h.call('POST', '/google/connect', body);
+      connects.push(answer.json);
+      return answer.status === 200 ? answer.json : { __status: answer.status, body: answer.json };
+    },
+  });
+  const { page, context } = h;
+  // Google's own pages are not visited for real: what the Planner opens is recorded.
+  const opened = [];
+  for (const origin of ['https://accounts.google.com/**', 'https://docs.google.com/**', 'https://drive.google.com/**']) {
+    await context.route(origin, (route) => {
+      opened.push(route.request().url());
+      return route.fulfill({ contentType: 'text/html', body: '<p>Google (e2e)</p>' });
+    });
+  }
+  const plannerErrors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(message.text().slice(0, 300));
+  });
+  page.on('pageerror', (error) => plannerErrors.push(`pageerror: ${error.message}`));
+  const shot = (name) => h.shot(`${name}-${size}`);
+  const state = async () => (await h.call('GET', '/state')).json.state;
+  const googleTask = (listId, id) => fake.tasks.get(listId)?.find((task) => task.id === id);
+  const toast = (text) => page.locator('li[data-sonner-toast]', { hasText: text });
+  const keptReport = async () => (await state()).googleTasks?.[`${ME}\nt-report`];
+  const callText = `Task at ${clock(now - 1)}: Call the bank`;
+  let f;
+  try {
+    f = await h.openPlanner();
+    const go = async (name) => {
+      if (!(await h.nav(name).isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
+      await h.nav(name).click();
+    };
+    // ── Do not disturb: Focus block's own notification comes (it says to begin); Call the bank's waits for its end.
+    const focusToast = toast('Focus block');
+    await until(async () => (await focusToast.count()) > 0, 20_000);
+    const takes = () => h.serviceCalls.filter((call) => call.method === 'POST' && call.path === '/google/tasks/notifications').length;
+    await until(() => takes() >= 2, 20_000);
+    check(`${size}: Do not disturb: a task with it gets its own notification at its start (missed while closed, it comes on opening)`, (await focusToast.count()) > 0, await page.locator('li[data-sonner-toast]').allInnerTexts().catch(() => []));
+    check(`${size}: but a task's notification due during it does not come then (${callText})`, Date.now() < focusEnd && (await toast(callText).count()) === 0, `${new Date().toISOString()} vs ${new Date(focusEnd).toISOString()}`);
+    await shot('tc-20-dnd-held');
+    await focusToast.getByRole('button', { name: 'OK' }).click({ timeout: 3000 }).catch(() => {});
+    const came = await until(async () => (await toast(callText).count()) > 0, Math.max(0, focusEnd - Date.now()) + 45_000);
+    const after = Date.now() - focusEnd;
+    check(`${size}: it comes when the task with Do not disturb ends, within 35 s`, came && after >= -1000 && after < 35_000, `${after} ms after its end`);
+    console.log(`  ${size}: the held notification came ${after} ms after Do not disturb ended`);
+    await shot('tc-21-dnd-released');
+    await toast(callText).getByRole('button', { name: 'OK' }).click({ timeout: 3000 }).catch(() => {});
+
+    // ── The calendar: Send the report, tomorrow.
+    await go('Calendar');
+    await f.getByRole('button', { name: /^View:/ }).waitFor();
+    const lane = (date) => f.locator(`.day-lane[data-date="${date}"]`);
+    if (!(await lane(tomorrow).count())) await f.getByRole('button', { name: 'Next week' }).click();
+    const allDay = async () => {
+      const toggle = f.getByRole('button', { name: 'Show all all-day events' });
+      if (await toggle.count()) await toggle.first().click();
+    };
+    await until(async () => (await f.getByRole('button', { name: /^Google task Send the report, due/ }).count()) > 0 || (await f.getByRole('button', { name: 'Show all all-day events' }).count()) > 0, 15_000);
+    await allDay();
+    const reportChip = () => f.getByRole('button', { name: /^Google task Send the report, due/ }).first();
+    const openEditor = async () => {
+      await reportChip().click();
+      await f.getByRole('dialog', { name: /^Google task: Send the report/ }).getByRole('button', { name: 'Edit task' }).click();
+      const editor = f.getByRole('dialog', { name: /^Edit task: Send the report/ });
+      await editor.waitFor();
+      return editor;
+    };
+    let editor = await openEditor();
+    await editor.getByRole('combobox', { name: 'Time', exact: true }).selectOption('900');
+    await editor.getByRole('combobox', { name: 'End time' }).selectOption('960');
+
+    // ── Drive: not allowed yet, so the picker asks for it, as Google asks for one more permission.
+    await editor.getByRole('button', { name: 'Add a Google Drive attachment' }).click();
+    const picker = f.getByRole('dialog', { name: 'Add a Google Drive attachment' });
+    await picker.waitFor();
+    check(`${size}: "Add a Google Drive attachment" first asks to allow Google Drive, saying what it sees (names, never contents)`, (await picker.getByRole('button', { name: 'Allow Google Drive' }).count()) === 1 && (await picker.innerText()).includes('never their contents'));
+    await shot('tc-22-drive-allow');
+    await picker.getByRole('button', { name: 'Allow Google Drive' }).click();
+    await until(() => connects.length > 0, 10_000);
+    const started = connects.at(-1);
+    const auth = new URL(started.authUrl);
+    check(`${size}: it asks Google for what the account has plus Drive (read-only names), keeping what it granted before`, auth.searchParams.get('scope').split(' ').includes('https://www.googleapis.com/auth/drive.metadata.readonly') && auth.searchParams.get('scope').includes('auth/tasks') && auth.searchParams.get('include_granted_scopes') === 'true', auth.searchParams.get('scope'));
+    check(`${size}: Google's consent page opens in the browser`, await until(() => opened.some((url) => url.startsWith('https://accounts.google.com/')), 10_000), JSON.stringify(opened));
+    const paste = picker.getByRole('textbox', { name: 'Address Google sent the browser to' });
+    await paste.waitFor({ timeout: 10_000 });
+    await paste.fill(`${started.redirectUri}?${new URLSearchParams({ state: auth.searchParams.get('state'), code: fakeAuthCode(auth.searchParams.get('scope')) })}`);
+    await picker.getByRole('button', { name: 'Finish' }).click();
+    const search = picker.getByRole('searchbox', { name: 'Search in Drive' });
+    check(`${size}: once allowed, the picker searches the account's Drive (its latest files; no folders)`, await search.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false) && (await until(async () => (await picker.getByRole('checkbox').count()) === 2, 10_000)), await picker.innerText().catch(() => ''));
+    check(`${size}: the account now has Drive too, beside what it had`, await until(async () => JSON.stringify((await h.call('GET', '/google/status')).json.accounts[0].features) === '["calendar","tasks","mail","drive"]', 10_000));
+    await search.fill('plan');
+    await until(async () => (await picker.getByRole('checkbox').count()) === 1, 10_000);
+    check(`${size}: typing finds files by name in Drive`, (await picker.getByRole('checkbox', { name: 'Q4 plan' }).count()) === 1 && fake.requests.some((request) => request.path === '/drive/v3/files' && /name contains 'plan'/.test(request.query.q ?? '')));
+    await picker.getByRole('checkbox', { name: 'Q4 plan' }).check();
+    await shot('tc-23-drive-picker');
+    await picker.getByRole('button', { name: 'Insert' }).click();
+    await picker.waitFor({ state: 'detached', timeout: 5000 });
+    check(`${size}: Insert puts it in the task's form, with "Remove attachment"`, (await editor.getByRole('button', { name: 'Open Q4 plan' }).count()) === 1 && (await editor.getByRole('button', { name: 'Remove attachment Q4 plan' }).count()) === 1);
+
+    // ── Advanced settings, as Google Calendar's for a work account: color, availability, Do not disturb, declining, visibility.
+    await editor.getByRole('button', { name: 'Advanced settings' }).click();
+    const decline = editor.getByRole('checkbox', { name: 'Automatically decline meetings' });
+    check(`${size}: a work account's task offers Task color, Free/Busy, Do not disturb, Automatically decline meetings and visibility`, (await editor.getByRole('button', { name: /^Task color: / }).count()) === 1 && (await editor.getByRole('combobox', { name: 'Availability' }).count()) === 1 && (await editor.getByRole('checkbox', { name: 'Do not disturb' }).count()) === 1 && (await decline.count()) === 1 && (await editor.getByRole('combobox', { name: 'Visibility' }).count()) === 1);
+    check(`${size}: declining is "Unavailable for "Free" time entries", as in Google Calendar`, (await decline.isDisabled()) && (await editor.innerText()).includes('Unavailable for "Free" time entries'));
+    check(`${size}: Do not disturb says what it mutes here, and what it can't (Chat, other apps)`, (await editor.innerText()).includes("Mutes the Planner's own task notifications") && (await editor.innerText()).includes("Google Chat, other apps and OpenChamber's own notifications aren't muted"));
+    await editor.getByRole('button', { name: 'Task color: List color' }).click();
+    const colors = editor.getByRole('menu', { name: 'Task color' });
+    check(`${size}: the color menu has Google Calendar's colors and the list's`, (await colors.getByRole('menuitemradio').count()) === 12 && (await colors.getByRole('menuitemradio', { name: 'Basil' }).count()) === 1);
+    await shot('tc-24-color-menu');
+    await colors.getByRole('menuitemradio', { name: 'Basil' }).click();
+    await editor.getByRole('combobox', { name: 'Availability' }).selectOption('busy');
+    await decline.check();
+    await editor.getByRole('combobox', { name: 'Meetings to decline' }).selectOption('all');
+    const message = 'Declined: heads down on the Q4 plan';
+    await editor.getByRole('textbox', { name: 'Message' }).fill(message);
+    await editor.getByRole('checkbox', { name: 'Do not disturb' }).check();
+    await shot('tc-25-advanced-work-account');
+    await editor.getByRole('button', { name: 'Done' }).click();
+    await editor.waitFor({ state: 'detached', timeout: 10_000 });
+    check(`${size}: kept in the Planner: 3–4pm, Busy, Basil, Q4 plan attached, Do not disturb, declining new and existing meetings with the message`, await until(async () => {
+      const kept = await keptReport();
+      return kept?.time === 900 && kept.busy === true && kept.color === '#0b8043' && kept.attachments?.[0]?.id === 'drive-plan' && kept.doNotDisturb === true && kept.decline?.mode === 'all' && kept.decline.message === message;
+    }, 10_000), JSON.stringify(await keptReport()));
+    const report = googleTask('L1', 't-report');
+    check(`${size}: Google Tasks got none of them (its API has no color, attachments, Do not disturb or declining)`, report && !['color', 'attachments', 'doNotDisturb', 'decline', 'links'].some((key) => key in report) && report.due === due(1), JSON.stringify(report));
+
+    // ── Declined: the invitation overlapping 3–4pm, with the message, which Google sends the organizer.
+    const self = (id) => fake.calendars.get('primary').events.get(id)?.attendees?.find((guest) => guest.self);
+    const declined = await until(() => self('inv-overlap')?.responseStatus === 'declined', 20_000);
+    check(`${size}: the overlapping invitation is declined in Google Calendar, with the task's message for the organizer`, declined && self('inv-overlap')?.comment === message, JSON.stringify(self('inv-overlap')));
+    const patches = fake.requests.filter((request) => request.method === 'PATCH' && request.path.endsWith('/events/inv-overlap'));
+    check(`${size}: once, and the organizer is told (sendUpdates=all)`, patches.length === 1 && patches[0].query.sendUpdates === 'all', JSON.stringify(patches.map((request) => request.query)));
+    check(`${size}: the meeting after the task and the one I organize are left alone`, self('inv-after')?.responseStatus === 'needsAction' && !fake.requests.some((request) => request.method === 'PATCH' && /\/events\/inv-(after|mine)$/.test(request.path)));
+    check(`${size}: the Planner says what it declined`, await until(async () => (await f.getByText('Declined a meeting during "Send the report": "Roadmap sync"').count()) > 0, 5000));
+
+    // ── On the calendar: Basil; its details: Do not disturb, what was declined, the attachment, which opens in Drive.
+    const chipColor = async () => reportChip().evaluate((node) => getComputedStyle(node).getPropertyValue('--item-color').trim() || node.style.getPropertyValue('--item-color'));
+    check(`${size}: the task is Basil on the calendar`, await until(async () => (await chipColor()).toLowerCase() === '#0b8043', 10_000), await chipColor());
+    await reportChip().click();
+    const details = f.getByRole('dialog', { name: /^Google task: Send the report/ });
+    await details.waitFor();
+    check(`${size}: its details say Busy, Do not disturb · Declines meetings, and which meeting was declined`, await until(async () => (await details.innerText()).includes('Do not disturb · Declines meetings') && (await details.innerText()).includes('Declined: Roadmap sync'), 10_000), await details.innerText());
+    const openDoc = context.waitForEvent('page', { timeout: 10_000 }).catch(() => null);
+    await details.getByRole('button', { name: 'Open Q4 plan' }).click();
+    const docTab = await openDoc;
+    check(`${size}: its attachment opens in Google Drive (a new browser tab)`, await until(() => opened.includes('https://docs.google.com/document/d/drive-plan/edit'), 10_000), JSON.stringify(opened));
+    await docTab?.close().catch(() => {});
+    await shot('tc-26-details-attachment');
+    await page.keyboard.press('Escape');
+
+    // ── A task list's color, under "My calendars": Errands' tasks take it; its checkbox hides them.
+    // At 1024 px the calendars fold away, as in Google Calendar: its main menu shows them.
+    const rail = f.getByRole('list', { name: 'My calendars' });
+    if (!(await rail.isVisible().catch(() => false))) await f.getByRole('button', { name: 'Main menu' }).click();
+    await rail.waitFor({ timeout: 5000 });
+    const stampsChip = () => f.getByRole('button', { name: /^Google task Buy stamps, due/ }).first();
+    await allDay();
+    const errandsRow = rail.locator('li', { hasText: 'Errands' });
+    const listRows = await rail.locator('li.cal-row.is-nested').allInnerTexts().catch(() => []);
+    check(`${size}: "My calendars" lists Tasks and each task list (My Tasks, Errands), with a checkbox each`, listRows.some((text) => text.includes('My Tasks')) && listRows.some((text) => text.includes('Errands')), JSON.stringify(listRows));
+    await errandsRow.hover();
+    await errandsRow.getByRole('button', { name: 'Options for Errands' }).click();
+    await f.getByRole('menu', { name: 'Options for Errands' }).getByRole('button', { name: 'Color #f4511e' }).click();
+    check(`${size}: a list's color is kept (the Planner's: Google Tasks has none)`, await until(async () => (await state()).settings.googleTaskListColors?.[`${ME}\nL2`] === '#f4511e', 10_000));
+    const stampsColor = async () => stampsChip().evaluate((node) => getComputedStyle(node).getPropertyValue('--item-color').trim() || node.style.getPropertyValue('--item-color'));
+    check(`${size}: Errands' task takes its list's color; Send the report keeps its own`, await until(async () => (await stampsColor()).toLowerCase() === '#f4511e', 10_000) && (await chipColor()).toLowerCase() === '#0b8043', `${await stampsColor()} / ${await chipColor()}`);
+    await shot('tc-27-list-color');
+    await errandsRow.getByRole('checkbox').uncheck();
+    check(`${size}: unchecking Errands hides its tasks; the other list's stay`, await until(async () => (await stampsChip().count()) === 0, 10_000) && (await reportChip().count()) === 1);
+    await errandsRow.getByRole('checkbox').check();
+    check(`${size}: checking it shows them again`, await until(async () => (await stampsChip().count()) === 1, 10_000));
+
+    // ── After a reload: all of it, in the editor; then Remove attachment.
+    await page.reload({ waitUntil: 'load' });
+    f = await h.openPlanner();
+    await go('Calendar');
+    await f.getByRole('button', { name: /^View:/ }).waitFor();
+    if (!(await lane(tomorrow).count())) await f.getByRole('button', { name: 'Next week' }).click();
+    await reportChip().waitFor({ timeout: 15_000 });
+    editor = await openEditor();
+    const advancedOpen = (await editor.getByRole('checkbox', { name: 'Do not disturb' }).count()) === 1;
+    check(`${size}: after a reload the editor has it all: Basil, Busy, Do not disturb, declining with its message, Q4 plan`, advancedOpen && (await editor.getByRole('button', { name: 'Task color: Basil' }).count()) === 1 && (await editor.getByRole('combobox', { name: 'Availability' }).inputValue()) === 'busy' && (await editor.getByRole('checkbox', { name: 'Do not disturb' }).isChecked()) && (await editor.getByRole('checkbox', { name: 'Automatically decline meetings' }).isChecked()) && (await editor.getByRole('textbox', { name: 'Message' }).inputValue()) === message && (await editor.getByRole('button', { name: 'Open Q4 plan' }).count()) === 1);
+    await shot('tc-28-after-reload');
+    await editor.getByRole('button', { name: 'Remove attachment Q4 plan' }).click();
+    check(`${size}: Remove attachment takes it off the form`, (await editor.getByRole('button', { name: 'Open Q4 plan' }).count()) === 0);
+    await editor.getByRole('button', { name: 'Done' }).click();
+    await editor.waitFor({ state: 'detached', timeout: 10_000 });
+    check(`${size}: and, saved, off the task (the rest stays)`, await until(async () => { const kept = await keptReport(); return kept && !kept.attachments && kept.color === '#0b8043' && kept.doNotDisturb === true; }, 10_000), JSON.stringify(await keptReport()));
+    check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
+  } catch (error) {
+    check(`${size}: the work-account journey ran to its end`, false, error?.stack ?? String(error));
+    await shot('tc-29-failure').catch(() => {});
+  } finally {
+    await h.close();
+    await fake.close();
+  }
+};
+
+/**
+ * Round 10's inventory of Google Tasks' help: the operations the Planner lacked, in Tasks in Calendar.
+ * - Sort by Deadline and by Title; shared tasks (assigned in a Doc: no repeat, no subtasks) and a task from Gmail
+ *   show where they came from.
+ * - Keyboard shortcuts: s stars, Ctrl+Shift+Down moves to the bottom, Space completes, Ctrl+/ lists them.
+ * - Delete, then Undo (the snackbar's, and Ctrl+Z): Google has the task back, with what the Planner kept.
+ * - Lists reordered with Alt+Up; Starred sorted by Date, a starred task added to the list chosen, moved to another.
+ * - Gmail's "Add to Tasks".
+ */
+const inventoryJourney = async (viewport) => {
+  const size = `${viewport.width}`;
+  const today = dayOf(Date.now());
+  const due = (days) => `${addDays(today, days)}T00:00:00.000Z`;
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  const world = defaultFakeWorld({ account: ME, today, zone: ZONE });
+  // Send the report and the done Water the plants are today's, on the calendar's day whatever the week.
+  world.tasks.L1[0].due = due(0);
+  world.tasks.L1.push(
+    { id: 't-shared', title: 'Review the draft', notes: '', status: 'needsAction', updated: yesterday, assignmentInfo: { surfaceType: 'DOCUMENT', linkToTask: 'https://docs.google.com/document/d/doc-1/edit' } },
+    { id: 't-mailed', title: 'Reply to Ann', notes: '', status: 'needsAction', updated: yesterday, links: [{ type: 'email', description: 'Quarterly numbers', link: 'https://mail.google.com/mail/u/0/#all/thread-1' }] },
+    { id: 't-watered', title: 'Water the plants', notes: '', due: due(0), status: 'completed', completed: yesterday, updated: yesterday },
+  );
+  world.mail = [{ id: 'msg-1', threadId: 'thread-9', subject: 'Budget review', from: 'Lead <lead@example.com>', date: new Date(Date.now() - 3_600_000).toUTCString(), snippet: 'Can you look at the numbers', unread: true }];
+  const fake = await startFakeGoogle(world);
+  const seeded = [
+    { type: 'settings.updated', patch: { timezone: ZONE } },
+    { type: 'gtask.kept', account: ME, listId: 'L1', taskId: 't-report', patch: { deadline: addDays(today, 5) } },
+    { type: 'gtask.kept', account: ME, listId: 'L1', taskId: 't-shared', patch: { deadline: addDays(today, -1) } },
+  ].map((body, index) => ({ v: 1, id: `seed${index}`, at: yesterday, ...body }));
+  const h = await startHarness({
+    out,
+    viewport,
+    timezoneId: ZONE,
+    serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base },
+    homeFiles: { 'google-accounts.json': fake.accountsFile(), [`data/events/${yesterday.slice(0, 7)}.jsonl`]: `${seeded.map((event) => JSON.stringify(event)).join('\n')}\n` },
+  });
+  const { page } = h;
+  const plannerErrors = [];
+  page.on('pageerror', (error) => plannerErrors.push(`pageerror: ${error.message}`));
+  page.on('console', (message) => {
+    if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(message.text().slice(0, 300));
+  });
+  const shot = (name) => h.shot(`${name}-${size}`);
+  const state = async () => (await h.call('GET', '/state')).json.state;
+  const googleTask = (listId, id) => fake.tasks.get(listId)?.find((task) => task.id === id);
+  const order = (listId) => (fake.tasks.get(listId) ?? []).filter((task) => !task.parent && task.status !== 'completed').map((task) => task.id);
+  let f;
+  try {
+    f = await h.openPlanner();
+    const go = async (name) => {
+      if (!(await h.nav(name).isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
+      await h.nav(name).click();
+    };
+    await go('Calendar');
+    await f.getByRole('radio', { name: 'Tasks' }).click();
+    const myTasks = f.getByRole('region', { name: 'My Tasks' });
+    await myTasks.getByRole('listitem', { name: 'Review the draft' }).waitFor({ timeout: 20_000 });
+
+    // ── Where a task came from: a shared task (a Doc) and an email added to Tasks; a shared task neither repeats nor takes subtasks.
+    check(`${size}: a shared task says it was assigned in Google Docs, and a task from Gmail says so, with the email`, (await myTasks.getByRole('button', { name: 'Assigned in Google Docs' }).count()) === 1 && (await myTasks.getByRole('button', { name: 'From Gmail: Quarterly numbers' }).count()) === 1);
+    await myTasks.getByRole('button', { name: 'Edit Review the draft' }).click();
+    const sharedForm = myTasks.getByRole('group', { name: 'Edit Review the draft' });
+    await sharedForm.waitFor();
+    check(`${size}: a shared task can't repeat nor take subtasks, as in Google Tasks (and says so)`, (await sharedForm.getByRole('combobox', { name: 'Repeat' }).isDisabled()) && (await sharedForm.innerText()).includes("A shared task can't repeat") && (await sharedForm.getByRole('button', { name: 'Add subtask' }).getAttribute('title')) === "A shared task can't have subtasks, as in Google Tasks");
+    await shot('tc-30-shared-task');
+    await sharedForm.getByRole('button', { name: 'Cancel' }).click();
+
+    // ── Sort by: Deadline and Title, as Google Tasks has them.
+    const sortBy = async (name) => {
+      await myTasks.getByRole('button', { name: 'List options for My Tasks' }).click();
+      await f.getByRole('menu', { name: 'List options for My Tasks' }).getByRole('menuitemradio', { name }).click();
+    };
+    await sortBy('Deadline');
+    const byDeadline = myTasks.getByRole('list', { name: 'My Tasks tasks by deadline' });
+    const deadlineText = await byDeadline.innerText();
+    check(`${size}: Sort by Deadline: the past one first, then by deadline, then "No deadline"`, deadlineText.indexOf('Past') < deadlineText.indexOf('Review the draft') && deadlineText.indexOf('Review the draft') < deadlineText.indexOf('Send the report') && deadlineText.indexOf('Send the report') < deadlineText.indexOf('No deadline') && deadlineText.indexOf('No deadline') < deadlineText.indexOf('Plan the trip'), deadlineText);
+    await shot('tc-31-sort-deadline');
+    await sortBy('Title');
+    const titles = await myTasks.getByRole('list', { name: 'My Tasks tasks by title' }).getByRole('listitem').evaluateAll((rows) => rows.map((row) => row.getAttribute('aria-label')));
+    check(`${size}: Sort by Title: A to Z`, JSON.stringify(titles) === JSON.stringify(['Book the hotel', 'Plan the trip', 'Reply to Ann', 'Review the draft', 'Send the report']), JSON.stringify(titles));
+    await sortBy('My order');
+
+    // ── Keyboard shortcuts on the selected task.
+    const row = (title) => myTasks.getByRole('list', { name: 'My Tasks tasks' }).getByRole('listitem', { name: title, exact: true });
+    await row('Plan the trip').locator('.gt-body-edit').focus();
+    await page.keyboard.press('s');
+    check(`${size}: s stars the selected task`, await until(async () => Boolean((await state()).googleTasks?.[`${ME}\nt-trip`]?.starredAt), 10_000));
+    await page.keyboard.press('Control+Shift+ArrowDown');
+    check(`${size}: Ctrl+Shift+Down moves it to the bottom of the list, in Google`, await until(() => order('L1').at(-1) === 't-trip', 10_000), JSON.stringify(order('L1')));
+    await sortBy('Starred recently');
+    const starredFirst = await myTasks.getByRole('list', { name: 'My Tasks tasks, starred recently' }).getByRole('listitem').evaluateAll((rows) => rows.map((one) => one.getAttribute('aria-label')));
+    check(`${size}: Sort by Starred recently puts the starred one first`, starredFirst[0] === 'Plan the trip', JSON.stringify(starredFirst));
+    await sortBy('My order');
+    await row('Reply to Ann').locator('.gt-body-edit').focus();
+    await page.keyboard.press(' ');
+    check(`${size}: Space completes the selected task, in Google`, await until(() => googleTask('L1', 't-mailed')?.status === 'completed', 10_000));
+    await page.keyboard.press('Control+/');
+    const help = f.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    check(`${size}: Ctrl+/ lists Google Tasks' shortcuts, Print and Report spam marked as not here (and why)`, await help.waitFor({ timeout: 5000 }).then(async () => (await help.innerText()).includes('Move to bottom') && (await help.innerText()).includes("can't open the print dialog")).catch(() => false));
+    await shot('tc-32-shortcuts');
+    await page.keyboard.press('Escape');
+
+    // ── Delete, then Undo: the snackbar's, and Ctrl+Z.
+    await row('Send the report').hover();
+    await row('Send the report').getByRole('button', { name: 'Actions for Send the report' }).click();
+    await f.getByRole('menu', { name: 'Actions for Send the report' }).getByRole('menuitem', { name: 'Delete' }).click();
+    check(`${size}: Delete takes it out of Google`, await until(() => !googleTask('L1', 't-report'), 10_000));
+    const snack = f.locator('.gcal-snack', { hasText: 'Task deleted' });
+    await snack.waitFor({ timeout: 5000 });
+    await shot('tc-33-deleted-undo');
+    await snack.getByRole('button', { name: 'Undo' }).click();
+    check(`${size}: Undo gives it back in Google, with its deadline kept in the Planner`, await until(async () => Boolean(googleTask('L1', 't-report')) && (await state()).googleTasks?.[`${ME}\nt-report`]?.deadline === addDays(today, 5), 10_000));
+    check(`${size}: and it is back in the list`, await until(async () => (await row('Send the report').count()) === 1, 10_000));
+    await row('Plan the trip').hover();
+    await row('Plan the trip').getByRole('button', { name: 'Actions for Plan the trip' }).click();
+    await f.getByRole('menu', { name: 'Actions for Plan the trip' }).getByRole('menuitem', { name: 'Delete' }).click();
+    await until(() => !googleTask('L1', 't-trip'), 10_000);
+    await row('Send the report').locator('.gt-body-edit').focus();
+    await page.keyboard.press('Control+z');
+    check(`${size}: Ctrl+Z undoes a deletion too: the task and its subtask are back in Google, still starred`, await until(async () => Boolean(googleTask('L1', 't-trip')) && Boolean(googleTask('L1', 't-hotel')) && Boolean((await state()).googleTasks?.[`${ME}\nt-trip`]?.starredAt), 10_000));
+
+    // ── Lists in the order the user puts them: Alt+Up on Errands.
+    const sidebar = f.getByRole('navigation', { name: 'Task lists' });
+    await sidebar.getByRole('button', { name: 'Errands' }).focus();
+    await page.keyboard.press('Alt+ArrowUp');
+    check(`${size}: Alt+Up moves a list up (kept in the Planner: Google's API has no order of lists)`, await until(async () => JSON.stringify((await state()).settings.googleTaskListOrder) === JSON.stringify([`${ME}\nL2`, `${ME}\nL1`]), 10_000));
+    const sideOrder = await sidebar.getByRole('list', { name: 'Lists' }).getByRole('listitem').allInnerTexts();
+    check(`${size}: the sidebar shows Errands first now`, sideOrder[0]?.includes('Errands') && sideOrder[1]?.includes('My Tasks'), JSON.stringify(sideOrder));
+    await shot('tc-34-list-order');
+
+    // ── Starred: sort by Date; a starred task added in the list chosen; then moved to another list.
+    await sidebar.getByRole('button', { name: 'Starred' }).click();
+    const starredSection = f.getByRole('region', { name: 'Starred' });
+    await starredSection.getByRole('button', { name: 'Starred options' }).click();
+    await f.getByRole('menu', { name: 'Starred options' }).getByRole('menuitemradio', { name: 'Date' }).click();
+    await starredSection.getByRole('button', { name: 'Add a starred task' }).click();
+    await starredSection.getByRole('combobox', { name: 'List for the starred task' }).selectOption(`${ME}\nL2`);
+    const newStarred = starredSection.getByRole('group', { name: 'New task' });
+    await newStarred.getByRole('textbox', { name: 'Title' }).fill('Buy milk');
+    await newStarred.getByRole('button', { name: 'Add', exact: true }).click();
+    const milk = () => (fake.tasks.get('L2') ?? []).find((task) => task.title === 'Buy milk');
+    check(`${size}: Starred's "Add a starred task" adds it to the list chosen, starred`, await until(async () => Boolean(milk()) && Boolean((await state()).googleTasks?.[`${ME}\n${milk()?.id}`]?.starredAt), 10_000));
+    await newStarred.getByRole('button', { name: 'Cancel' }).click();
+    await starredSection.getByRole('button', { name: 'Edit Buy milk' }).click();
+    const milkForm = starredSection.getByRole('group', { name: 'Edit Buy milk' });
+    await milkForm.getByRole('combobox', { name: 'List' }).selectOption('L1');
+    await milkForm.getByRole('button', { name: 'Done' }).click();
+    check(`${size}: a starred task's list is changed from Starred, in Google`, await until(() => (fake.tasks.get('L1') ?? []).some((task) => task.title === 'Buy milk') && !(fake.tasks.get('L2') ?? []).some((task) => task.title === 'Buy milk'), 10_000));
+    await shot('tc-35-starred');
+
+    // ── On the calendar: Show completed tasks off hides a done one; Tasks unchecked hides them all (Google Calendar's own).
+    await go('Calendar');
+    await f.getByRole('radio', { name: 'Calendar' }).click();
+    await f.getByRole('button', { name: /^View:/ }).waitFor();
+    const doneChip = f.getByRole('button', { name: /^Google task Water the plants, due/ });
+    const openChip = f.getByRole('button', { name: /^Google task Send the report, due/ });
+    const showAll = async () => {
+      const toggle = f.getByRole('button', { name: 'Show all all-day events' });
+      if (await toggle.count()) await toggle.first().click();
+    };
+    await until(async () => (await doneChip.count()) > 0 || (await f.getByRole('button', { name: 'Show all all-day events' }).count()) > 0, 15_000);
+    await showAll();
+    const viewOption = async (name) => {
+      await f.getByRole('button', { name: /^View:/ }).click();
+      await f.getByRole('menuitemcheckbox', { name }).click();
+    };
+    const doneBefore = await until(async () => (await doneChip.count()) > 0, 10_000);
+    await viewOption('Show completed tasks');
+    check(`${size}: the view's "Show completed tasks" off hides a completed task; open ones stay`, doneBefore && (await until(async () => (await doneChip.count()) === 0, 10_000)) && (await openChip.count()) > 0);
+    await viewOption('Show completed tasks');
+    await until(async () => (await doneChip.count()) > 0, 10_000);
+    const rail = f.getByRole('list', { name: 'My calendars' });
+    if (!(await rail.isVisible().catch(() => false))) await f.getByRole('button', { name: 'Main menu' }).click();
+    await rail.locator('li', { hasText: /^Tasks$/ }).getByRole('checkbox').uncheck();
+    check(`${size}: unchecking Tasks under My calendars hides every task on the calendar`, await until(async () => (await openChip.count()) === 0 && (await doneChip.count()) === 0, 10_000));
+    await shot('tc-37-tasks-hidden');
+    await rail.locator('li', { hasText: /^Tasks$/ }).getByRole('checkbox').check();
+    check(`${size}: checking it shows them again`, await until(async () => (await openChip.count()) > 0, 15_000));
+
+    // ── Gmail's "Add to Tasks".
+    await go('Google');
+    await f.getByRole('tab', { name: 'Gmail' }).click();
+    const mailRow = f.getByRole('listitem', { name: 'Budget review' });
+    await mailRow.waitFor({ timeout: 15_000 });
+    await mailRow.getByRole('button', { name: 'Add "Budget review" to Google Tasks' }).click();
+    const added = () => (fake.tasks.get('L1') ?? []).find((task) => task.title === 'Budget review');
+    check(`${size}: Gmail's "Add to Tasks" makes a task in the default list, the email's link in its details`, await until(() => Boolean(added()) && /From Gmail: https:\/\/mail\.google\.com\//.test(added()?.notes ?? ''), 10_000), JSON.stringify(added()));
+    await shot('tc-36-gmail-add-to-tasks');
+    check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
+  } catch (error) {
+    check(`${size}: the inventory journey ran to its end`, false, error?.stack ?? String(error));
+    await shot('tc-39-failure').catch(() => {});
+  } finally {
+    await h.close();
+    await fake.close();
+  }
+};
+
+/** The instant of a wall-clock time in ZONE (minutes may run past midnight). */
+const atZone = (key, minutes) => at(key, minutes);
+
 mkdirSync(out, { recursive: true });
 console.log(`zone ${ZONE}, local ${clock(Math.floor(minutesIn(ZONE)))}`);
-await journey({ width: 1440, height: 900 });
-await journey({ width: 1024, height: 768 });
+// TC_PARTS=tasks, advanced or inventory runs one journey alone (while it is written); the full run has all three.
+const parts = process.env.TC_PARTS ?? 'all';
+for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) {
+  if (parts === 'all' || parts === 'tasks') await journey(viewport);
+  if (parts === 'all' || parts === 'advanced') await advancedJourney(viewport);
+  if (parts === 'all' || parts === 'inventory') await inventoryJourney(viewport);
+}
 const failed = results.filter((result) => !result.ok);
 writeFileSync(join(out, 'results.json'), JSON.stringify({ zone: ZONE, results }, null, 2));
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

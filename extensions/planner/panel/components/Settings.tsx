@@ -189,21 +189,20 @@ const LinearSettings = () => {
   );
 };
 
-const FEATURE_LABELS: Record<GoogleFeature, string> = { calendar: 'Calendar', tasks: 'Tasks', mail: 'Gmail' };
+const FEATURE_LABELS: Record<GoogleFeature, string> = { calendar: 'Calendar', tasks: 'Tasks', mail: 'Gmail', drive: 'Drive' };
 
 /** Signing in an account: Google's page opens; its redirect comes back here, or its address is pasted. */
 const GoogleSignIn = () => {
-  const { google, host, client } = usePlanner();
+  const { google } = usePlanner();
   const gv = useGoogle();
   const [features, setFeatures] = useState<GoogleFeature[]>(['calendar', 'tasks', 'mail']);
-  const [pasted, setPasted] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
   const signIn = gv.signIn;
   if (!signIn || signIn.result.status === 'connected') {
     return (
       <div class="google-connect">
         <div class="row" role="group" aria-label="What the Planner may use">
-          {(['calendar', 'tasks', 'mail'] as const).map((feature) => (
+          {(['calendar', 'tasks', 'mail', 'drive'] as const).map((feature) => (
             <label key={feature} class="inline">
               <input type="checkbox" checked={features.includes(feature)} onChange={(event) => setFeatures(event.currentTarget.checked ? [...features, feature] : features.filter((item) => item !== feature))} />
               {FEATURE_LABELS[feature]}
@@ -212,11 +211,25 @@ const GoogleSignIn = () => {
           <div class="nav-spacer" />
           <button disabled={!features.length} onClick={() => { setProblem(null); google.connect(features).catch((error) => setProblem(messageOf(error))); }}>Connect a Google account</button>
         </div>
-        <p class="hint">Calendar reads your calendars and writes working sessions to the one you choose; Tasks reads and updates Google Tasks; Gmail only reads messages.</p>
+        <p class="hint">
+          Calendar reads your calendars and writes working sessions to the one you choose; Tasks reads and updates Google Tasks; Gmail only reads messages; Drive only sees your files'
+          names, to attach them to tasks (it can be allowed later, when you first attach one).
+        </p>
         {problem && <p class="danger" role="alert">{problem}</p>}
       </div>
     );
   }
+  return <SignInPending />;
+};
+
+/** A sign-in on its way: Google's page to open (again), or the address it sent the browser to, pasted; or why it failed. */
+export const SignInPending = () => {
+  const { google, host, client } = usePlanner();
+  const gv = useGoogle();
+  const [pasted, setPasted] = useState('');
+  const [problem, setProblem] = useState<string | null>(null);
+  const signIn = gv.signIn;
+  if (!signIn || signIn.result.status === 'connected') return null;
   if (signIn.result.status === 'failed') {
     return (
       <div class="google-connect">
@@ -329,8 +342,8 @@ const GoogleSettings = () => {
       {status && !status.client && (
         <>
           <p class="hint">
-            Google Calendar, Google Tasks and Gmail connect through an OAuth client in your own Google Cloud project: create a project, enable the Google Calendar API, Google Tasks API
-            and Gmail API, set up the OAuth consent screen with yourself as a test user, then create an OAuth client ID of type <strong>Desktop app</strong> and paste its ID and secret
+            Google Calendar, Google Tasks, Gmail and Drive connect through an OAuth client in your own Google Cloud project: create a project, enable the Google Calendar API, Google Tasks API,
+            Gmail API and Google Drive API, set up the OAuth consent screen with yourself as a test user, then create an OAuth client ID of type <strong>Desktop app</strong> and paste its ID and secret
             here. They stay on this machine, outside the synced plan, in a file only you can read.
           </p>
           <div class="row">
@@ -348,7 +361,10 @@ const GoogleSettings = () => {
             {status.accounts.map((account) => (
               <li key={account.email}>
                 <span class="channel-name">{account.email}</span>
-                <span class="muted grow">{account.features.map((feature) => FEATURE_LABELS[feature]).join(', ') || 'nothing allowed'}</span>
+                <span class="muted grow">
+                  {account.features.map((feature) => FEATURE_LABELS[feature]).join(', ') || 'nothing allowed'}
+                  {account.workspace ? ' · work or school account' : ''}
+                </span>
                 <button class="link danger" aria-label={`Remove the Google account ${account.email}`} onClick={() => run(() => google.removeAccount(account.email))}>Remove</button>
               </li>
             ))}

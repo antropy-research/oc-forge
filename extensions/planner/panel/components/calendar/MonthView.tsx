@@ -146,7 +146,7 @@ export const MonthView = ({ anchor, events, onDay }: { anchor: DateKey; events: 
       );
     }
     const event = item.event;
-    const color = eventColor(event, view.state.calendars);
+    const color = eventColor(event, view.state);
     const task = isTaskEvent(event) ? event.googleTask! : null;
     const movable = isMovableTask(event);
     const planned = task ? plannedTask(view.state, event) : null;

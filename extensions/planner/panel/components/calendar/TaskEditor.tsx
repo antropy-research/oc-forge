@@ -9,6 +9,7 @@
 // Google has the edit; a refusal stays in it, with the edit, to save again.
 import { useEffect } from 'preact/hooks';
 import { addDays } from '../../../src/domain/dates.ts';
+import type { GoogleTaskTemplate } from '../../../src/domain/types.ts';
 import { keptFor, seriesTemplate, upcomingValues } from '../../../src/domain/gtaskKept.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
 import { calendarUi, type TaskEditorTarget } from '../../lib/gcal.ts';
@@ -18,8 +19,8 @@ import { Icon } from './Icon.tsx';
 
 /** Why one task of a series does not change the repeat: its series has it. */
 const SERIES_REPEATS = 'This task alone: its series repeats as before (Edit → All tasks changes it)';
-/** Why one task of a series does not change its availability or visibility: Google Calendar keeps one for the whole series. */
-const SERIES_ADVANCED = "A repeating task's availability and visibility are its series' (Edit → All tasks changes them)";
+/** Why one task of a series does not change its advanced settings: Google Calendar keeps one for the whole series. */
+const SERIES_ADVANCED = "A repeating task's availability, visibility and other advanced settings are its series' (Edit → All tasks changes them)";
 
 export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
   const { google } = usePlanner();
@@ -43,8 +44,15 @@ export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
   const template = target.series && kept ? seriesTemplate(kept, item) : null;
   // One upcoming occurrence: as it is, its series' values with its own changes.
   const values = occurrence ? upcomingValues(occurrence) : null;
-  // Availability and visibility are the series' template's, as it makes each task.
-  const advanced = (from: { busy?: true; visibility?: 'public' | 'private' }) => ({ busy: from.busy, visibility: from.visibility });
+  // Availability, visibility, color, Do not disturb, declining and attachments are the series' template's, as it makes each task.
+  const advanced = (from: GoogleTaskTemplate) => ({
+    busy: from.busy,
+    visibility: from.visibility,
+    color: from.color,
+    doNotDisturb: from.doNotDisturb,
+    decline: from.decline ? { ...from.decline, since: from.decline.since ?? kept?.decline?.since ?? kept?.updatedAt ?? new Date().toISOString() } : undefined,
+    attachments: from.attachments,
+  });
   const shown = values && kept
     ? { item: { ...item, title: values.title, notes: values.notes, due: values.due }, kept: { ...kept, time: values.time, duration: values.duration, deadline: values.deadline, ...advanced(occurrence!.template) } }
     : template && kept

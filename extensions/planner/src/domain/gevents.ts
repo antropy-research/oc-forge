@@ -6,7 +6,7 @@
 import type { DateKey } from './types.ts';
 import { addDays, daysBetween, instantAt, isDateKey, isValidTimeZone, zonedDateMinutes } from './dates.ts';
 import { formatRRule, shiftRule, splitRecurrence, untilBefore } from './rrule.ts';
-import { EVENT_COLORS, type GoogleResponse, type GoogleTime, type RawGoogleEvent } from './google.ts';
+import { EVENT_COLORS, type GoogleResponse, type GoogleTime, type RawAttendee, type RawGoogleEvent } from './google.ts';
 
 export type EditScope = 'this' | 'following' | 'all';
 export const EDIT_SCOPES: readonly EditScope[] = ['this', 'following', 'all'];
@@ -280,12 +280,16 @@ export const planDelete = (args: { scope: EditScope; instance: Identified; serie
   return { ops: [{ method: 'PATCH', eventId: series.id, body: { recurrence: [formatRRule({ ...rule, count: null, until }), ...rest] }, role: 'truncate' }] };
 };
 
-/** The request that answers an invitation, for this occurrence or (scope 'all') the whole series. */
-export const planRsvp = (args: { scope: 'this' | 'all'; instance: Identified; series: Identified | null; response: GoogleResponse }): EventPlan => {
+/**
+ * The request that answers an invitation, for this occurrence or (scope 'all') the whole series; with `comment`, the
+ * note the organizer gets with the answer (as "Automatically decline meetings" sends its message).
+ */
+export const planRsvp = (args: { scope: 'this' | 'all'; instance: Identified; series: Identified | null; response: GoogleResponse; comment?: string }): EventPlan => {
   const target = args.scope === 'all' && args.series ? args.series : args.instance;
   const attendees = target.attendees ?? [];
   if (!attendees.some((attendee) => attendee.self)) return { error: "You are not on this event's guest list" };
-  return { ops: [{ method: 'PATCH', eventId: target.id, body: { attendees: attendees.map((attendee) => (attendee.self ? { ...attendee, responseStatus: args.response } : attendee)) }, role: 'change' }] };
+  const answer = (attendee: RawAttendee) => ({ ...attendee, responseStatus: args.response, ...(args.comment ? { comment: args.comment } : {}) });
+  return { ops: [{ method: 'PATCH', eventId: target.id, body: { attendees: attendees.map((attendee) => (attendee.self ? answer(attendee) : attendee)) }, role: 'change' }] };
 };
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" };

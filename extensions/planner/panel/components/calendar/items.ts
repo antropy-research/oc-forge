@@ -2,7 +2,8 @@
 // one kind of item, their colors (Google Calendar's solid fills, with ink that
 // reads on them), labels, and the drag payloads between calendar cells.
 import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { CalendarSubscription, DateKey, PlannerState, Task, WorkBlock } from '../../../src/domain/types.ts';
+import type { DateKey, PlannerState, Task, WorkBlock } from '../../../src/domain/types.ts';
+import { TASKS_COLOR, taskColor, taskListColor, taskListShown } from '../../../src/domain/gtaskAdvanced.ts';
 import { blocksOnDay } from '../../../src/domain/selectors.ts';
 import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
 import { compactClock, compactRange, eventSpan, longDay, shortDay, type RowItem } from '../../../src/domain/gcalendar.ts';
@@ -12,7 +13,7 @@ import { PENDING_DAYS } from '../../../src/domain/gtaskPending.ts';
 import { describeRecurrence } from '../../../src/domain/rrule.ts';
 
 /** Google Calendar's color for tasks. */
-export const GOOGLE_TASKS_COLOR = '#1a73e8';
+export const GOOGLE_TASKS_COLOR = TASKS_COLOR;
 /** A calendar event dragged between days (its id). */
 export const GCAL_EVENT_TYPE = 'application/x-planner-gcal-event';
 /** A Google task chip dragged to another day (the task as JSON). */
@@ -26,8 +27,22 @@ export const isTaskEvent = (event: CalendarEvent): boolean => event.calendarId =
 /** A Google task on its date: it completes, and drags to another day or time. Not its deadline, nor an upcoming occurrence. */
 export const isMovableTask = (event: CalendarEvent): boolean => isTaskEvent(event) && !event.taskDeadline;
 
-export const eventColor = (event: CalendarEvent, calendars: Readonly<Record<string, CalendarSubscription>>): string =>
-  event.calendarId === GOOGLE_TASKS_CALENDAR ? GOOGLE_TASKS_COLOR : event.google?.color ?? calendars[event.calendarId]?.color ?? '#868e96';
+/**
+ * What an item is filled with: an event its own color or its calendar's; a task its own color, else its list's (as
+ * Google Calendar colors tasks), an upcoming occurrence its series'.
+ */
+export const eventColor = (event: CalendarEvent, state: Pick<PlannerState, 'calendars' | 'googleTasks' | 'settings'>): string => {
+  if (event.calendarId !== GOOGLE_TASKS_CALENDAR) return event.google?.color ?? state.calendars[event.calendarId]?.color ?? '#868e96';
+  if (event.googleTask) return taskColor(state, event.googleTask);
+  if (event.upcoming) return event.upcoming.template.color ?? taskListColor(state.settings, event.upcoming.account, event.upcoming.listId);
+  return GOOGLE_TASKS_COLOR;
+};
+
+/** A task list hidden under "My calendars": its tasks (and their upcoming occurrences) are not on the calendar. */
+export const inHiddenList = (event: CalendarEvent, settings: PlannerState['settings']): boolean => {
+  const task = event.googleTask ?? event.upcoming;
+  return Boolean(task && event.calendarId === GOOGLE_TASKS_CALENDAR && !taskListShown(settings, task.account, task.listId));
+};
 
 /** How a Google task item shows: the task, its deadline, an upcoming occurrence of its series, or the pending tasks ('' for anything else), as class names. */
 export const taskClass = (event: CalendarEvent): string =>

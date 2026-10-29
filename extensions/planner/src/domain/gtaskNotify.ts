@@ -32,6 +32,8 @@ export interface TaskNotification {
   /** The task's time and length ('time'), for its message. */
   time: number | null;
   duration: number | null;
+  /** It came later than its time: a task with Do not disturb was on then (`quietNotifications`). */
+  held?: true;
 }
 
 /**

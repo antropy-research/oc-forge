@@ -83,7 +83,7 @@ describe('Google client and sign-in', () => {
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(readFileSync(file, 'utf8')).toContain('rt-1');
     const status = await accounts.status();
-    expect(status.accounts).toEqual([{ email: 'me@example.com', features: ['calendar', 'tasks'], addedAt: expect.any(String) }]);
+    expect(status.accounts).toEqual([{ email: 'me@example.com', features: ['calendar', 'tasks'], addedAt: expect.any(String), workspace: false }]);
     expect(JSON.stringify(status)).not.toContain('rt-1');
   });
 

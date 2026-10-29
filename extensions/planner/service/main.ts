@@ -15,6 +15,7 @@ import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimebo
 import { googleWriteRoute } from './googleRoutes.ts';
 import { TaskNotifications } from './taskNotifications.ts';
 import { GoogleSeries } from './googleSeries.ts';
+import { MeetingDecliner } from './googleDecline.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { deadlineGroups } from '../src/domain/gtaskKept.ts';
 import { pendingRange, pendingTasks } from '../src/domain/gtaskPending.ts';
@@ -60,6 +61,18 @@ const taskNotifications = new TaskNotifications(join(dirname(dir), 'task-notific
 });
 // Repeating Google tasks: one change of a series at a time, whichever window asks.
 const series = new GoogleSeries(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleDueTasks.forget() });
+// "Automatically decline meetings" for Busy tasks of work and school accounts; what was declined stays beside the data.
+const decliner = new MeetingDecliner(
+  join(dirname(dir), 'declined-meetings.json'),
+  () => planner.state,
+  {
+    accounts: async () => (await google.status()).accounts.filter((account) => account.workspace && account.features.includes('calendar') && account.features.includes('tasks')).map((account) => account.email),
+    byIds: (groups) => googleDueTasks.byIds(groups, true),
+  },
+  googleData,
+  { log, onDeclined: () => googleCalendars.forget() },
+);
+decliner.start(planner);
 // Agents to assign tasks to: one OpenCode command per preset, in OpenCode's own config folder.
 const opencodeConfig = opencodeConfigDir();
 const opencodeInfo = new OpenCodeInfo();
@@ -174,6 +187,23 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     // The task notifications come by now that no Planner surface has had yet; each is given once.
     return ok(await taskNotifications.take());
   }
+  if (path === '/google/tasks/decline' && req.method === 'POST') {
+    // "Automatically decline meetings" now, after a task's change: the meetings it declined.
+    return ok(await decliner.run());
+  }
+  if (path === '/google/tasks/declined' && req.method === 'GET') {
+    const [email, task] = [url.searchParams.get('account'), url.searchParams.get('task')];
+    if (!isEmail(email) || !isGoogleId(task)) return { status: 400, body: { error: 'account and task are required' } };
+    return ok({ declined: await decliner.declinedFor(email, task) });
+  }
+  if (path === '/google/drive/files' && req.method === 'GET') {
+    // Drive's files by name, to attach to a task, as Google Calendar's "Add a Google Drive attachment" finds them.
+    const [email, text] = [url.searchParams.get('account'), url.searchParams.get('q') ?? ''];
+    if (!isEmail(email) || text.length > 200) return { status: 400, body: { error: 'account is required, and the search must be at most 200 characters' } };
+    const account = (await google.status()).accounts.find((item) => item.email === email.toLowerCase());
+    if (!account?.features.includes('drive')) return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
+    return ok({ files: await googleData.driveFiles(email, text) });
+  }
   if (path === '/google/tasks/linked' && req.method === 'POST') {
     // The tasks behind linked Planner tasks, to bring those up to date.
     const body = (await readJson(req)) as { groups?: unknown };
@@ -199,7 +229,7 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     return ok({ tasks, missing, errors });
   }
   if (path === '/google/tasks' && (req.method === 'PATCH' || req.method === 'POST')) {
-    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown; parent?: unknown; previous?: unknown };
+    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown; parent?: unknown; previous?: unknown; deleted?: unknown };
     if (!isEmail(body.account) || !isGoogleId(body.listId)) return { status: 400, body: { error: 'account and listId are required' } };
     if (body.due !== undefined && body.due !== null && !isDateKey(body.due)) return { status: 400, body: { error: 'due must be a date or null' } };
     if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8192)) return { status: 400, body: { error: 'notes must be text, at most 8192 characters (as Google Tasks keeps)' } };
@@ -207,7 +237,9 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     if (req.method === 'PATCH') {
       if (!isGoogleId(body.id)) return { status: 400, body: { error: 'id is required' } };
       if (body.completed !== undefined && typeof body.completed !== 'boolean') return { status: 400, body: { error: 'completed must be true or false' } };
-      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}), ...(body.title !== undefined ? { title: (body.title as string).trim() } : {}), ...(body.notes !== undefined ? { notes: body.notes as string } : {}) };
+      // Undo after Delete: Google undeletes a task it deleted a moment ago.
+      if (body.deleted !== undefined && body.deleted !== false) return { status: 400, body: { error: 'deleted can only be false (Undo); DELETE deletes' } };
+      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}), ...(body.title !== undefined ? { title: (body.title as string).trim() } : {}), ...(body.notes !== undefined ? { notes: body.notes as string } : {}), ...(body.deleted === false ? { deleted: false as const } : {}) };
       const task = await googleData.updateTask(body.account, body.listId, body.id, patch);
       // Due dates and completion show on the calendar: read them again next time.
       googleDueTasks.forget();

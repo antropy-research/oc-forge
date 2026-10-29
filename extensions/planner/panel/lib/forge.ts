@@ -128,5 +128,8 @@ export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; pag
   const key = event.key.toLowerCase();
   if (where.surface === 'page' && mod && key === 'k') return true;
   if (where.surface === 'page' && where.page === 'linear' && mod && key === 'b') return true;
+  // Google Tasks' own shortcuts while its view has the focus: indent ([ ]), move (Up/Down, with Shift), a subtask
+  // (Alt+Enter), the shortcut list (/) and Undo (z).
+  if (mod && target?.closest?.('.tasks-app') && /^(\[|\]|arrowup|arrowdown|enter|\/|z)$/.test(key)) return true;
   return false;
 };

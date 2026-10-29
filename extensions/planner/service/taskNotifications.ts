@@ -4,13 +4,15 @@
 // each notification once, whichever asks first, in any window. What was given
 // is kept a few days beside the data (never in its synced repository), so a
 // reload or a restart does not give one again; one missed while no Planner
-// surface was open comes when one opens, the same day.
+// surface was open comes when one opens, the same day. One that comes while a
+// task with Do not disturb is on waits until that task ends.
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { DateKey, PlannerState } from '../src/domain/types.ts';
 import { todayIn } from '../src/domain/dates.ts';
 import { deadlineGroups } from '../src/domain/gtaskKept.ts';
 import { dueNotifications, nextNotificationAt, taskNotifications, type TaskNotification } from '../src/domain/gtaskNotify.ts';
+import { quietNotifications, taskWindows } from '../src/domain/gtaskAdvanced.ts';
 import type { GoogleTaskItem } from '../src/domain/google.ts';
 
 /** How long a given notification is remembered: past its day, whatever the zone. */
@@ -62,7 +64,9 @@ export class TaskNotifications {
     const zone = state.settings.timezone ?? 'UTC';
     const today = todayIn(zone, new Date(this.now()));
     const [due, deadlines] = await Promise.all([this.reads.due(accounts, today), this.reads.byIds(deadlineGroups(state.googleTasks, accounts, today, today))]);
-    const all = taskNotifications(due.items, deadlines.items, this.state().googleTasks, today, zone);
+    const kept = this.state().googleTasks;
+    // Do not disturb: what comes during a task with it on waits until the task ends.
+    const all = quietNotifications(taskNotifications(due.items, deadlines.items, kept, today, zone), taskWindows(due.items, kept, today, today, today, zone));
     const given = await this.load();
     const now = this.now();
     const keys = new Set(given.keys());

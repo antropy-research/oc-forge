@@ -10,17 +10,17 @@
 // tasks" of a series takes, and the Starred view's order. Google keeps the
 // rest: nothing kept here is written into a task's title or details.
 import type { CalendarEvent } from './ics.ts';
-import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState, type TaskVisibility } from './types.ts';
+import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState, type TaskAttachment, type TaskVisibility } from './types.ts';
 import { addDays, daysBetween, instantAt, monthDay, weekday, weekdayName } from './dates.ts';
 import { addMonths, compactClock, compactRange, daysInMonth } from './gcalendar.ts';
 import { formatRRule, parseRRule, untilDate, WEEKDAY_CODES, type RRule } from './rrule.ts';
 import { GOOGLE_TASKS_CALENDAR, type GoogleTaskItem } from './google.ts';
-import type { EventBody, GoogleTaskKeptPatch } from './events.ts';
+import type { DeclineInput, EventBody, GoogleTaskKeptPatch } from './events.ts';
 
 /** Google's reference for what its Tasks API carries (a date without a time; no repeat, no star). */
 export const TASKS_API_REFERENCE = 'https://developers.google.com/workspace/tasks/reference/rest/v1/tasks';
 /** Said wherever a user sets something the Planner keeps. */
-export const KEPT_HINT = "Kept in the Planner: Google Tasks doesn't let other apps set times, deadlines, repeats, stars, availability or visibility";
+export const KEPT_HINT = "Kept in the Planner: Google Tasks doesn't let other apps set times, deadlines, repeats, stars, colors, attachments, availability or visibility";
 /** How long a timed task without an end time shows on the grid, as Google Calendar draws it. */
 export const TASK_MINUTES = 30;
 
@@ -164,12 +164,13 @@ export const scheduledOn = (kept: GoogleTaskKept, item: Pick<GoogleTaskItem, 'du
 
 /**
  * A series' template from a task's values: what it says, its time, its
- * deadline as days after `date`, and (with a time) its availability and
- * visibility, the series' own; its schedule counts from `start`.
+ * deadline as days after `date`, its color and attachments, and (with a time)
+ * its availability, visibility, Do not disturb and declining meetings, the
+ * series' own; its schedule counts from `start`.
  */
 export const templateOf = (
   task: { title: string; notes: string },
-  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { busy?: boolean; visibility?: TaskVisibility },
+  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { busy?: boolean; visibility?: TaskVisibility; color?: string | null; attachments?: readonly TaskAttachment[]; doNotDisturb?: boolean; decline?: DeclineInput | null },
   date: DateKey,
   start: DateKey = date,
 ): GoogleTaskTemplate => ({
@@ -181,6 +182,10 @@ export const templateOf = (
   start,
   ...(kept.time !== null && kept.busy ? { busy: true as const } : {}),
   ...(kept.time !== null && kept.visibility && kept.visibility !== 'default' ? { visibility: kept.visibility } : {}),
+  ...(kept.color ? { color: kept.color } : {}),
+  ...(kept.attachments?.length ? { attachments: [...kept.attachments] } : {}),
+  ...(kept.time !== null && kept.doNotDisturb ? { doNotDisturb: true as const } : {}),
+  ...(kept.time !== null && kept.busy && kept.decline ? { decline: { mode: kept.decline.mode, message: kept.decline.message, ...(kept.decline.since ? { since: kept.decline.since } : {}) } } : {}),
 });
 
 /**
@@ -287,6 +292,10 @@ export const occurrenceTask = (repeat: Repeat, template: GoogleTaskTemplate, dat
       repeat: { rule: repeat.rule, seriesId: repeat.seriesId, index, next: null, on: date, template, ...(ahead.length ? { exceptions: Object.fromEntries(ahead) } : {}) },
       ...(values.time !== null && template.busy ? { busy: true } : {}),
       ...(values.time !== null && template.visibility ? { visibility: template.visibility } : {}),
+      ...(template.color ? { color: template.color } : {}),
+      ...(template.attachments?.length ? { attachments: template.attachments } : {}),
+      ...(values.time !== null && template.doNotDisturb ? { doNotDisturb: true } : {}),
+      ...(values.time !== null && template.busy && template.decline ? { decline: template.decline } : {}),
     },
   };
 };

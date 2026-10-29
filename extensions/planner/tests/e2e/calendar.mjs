@@ -442,14 +442,14 @@ try {
   const fresh = myTasks.getByRole('group', { name: 'New task' });
   await fresh.getByRole('textbox', { name: 'Title' }).fill('Harness buy milk');
   await fresh.getByRole('textbox', { name: 'Details' }).fill('Oat');
-  await fresh.getByRole('button', { name: 'Add' }).click();
+  await fresh.getByRole('button', { name: 'Add', exact: true }).click();
   const milkPost = await until(() => requests('POST', '/tasks/v1/lists/L1/tasks').find((request) => request.body?.title === 'Harness buy milk'));
   check('Add a task adds it at the top of the list in Google Tasks', milkPost && !milkPost.query.previous && milkPost.body.notes === 'Oat');
   await myTasks.getByRole('button', { name: 'Actions for Plan the trip' }).click();
   await myTasks.getByRole('menuitem', { name: 'Add a subtask' }).click();
   const sub = myTasks.getByRole('group', { name: 'New task' });
   await sub.getByRole('textbox', { name: 'Title' }).fill('Pack the bags');
-  await sub.getByRole('button', { name: 'Add' }).click();
+  await sub.getByRole('button', { name: 'Add', exact: true }).click();
   const subPost = await until(() => requests('POST', '/tasks/v1/lists/L1/tasks').find((request) => request.body?.title === 'Pack the bags'));
   check('a subtask goes under its task, after the subtasks it has', subPost && subPost.query.parent === 't-trip' && subPost.query.previous === 't-hotel', JSON.stringify(subPost?.query));
   await myTasks.locator('li.gt-row.depth-1', { hasText: 'Pack the bags' }).waitFor();
@@ -638,7 +638,7 @@ try {
   await timedForm.getByRole('combobox', { name: 'Time' }).selectOption('840');
   await timedForm.getByRole('combobox', { name: 'End time' }).selectOption('900');
   await shot('cal-22-task-time');
-  await timedForm.getByRole('button', { name: 'Add' }).click();
+  await timedForm.getByRole('button', { name: 'Add', exact: true }).click();
   await timedForm.getByRole('button', { name: 'Cancel' }).click();
   const timedPost = await until(() => requests('POST', '/tasks/v1/lists/L1/tasks').find((request) => request.body?.title === 'Harness timed task'));
   const timedId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness timed task')?.id);
@@ -706,7 +706,7 @@ try {
   await weeklyForm.getByLabel('Date', { exact: true }).fill(today);
   await weeklyForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: `Weekly on ${WEEKDAYS[new Date(`${today}T00:00:00Z`).getUTCDay()]}` });
   await shot('cal-26-repeat');
-  await weeklyForm.getByRole('button', { name: 'Add' }).click();
+  await weeklyForm.getByRole('button', { name: 'Add', exact: true }).click();
   await weeklyForm.getByRole('button', { name: 'Cancel' }).click();
   const weeklyId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness weekly review')?.id);
   const weeklyRule = await until(() => keptOf(weeklyId).then((kept) => kept?.repeat?.rule ?? null));
@@ -769,7 +769,7 @@ try {
   await dailyForm.getByLabel('Date', { exact: true }).fill(today);
   await dailyForm.getByRole('combobox', { name: 'Time' }).selectOption('600');
   await dailyForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
-  await dailyForm.getByRole('button', { name: 'Add' }).click();
+  await dailyForm.getByRole('button', { name: 'Add', exact: true }).click();
   await dailyForm.getByRole('button', { name: 'Cancel' }).click();
   const dailyId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness daily')?.id);
   const dailyKept = await until(() => keptOf(dailyId).then((kept) => (kept?.repeat?.template ? kept : null)));
@@ -874,7 +874,7 @@ try {
   const deadlineForm = myTasks.getByRole('group', { name: 'New task' });
   await deadlineForm.getByRole('textbox', { name: 'Title' }).fill('Harness deadline only');
   await deadlineForm.getByLabel('Deadline', { exact: true }).fill(deadlineDay);
-  await deadlineForm.getByRole('button', { name: 'Add' }).click();
+  await deadlineForm.getByRole('button', { name: 'Add', exact: true }).click();
   await deadlineForm.getByRole('button', { name: 'Cancel' }).click();
   const deadlineId = await until(() => fake.tasks.get('L1').find((task) => task.title === 'Harness deadline only')?.id);
   await until(() => keptOf(deadlineId).then((kept) => kept?.deadline === deadlineDay));
@@ -1066,7 +1066,7 @@ try {
   await atomicForm.getByLabel('Date', { exact: true }).fill(today);
   await atomicForm.getByRole('combobox', { name: 'Time' }).selectOption('780');
   await atomicForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
-  await atomicForm.getByRole('button', { name: 'Add' }).click();
+  await atomicForm.getByRole('button', { name: 'Add', exact: true }).click();
   const atomicId = await until(() => fake.tasks.get('L1').find((task) => task.title === atomicTitle)?.id);
   await until(() => keptOf(atomicId).then((kept) => Boolean(kept?.repeat?.template)));
   await atomicForm.getByRole('button', { name: 'Cancel' }).click();
@@ -1157,12 +1157,12 @@ try {
   await newForm.getByRole('textbox', { name: 'Title' }).fill(refusedNew);
   await newForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('600');
   fake.failNext('POST', '/tasks/v1/lists/L1/tasks', 503, 'Backend Error');
-  await newForm.getByRole('button', { name: 'Add' }).click();
+  await newForm.getByRole('button', { name: 'Add', exact: true }).click();
   const newRefused = await newForm.getByRole('alert').waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
   const newTyped = newRefused && (await newForm.getByRole('textbox', { name: 'Title' }).inputValue()) === refusedNew && (await newForm.getByRole('combobox', { name: 'Time', exact: true }).inputValue()) === '600';
   const newNone = countNew() === 0;
   await shot('cal-52b-new-task-refused-1440');
-  await newForm.getByRole('button', { name: 'Add' }).click();
+  await newForm.getByRole('button', { name: 'Add', exact: true }).click();
   const newAdded = await until(async () => countNew() === 1 && (await newForm.getByRole('textbox', { name: 'Title' }).inputValue()) === '');
   const newId = fake.tasks.get('L1').find((task) => task.title === refusedNew)?.id;
   const newKept = newId ? await until(() => keptOf(newId).then((kept) => (kept?.time === 600 ? kept : null))) : null;
@@ -1305,7 +1305,7 @@ try {
   await sameForm.getByLabel('Date', { exact: true }).fill(today);
   await sameForm.getByRole('combobox', { name: 'Time' }).selectOption('780');
   await sameForm.getByLabel('Deadline', { exact: true }).fill(today);
-  await sameForm.getByRole('button', { name: 'Add' }).click();
+  await sameForm.getByRole('button', { name: 'Add', exact: true }).click();
   const sameId = await until(() => fake.tasks.get('L1').find((task) => task.title === sameTitle)?.id);
   await until(() => keptOf(sameId).then((kept) => kept?.time === 780 && kept.deadline === today));
   await sameForm.getByRole('button', { name: 'Cancel' }).click();
@@ -1393,7 +1393,7 @@ try {
   await twinForm.getByLabel('Date', { exact: true }).fill(today);
   await twinForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('540');
   await twinForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
-  await twinForm.getByRole('button', { name: 'Add' }).click();
+  await twinForm.getByRole('button', { name: 'Add', exact: true }).click();
   const twinSeries = await until(() => fake.tasks.get('L1').find((task) => task.title === twinTitle)?.id);
   await until(() => keptOf(twinSeries).then((kept) => Boolean(kept?.repeat?.template)));
   // The other one: the same title, tomorrow at 4pm, its own details, no repeat.
@@ -1402,7 +1402,7 @@ try {
   await twinForm.getByLabel('Date', { exact: true }).fill(tomorrow);
   await twinForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('960');
   await twinForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Does not repeat' });
-  await twinForm.getByRole('button', { name: 'Add' }).click();
+  await twinForm.getByRole('button', { name: 'Add', exact: true }).click();
   const twinOther = await until(() => fake.tasks.get('L1').find((task) => task.title === twinTitle && task.id !== twinSeries)?.id);
   await until(() => keptOf(twinOther).then((kept) => kept?.time === 960));
   await twinForm.getByRole('button', { name: 'Cancel' }).click();
@@ -1504,7 +1504,7 @@ try {
   await plantForm.getByLabel('Date', { exact: true }).fill(today);
   await plantForm.getByRole('combobox', { name: 'Time', exact: true }).selectOption('480');
   await plantForm.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
-  await plantForm.getByRole('button', { name: 'Add' }).click();
+  await plantForm.getByRole('button', { name: 'Add', exact: true }).click();
   const plantId = await until(() => (fake.tasks.get(plantsId) ?? []).find((task) => task.title === 'Harness water plants')?.id);
   await until(() => keptOf(plantId).then((kept) => Boolean(kept?.repeat?.template)));
   await plantForm.getByRole('button', { name: 'Cancel' }).click();
@@ -1577,7 +1577,7 @@ try {
     await form.getByLabel('Date', { exact: true }).fill(today);
     await form.getByRole('combobox', { name: 'Time', exact: true }).selectOption(String(time));
     await form.getByRole('combobox', { name: 'Repeat' }).selectOption({ label: 'Daily' });
-    await form.getByRole('button', { name: 'Add' }).click();
+    await form.getByRole('button', { name: 'Add', exact: true }).click();
     const id = await until(() => fake.tasks.get('L1').find((task) => task.title === title)?.id);
     await until(() => keptOf(id).then((kept) => Boolean(kept?.repeat?.template)));
     await form.getByRole('button', { name: 'Cancel' }).click();

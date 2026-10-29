@@ -1337,6 +1337,8 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gt-check:hover .gt-check-hover { opacity: 1; }
 .gt-check.is-checked { color: var(--oc-primary-text, var(--oc-primary)); }
 .gt-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 3px 0; border: 0; background: none; text-align: left; color: var(--oc-fg); cursor: text; }
+.gt-body-edit { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; text-align: left; color: inherit; font: inherit; cursor: text; }
+.gt-body-edit:focus-visible { outline: 2px solid var(--oc-primary); outline-offset: 2px; border-radius: 4px; }
 .gt-title { font-size: 14px; overflow-wrap: anywhere; }
 .gt-notes { font-size: 12.5px; color: var(--oc-muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .gt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
@@ -1565,7 +1567,78 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .pending-menu > button:hover { background: var(--pl-soft); }
 .pending-pick { display: flex; align-items: center; gap: 6px; }
 .pending-pick input[type='date'] { background: var(--pl-soft); border: 0; border-radius: 12px; padding: 2px 8px; font-size: 12px; }
-/* A task's advanced settings: availability and visibility, with what they do here. */
+/* A task's advanced settings, as Google Calendar's: color, availability, Do not disturb, declining meetings and visibility, with what they do here. */
 .gt-form-advanced .link { padding: 0; }
-.gt-form-advanced-fields { padding-left: 24px; }
+.gt-form-advanced-fields { display: flex; flex-direction: column; gap: 6px; padding-left: 24px; }
 .gt-form-advanced-fields .gt-form-note { flex-basis: 100%; line-height: 1.4; }
+.gt-adv-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.gt-adv-row > .icon, .gt-form-advanced > .icon { color: var(--oc-muted); flex: none; }
+.gt-adv-row select { background: var(--pl-soft); border: 0; border-radius: 12px; padding: 2px 8px; font-size: 12px; color: var(--oc-fg); max-width: 100%; }
+.gt-adv-row select:disabled, .gt-adv-check input:disabled + .gt-adv-check-text { opacity: 0.6; }
+.gt-adv-check { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; font-size: 12.5px; }
+.gt-adv-check input { margin: 2px 0 0; width: 16px; height: 16px; flex: none; accent-color: var(--oc-primary); }
+.gt-adv-check-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.gt-dnd-label { display: inline-flex; align-items: center; gap: 4px; }
+.gt-dnd-mark { display: inline-flex; color: #d93025; }
+.gt-adv-decline { padding-left: 24px; }
+.gt-adv-message { flex: 1 1 180px; min-width: 0; background: var(--pl-soft); border: 0; border-radius: 6px; padding: 3px 8px; font-size: 12px; }
+.gt-color-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; flex: none; }
+.gt-color-button { display: inline-flex; align-items: center; gap: 2px; border: 0; background: var(--pl-soft); border-radius: 12px; padding: 3px 4px 3px 8px; color: var(--oc-fg); }
+.gt-color-button:disabled { opacity: 0.6; cursor: not-allowed; }
+.gt-color-menu { left: 0; right: auto; top: 28px; min-width: 190px; padding: 4px 0; }
+.gt-adv-name { font-size: 12px; color: var(--oc-muted); }
+.gt-color-menu .cal-palette { grid-template-columns: repeat(6, 22px); }
+.gt-color-menu .cal-swatch[aria-checked='true'] { outline: 2px solid var(--oc-fg); outline-offset: 2px; }
+.gt-color-list { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; padding: 6px 10px; text-align: left; font-size: 12.5px; color: var(--oc-fg); }
+.gt-color-list:hover { background: var(--pl-soft); }
+.gt-color-list[aria-checked='true'] { font-weight: 600; }
+/* A task's Drive attachments, and Google Drive's picker for them. */
+.gt-attachments { align-items: flex-start; }
+.gt-attachments > .icon { margin-top: 3px; color: var(--oc-muted); }
+.gt-attach-main { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; flex: 1; }
+.gt-attach-main > .link { padding: 0; font-size: 12.5px; }
+.gt-attach-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-width: 100%; }
+.gt-attach { display: flex; align-items: center; gap: 6px; min-width: 0; background: var(--pl-soft); border-radius: 8px; padding: 2px 4px 2px 6px; }
+.gt-attach-icon { display: inline-flex; flex: none; }
+.gt-attach-title { padding: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.gt-attach-remove { width: 22px; height: 22px; flex: none; }
+.gt-file-chip { display: inline-flex; align-items: center; gap: 3px; max-width: 220px; border: 0; background: var(--pl-soft); border-radius: 10px; padding: 1px 8px; font-size: 12px; color: var(--oc-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gt-file-chip.is-more { color: var(--oc-muted); }
+.modal-backdrop.drive-backdrop { z-index: 60; }
+.modal.drive-picker { width: min(560px, 100%); padding: 10px 16px 14px; display: flex; flex-direction: column; gap: 8px; }
+.drive-allow p { margin: 0 0 8px; font-size: 13px; line-height: 1.45; }
+.drive-search { display: flex; align-items: center; gap: 8px; background: var(--pl-soft); border-radius: 18px; padding: 4px 12px; color: var(--oc-muted); }
+.drive-search input { flex: 1; border: 0; background: transparent; outline: 0; font: inherit; font-size: 13px; color: var(--oc-fg); min-width: 0; }
+.drive-files { list-style: none; margin: 0; padding: 0; max-height: min(46vh, 360px); overflow: auto; }
+.drive-file { display: grid; grid-template-columns: auto auto 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.drive-file:hover { background: var(--pl-soft); }
+.drive-file.is-on { background: color-mix(in srgb, var(--oc-primary) 14%, transparent); }
+.drive-file.is-attached { cursor: default; opacity: 0.7; }
+.drive-file input { grid-row: 1 / span 2; margin: 0; width: 16px; height: 16px; accent-color: var(--oc-primary); }
+.drive-file-icon { grid-row: 1 / span 2; display: inline-flex; }
+.drive-file-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.drive-file-meta { grid-column: 3; font-size: 11.5px; }
+.drive-actions { display: flex; align-items: center; gap: 12px; padding-top: 4px; }
+.drive-actions .muted { font-size: 12.5px; }
+.drive-actions .primary { border-radius: 16px; padding: 4px 16px; }
+.pop-attachments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.pop-attachments .link { display: inline-flex; align-items: center; gap: 6px; padding: 0; text-align: left; }
+.pop-file { display: inline-flex; }
+.pop-declined { list-style: none; margin: 2px 0 0; padding: 0; font-size: 12px; color: var(--oc-muted); }
+/* A task list under "My calendars", under Tasks. */
+.cal-row.is-nested { padding-left: 20px; }
+/* Where a task came from (Gmail, Keep, a shared Doc or Chat space); the lists dragged into their order; Starred's "Add". */
+.gt-origin { color: var(--oc-primary-text, var(--oc-primary)); }
+.tasks-lists li.is-dragging { opacity: 0.5; }
+.tasks-lists li[draggable='true'] { cursor: grab; }
+.tasks-shortcuts { margin-top: 8px; color: var(--oc-muted); }
+.gt-starred-add { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 0 46px; }
+.gt-starred-add .gt-form { padding-left: 0; }
+.gt-starred-list select { background: var(--pl-soft); border: 0; border-radius: 12px; padding: 2px 8px; font-size: 12px; color: var(--oc-fg); }
+.modal.gt-shortcuts { width: min(560px, 100%); padding: 10px 16px 16px; }
+.gt-shortcut-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.gt-shortcut-table td { padding: 5px 6px; border-top: 1px solid var(--pl-line); vertical-align: top; }
+.gt-shortcut-table td:first-child { width: 42%; white-space: nowrap; }
+.gt-shortcut-table kbd { font: inherit; font-size: 12px; background: var(--pl-soft); border-radius: 4px; padding: 1px 6px; }
+.gt-shortcut-table tr.is-unavailable td { color: var(--oc-muted); }
+.mail-to-tasks { padding: 0 4px; font-size: 12px; white-space: nowrap; }
