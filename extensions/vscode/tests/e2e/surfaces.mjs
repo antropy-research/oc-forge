@@ -37,8 +37,9 @@
 //      as on disk: VS Code's backup of the change went too), Save writes and
 //      closes, each back to the chat; a saved tab closes at once; across a reload the
 //      tabs come back once each (Markdown's preview, which VS Code revives
-//      under a new key, too), and closed tabs stay closed, VS Code's own state
-//      included;
+//      under a new key, too), tabs chosen as the page starts end on the one
+//      chosen last (the header's and VS Code's), and closed tabs stay closed,
+//      VS Code's own state included;
 //  13. the page alone (what a new browser tab from Cmd/Ctrl+click loads: no
 //      rail view, no terminal): its last tab closed, the hidden page keeps the
 //      folder's tabs empty before OpenChamber removes it, and after a reload
@@ -963,16 +964,28 @@ const journey = async (viewport, seeded, first) => {
       await wait(7_000);
       await page.reload({ waitUntil: 'load' });
       await railBack();
-      // The rail view brings the tabs back and the page starts behind them: VS Code revives the preview under a new
-      // key, which takes its old tab's place.
+      // Back, the tabs are chosen as the page starts behind them: README's, then the preview's, as soon as both are
+      // there. The one chosen last is the page's, whatever the address bar named before the reload.
+      const back = await until(async () => {
+        const tabs = await headerTabs(page);
+        return tabs.find((tab) => tab.title === 'README.md') && tabs.find((tab) => tab.title.includes('Preview')) ? tabs : null;
+      }, 90_000);
+      const startedFirst = (await pageFrame(page).locator('html[data-oc-vscode-page-started="true"]').count()) > 0;
+      if (back) await page.locator(`[data-oc-forge-tab="${VSCODE}:${back.find((tab) => tab.title === 'README.md').id}"]`).first().click();
+      await headerTab(page, 'Preview').click();
+      // VS Code revives the preview under a new key, which takes its old tab's place.
       const revived = await until(async () => {
         const tabs = await headerTabs(page);
         const previews = tabs.filter((tab) => tab.title.includes('Preview'));
         return tabs.length === 2 && previews.length === 1 && previews[0].id !== previewBefore?.id ? tabs : null;
       }, 90_000);
-      await headerTab(page, 'Preview').click();
       const rendered = await until(async () => (await previewHeading(pageFrame(page))) === 'demo', 90_000);
+      await pageStarted(page);
       await wait(2_000);
+      const selected = (await headerTabs(page)).find((tab) => tab.active)?.title ?? 'none';
+      const vscodeShows = (await pageFrame(page).locator('html').evaluate(() => document.title).catch(() => '')).split(' - ')[0];
+      check(`[${size}] 12 tabs chosen as the page starts: the one chosen last is the header's and VS Code's`, selected.includes('Preview') && vscodeShows.startsWith('Preview'),
+        `${startedFirst ? 'the page had started before the clicks; ' : ''}header: ${selected}; VS Code: ${vscodeShows}`);
       check(`[${size}] 12 after a reload the tabs come back once each: Markdown's preview, which VS Code revives under a new key, takes its old tab's place`,
         Boolean(previewBefore && revived) && (await titles()).length === 2, `${(await titles()).join(' | ')}; before the reload its tab came ${previewBefore ? `${previewAfter} s` : 'never'} after the command`);
       check(`[${size}] 12 ... and the revived preview renders the file again`, Boolean(renderedBefore && rendered),

@@ -215,13 +215,13 @@ a second project and back; the terminal under a file's editor (`keepBottomZone`:
 zone begins, both take input, both stay through a chat); closing the last unsaved file tab (Cancel keeps the tab,
 the editor and the change; Don't Save closes without writing, and the file opens again as on disk; Save writes;
 each back to the chat), and across a
-reload the tabs coming back once each (Markdown's preview too) and closed ones staying closed; the page alone (as a
-new browser tab from Cmd/Ctrl+click loads it, no rail view or terminal): its last tab closed, the hidden page keeps
-the folder's tabs empty, and nothing comes back after a reload; a Cmd/Ctrl+click on a file tab opening that file in a
-new browser tab while this one stays as it was, VS Code's rail view and page then working in both browser tabs, each
-sending its service requests over a WebSocket of its own (the adapters' transport); and three browser windows in a row
-each opening the terminal and running a command in it, the terminal's part adding no terminal to the ones VS Code
-reconnects. It writes each size's
+reload the tabs coming back once each (Markdown's preview too), tabs chosen while the page starts ending on the one
+chosen last, and closed ones staying closed; the page alone (as a new browser tab from Cmd/Ctrl+click loads it, no
+rail view or terminal): its last tab closed, the hidden page keeps the folder's tabs empty, and nothing comes back
+after a reload; a Cmd/Ctrl+click on a file tab opening that file in a new browser tab while this one stays as it was,
+VS Code's rail view and page then working in both browser tabs, each sending its service requests over a WebSocket of
+its own (the adapters' transport); and three browser windows in a row each opening the terminal and running a command
+in it, the terminal's part adding no terminal to the ones VS Code reconnects. It writes each size's
 start times and memory to `<size>-frames.json`. Run the stack's `prepare` outside a private network namespace (it
 downloads), then `up`, the check and `down` inside one.
 

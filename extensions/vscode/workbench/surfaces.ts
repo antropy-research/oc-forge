@@ -454,6 +454,8 @@ class EditorArea {
   private started = false;
   /** The editor a link names as the page starts (a reload, a new browser tab from Cmd/Ctrl+click). */
   private linked: string | null = null;
+  /** A tab chosen since the page started: it, not the link the page started with, is what the page shows. */
+  private chosen = false;
 
   constructor(private readonly context: SurfaceContext) {
     this.editorService = context.services.get<EditorService>('editorService');
@@ -498,7 +500,10 @@ class EditorArea {
       }
       this.schedule();
     });
-    forge.tabs.onActivate((id) => void this.show(id).catch((error) => log('could not show the tab', error)));
+    forge.tabs.onActivate((id) => {
+      this.chosen = true;
+      void this.show(id).catch((error) => log('could not show the tab', error));
+    });
     forge.tabs.onClose((id) => void this.closeFromHeader(id).catch((error) => log('could not close the editor', error)));
     // An unsaved tab the user closes stays until VS Code's own close, with its save prompt, has run here.
     forge.tabs.onCloseRequest((id) => void this.closeAsked(id).catch((error) => log('could not close the editor', error)));
@@ -510,13 +515,14 @@ class EditorArea {
     this.lastActive = this.activeKey();
     // A link to an editor shows that editor, before the header follows VS Code (the address bar would name VS Code's
     // editor then). Otherwise the editor handed over, or the header's selection: a tab chosen while the page started
-    // behind the tabs the rail view brought back.
-    if (this.linked) await this.openRoute(route);
+    // behind the tabs the rail view brought back. A tab chosen meanwhile also comes before the link: after a reload
+    // the address bar still names the editor shown before it.
+    if (this.linked && !this.chosen) await this.openRoute(route);
     this.started = true;
     await this.sync();
     const state = forge.tabs.state();
     if (handed && active) await this.show(active, handed);
-    else if (!this.linked && state.active && (state.shown || !this.strip)) await this.show(state.active);
+    else if ((!this.linked || this.chosen) && state.active && (state.shown || !this.strip)) await this.show(state.active);
     // Started: the page follows VS Code now, and its first file has opened (it took the focus then).
     document.documentElement.dataset.ocVscodePageStarted = 'true';
   }
@@ -654,6 +660,10 @@ class EditorArea {
     this.showing += 1;
     try {
       await this.ready;
+      // Tabs chosen while the page was starting each wait for it: only the one chosen last opens its editor, as the
+      // header shows, not each in the order they come back here.
+      const selected = this.context.forge.tabs.state().active;
+      if (selected && selected !== id) return;
       const request = handed ?? await this.take(id);
       if (request) {
         await this.open(request, id);
