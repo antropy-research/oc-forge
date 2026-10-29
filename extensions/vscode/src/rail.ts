@@ -15,6 +15,8 @@ export interface RailEntry {
   zone?: 'bottom';
   /** The view container a view entry shows: VS Code opens it by this id (`workbench.view.explorer`). The host ignores it. */
   view?: string;
+  /** The overflow entry's containers, the ones the rail has no room for (`MORE_ENTRY_ID`). The host ignores it. */
+  more?: { view: string; title: string }[];
 }
 
 /** VS Code's own view containers, in its order, with the Remixicons in OpenChamber's sprite closest to their codicons. */
@@ -32,7 +34,11 @@ export const TERMINAL_ENTRY: RailEntry = { id: 'terminal', title: 'Terminal', ic
 const ENTRY_ID_MAX = 48;
 const TITLE_MAX = 80;
 const SVG_MAX = 16_384;
-const ENTRIES_MAX = 32;
+/** The entries the host takes from an extension (`OC_FORGE_LIMITS.railEntries`: 100, 32 before d459d05). */
+export const ENTRIES_MAX = 100;
+
+/** The containers past the rail's room, behind one entry, as VS Code's activity bar puts them behind "…". */
+export const MORE_ENTRY_ID = 'additional-views';
 
 /** An extension's activity-bar view container, as its package.json declares it. */
 export interface DeclaredContainer {
@@ -134,10 +140,12 @@ export interface InstalledContainers {
 /**
  * The rail: the built-ins, then each installed extension's containers in the
  * order the extensions are listed, then the terminal, which opens at the
- * bottom. At most the host's 32 entries.
+ * bottom. At most the host's `max` entries: past them, the last container
+ * entry is "Additional Views", which opens the others (`more`), so none is
+ * left out.
  */
-export const railEntries = (installed: readonly InstalledContainers[]): RailEntry[] => {
-  const taken = new Set<string>([...BUILT_IN_ENTRIES.map((entry) => entry.id), TERMINAL_ENTRY.id]);
+export const railEntries = (installed: readonly InstalledContainers[], max = ENTRIES_MAX): RailEntry[] => {
+  const taken = new Set<string>([...BUILT_IN_ENTRIES.map((entry) => entry.id), TERMINAL_ENTRY.id, MORE_ENTRY_ID]);
   const extensions: RailEntry[] = [];
   const views = new Set<string>(BUILT_IN_ENTRIES.map((entry) => entry.view!));
   for (const extension of installed) {
@@ -152,9 +160,21 @@ export const railEntries = (installed: readonly InstalledContainers[]): RailEntr
       extensions.push({ id, title, icon, order: 10 + extensions.length, view });
     }
   }
-  const room = ENTRIES_MAX - BUILT_IN_ENTRIES.length - 1;
-  return [...BUILT_IN_ENTRIES, ...extensions.slice(0, room), TERMINAL_ENTRY].map((entry) => ({ ...entry }));
+  const room = max - BUILT_IN_ENTRIES.length - 1;
+  const shown = extensions.length <= room ? extensions : extensions.slice(0, room - 1);
+  const hidden = extensions.slice(shown.length);
+  const more: RailEntry[] = hidden.length === 0 ? [] : [{
+    id: MORE_ENTRY_ID,
+    title: `Additional Views (${hidden.length})`,
+    icon: 'more',
+    order: 10 + shown.length,
+    more: hidden.map((entry) => ({ view: entry.view!, title: entry.title })),
+  }];
+  // The host shows them by `order`, and keeps the first `max` it reads: the built-ins, the terminal and the overflow
+  // entry come first, so a host that takes fewer (an adapted OpenChamber before d459d05 took 32) drops containers.
+  return [...BUILT_IN_ENTRIES, TERMINAL_ENTRY, ...more, ...shown].map((entry) => ({ ...entry }));
 };
 
-/** The entry that shows a view container, or null (`workbench.view.scm` → `scm`). */
-export const entryOfView = (entries: readonly RailEntry[], view: string): string | null => entries.find((entry) => entry.view === view)?.id ?? null;
+/** The entry that shows a view container, or null (`workbench.view.scm` → `scm`; one past the rail's room → its overflow entry). */
+export const entryOfView = (entries: readonly RailEntry[], view: string): string | null =>
+  entries.find((entry) => entry.view === view || entry.more?.some((item) => item.view === view))?.id ?? null;

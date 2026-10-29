@@ -86,6 +86,16 @@ export interface ViewsService {
   openViewContainer(id: string, focus?: boolean): Promise<unknown>;
 }
 
+export interface QuickPickItem {
+  label: string;
+  description?: string;
+}
+
+export interface QuickInputService {
+  /** VS Code's quick pick: the item chosen, or undefined when it was dismissed. */
+  pick<T extends QuickPickItem>(items: readonly T[], options?: { title?: string; placeHolder?: string; activeItem?: T }): Promise<T | undefined>;
+}
+
 /** `ConfigurationTarget.MEMORY`: above the user's settings, never written anywhere. */
 export const MEMORY_TARGET = 8;
 

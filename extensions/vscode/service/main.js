@@ -530,7 +530,8 @@ var TERMINAL_ENTRY = { id: "terminal", title: "Terminal", icon: "terminal-box", 
 var ENTRY_ID_MAX = 48;
 var TITLE_MAX = 80;
 var SVG_MAX = 16384;
-var ENTRIES_MAX = 32;
+var ENTRIES_MAX = 100;
+var MORE_ENTRY_ID = "additional-views";
 var declaredContainers = (manifest, nls = {}) => {
   const list = manifest?.contributes?.viewsContainers?.activitybar;
   if (!Array.isArray(list))
@@ -638,8 +639,8 @@ var codiconIcon = (icon) => {
   const name = /^\$\(([a-z0-9-]+)(?:~[a-z]+)?\)$/.exec(icon.trim())?.[1];
   return name ? CODICONS[name] ?? FALLBACK_ICON : null;
 };
-var railEntries = (installed) => {
-  const taken = new Set([...BUILT_IN_ENTRIES.map((entry) => entry.id), TERMINAL_ENTRY.id]);
+var railEntries = (installed, max = ENTRIES_MAX) => {
+  const taken = new Set([...BUILT_IN_ENTRIES.map((entry) => entry.id), TERMINAL_ENTRY.id, MORE_ENTRY_ID]);
   const extensions = [];
   const views = new Set(BUILT_IN_ENTRIES.map((entry) => entry.view));
   for (const extension of installed) {
@@ -655,8 +656,17 @@ var railEntries = (installed) => {
       extensions.push({ id, title, icon, order: 10 + extensions.length, view });
     }
   }
-  const room = ENTRIES_MAX - BUILT_IN_ENTRIES.length - 1;
-  return [...BUILT_IN_ENTRIES, ...extensions.slice(0, room), TERMINAL_ENTRY].map((entry) => ({ ...entry }));
+  const room = max - BUILT_IN_ENTRIES.length - 1;
+  const shown = extensions.length <= room ? extensions : extensions.slice(0, room - 1);
+  const hidden = extensions.slice(shown.length);
+  const more = hidden.length === 0 ? [] : [{
+    id: MORE_ENTRY_ID,
+    title: `Additional Views (${hidden.length})`,
+    icon: "more",
+    order: 10 + shown.length,
+    more: hidden.map((entry) => ({ view: entry.view, title: entry.title }))
+  }];
+  return [...BUILT_IN_ENTRIES, TERMINAL_ENTRY, ...more, ...shown].map((entry) => ({ ...entry }));
 };
 
 // service/rail.ts

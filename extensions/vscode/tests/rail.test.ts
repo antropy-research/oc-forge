@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readOcForgeRailEntries } from '../../../adapters/openchamber/client/index.ts';
-import { BUILT_IN_ENTRIES, codiconIcon, declaredContainers, entryIdOf, entryOfView, railEntries, railSvg, TERMINAL_ENTRY } from '../src/rail.ts';
+import { BUILT_IN_ENTRIES, codiconIcon, declaredContainers, ENTRIES_MAX, entryIdOf, entryOfView, MORE_ENTRY_ID, railEntries, railSvg, TERMINAL_ENTRY } from '../src/rail.ts';
 import { installedFolders, Rail } from '../service/rail.ts';
 import type { VscodeServer } from '../service/server.ts';
 
@@ -12,9 +12,10 @@ const CIRCLE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><cir
 describe('VS Code\'s activity bar as rail entries', () => {
   test('the five built-ins in VS Code\'s order, then the extensions\', then the terminal at the bottom', () => {
     const entries = railEntries([{ extension: 'a', containers: [{ id: 'todoTree', title: 'Todo Tree', icon: 'media/todo.svg', svg: CIRCLE }] }]);
-    expect(entries.map((entry) => entry.id)).toEqual(['explorer', 'search', 'scm', 'debug', 'extensions', 'todo-tree', 'terminal']);
+    // As the host shows them (it orders them by `order`).
+    expect(readOcForgeRailEntries({ entries })!.map((entry) => entry.id)).toEqual(['explorer', 'search', 'scm', 'debug', 'extensions', 'todo-tree', 'terminal']);
     expect(entries.find((entry) => entry.id === 'todo-tree')).toMatchObject({ title: 'Todo Tree', icon: CIRCLE, view: 'workbench.view.extension.todoTree' });
-    expect(entries.at(-1)).toEqual({ ...TERMINAL_ENTRY });
+    expect(entries.find((entry) => entry.id === 'terminal')).toEqual({ ...TERMINAL_ENTRY });
     expect(entryOfView(entries, 'workbench.view.scm')).toBe('scm');
     expect(entryOfView(entries, 'workbench.view.extension.todoTree')).toBe('todo-tree');
   });
@@ -22,11 +23,38 @@ describe('VS Code\'s activity bar as rail entries', () => {
   test('every entry passes the host\'s own rules (adapters/openchamber/host/protocol.ts)', () => {
     const many = Array.from({ length: 40 }, (_, index) => ({ id: `view${index}`, title: `View ${index}`, icon: '$(beaker)' }));
     const entries = railEntries([{ extension: 'many', containers: many }]);
-    expect(entries).toHaveLength(32);
-    expect(entries.at(-1)!.id).toBe('terminal');
+    expect(entries).toHaveLength(46);
     const read = readOcForgeRailEntries({ entries });
-    expect(read!.map((entry) => entry.id)).toEqual(entries.map((entry) => entry.id));
+    expect(read).toHaveLength(entries.length);
+    expect(read!.at(-1)!.id).toBe('terminal');
     expect(read!.find((entry) => entry.id === 'terminal')!.zone).toBe('bottom');
+  });
+
+  test('past the host\'s room "Additional Views" opens the containers left; none is dropped', () => {
+    const containers = (count: number) => [{ extension: 'many', containers: Array.from({ length: count }, (_, index) => ({ id: `view${index}`, title: `View ${index}`, icon: '$(beaker)' })) }];
+    const covered = (entries: ReturnType<typeof railEntries>, count: number) => Array.from({ length: count }, (_, index) => `workbench.view.extension.view${index}`)
+      .every((view) => entryOfView(entries, view) !== null);
+    // 94 containers fill the host's 100 entries with the built-ins and the terminal; one more needs the overflow.
+    expect(railEntries(containers(94)).some((entry) => entry.id === MORE_ENTRY_ID)).toBe(false);
+    const entries = railEntries(containers(120));
+    expect(entries).toHaveLength(ENTRIES_MAX);
+    const more = entries.find((entry) => entry.id === MORE_ENTRY_ID)!;
+    expect(more).toMatchObject({ title: 'Additional Views (27)', icon: 'more' });
+    expect(more.more).toHaveLength(27);
+    expect(more.more![0]).toEqual({ view: 'workbench.view.extension.view93', title: 'View 93' });
+    expect(covered(entries, 120)).toBe(true);
+    expect(entryOfView(entries, 'workbench.view.extension.view119')).toBe(MORE_ENTRY_ID);
+    expect(entryOfView(entries, 'workbench.view.extension.view92')).toBe('view92');
+    // As the host shows them: the containers with room, then "Additional Views", then the terminal.
+    const shown = readOcForgeRailEntries({ entries })!.map((entry) => entry.id);
+    expect(shown).toHaveLength(ENTRIES_MAX);
+    expect(shown.slice(-3)).toEqual(['view92', MORE_ENTRY_ID, 'terminal']);
+    // For a host that takes fewer: within them, and a host that cut the list short keeps the built-ins and the terminal.
+    const fewer = railEntries(containers(40), 32);
+    expect(fewer).toHaveLength(32);
+    expect(fewer.find((entry) => entry.id === MORE_ENTRY_ID)!.more).toHaveLength(15);
+    expect(covered(fewer, 40)).toBe(true);
+    expect(entries.slice(0, 32).map((entry) => entry.id)).toEqual(expect.arrayContaining(['explorer', 'extensions', 'terminal', MORE_ENTRY_ID]));
   });
 
   test('entry ids are kebab-case, unique, and never a built-in\'s', () => {
@@ -64,7 +92,7 @@ describe('VS Code\'s activity bar as rail entries', () => {
     expect(codiconIcon('$(beaker)')).toBe('flask');
     expect(codiconIcon('$(sync~spin)')).toBe('apps');
     expect(codiconIcon('media/icon.png')).toBeNull();
-    const [entry] = railEntries([{ extension: 'a', containers: [{ id: 'png', title: 'PNG', icon: 'icon.png', svg: null }] }]).slice(5, 6);
+    const entry = railEntries([{ extension: 'a', containers: [{ id: 'png', title: 'PNG', icon: 'icon.png', svg: null }] }]).find((item) => item.id === 'png');
     expect(entry!.icon).toBe('apps');
     expect(BUILT_IN_ENTRIES.map((item) => item.icon)).toEqual(['file-copy-2', 'search', 'git-branch', 'bug', 'puzzle']);
   });

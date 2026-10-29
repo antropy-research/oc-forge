@@ -43,6 +43,7 @@ import {
   type LayoutService,
   type PaneCompositePartService,
   type Part,
+  type QuickInputService,
   type RemoteAgentService,
   type TerminalService,
   type ViewsService,
@@ -371,6 +372,30 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   const panes = services.get<PaneCompositePartService>('paneCompositePartService');
   let entries = await context.railEntries().catch(() => [] as RailEntry[]);
   let showing: string | null = null;
+  /** The container behind "Additional Views" shown last. */
+  let lastMore: string | null = null;
+  const open = async (entry: string, view: string, title: string): Promise<boolean> => {
+    applyRoleLayout('view', services, () => editorsOf(services).length > 0);
+    // An extension installed a moment ago registers its view container once its host has it.
+    for (let attempt = 0; attempt < 30 && showing === entry; attempt++) {
+      if (await views.openViewContainer(view, true).catch(() => null)) return true;
+      await later(500);
+    }
+    if (showing === entry) services.get<{ info(message: string): void }>('notificationService').info(`${title} isn't in this VS Code yet.`);
+    return false;
+  };
+  // "Additional Views", the containers the rail has no room for: the one shown last (or the first), and VS Code's
+  // quick pick of them all, as its activity bar lists them behind "…".
+  const openMore = async (entry: RailEntry): Promise<void> => {
+    const items = (entry.more ?? []).map((item) => ({ label: item.title, view: item.view }));
+    const current = items.find((item) => item.view === lastMore) ?? items[0];
+    if (!current || !(await open(entry.id, current.view, current.label)) || showing !== entry.id) return;
+    lastMore = current.view;
+    const picked = await services.get<QuickInputService>('quickInputService').pick(items, { title: entry.title, placeHolder: 'Open a view container', activeItem: current });
+    if (!picked || showing !== entry.id) return;
+    lastMore = picked.view;
+    await open(entry.id, picked.view, picked.label);
+  };
   const showEntry = async (entry: string): Promise<void> => {
     showing = entry;
     let target = entries.find((item) => item.id === entry);
@@ -378,20 +403,15 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
       entries = await context.railEntries().catch(() => entries);
       target = entries.find((item) => item.id === entry);
     }
-    if (!target?.view) return;
-    applyRoleLayout('view', services, () => editorsOf(services).length > 0);
-    // An extension installed a moment ago registers its view container once its host has it.
-    for (let attempt = 0; attempt < 30 && showing === entry; attempt++) {
-      if (await views.openViewContainer(target.view, true).catch(() => null)) return;
-      await later(500);
-    }
-    if (showing === entry) services.get<{ info(message: string): void }>('notificationService').info(`${target.title} isn't in this VS Code yet.`);
+    if (target?.more) await openMore(target);
+    else if (target?.view) await open(entry, target.view, target.title);
   };
   forge.rail.onEntry((entry) => void showEntry(entry));
   // VS Code switched view containers by itself (Ctrl+Shift+F, "Reveal in Explorer"): the rail follows.
   panes.onDidPaneCompositeOpen(({ composite, viewContainerLocation }) => {
     if (viewContainerLocation !== SIDEBAR) return;
     const entry = entryOfView(entries, composite.getId());
+    if (entry && entries.find((item) => item.id === entry)?.more) lastMore = composite.getId();
     if (!entry || entry === forge.rail.entry()) return;
     showing = entry;
     void forge.rail.setActive(entry).catch(() => undefined);
