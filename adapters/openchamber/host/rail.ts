@@ -40,12 +40,16 @@ export const currentOcForgeRail = (): OcForgeRailState => {
   return { entries, current };
 };
 
-/** The entry an extension's one panel shows: the last one chosen, else its first view. */
+/**
+ * The entry an extension's one panel shows: the last one chosen, else its first view. None while the one chosen is
+ * not in the list (it left, or the frame reported one the next poll brings): the frame still shows it until it
+ * reports what it shows next, so no other entry is lit for it, and a click on any entry shows that entry.
+ */
 export const ocForgeCurrentEntry = (guestId: string, rail: OcForgeRailState = currentOcForgeRail()): string | null => {
   const { current, entries } = rail;
   const views = sharedEntries(entries[guestId]);
   const chosen = current[guestId];
-  if (chosen && views.some((entry) => entry.id === chosen)) return chosen;
+  if (chosen) return views.some((entry) => entry.id === chosen) ? chosen : null;
   return views[0]?.id ?? null;
 };
 

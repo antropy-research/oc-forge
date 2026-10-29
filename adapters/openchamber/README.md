@@ -100,7 +100,12 @@ entry leaves the list.
 Clicking a view entry shows the panel on it (the frame gets `rail-entry`);
 clicking the lit one closes the panel, as for any surface. The digit shortcuts
 (`mod+alt+<n>`) select entries the same way. A frame that changes views by
-itself reports it with `rail.setActive(entry)` so the highlight follows.
+itself reports it with `rail.setActive(entry)` so the highlight follows. While
+the entry the panel shows is not in the list (it left it, or the frame reported
+one the next poll brings), the rail lights none of the panel's entries and a
+frame's `hello` names none: the frame shows what it showed until it reports
+what it shows next, and a click on any entry, the first one too, shows that
+entry rather than closing the panel.
 
 ### Wire protocol
 

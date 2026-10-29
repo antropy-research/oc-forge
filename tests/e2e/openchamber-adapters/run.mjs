@@ -226,6 +226,23 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   check(`[${size}] R1 a frame that switches by itself moves the highlight`, await until(async () => await pressed(page, `plugin:${TEST}--beta`)));
   await page.locator(`[data-context-surface="plugin:${TEST}--beta"]`).click();
   check(`[${size}] R1 the lit entry closes the panel again`, await until(async () => !(await rail(page)).some((entry) => entry.id.startsWith(`plugin:${TEST}`) && entry.pressed)));
+  // The entry the panel shows leaves the list (its container uninstalled, or moved behind another entry). The frame
+  // shows it until it says what it shows next, so the rail lights none of the panel's entries meanwhile, and a click
+  // on the first one shows that one instead of closing the panel.
+  await page.locator(`[data-context-surface="plugin:${TEST}--alpha"]`).click();
+  await until(async () => (await text(right, '#entry')) === 'alpha');
+  await setEntries(request, base, ENTRIES.filter((entry) => entry.id !== 'alpha'));
+  await until(async () => !(await rail(page)).some((entry) => entry.id === `plugin:${TEST}--alpha`), 10_000);
+  const litViews = (await rail(page)).filter((entry) => entry.pressed && entry.id.startsWith(`plugin:${TEST}--`)).map((entry) => entry.id.slice(`plugin:${TEST}--`.length));
+  const stillShown = await text(right, '#entry');
+  check(`[${size}] R1 while the entry shown has left the list, none of the panel's entries is lit`, litViews.length === 0 && stillShown === 'alpha',
+    `lit: ${litViews.join(' ') || 'none'}; the frame shows ${stillShown}`);
+  await shot(page, `${size}-r1-left`);
+  await page.locator(`[data-context-surface="plugin:${TEST}--beta"]`).click();
+  check(`[${size}] R1 then a click on the first entry shows it, and the panel stays open`,
+    await until(async () => (await text(right, '#entry')) === 'beta' && await pressed(page, `plugin:${TEST}--beta`)), `the frame shows ${await text(right, '#entry')}`);
+  await page.locator(`[data-context-surface="plugin:${TEST}--beta"]`).click();
+  await until(async () => !(await pressed(page, `plugin:${TEST}--beta`)));
   const changed = ENTRIES.filter((entry) => entry.id !== 'beta').concat([{ id: 'delta', title: 'Delta view', icon: 'bug', order: 5 }]);
   await setEntries(request, base, changed);
   const started = Date.now();
