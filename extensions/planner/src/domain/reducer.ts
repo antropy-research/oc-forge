@@ -334,10 +334,23 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       return;
     case 'gtask.kept': {
       const key = googleTaskKey(event.account, event.taskId);
-      const { starred, ...patch } = event.patch;
+      const { starred, busy, visibility, ...patch } = event.patch;
       const before = state.googleTasks[key] ?? { account: event.account, listId: event.listId, taskId: event.taskId, time: null, duration: null, deadline: null, repeat: null, starredAt: null, updatedAt: event.at };
       const starredAt = starred === undefined ? before.starredAt : starred ? before.starredAt ?? event.at : null;
       const next: GoogleTaskKept = { ...before, ...patch, listId: event.listId, starredAt, updatedAt: event.at };
+      if (busy !== undefined) {
+        if (busy) next.busy = true;
+        else delete next.busy;
+      }
+      if (visibility !== undefined) {
+        if (visibility === 'default') delete next.visibility;
+        else next.visibility = visibility;
+      }
+      // As in Google Calendar, a task without a time is free and private: availability and visibility go with the time.
+      if (next.time === null) {
+        delete next.busy;
+        delete next.visibility;
+      }
       // Nothing kept any more: the task is Google's alone again.
       if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null) delete state.googleTasks[key];
       else state.googleTasks[key] = next;

@@ -8,7 +8,7 @@ import { compactRange, longDay, scheduleDays, shortDay, weekdayShort } from '../
 import { usePlanner, useView } from '../../lib/context.ts';
 import { useUi } from '../../lib/ui.ts';
 import { anchorOf, calendarUi, popoverKind, searchEvents, useCalendarUi } from '../../lib/gcal.ts';
-import { answerClass, calendarItems, deadlinePassed, eventColor, isTaskEvent, itemKey, plannedTask, taskClass, taskEventLabel } from './items.ts';
+import { answerClass, calendarItems, deadlinePassed, eventColor, eventLabel, isTaskEvent, itemKey, plannedTask, taskClass, taskEventLabel } from './items.ts';
 import { Icon } from './Icon.tsx';
 
 const range = (start: string, end: string, zone: string, day: DateKey): string => {
@@ -56,14 +56,15 @@ export const ScheduleView = ({ from, to, events, onDay }: { from: DateKey; to: D
                   <button
                     class={`schedule-item${taskClass(event)}${task?.completed ? ' is-done' : ''}${deadlinePassed(event, view.state, view.today) ? ' is-overdue' : ''}${answerClass(event)}`}
                     style={{ '--item-color': eventColor(event, view.state.calendars) }}
-                    aria-label={task || event.upcoming ? taskEventLabel(event, view.state, view.today, zone) : `${event.title}, ${event.allDay ? 'all day' : range(event.start, event.end, zone, day.date)}`}
+                    aria-label={task || event.upcoming ? taskEventLabel(event, view.state, view.today, zone) : event.pendingTasks ? eventLabel(event, zone) : `${event.title}, ${event.allDay ? 'all day' : range(event.start, event.end, zone, day.date)}`}
                     onClick={(click) => calendarUi.open({ kind: popoverKind(event), event, anchor: anchorOf(click.currentTarget) })}
                   >
-                    <span class="schedule-time">{event.taskDeadline ? 'Deadline' : event.allDay ? 'All day' : range(event.start, event.end, zone, day.date)}</span>
+                    <span class="schedule-time">{event.taskDeadline ? 'Deadline' : event.pendingTasks ? 'Pending' : event.allDay ? 'All day' : range(event.start, event.end, zone, day.date)}</span>
                     <span class="chip-dot" aria-hidden="true" />
                     <span class="schedule-title">
                       {event.taskDeadline ? '⚑ ' : task ? (task.completed ? '☑ ' : '☐ ') : ''}
                       {event.upcoming && <span class="task-repeat" aria-hidden="true"><Icon name="repeat" size={12} /></span>}
+                      {event.pendingTasks && <span class="task-pending" aria-hidden="true"><Icon name="taskAlt" size={14} /></span>}
                       {event.title}
                     </span>
                     {event.location && <span class="schedule-where muted">{event.location}</span>}

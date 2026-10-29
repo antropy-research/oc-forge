@@ -1,6 +1,7 @@
 // A Google task's editor over the calendar, as Google Calendar's task details
 // have one: the Tasks view's own form (title, details, date and time,
-// deadline, repeat, star) and the task's list, in a dialog. The calendar stays
+// deadline, repeat, star, advanced settings) and the task's list, in a dialog
+// (a repeating task's availability and visibility are its series'). The calendar stays
 // on the view and date it was on. A repeating task asks This task or All
 // tasks; opened from an upcoming occurrence it edits all of its series, which
 // the form shows as the series has it, or (This task) that occurrence alone,
@@ -17,6 +18,8 @@ import { Icon } from './Icon.tsx';
 
 /** Why one task of a series does not change the repeat: its series has it. */
 const SERIES_REPEATS = 'This task alone: its series repeats as before (Edit → All tasks changes it)';
+/** Why one task of a series does not change its availability or visibility: Google Calendar keeps one for the whole series. */
+const SERIES_ADVANCED = "A repeating task's availability and visibility are its series' (Edit → All tasks changes them)";
 
 export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
   const { google } = usePlanner();
@@ -40,10 +43,12 @@ export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
   const template = target.series && kept ? seriesTemplate(kept, item) : null;
   // One upcoming occurrence: as it is, its series' values with its own changes.
   const values = occurrence ? upcomingValues(occurrence) : null;
+  // Availability and visibility are the series' template's, as it makes each task.
+  const advanced = (from: { busy?: true; visibility?: 'public' | 'private' }) => ({ busy: from.busy, visibility: from.visibility });
   const shown = values && kept
-    ? { item: { ...item, title: values.title, notes: values.notes, due: values.due }, kept: { ...kept, time: values.time, duration: values.duration, deadline: values.deadline } }
+    ? { item: { ...item, title: values.title, notes: values.notes, due: values.due }, kept: { ...kept, time: values.time, duration: values.duration, deadline: values.deadline, ...advanced(occurrence!.template) } }
     : template && kept
-      ? { item: { ...item, title: template.title, notes: template.notes }, kept: { ...kept, time: template.time, duration: template.duration, deadline: template.deadline !== null && item.due ? addDays(item.due, template.deadline) : null } }
+      ? { item: { ...item, title: template.title, notes: template.notes }, kept: { ...kept, time: template.time, duration: template.duration, deadline: template.deadline !== null && item.due ? addDays(item.due, template.deadline) : null, ...advanced(template) } }
       : { item, kept };
   const title = target.series ? 'Edit all tasks' : 'Edit task';
   return (
@@ -61,6 +66,7 @@ export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
           depth={0}
           canRepeat={canRepeat}
           repeatNote={occurrence ? SERIES_REPEATS : block}
+          advancedNote={occurrence ? SERIES_ADVANCED : null}
           star={!occurrence}
           lists={{ lists: gv.lists.filter((list) => list.account === item.account), locked: kept?.repeat ? REPEATING_STAYS : null }}
           onCancel={close}

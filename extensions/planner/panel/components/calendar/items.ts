@@ -8,6 +8,7 @@ import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
 import { compactClock, compactRange, eventSpan, longDay, shortDay, type RowItem } from '../../../src/domain/gcalendar.ts';
 import { GOOGLE_TASKS_CALENDAR, taskForGoogleTask } from '../../../src/domain/google.ts';
 import { keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
+import { PENDING_DAYS } from '../../../src/domain/gtaskPending.ts';
 import { describeRecurrence } from '../../../src/domain/rrule.ts';
 
 /** Google Calendar's color for tasks. */
@@ -28,8 +29,9 @@ export const isMovableTask = (event: CalendarEvent): boolean => isTaskEvent(even
 export const eventColor = (event: CalendarEvent, calendars: Readonly<Record<string, CalendarSubscription>>): string =>
   event.calendarId === GOOGLE_TASKS_CALENDAR ? GOOGLE_TASKS_COLOR : event.google?.color ?? calendars[event.calendarId]?.color ?? '#868e96';
 
-/** How a Google task item shows: the task, its deadline, or an upcoming occurrence of its series ('' for anything else), as class names. */
-export const taskClass = (event: CalendarEvent): string => (event.upcoming ? ' is-task is-upcoming' : !isTaskEvent(event) ? '' : event.taskDeadline ? ' is-task is-deadline' : ' is-task');
+/** How a Google task item shows: the task, its deadline, an upcoming occurrence of its series, or the pending tasks ('' for anything else), as class names. */
+export const taskClass = (event: CalendarEvent): string =>
+  event.pendingTasks ? ' is-task is-pending' : event.upcoming ? ' is-task is-upcoming' : !isTaskEvent(event) ? '' : event.taskDeadline ? ' is-task is-deadline' : ' is-task';
 
 /** Dark ink on light fills, white on the rest, as Google Calendar does. */
 export const inkOn = (hex: string): string => {
@@ -53,8 +55,9 @@ export const answerClass = (event: CalendarEvent): string => {
   }
 };
 
-/** "Quarter planning, 2pm – 3pm, Monday, October 26" */
+/** "Quarter planning, 2pm – 3pm, Monday, October 26"; "3 pending tasks, from the past 365 days" */
 export const eventLabel = (event: CalendarEvent, zone: string): string => {
+  if (event.pendingTasks) return `${event.title}, from the past ${PENDING_DAYS} days`;
   const start = zonedDateMinutes(event.start, zone);
   const end = zonedDateMinutes(event.end, zone);
   if (event.allDay) return `${event.title}, all day, ${longDay(start.date)}`;

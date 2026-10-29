@@ -119,7 +119,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
   // Calendar events: masters and singles by calendar; exceptions by occurrence id.
   const calendars = new Map(world.calendars.map((calendar) => [calendar.id, { ...calendar, events: new Map((world.events[calendar.id] ?? []).map((event) => [event.id, structuredClone(event)])), exceptions: new Map() }]));
   const lists = world.lists.map((list) => ({ ...list }));
-  const tasks = new Map(world.lists.map((list) => [list.id, (world.tasks[list.id] ?? []).map((task) => ({ ...structuredClone(task), updated: new Date().toISOString() }))]));
+  // A world's task may say when it was last changed (`updated`); else now.
+  const tasks = new Map(world.lists.map((list) => [list.id, (world.tasks[list.id] ?? []).map((task) => ({ updated: new Date().toISOString(), ...structuredClone(task) }))]));
   const fail = { next: null };
 
   // Google keeps an order among siblings; positions are 20-digit numbers, rewritten here on each change.

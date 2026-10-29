@@ -13,8 +13,10 @@ import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from
 import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
 import { googleWriteRoute } from './googleRoutes.ts';
+import { TaskNotifications } from './taskNotifications.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { deadlineGroups } from '../src/domain/gtaskKept.ts';
+import { pendingRange, pendingTasks } from '../src/domain/gtaskPending.ts';
 import { addDays, daysBetween, instantAt, isDateKey, todayIn } from '../src/domain/dates.ts';
 import { CommandFiles, OpenCodeInfo, agentRoute, opencodeConfigDir } from './agents.ts';
 
@@ -48,6 +50,13 @@ const googleData = new GoogleData(google);
 const googleCalendars = new GoogleCalendars(googleData);
 const googleDueTasks = new GoogleDueTasks(googleData);
 const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleCalendars.forget() });
+const taskAccounts = async (): Promise<string[]> => (await google.status()).accounts.filter((account) => account.features.includes('tasks')).map((account) => account.email);
+// The task notifications given so far stay on this machine, beside the data, never in its synced repository.
+const taskNotifications = new TaskNotifications(join(dirname(dir), 'task-notifications.json'), () => planner.state, {
+  accounts: taskAccounts,
+  due: (accounts, date) => googleDueTasks.read(accounts, date, date, false),
+  byIds: (groups) => googleDueTasks.byIds(groups, false),
+});
 // Agents to assign tasks to: one OpenCode command per preset, in OpenCode's own config folder.
 const opencodeConfig = opencodeConfigDir();
 const opencodeInfo = new OpenCodeInfo();
@@ -150,6 +159,17 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     const list = url.searchParams.get('list');
     if (!isEmail(email) || !isGoogleId(list)) return { status: 400, body: { error: 'account and list are required' } };
     return ok({ tasks: await googleData.tasks(email, list) });
+  }
+  if (path === '/google/tasks/pending' && req.method === 'GET') {
+    // Google Calendar's Pending tasks: the open tasks of every list dated in the past 365 days, latest first.
+    const today = todayIn(planner.state.settings.timezone ?? 'UTC');
+    const { from, to } = pendingRange(today);
+    const read = await googleDueTasks.read(await taskAccounts(), from, to, url.searchParams.get('refresh') === '1', true);
+    return ok({ tasks: pendingTasks(read.items, today), today, from, to, errors: read.errors });
+  }
+  if (path === '/google/tasks/notifications' && req.method === 'POST') {
+    // The task notifications come by now that no Planner surface has had yet; each is given once.
+    return ok(await taskNotifications.take());
   }
   if (path === '/google/tasks/linked' && req.method === 'POST') {
     // The tasks behind linked Planner tasks, to bring those up to date.
@@ -388,13 +408,13 @@ const server = http.createServer(async (req, res) => {
       const timeMin = instantAt(from, 0, zone);
       const timeMax = instantAt(addDays(to, 1), 0, zone);
       // Google tasks due in the range show on their day, as in Google Calendar, planned or not (the panel shows the link).
-      const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes('tasks')).map((account) => account.email) : [];
+      const shownAccounts = planner.state.settings.googleTasksOnCalendar ? await taskAccounts() : [];
       const [feed, fromGoogle, due, deadlines] = await Promise.all([
         feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
         googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
-        googleDueTasks.read(taskAccounts, from, to, refresh),
+        googleDueTasks.read(shownAccounts, from, to, refresh),
         // Tasks whose deadline (kept in the Planner) falls in the range show it there, as Google Calendar does, dated or not.
-        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, taskAccounts, from, to), refresh),
+        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, shownAccounts, from, to), refresh),
       ]);
       const dueEvents = due.items.flatMap((item) => (item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []));
       json(res, 200, {

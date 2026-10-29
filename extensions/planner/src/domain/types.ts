@@ -81,8 +81,18 @@ export interface GoogleTaskKept {
   repeat: { rule: string; seriesId: string; index: number; next: string | null; on?: DateKey; template?: GoogleTaskTemplate; exceptions?: Record<DateKey, GoogleTaskException> } | null;
   /** When it was starred; null when it is not. */
   starredAt: string | null;
+  /**
+   * Google Calendar's availability for a task with a time: Busy (absent: Free,
+   * as Google Calendar makes tasks). The Planner plans other work around it.
+   */
+  busy?: true;
+  /** Google Calendar's visibility for a task with a time; absent: the calendar's default. */
+  visibility?: 'public' | 'private';
   updatedAt: string;
 }
+
+/** Google Calendar's visibility choices for an event or a task with a time. */
+export type TaskVisibility = 'default' | 'public' | 'private';
 
 /**
  * What each next occurrence of a repeating Google task is made from, as
@@ -100,6 +110,9 @@ export interface GoogleTaskTemplate {
   deadline: number | null;
   /** The day the schedule counts from. */
   start: DateKey;
+  /** Busy and visibility are the series', as Google Calendar keeps one for all of a series. */
+  busy?: true;
+  visibility?: 'public' | 'private';
 }
 
 /**
@@ -417,6 +430,11 @@ export interface Settings {
   /** Show Google tasks that are due on the calendar, as Google Calendar does, until they are planned. */
   googleTasksOnCalendar: boolean;
   /**
+   * Google Calendar's task notifications, from the Planner: at a task's time (9 AM for one
+   * without), and at 9 AM on its deadline's day, while a Planner surface is open.
+   */
+  googleTaskNotifications: boolean;
+  /**
    * Google accounts whose own calendar was shown when the Planner first saw them, as Google
    * Calendar shows yours from the start; once per account, so hiding it later stays hidden.
    */
@@ -473,6 +491,7 @@ export const DEFAULT_SETTINGS: Settings = {
   googleTasksImportCompletion: true,
   googleTasksDueFromPlan: true,
   googleTasksOnCalendar: true,
+  googleTaskNotifications: true,
   googleCalendarsIntroduced: [],
   agentPresets: [],
 };

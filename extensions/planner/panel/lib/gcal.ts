@@ -29,10 +29,12 @@ export type CalendarPopover =
   | { kind: 'task'; event: CalendarEvent; anchor: Anchor }
   /** An upcoming occurrence of a repeating Google task: its series. */
   | { kind: 'upcoming'; event: CalendarEvent; anchor: Anchor }
+  /** Google Calendar's Pending tasks: the open tasks of the past 365 days. */
+  | { kind: 'pending'; event: CalendarEvent; anchor: Anchor }
   | { kind: 'day'; date: DateKey; anchor: Anchor; events: CalendarEvent[] };
 
-/** What a click on a calendar item opens: an event's details, a Google task's, or a series'. */
-export const popoverKind = (event: CalendarEvent): 'event' | 'task' | 'upcoming' => (event.upcoming ? 'upcoming' : event.googleTask ? 'task' : 'event');
+/** What a click on a calendar item opens: an event's details, a Google task's, a series', or the pending tasks. */
+export const popoverKind = (event: CalendarEvent): 'event' | 'task' | 'upcoming' | 'pending' => (event.pendingTasks ? 'pending' : event.upcoming ? 'upcoming' : event.googleTask ? 'task' : 'event');
 
 /**
  * A Google task edited over the calendar, in the Tasks view's form; `series`:

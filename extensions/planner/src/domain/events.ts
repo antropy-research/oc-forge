@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type TaskVisibility, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 import { parseRRule } from './rrule.ts';
 import { linearDisplayProblem } from './linearDisplay.ts';
@@ -86,8 +86,11 @@ export type EventBody =
   | { type: 'gtask.moved'; account: string; taskId: string; listId: string; newTaskId?: string }
   | { type: 'gtask.dropped'; account: string; taskId: string };
 
-/** What a user sets on a Google task that the Planner keeps (Google Tasks' API cannot): `starred` stars or unstars it. */
-export type GoogleTaskKeptPatch = Partial<Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline' | 'repeat'> & { starred: boolean }>;
+/**
+ * What a user sets on a Google task that the Planner keeps (Google Tasks' API cannot): `starred` stars or unstars it;
+ * `busy` false makes it Free again, `visibility` 'default' gives it the calendar's default again.
+ */
+export type GoogleTaskKeptPatch = Partial<Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline' | 'repeat'> & { starred: boolean; busy: boolean; visibility: TaskVisibility }>;
 
 export type EventType = EventBody['type'];
 
@@ -143,7 +146,7 @@ export const GOOGLE_NOTES_MAX = 8192;
 
 const isGoogleTaskId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024;
 
-const GTASK_TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'start'];
+const GTASK_TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'start', 'busy', 'visibility'];
 
 /** A repeating Google task's template: Google's title and details, and what the Planner keeps, for each next occurrence. */
 const validateGtaskTemplate = (value: unknown): string | null => {
@@ -154,6 +157,8 @@ const validateGtaskTemplate = (value: unknown): string | null => {
   if (!(value.duration === null || (Number.isInteger(value.duration) && (value.duration as number) >= 5 && (value.duration as number) <= 24 * 60))) return 'template duration must be 5 to 1440 minutes, or null';
   if (!(value.deadline === null || (Number.isInteger(value.deadline) && Math.abs(value.deadline as number) <= 3660))) return 'template deadline must be days from the date, or null';
   if (!isDateKey(value.start)) return 'template start must be a date';
+  if (value.busy !== undefined && value.busy !== true) return 'template busy is true, or left out (free)';
+  if (value.visibility !== undefined && value.visibility !== 'public' && value.visibility !== 'private') return 'template visibility is public or private, or left out (the default)';
   return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? 'template has an unknown field' : null;
 };
 
@@ -177,14 +182,15 @@ const validateGtaskException = (value: unknown): string | null => {
   return null;
 };
 
-/** What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule (with its series' template), a star. */
+/** What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule (with its series' template), a star, Busy, a visibility. */
 const validateKeptPatch = (patch: unknown): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'time' && !(value === null || (Number.isInteger(value) && (value as number) >= 0 && (value as number) < 24 * 60))) return 'time must be minutes after midnight, or null';
     else if (key === 'duration' && !(value === null || (Number.isInteger(value) && (value as number) >= 5 && (value as number) <= 24 * 60))) return 'duration must be 5 to 1440 minutes, or null';
     else if (key === 'deadline' && !(value === null || isDateKey(value))) return 'deadline must be a date or null';
-    else if (key === 'starred' && typeof value !== 'boolean') return 'starred must be true or false';
+    else if ((key === 'starred' || key === 'busy') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if (key === 'visibility' && value !== 'default' && value !== 'public' && value !== 'private') return 'visibility must be default, public or private';
     else if (key === 'repeat') {
       if (value === null) continue;
       if (!isRecord(value) || typeof value.rule !== 'string' || value.rule.length > 500 || !parseRRule(value.rule)) return 'repeat needs an RRULE';
@@ -205,7 +211,7 @@ const validateKeptPatch = (patch: unknown): string | null => {
         }
       }
       if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next', 'on', 'template', 'exceptions'].includes(field))) return 'repeat has an unknown field';
-    } else if (!['time', 'duration', 'deadline', 'starred', 'repeat'].includes(key)) return `unknown field ${key}`;
+    } else if (!['time', 'duration', 'deadline', 'starred', 'repeat', 'busy', 'visibility'].includes(key)) return `unknown field ${key}`;
   }
   return null;
 };
@@ -273,11 +279,11 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if ((key === 'pomodoroMinutes' || key === 'breakMinutes') && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 180)) return `${key} must be 1-180`;
     else if (key === 'googleTimebox' && !(value === null || isGoogleCalendarRef(value))) return 'googleTimebox must be a Google account and calendar, or null';
     else if (key === 'googleTasksOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'googleTasksOnComplete must be ask, complete or nothing';
-    else if ((key === 'googleTasksImportCompletion' || key === 'googleTasksDueFromPlan' || key === 'googleTasksOnCalendar') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if ((key === 'googleTasksImportCompletion' || key === 'googleTasksDueFromPlan' || key === 'googleTasksOnCalendar' || key === 'googleTaskNotifications') && typeof value !== 'boolean') return `${key} must be true or false`;
     else if (key === 'googleCalendarsIntroduced' && !(Array.isArray(value) && value.length <= 50 && value.every((email) => typeof email === 'string' && email.length <= 254 && email.includes('@')))) return 'googleCalendarsIntroduced must be at most 50 email addresses';
     else if (key === 'agentPresets' && !(Array.isArray(value) && value.length <= 30 && value.every(isAgentPreset) && new Set(value.map((preset: { id: string }) => preset.id)).size === value.length)) return 'agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null';
     else if (key === 'agentPresets') continue;
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar', 'googleCalendarsIntroduced'].includes(key)) return `unknown setting ${key}`;
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar', 'googleTaskNotifications', 'googleCalendarsIntroduced'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };

@@ -384,6 +384,15 @@ const GoogleSettings = () => {
             Show Google tasks on the calendar on their due day, as Google Calendar does (planned ones too, marked)
             <input type="checkbox" checked={settings.googleTasksOnCalendar} onChange={(event) => update({ googleTasksOnCalendar: event.currentTarget.checked })} />
           </label>
+          <label>
+            Task notifications, as Google Calendar gives them: at a task's time (9 AM for one without), and at 9 AM on its deadline's day
+            <input type="checkbox" checked={settings.googleTaskNotifications} onChange={(event) => update({ googleTaskNotifications: event.currentTarget.checked })} />
+          </label>
+          <p class="hint">
+            The Planner gives these itself, as OpenChamber notifications, while one of its surfaces is open (the page, the rail panel or its Work Status section), each once,
+            and one missed meanwhile when one opens the same day: Google Tasks gets no time or deadline from the Planner, so Google's own apps notify a task the Planner
+            times only at 9 AM on its date, and never for its deadline. The notifications given are kept on this machine, outside the synced plan.
+          </p>
         </>
       )}
     </fieldset>

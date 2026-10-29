@@ -3,15 +3,16 @@
 // order with subtasks one level in, drag to reorder, nest or move to another
 // list, edit in place, and a "Completed" section. A task has Google's date and
 // what Google Tasks' API does not let other apps set, kept in the Planner and
-// said so where it is set: a time (and an end), a deadline, a repeat and a
-// star. Each task shows the Planner task planning it, and can be planned from here.
+// said so where it is set: a time (and an end), a deadline, a repeat, a star,
+// and a timed task's availability and visibility. Each task shows the Planner
+// task planning it, and can be planned from here.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { DateKey, GoogleTaskKept } from '../../src/domain/types.ts';
+import type { DateKey, GoogleTaskKept, TaskVisibility } from '../../src/domain/types.ts';
 import { addDays, isDateKey } from '../../src/domain/dates.ts';
 import { shortDay, weekdayShort } from '../../src/domain/gcalendar.ts';
 import { describeRecurrence } from '../../src/domain/rrule.ts';
 import { taskForGoogleTask, type GoogleTaskItem, type GoogleTaskList } from '../../src/domain/google.ts';
-import { KEPT_HINT, TASKS_API_REFERENCE, keptFor, keptTimeLabel, starredKept, taskRepeatPresets } from '../../src/domain/gtaskKept.ts';
+import { KEPT_HINT, TASKS_API_REFERENCE, VISIBILITY_LABELS, keptFor, keptTimeLabel, starredKept, taskRepeatPresets, visibilityOf } from '../../src/domain/gtaskKept.ts';
 import { completedItems, dateGroups, dropTarget, indentTarget, moveDownTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
@@ -97,18 +98,27 @@ const placed = (place: MenuPlace | null) =>
       }
     : undefined;
 
+/** Why a task without a time has no availability or visibility to set, as Google Calendar has it. */
+export const UNTIMED_ADVANCED = 'A task without a time is free and private, as in Google Calendar: give it a time to set these';
+/** What a task's availability and visibility do here, and what they cannot do in Google. */
+export const ADVANCED_NOTE =
+  'Busy: the Planner plans other work around it (auto-schedule, playlist times). Visibility goes to the working sessions the Planner writes to Google Calendar for it; Google Calendar itself shows others no task the Planner times, as it gets no time for it and keeps a task without one private';
+
 /**
- * Title, details, date and time (or all day), deadline, repeat and star of a
- * task, edited in place, as Google Tasks' task form (and, over the calendar,
+ * Title, details, date and time (or all day), deadline, repeat, star and
+ * advanced settings (availability and visibility) of a task, edited in place,
+ * as Google Tasks' task form and Google Calendar's (and, over the calendar,
  * its list). A new task's form stays open after Enter for the next one, as
  * Google Tasks keeps adding. Subtasks, and tasks with subtasks, do not repeat,
  * nor does a repeating task take subtasks (nor in Google Tasks): those
- * controls are unavailable, with the reason. One upcoming task of a series,
- * edited alone, shows its series' repeat there, unavailable, and no star (it
- * is no Google task yet). A save Google refuses leaves the form open with
- * what was typed and why, so Save can try again.
+ * controls are unavailable, with the reason. As in Google Calendar, only a
+ * task with a time has availability and visibility. One upcoming task of a
+ * series, edited alone, shows its series' repeat, availability and visibility
+ * there, unavailable, and no star (it is no Google task yet). A save Google
+ * refuses leaves the form open with what was typed and why, so Save can try
+ * again.
  */
-export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star = true, lists, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false }: {
+export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star = true, lists, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false, advancedNote = null }: {
   item: Partial<GoogleTaskItem>;
   kept: GoogleTaskKept | null;
   depth: 0 | 1;
@@ -126,6 +136,8 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   /** Why it takes no subtasks, on the unavailable "Add subtask". */
   subtaskNote?: string | null;
   keepOpen?: boolean;
+  /** Why its availability and visibility cannot change here (one task of a series: they are the series'). */
+  advancedNote?: string | null;
 }) => {
   const { client } = usePlanner();
   const view = useView();
@@ -138,6 +150,9 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   const [deadline, setDeadline] = useState<DateKey | null>(kept?.deadline ?? null);
   const [rule, setRule] = useState<string | null>(kept?.repeat?.rule ?? null);
   const [starred, setStarred] = useState(Boolean(kept?.starredAt));
+  const [busy, setBusy] = useState(Boolean(kept?.busy));
+  const [visibility, setVisibility] = useState<TaskVisibility>(visibilityOf(kept));
+  const [advanced, setAdvanced] = useState(Boolean(kept?.busy || kept?.visibility));
   const [listId, setListId] = useState(item.listId ?? '');
   const [custom, setCustom] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -162,8 +177,9 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
     if (!title.trim()) return onCancel();
     setSaving(true);
     setProblem(null);
-    // Google Calendar's repeating tasks have no end time.
-    onSave({ title: title.trim(), notes, due, kept: { time: due ? time : null, duration: due && time !== null && !rule ? duration : null, deadline, rule: due && canRepeat ? rule : null } }, starred, listId || undefined).then(
+    // Google Calendar's repeating tasks have no end time; availability and visibility come with a time.
+    const timed = Boolean(due) && time !== null;
+    onSave({ title: title.trim(), notes, due, kept: { time: due ? time : null, duration: due && time !== null && !rule ? duration : null, deadline, rule: due && canRepeat ? rule : null, busy: timed && busy, visibility: timed ? visibility : 'default' } }, starred, listId || undefined).then(
       () => {
         if (!mounted.current) return;
         setSaving(false);
@@ -176,6 +192,9 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
         setDeadline(null);
         setRule(null);
         setStarred(false);
+        setBusy(false);
+        setVisibility('default');
+        setAdvanced(false);
         titleRef.current?.focus();
       },
       (error: unknown) => {
@@ -293,6 +312,23 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
           </button>
         </div>
       )}
+      <div class="gt-form-row gt-form-advanced">
+        <Icon name="tune" size={16} />
+        <button class="link" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>Advanced settings</button>
+        {!advanced && (busy || visibility !== 'default') && due && time !== null && <span class="gt-form-note">{busy ? 'Busy' : 'Free'} · {VISIBILITY_LABELS[visibility]}</span>}
+      </div>
+      {advanced && (
+        <div class="gt-form-row gt-form-advanced-fields" role="group" aria-label="Advanced settings">
+          <select aria-label="Availability" value={due && time !== null && busy ? 'busy' : 'free'} disabled={!due || time === null || Boolean(advancedNote)} title={advancedNote ?? (!due || time === null ? UNTIMED_ADVANCED : 'Show me as busy or free')} onChange={(event) => setBusy(event.currentTarget.value === 'busy')}>
+            <option value="free">Free</option>
+            <option value="busy">Busy</option>
+          </select>
+          <select aria-label="Visibility" value={due && time !== null ? visibility : 'default'} disabled={!due || time === null || Boolean(advancedNote)} title={advancedNote ?? (!due || time === null ? UNTIMED_ADVANCED : 'Who sees its details')} onChange={(event) => setVisibility(event.currentTarget.value as TaskVisibility)}>
+            {(['default', 'public', 'private'] as const).map((choice) => <option key={choice} value={choice}>{VISIBILITY_LABELS[choice]}</option>)}
+          </select>
+          <span class="gt-form-note">{advancedNote ?? (!due || time === null ? UNTIMED_ADVANCED : ADVANCED_NOTE)}.</span>
+        </div>
+      )}
       <KeptHint />
       {problem && <p class="danger gt-form-problem" role="alert">{problem}</p>}
       <div class="gt-form-row gt-form-actions">
@@ -378,12 +414,14 @@ export const useTaskSave = () => {
   const view = useView();
   return async (item: GoogleTaskItem, fields: TaskFields, starred: boolean, scope?: RepeatScope, listId?: string): Promise<boolean> => {
     const kept = keptFor(view.state, item);
+    // Availability and visibility are a series' own: changing them is for all its tasks, as a new rule is.
+    const advanced = (fields.kept.time !== null && (fields.kept.busy ?? Boolean(kept?.busy))) !== Boolean(kept?.busy) || (fields.kept.time !== null ? fields.kept.visibility ?? visibilityOf(kept) : 'default') !== visibilityOf(kept);
     const changed =
-      fields.title !== item.title || fields.notes !== item.notes || fields.due !== item.due || fields.kept.time !== (kept?.time ?? null) || fields.kept.duration !== (kept?.duration ?? null) || fields.kept.deadline !== (kept?.deadline ?? null) || fields.kept.rule !== (kept?.repeat?.rule ?? null);
+      fields.title !== item.title || fields.notes !== item.notes || fields.due !== item.due || fields.kept.time !== (kept?.time ?? null) || fields.kept.duration !== (kept?.duration ?? null) || fields.kept.deadline !== (kept?.deadline ?? null) || fields.kept.rule !== (kept?.repeat?.rule ?? null) || advanced;
     const star = Boolean(kept?.starredAt) !== starred ? starred : undefined;
     const moveTo = listId && listId !== item.listId ? listId : undefined;
     if (changed) {
-      const chosen = scope ?? (kept?.repeat ? await askRepeat('edit', fields.kept.rule !== kept.repeat.rule) : 'this');
+      const chosen = scope ?? (kept?.repeat ? await askRepeat('edit', fields.kept.rule !== kept.repeat.rule || advanced) : 'this');
       if (!chosen) return false;
       await google.saveListTask(item, fields, chosen, { starred: star, listId: moveTo });
       return true;
@@ -519,7 +557,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
   };
   /** A new task from its form, which shows Google's refusal (and keeps what was typed). */
   const addTask = (fields: TaskFields, starred: boolean, where: { parent: string | null; previous: string | null }) =>
-    google.addListTask(list.account, list.id, { title: fields.title, notes: fields.notes, due: fields.due, parent: where.parent, previous: where.previous }, { time: fields.kept.time, duration: fields.kept.duration, deadline: fields.kept.deadline, rule: fields.kept.rule, starred });
+    google.addListTask(list.account, list.id, { title: fields.title, notes: fields.notes, due: fields.due, parent: where.parent, previous: where.previous }, { time: fields.kept.time, duration: fields.kept.duration, deadline: fields.kept.deadline, rule: fields.kept.rule, starred, busy: fields.kept.busy, visibility: fields.kept.visibility });
 
   /** One open task: check, title, details, date and time, deadline, repeat, the Planner task planning it, star and menu; edited in place. */
   const openRow = (row: TaskRow) => {

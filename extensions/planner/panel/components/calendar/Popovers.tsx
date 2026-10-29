@@ -10,7 +10,7 @@ import { compactClock, compactRange, eventSpan, longDay, weekdayShort } from '..
 import { describeRecurrence } from '../../../src/domain/rrule.ts';
 import { descriptionText } from '../../../src/domain/gevents.ts';
 import { taskForGoogleTask, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google.ts';
-import { KEPT_HINT, keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
+import { KEPT_HINT, advancedLabel, keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
@@ -329,6 +329,12 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
           <div class={`pop-main${kept.deadline < view.today && !item.completed ? ' danger' : ''}`}>Deadline: {longDay(kept.deadline)}</div>
         </div>
       )}
+      {advancedLabel(kept) && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name="tune" /></span>
+          <div class="pop-main">{advancedLabel(kept)}</div>
+        </div>
+      )}
       {(time || kept?.deadline || kept?.repeat || kept?.starredAt) && (
         <div class="pop-row">
           <span class="pop-icon"><Icon name="info" /></span>
@@ -446,6 +452,12 @@ export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; ancho
         <div class="pop-row">
           <span class="pop-icon"><Icon name="flag" /></span>
           <div class="pop-main">Deadline: {longDay(values.deadline)}</div>
+        </div>
+      )}
+      {advancedLabel({ time: values.time, busy: template.busy, visibility: template.visibility }) && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name="tune" /></span>
+          <div class="pop-main">{advancedLabel({ time: values.time, busy: template.busy, visibility: template.visibility })}</div>
         </div>
       )}
       {values.notes && (
