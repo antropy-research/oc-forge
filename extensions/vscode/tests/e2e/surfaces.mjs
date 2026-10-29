@@ -48,6 +48,9 @@
 //      stays as it is; VS Code's rail view and page work in the new tab, and
 //      the first one's still do, each tab's service requests over a WebSocket
 //      of its own (the adapters' transport);
+//  15. a terminal right after an earlier session: three browser windows in a
+//      row each open the terminal and run a command in it, and the terminal's
+//      part adds no terminal to the ones VS Code reconnects;
 // and, with OpenChamber's session tabs off, the page keeps VS Code's own tab
 // bar. It also measures each workbench's start and memory (`<size>-frames.json`).
 //
@@ -1270,6 +1273,59 @@ const twoTabs = async (chat) => {
   }
 };
 
+/** The VS Code Server's pty host log of this run (the newest log folder that has one). */
+const ptyHostLog = () => {
+  const root = join(work, 'vscode/data/data/logs');
+  const dirs = existsSync(root) ? readdirSync(root).filter((name) => existsSync(join(root, name, 'ptyhost.log'))).sort() : [];
+  return dirs.length > 0 ? join(root, dirs.at(-1), 'ptyhost.log') : null;
+};
+
+// ── 15. A terminal right after an earlier session: three browser windows one after another, each opening the
+// terminal and running a command in it. VS Code reconnects the terminals the earlier ones left (persistent
+// sessions), and the terminal's part adds none to them: it asks for a terminal only once they are back ──
+const terminalAfterSessions = async (chat) => {
+  const size = '1440x900, terminal after earlier sessions';
+  const log = ptyHostLog();
+  const ran = [];
+  const reconnected = [];
+  for (let n = 1; n <= 3; n++) {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.request.post(`${base}/auth/session`, { data: { password } });
+    const page = await context.newPage();
+    const marker = join('/tmp', `${run}-session-${n}.txt`);
+    try {
+      const from = log ? readFileSync(log, 'utf8').length : 0;
+      await page.goto(`${base}/?session=${chat}`);
+      await until(async () => (await rail(page)).some((entry) => entry.id === entrySurface('terminal')), 60_000);
+      const clicked = Date.now();
+      await entryButton(page, 'terminal').click();
+      const xterm = bottomFrame(page).locator('.xterm:visible').first();
+      let done = false;
+      while (!done && Date.now() - clicked < 60_000) {
+        if (!(await xterm.isVisible().catch(() => false))) {
+          await wait(1_000);
+          continue;
+        }
+        await xterm.click();
+        await page.keyboard.type(`echo ${run}-${n} > ${marker}`);
+        await page.keyboard.press('Enter');
+        done = Boolean(await until(() => existsSync(marker) && readFileSync(marker, 'utf8').trim() === `${run}-${n}`, 5_000));
+      }
+      ran.push(done ? ((Date.now() - clicked) / 1000).toFixed(1) : 'none');
+      await wait(1_000);
+      reconnected.push(log ? (readFileSync(log, 'utf8').slice(from).match(/Expanding terminal instance/g) ?? []).length : null);
+    } catch (error) {
+      ran.push(`error: ${String(error.message ?? error).split('\n')[0]}`);
+    } finally {
+      rmSync(marker, { force: true });
+      await context.close();
+    }
+  }
+  check(`[${size}] 15 each window opens its terminal and runs a command in it, right after the one before`, ran.every((seconds) => /^\d/.test(seconds) && Number(seconds) < 60), `${ran.join(' s, ')} s after the click`);
+  check(`[${size}] 15 ... and adds no terminal to those VS Code reconnects (as many reconnected in the second and third)`,
+    reconnected[1] >= 1 && reconnected[2] === reconnected[1], `terminals reconnected: ${reconnected.join(', ')}`);
+};
+
 try {
   const seeded = await seed();
   await classic();
@@ -1279,6 +1335,7 @@ try {
   await withoutStrip(seeded.chats);
   await pageAlone();
   await twoTabs(seeded.chats[0]);
+  await terminalAfterSessions(seeded.chats[0]);
 } catch (error) {
   check('the check ran to the end', false, String(error.message ?? error).split('\n')[0]);
 } finally {

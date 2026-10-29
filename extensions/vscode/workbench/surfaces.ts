@@ -44,6 +44,7 @@ import {
   type PaneCompositePartService,
   type Part,
   type RemoteAgentService,
+  type TerminalService,
   type ViewsService,
   type VscodeKeyboardEvent,
   type VscodeServices,
@@ -416,7 +417,12 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
 const startTerminal = async (context: SurfaceContext): Promise<void> => {
   await context.services.get<EditorGroupsService>('editorGroupsService').whenRestored;
   applyRoleLayout('terminal', context.services);
-  // Opens a terminal when there is none.
+  // VS Code first reconnects the folder's terminals an earlier window left running (persistent sessions). Asked for a
+  // terminal before that, it finds none and starts one more: every start of this part added a terminal, which every
+  // later start reconnected and replayed too. A reconnection that hangs still gets its terminal, after a while.
+  const reconnected = (async () => context.services.get<TerminalService>('terminalService').whenConnected)();
+  await Promise.race([reconnected, later(20_000)]).catch(() => undefined);
+  // Its active terminal, or a new one when the folder has none.
   await context.services.get<CommandService>('commandService').executeCommand('workbench.action.terminal.focus').catch((error) => log('could not open the terminal', error));
 };
 

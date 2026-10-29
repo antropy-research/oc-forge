@@ -114,6 +114,8 @@ export interface EnvironmentService {
 
 export interface TerminalService {
   readonly instances: readonly unknown[];
+  /** Done once VS Code has reconnected the workspace's terminals an earlier window left (persistent sessions). */
+  readonly whenConnected: Promise<void>;
 }
 
 /** `WillSaveStateReason.SHUTDOWN`: the window is about to reload or close. */
