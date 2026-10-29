@@ -97,16 +97,33 @@ export const openInNewTab = (url: string | null, openUrl: (url: string) => Promi
 };
 
 /**
+ * Keys a text field uses itself: moving and deleting (arrows, Home and End,
+ * the page keys, Backspace and Delete, alone or with one modifier), the
+ * clipboard, undo and select-all, and formatting (Cmd/Ctrl+B, I, U: bold in
+ * the notes editor). On macOS also Option with a key, which types a
+ * character, and Control with a letter, a Cocoa move (Ctrl+A, E, F, B, P…).
+ */
+const editsText = (event: KeyboardEvent, mac: boolean): boolean => {
+  const key = event.key.toLowerCase();
+  const { ctrlKey: ctrl, metaKey: meta, altKey: alt } = event;
+  if (/^(arrow(left|right|up|down)|home|end|pageup|pagedown|backspace|delete)$/.test(key)) return !(alt && (ctrl || meta));
+  if (mac && alt && !ctrl && !meta) return true;
+  if (mac && ctrl && !meta && !alt && /^[a-z]$/.test(key)) return true;
+  return (mac ? meta : ctrl) && !alt && /^[acvxyzbiu]$/.test(key);
+};
+
+/**
  * The keys the Planner keeps while it has focus; everything else bound to an
  * OpenChamber navigation action (switching tabs, surfaces or chats, closing a
- * tab, the sidebar, its command palette) goes to OpenChamber, not to Chrome.
- * Kept: anything typed into a field (Cmd/Ctrl+B is bold in the notes editor),
- * the Planner page's own command palette (Cmd/Ctrl+K), and the Linear page's
- * Cmd/Ctrl+B (list or board).
+ * tab, the sidebar, its command palette) goes to OpenChamber, not to Chrome,
+ * from a field too (Cmd/Ctrl+1 in a task's title switches OpenChamber's tab).
+ * Kept: what a field uses for editing (editsText), the Planner page's own
+ * command palette (Cmd/Ctrl+K), and the Linear page's Cmd/Ctrl+B (list or
+ * board).
  */
-export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; page: string }): boolean => {
+export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; page: string; mac: boolean }): boolean => {
   const target = event.target as HTMLElement | null;
-  if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable)) return true;
+  if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable) && editsText(event, where.mac)) return true;
   const mod = event.metaKey || event.ctrlKey;
   const key = event.key.toLowerCase();
   if (where.surface === 'page' && mod && key === 'k') return true;

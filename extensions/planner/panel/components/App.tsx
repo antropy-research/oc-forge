@@ -91,7 +91,7 @@ export const App = ({ surface }: { surface: string }) => {
   routeNow.current = route;
   useEffect(() => {
     if (!forge) return;
-    return forge.keys.forwardHostShortcuts({ except: (_action, event) => plannerKeeps(event, { surface, page: routeNow.current }) });
+    return forge.keys.forwardHostShortcuts({ except: (_action, event) => plannerKeeps(event, { surface, page: routeNow.current, mac: forge.keys.shortcuts().mac }) });
   }, [forge, surface]);
   const [overlay, setOverlay] = useState<'palette' | 'quickadd' | 'ask' | null>(null);
   const [askText, setAskText] = useState('');

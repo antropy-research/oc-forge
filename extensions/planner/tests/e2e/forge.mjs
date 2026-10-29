@@ -195,6 +195,26 @@ try {
   const switched = await until(async () => new URL(page.url()).searchParams.get('session') === chatId || (await page.locator('[role="tab"][aria-selected="true"]').first().innerText().catch(() => '')).includes(`${run} chat`), 8000);
   check("Ctrl/Cmd+1 in the Planner switches OpenChamber's header to its first tab (the chat), not Chrome's", Boolean(switched), page.url().replace(base, ''));
   await page.screenshot({ path: join(out, '07-ctrl-1-chat.png') });
+  // From a field too: the field keeps what editing uses (Cmd/Ctrl+B is bold in the notes), and OpenChamber's
+  // navigation keys go to OpenChamber, not to Chrome.
+  await openPlanner(page, `${base}/?session=${chatId}&extension=${PLANNER}&route=${encodeURIComponent('/today')}`);
+  frame = plannerFrame(page);
+  const plannerShown = () => page.evaluate((id) => {
+    const element = document.querySelector(`[data-oc-forge-page="${id}"]`);
+    return Boolean(element) && getComputedStyle(element).visibility === 'visible';
+  }, PLANNER);
+  await frame.getByRole('button', { name: /Add task/ }).first().click();
+  const field = frame.getByRole('textbox', { name: 'New task' }).first();
+  await field.waitFor({ timeout: 10_000 });
+  await field.fill('forge-typing');
+  const sidebarBefore = await sidebarShown();
+  await page.keyboard.press(`${modifier}+b`);
+  await wait(1_000);
+  check('Cmd/Ctrl+B typed in a Planner field stays with the field (the sidebar does not toggle)', (await sidebarShown()) === sidebarBefore && await plannerShown() && (await field.inputValue()) === 'forge-typing');
+  await page.keyboard.press(`${modifier}+1`);
+  check("Ctrl/Cmd+1 typed in a Planner field switches OpenChamber's header to its first tab, not Chrome's",
+    Boolean(await until(async () => !await plannerShown() && new URL(page.url()).searchParams.get('session') === chatId, 5000)) && context.pages().length === 1, page.url().replace(base, ''));
+  await page.screenshot({ path: join(out, '08-ctrl-1-from-field.png') });
   check('no page errors', problems.length === 0, problems.slice(0, 3).join(' | '));
 } catch (error) {
   check('journey completed', false, String(error).split('\n')[0]);
