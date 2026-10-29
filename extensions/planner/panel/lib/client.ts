@@ -181,6 +181,16 @@ export class PlannerClient {
     if (this.view.undoLabel) this.set({ undoLabel: null });
   }
 
+  /**
+   * The plan as the service has it now: this window's view moves on to it (a
+   * change made in another window since it last looked included), in its
+   * turn after this window's batches on their way.
+   */
+  async refresh(): Promise<PlannerState> {
+    await this.adopt(await this.request<Snapshot>('GET', '/state'));
+    return this.view.state;
+  }
+
   /** A raw call to the local service, for modules with their own endpoints. */
   call<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
     return this.request<T>(method, path, body);
