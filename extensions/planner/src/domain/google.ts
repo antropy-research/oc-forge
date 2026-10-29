@@ -77,6 +77,8 @@ export interface RawAttendee {
   optional?: boolean;
   resource?: boolean;
   responseStatus?: string;
+  /** The guest's note with their answer. */
+  comment?: string;
 }
 
 /** A Google Calendar event, the part the Planner reads. */
@@ -110,6 +112,8 @@ export interface RawGoogleEvent {
   reminders?: { useDefault?: boolean; overrides?: { method?: string; minutes?: number }[] };
   extendedProperties?: { private?: Record<string, string> };
   htmlLink?: string;
+  /** When it was made (an instant). */
+  created?: string;
 }
 
 export type GoogleResponse = 'needsAction' | 'declined' | 'tentative' | 'accepted';

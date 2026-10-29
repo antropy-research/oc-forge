@@ -1,7 +1,7 @@
 // service/main.ts
 import http2 from "node:http";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname4, join as join4 } from "node:path";
+import { dirname as dirname5, join as join4 } from "node:path";
 
 // service/store.ts
 import { execFile } from "node:child_process";
@@ -523,7 +523,7 @@ var applyInto = (state, event) => {
       return;
     case "gtask.kept": {
       const key = googleTaskKey(event.account, event.taskId);
-      const { starred, busy, visibility, ...patch } = event.patch;
+      const { starred, busy, visibility, color, attachments, doNotDisturb, decline, ...patch } = event.patch;
       const before = state.googleTasks[key] ?? { account: event.account, listId: event.listId, taskId: event.taskId, time: null, duration: null, deadline: null, repeat: null, starredAt: null, updatedAt: event.at };
       const starredAt = starred === undefined ? before.starredAt : starred ? before.starredAt ?? event.at : null;
       const next = { ...before, ...patch, listId: event.listId, starredAt, updatedAt: event.at };
@@ -539,11 +539,38 @@ var applyInto = (state, event) => {
         else
           next.visibility = visibility;
       }
+      if (color !== undefined) {
+        if (color)
+          next.color = color;
+        else
+          delete next.color;
+      }
+      if (attachments !== undefined) {
+        if (attachments.length)
+          next.attachments = attachments;
+        else
+          delete next.attachments;
+      }
+      if (doNotDisturb !== undefined) {
+        if (doNotDisturb)
+          next.doNotDisturb = true;
+        else
+          delete next.doNotDisturb;
+      }
+      if (decline !== undefined) {
+        if (decline)
+          next.decline = { mode: decline.mode, message: decline.message, since: decline.since ?? before.decline?.since ?? event.at };
+        else
+          delete next.decline;
+      }
       if (next.time === null) {
         delete next.busy;
         delete next.visibility;
+        delete next.doNotDisturb;
       }
-      if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null)
+      if (!next.busy)
+        delete next.decline;
+      if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null && !next.color && !next.attachments)
         delete state.googleTasks[key];
       else
         state.googleTasks[key] = next;
@@ -1052,7 +1079,38 @@ var isShortText = (value, max) => typeof value === "string" && value.length <= m
 var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due));
 var GOOGLE_NOTES_MAX = 8192;
 var isGoogleTaskId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
-var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start", "busy", "visibility"];
+var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start", "busy", "visibility", "color", "doNotDisturb", "decline", "attachments"];
+var ATTACHMENTS_MAX = 25;
+var DECLINE_MESSAGE_MAX = 500;
+var ATTACHMENT_FIELDS = ["id", "title", "mimeType", "url"];
+var attachmentsProblem = (value) => {
+  if (!Array.isArray(value) || value.length > ATTACHMENTS_MAX)
+    return `attachments are at most ${ATTACHMENTS_MAX} Drive files`;
+  for (const file of value) {
+    if (!isRecord2(file) || typeof file.id !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(file.id))
+      return "an attachment needs Drive's id for the file";
+    if (typeof file.title !== "string" || !file.title.trim() || file.title.length > 500)
+      return "an attachment's name is 1-500 characters";
+    if (typeof file.mimeType !== "string" || file.mimeType.length > 200)
+      return "an attachment's type is text, at most 200 characters";
+    if (typeof file.url !== "string" || file.url.length > 2000 || !/^https:\/\//.test(file.url))
+      return "an attachment opens at an https address";
+    if (Object.keys(file).some((field) => !ATTACHMENT_FIELDS.includes(field)))
+      return "an attachment has an unknown field";
+  }
+  return new Set(value.map((file) => file.id)).size === value.length ? null : "a file is attached once";
+};
+var declineProblem = (value) => {
+  if (!isRecord2(value))
+    return "decline is an object, or null";
+  if (value.mode !== "all" && value.mode !== "new")
+    return "decline mode is all or new";
+  if (typeof value.message !== "string" || value.message.length > DECLINE_MESSAGE_MAX)
+    return `a decline message is text, at most ${DECLINE_MESSAGE_MAX} characters`;
+  if (value.since !== undefined && !(typeof value.since === "string" && value.since.length <= 40 && !Number.isNaN(Date.parse(value.since))))
+    return "decline since is an instant";
+  return Object.keys(value).some((field) => !["mode", "message", "since"].includes(field)) ? "decline has an unknown field" : null;
+};
 var validateGtaskTemplate = (value) => {
   if (!isRecord2(value))
     return "repeat template must be an object";
@@ -1072,6 +1130,13 @@ var validateGtaskTemplate = (value) => {
     return "template busy is true, or left out (free)";
   if (value.visibility !== undefined && value.visibility !== "public" && value.visibility !== "private")
     return "template visibility is public or private, or left out (the default)";
+  if (value.color !== undefined && !isColor(value.color))
+    return "template color must be #rrggbb";
+  if (value.doNotDisturb !== undefined && value.doNotDisturb !== true)
+    return "template doNotDisturb is true, or left out";
+  const problem = (value.decline !== undefined ? declineProblem(value.decline) : null) ?? (value.attachments !== undefined ? attachmentsProblem(value.attachments) : null);
+  if (problem)
+    return `template: ${problem}`;
   return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? "template has an unknown field" : null;
 };
 var GTASK_EXCEPTION_FIELDS = ["skip", "title", "notes", "date", "time", "duration", "deadline"];
@@ -1110,11 +1175,17 @@ var validateKeptPatch = (patch) => {
       return "duration must be 5 to 1440 minutes, or null";
     else if (key === "deadline" && !(value === null || isDateKey(value)))
       return "deadline must be a date or null";
-    else if ((key === "starred" || key === "busy") && typeof value !== "boolean")
+    else if ((key === "starred" || key === "busy" || key === "doNotDisturb") && typeof value !== "boolean")
       return `${key} must be true or false`;
     else if (key === "visibility" && value !== "default" && value !== "public" && value !== "private")
       return "visibility must be default, public or private";
-    else if (key === "repeat") {
+    else if (key === "color" && !(value === null || isColor(value)))
+      return "color must be #rrggbb, or null (its list's)";
+    else if (key === "attachments" || key === "decline") {
+      const problem = key === "attachments" ? attachmentsProblem(value) : value === null ? null : declineProblem(value);
+      if (problem)
+        return problem;
+    } else if (key === "repeat") {
       if (value === null)
         continue;
       if (!isRecord2(value) || typeof value.rule !== "string" || value.rule.length > 500 || !parseRRule(value.rule))
@@ -1145,7 +1216,7 @@ var validateKeptPatch = (patch) => {
       }
       if (Object.keys(value).some((field) => !["rule", "seriesId", "index", "next", "on", "template", "exceptions"].includes(field)))
         return "repeat has an unknown field";
-    } else if (!["time", "duration", "deadline", "starred", "repeat", "busy", "visibility"].includes(key))
+    } else if (!["time", "duration", "deadline", "starred", "repeat", "busy", "visibility", "color", "attachments", "doNotDisturb", "decline"].includes(key))
       return `unknown field ${key}`;
   }
   return null;
@@ -1201,6 +1272,8 @@ var validateChannelPatch = (patch) => {
 var isGoogleAccount = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
 var isGoogleCalendarRef = (value) => isRecord2(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && value.calendarId.length > 0;
 var isGoogleEventLink = (value) => isGoogleCalendarRef(value) && isShortText(value.eventId, 1024) && value.eventId.length > 0;
+var isTaskListKey = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}\n[^\n]{1,1024}$/.test(value);
+var TASK_LISTS_MAX = 500;
 var validateSettingsPatch = (patch) => {
   if (!isRecord2(patch))
     return "patch must be an object";
@@ -1245,11 +1318,15 @@ var validateSettingsPatch = (patch) => {
       return `${key} must be true or false`;
     else if (key === "googleCalendarsIntroduced" && !(Array.isArray(value) && value.length <= 50 && value.every((email) => typeof email === "string" && email.length <= 254 && email.includes("@"))))
       return "googleCalendarsIntroduced must be at most 50 email addresses";
+    else if (key === "googleTaskListColors" && !(isRecord2(value) && Object.keys(value).length <= TASK_LISTS_MAX && Object.entries(value).every(([list, color]) => isTaskListKey(list) && isColor(color))))
+      return `googleTaskListColors must be at most ${TASK_LISTS_MAX} task lists, each a #rrggbb color`;
+    else if ((key === "googleTaskListsHidden" || key === "googleTaskListOrder") && !(Array.isArray(value) && value.length <= TASK_LISTS_MAX && value.every(isTaskListKey) && new Set(value).size === value.length))
+      return `${key} must be at most ${TASK_LISTS_MAX} task lists, once each`;
     else if (key === "agentPresets" && !(Array.isArray(value) && value.length <= 30 && value.every(isAgentPreset) && new Set(value.map((preset) => preset.id)).size === value.length))
       return "agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null";
     else if (key === "agentPresets")
       continue;
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar", "googleTaskNotifications", "googleCalendarsIntroduced"].includes(key))
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar", "googleTaskNotifications", "googleCalendarsIntroduced", "googleTaskListColors", "googleTaskListsHidden", "googleTaskListOrder"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
@@ -3039,16 +3116,18 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmod as chmod2, mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
 import http from "node:http";
 import { dirname as dirname2 } from "node:path";
-var GOOGLE_FEATURES = ["calendar", "tasks", "mail"];
+var GOOGLE_FEATURES = ["calendar", "tasks", "mail", "drive"];
 var FEATURE_SCOPES = {
   calendar: ["https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events"],
   tasks: ["https://www.googleapis.com/auth/tasks"],
-  mail: ["https://www.googleapis.com/auth/gmail.readonly"]
+  mail: ["https://www.googleapis.com/auth/gmail.readonly"],
+  drive: ["https://www.googleapis.com/auth/drive.metadata.readonly"]
 };
 var IDENTITY_SCOPES = ["openid", "email"];
 var AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 var TOKEN_URL = "https://oauth2.googleapis.com/token";
 var REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+var USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
 var API_ORIGINS = ["https://www.googleapis.com/", "https://tasks.googleapis.com/", "https://gmail.googleapis.com/"];
 var TIMEOUT_MS3 = 12000;
 var SIGN_IN_MS = 10 * 60000;
@@ -3083,13 +3162,15 @@ var loopbackListen = (onRequest) => new Promise((resolve, reject) => {
 var base64url = (bytes) => bytes.toString("base64url");
 var page = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font:15px system-ui;margin:3em;max-width:36em"><h1 style="font-size:20px">${title}</h1><p>${text}</p>`;
 var featuresOf = (scopes) => GOOGLE_FEATURES.filter((feature) => FEATURE_SCOPES[feature].every((scope) => scopes.includes(scope)));
-var emailFromIdToken = (idToken) => {
+var domainOf = (value) => typeof value === "string" && /^[a-z0-9.-]{1,253}$/i.test(value) ? value.toLowerCase() : null;
+var identityFromIdToken = (idToken) => {
   const payload = idToken?.split(".")[1];
   if (!payload)
     return null;
   try {
-    const email = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).email;
-    return typeof email === "string" && /^[^\s@]+@[^\s@]+$/.test(email) ? email.toLowerCase() : null;
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const email = claims.email;
+    return typeof email === "string" && /^[^\s@]+@[^\s@]+$/.test(email) ? { email: email.toLowerCase(), domain: domainOf(claims.hd) } : null;
   } catch {
     return null;
   }
@@ -3117,9 +3198,10 @@ var googleStatus = (status) => {
 };
 var isStoredAccount = (value) => {
   const item = value;
-  return Boolean(item) && typeof item.email === "string" && typeof item.refreshToken === "string" && typeof item.addedAt === "string" && Array.isArray(item.scopes) && item.scopes.every((scope) => typeof scope === "string");
+  return Boolean(item) && typeof item.email === "string" && typeof item.refreshToken === "string" && typeof item.addedAt === "string" && Array.isArray(item.scopes) && item.scopes.every((scope) => typeof scope === "string") && (item.domain === undefined || item.domain === null || typeof item.domain === "string");
 };
-var publicInfo2 = (account) => ({ email: account.email, features: featuresOf(account.scopes), addedAt: account.addedAt });
+var publicInfo2 = (account) => ({ email: account.email, features: featuresOf(account.scopes), addedAt: account.addedAt, workspace: Boolean(account.domain) });
+var IDENTIFY_MS = 4000;
 
 class GoogleAccounts {
   file;
@@ -3132,6 +3214,7 @@ class GoogleAccounts {
   writes = Promise.resolve();
   signIns = new Map;
   tokens = new Map;
+  identifying = new Map;
   constructor(file, fetcher = defaultFetcher, listen = loopbackListen, log = () => {}) {
     this.file = file;
     this.fetcher = fetcher;
@@ -3140,7 +3223,29 @@ class GoogleAccounts {
   }
   async status() {
     await this.load();
+    const unknown = this.accounts.filter((account) => account.domain === undefined);
+    if (unknown.length)
+      await Promise.race([Promise.all(unknown.map((account) => this.identify(account.email))), new Promise((resolve) => setTimeout(resolve, IDENTIFY_MS).unref?.())]);
     return { client: this.client ? { id: this.client.id } : null, accounts: this.accounts.map(publicInfo2) };
+  }
+  identify(email) {
+    let pending = this.identifying.get(email);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const info = await this.request(email, "GET", USERINFO_URL);
+          const domain = domainOf(info?.hd);
+          await this.serial(async () => {
+            this.accounts = this.accounts.map((item) => item.email === email && item.domain === undefined ? { ...item, domain } : item);
+            await this.save();
+          });
+        } catch (error) {
+          this.log(`could not tell whether ${email} is a work or school account: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      })();
+      this.identifying.set(email, pending);
+    }
+    return pending;
   }
   setClient(rawId, rawSecret) {
     return this.serial(async () => {
@@ -3177,7 +3282,7 @@ class GoogleAccounts {
     if (!this.client)
       throw new GoogleError(400, "Add the OAuth client first");
     if (features.length === 0)
-      throw new GoogleError(400, "Choose at least one of Calendar, Tasks and Gmail");
+      throw new GoogleError(400, "Choose at least one of Calendar, Tasks, Gmail and Drive");
     this.expireSignIns();
     const id = base64url(randomBytes(12));
     const state = base64url(randomBytes(24));
@@ -3293,10 +3398,11 @@ class GoogleAccounts {
     const answer = await this.token({ grant_type: "authorization_code", code, code_verifier: signIn.verifier, redirect_uri: signIn.redirectUri, client_id: client.id, client_secret: client.secret });
     if (!answer.refresh_token)
       throw new GoogleError(400, "Google sent no refresh token; remove the Planner at myaccount.google.com/permissions and connect again");
-    const email = emailFromIdToken(answer.id_token);
-    if (!email)
+    const identity = identityFromIdToken(answer.id_token);
+    if (!identity)
       throw new GoogleError(400, "Google did not say which account this is (the 'email' scope was not granted)");
-    const account = { email, refreshToken: answer.refresh_token, scopes: (answer.scope ?? "").split(" ").filter(Boolean), addedAt: new Date().toISOString() };
+    const { email, domain } = identity;
+    const account = { email, refreshToken: answer.refresh_token, scopes: (answer.scope ?? "").split(" ").filter(Boolean), addedAt: new Date().toISOString(), domain };
     await this.serial(async () => {
       const index = this.accounts.findIndex((item) => item.email === email);
       if (index < 0 && this.accounts.length >= MAX_ACCOUNTS)
@@ -3784,13 +3890,346 @@ var planRsvp = (args) => {
   const attendees = target.attendees ?? [];
   if (!attendees.some((attendee) => attendee.self))
     return { error: "You are not on this event's guest list" };
-  return { ops: [{ method: "PATCH", eventId: target.id, body: { attendees: attendees.map((attendee) => attendee.self ? { ...attendee, responseStatus: args.response } : attendee) }, role: "change" }] };
+  const answer = (attendee) => ({ ...attendee, responseStatus: args.response, ...args.comment ? { comment: args.comment } : {} });
+  return { ops: [{ method: "PATCH", eventId: target.id, body: { attendees: attendees.map((attendee) => attendee.self ? answer(attendee) : attendee) }, role: "change" }] };
+};
+
+// src/domain/gcalendar.ts
+var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+var SHORT = MONTHS.map((month) => month.slice(0, 3));
+var parts2 = (key) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
+var keyOf2 = (year, month, day) => `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+var daysInMonth4 = (key) => {
+  const { year, month } = parts2(key);
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+};
+var addMonths = (key, n) => {
+  const { year, month, day } = parts2(key);
+  const index = year * 12 + (month - 1) + n;
+  const first = keyOf2(Math.floor(index / 12), index % 12 + 1, 1);
+  return keyOf2(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth4(first)));
+};
+
+// src/domain/gtaskKept.ts
+var TASK_MINUTES = 30;
+var keptFor = (state, item) => state.googleTasks?.[googleTaskKey(item.account, item.id)] ?? null;
+var nthWeekday = (monthKey, code) => {
+  const match = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/.exec(code);
+  if (!match)
+    return null;
+  const nth = Number(match[1] ?? "1");
+  const day = WEEKDAY_CODES.indexOf(match[2]);
+  const first = `${monthKey.slice(0, 8)}01`;
+  const length = daysInMonth4(first);
+  const offset = (day - weekday(first) + 7) % 7;
+  const dates = Array.from({ length: 5 }, (_, index) => 1 + offset + index * 7).filter((value) => value <= length);
+  const chosen = nth > 0 ? dates[nth - 1] : dates[dates.length + nth];
+  return chosen ? `${first.slice(0, 8)}${String(chosen).padStart(2, "0")}` : null;
+};
+var stepRule = (rule, date) => {
+  const every = rule.interval;
+  switch (rule.freq) {
+    case "DAILY":
+      return addDays(date, every);
+    case "WEEKLY": {
+      const days = [...new Set(rule.byDay.map((code) => WEEKDAY_CODES.indexOf(code.slice(-2))).filter((day) => day >= 0))];
+      if (!days.length)
+        return addDays(date, 7 * every);
+      const start = WEEKDAY_CODES.indexOf(rule.other.find(([key]) => key === "WKST")?.[1] ?? "MO");
+      const place = (day) => (day - Math.max(0, start) + 7) % 7;
+      const sorted = days.sort((a, b) => place(a) - place(b));
+      const here = place(weekday(date));
+      const later = sorted.find((day) => place(day) > here);
+      return later !== undefined ? addDays(date, place(later) - here) : addDays(date, 7 * every - here + place(sorted[0]));
+    }
+    case "MONTHLY":
+      for (let step = 1;step <= 48; step++) {
+        const month = addMonths(`${date.slice(0, 8)}01`, step * every);
+        let candidate;
+        if (rule.byDay.length === 1)
+          candidate = nthWeekday(month, rule.byDay[0]);
+        else {
+          const wanted = rule.byMonthDay[0] ?? Number(date.slice(8));
+          const length = daysInMonth4(month);
+          const day = wanted < 0 ? length + wanted + 1 : wanted;
+          candidate = day >= 1 && day <= length ? `${month.slice(0, 8)}${String(day).padStart(2, "0")}` : null;
+        }
+        if (candidate && candidate > date)
+          return candidate;
+      }
+      return null;
+    case "YEARLY":
+      for (let step = 1;step <= 8; step++) {
+        const year = Number(date.slice(0, 4)) + step * every;
+        const month = rule.byMonth[0] ?? Number(date.slice(5, 7));
+        const day = rule.byMonthDay[0] ?? Number(date.slice(8));
+        const first = `${year}-${String(month).padStart(2, "0")}-01`;
+        if (day >= 1 && day <= daysInMonth4(first))
+          return `${first.slice(0, 8)}${String(day).padStart(2, "0")}`;
+      }
+      return null;
+  }
+};
+var nextRepeatDate = (line, date, index) => {
+  const rule = parseRRule(line);
+  if (!rule)
+    return null;
+  if (rule.count !== null && index >= rule.count)
+    return null;
+  const next = stepRule(rule, date);
+  if (!next)
+    return null;
+  const until = rule.until ? untilDate(rule.until, "UTC") : null;
+  return until && next > until ? null : next;
+};
+var UPCOMING_MAX = 62;
+var STEPS_MAX = 4000;
+var scheduledOn = (kept, item) => kept.repeat?.on ?? item.due;
+var templateOf = (task, kept, date, start = date) => ({
+  title: task.title,
+  notes: task.notes,
+  time: kept.time,
+  duration: kept.duration,
+  deadline: kept.deadline ? daysBetween(date, kept.deadline) : null,
+  start,
+  ...kept.time !== null && kept.busy ? { busy: true } : {},
+  ...kept.time !== null && kept.visibility && kept.visibility !== "default" ? { visibility: kept.visibility } : {},
+  ...kept.color ? { color: kept.color } : {},
+  ...kept.attachments?.length ? { attachments: [...kept.attachments] } : {},
+  ...kept.time !== null && kept.doNotDisturb ? { doNotDisturb: true } : {},
+  ...kept.time !== null && kept.busy && kept.decline ? { decline: { mode: kept.decline.mode, message: kept.decline.message, ...kept.decline.since ? { since: kept.decline.since } : {} } } : {}
+});
+var seriesTemplate = (kept, item) => {
+  if (kept.repeat?.template)
+    return kept.repeat.template;
+  const on = scheduledOn(kept, item);
+  return on ? templateOf(item, kept, on) : null;
+};
+var occurrenceValues = (template, on, change) => ({
+  title: change?.title ?? template.title,
+  notes: change?.notes ?? template.notes,
+  due: change?.date ?? on,
+  time: change?.time !== undefined ? change.time : template.time,
+  duration: change?.time !== undefined ? change.duration ?? null : template.duration,
+  deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline)
+});
+var withExceptions = (repeat, exceptions) => {
+  const { exceptions: _old, ...rest } = repeat;
+  return exceptions ? { ...rest, exceptions } : rest;
+};
+var occurrenceTask = (repeat, template, date, index) => {
+  const values = occurrenceValues(template, date, repeat.exceptions?.[date]);
+  const ahead = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on > date);
+  return {
+    title: values.title,
+    notes: values.notes,
+    due: values.due,
+    kept: {
+      time: values.time,
+      duration: values.duration,
+      deadline: values.deadline,
+      repeat: { rule: repeat.rule, seriesId: repeat.seriesId, index, next: null, on: date, template, ...ahead.length ? { exceptions: Object.fromEntries(ahead) } : {} },
+      ...values.time !== null && template.busy ? { busy: true } : {},
+      ...values.time !== null && template.visibility ? { visibility: template.visibility } : {},
+      ...template.color ? { color: template.color } : {},
+      ...template.attachments?.length ? { attachments: template.attachments } : {},
+      ...values.time !== null && template.doNotDisturb ? { doNotDisturb: true } : {},
+      ...values.time !== null && template.busy && template.decline ? { decline: template.decline } : {}
+    }
+  };
+};
+var nextOccurrence = (item, kept) => {
+  const repeat = kept.repeat;
+  let date = scheduledOn(kept, item);
+  let index = repeat?.index ?? 0;
+  let found = null;
+  for (let step = 0;repeat && date && !found && step < STEPS_MAX; step++) {
+    date = nextRepeatDate(repeat.rule, date, index);
+    if (!date)
+      break;
+    index += 1;
+    if (!repeat.exceptions?.[date]?.skip)
+      found = date;
+  }
+  return { item, kept, template: seriesTemplate(kept, item), date: found, index };
+};
+var upcomingValues = (task) => occurrenceValues(task.template, task.on, task.change);
+var upcomingTasks = (kept, shown, from, to, today) => {
+  const taken = new Set;
+  for (const item of shown) {
+    if (!item.due)
+      continue;
+    const series = kept[googleTaskKey(item.account, item.id)]?.repeat?.seriesId;
+    if (series)
+      taken.add(`${series}
+${item.due}`);
+  }
+  const projected = new Set;
+  const out = [];
+  for (const source of Object.values(kept)) {
+    const repeat = source.repeat;
+    const rule = repeat && !repeat.next && repeat.on && repeat.template ? parseRRule(repeat.rule) : null;
+    if (!repeat?.on || !repeat.template || !rule)
+      continue;
+    const until = rule.until ? untilDate(rule.until, "UTC") : null;
+    const changes = repeat.exceptions ?? {};
+    const last = Object.entries(changes).reduce((latest, [on, change]) => change.date && change.date >= from && change.date <= to && on > latest ? on : latest, to);
+    let date = repeat.on;
+    let index = repeat.index;
+    for (let step = 0, made = 0;step < STEPS_MAX && made < UPCOMING_MAX; step++) {
+      if (rule.count !== null && index >= rule.count)
+        break;
+      const next = stepRule(rule, date);
+      if (!next || until && next > until || next > last)
+        break;
+      date = next;
+      index += 1;
+      const change = changes[next];
+      const on = change?.date ?? next;
+      if (change?.skip || on < from || on > to || on < today)
+        continue;
+      const own = `${repeat.seriesId}
+${next}`;
+      if (projected.has(own) || taken.has(`${repeat.seriesId}
+${on}`))
+        continue;
+      projected.add(own);
+      out.push({ account: source.account, listId: source.listId, taskId: source.taskId, seriesId: repeat.seriesId, rule: repeat.rule, index, on: next, date: on, template: repeat.template, ...change ? { change } : {} });
+      made++;
+    }
+  }
+  return out;
+};
+var deadlineGroups = (kept, accounts, from, to) => {
+  const groups = new Map;
+  for (const entry of Object.values(kept)) {
+    if (!entry.deadline || entry.deadline < from || entry.deadline > to || !accounts.includes(entry.account))
+      continue;
+    const key = `${entry.account}
+${entry.listId}`;
+    const group = groups.get(key) ?? { account: entry.account, listId: entry.listId, ids: [] };
+    group.ids.push(entry.taskId);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+};
+var seriesNextIn = (state, items, repeat, except) => {
+  const later = items.flatMap((item) => {
+    const theirs = item.id === except ? null : keptFor(state, item)?.repeat;
+    if (!theirs || theirs.seriesId !== repeat.seriesId)
+      return [];
+    return (theirs.on && repeat.on ? theirs.on > repeat.on : theirs.index > repeat.index) ? [{ item, on: theirs.on ?? "", index: theirs.index }] : [];
+  });
+  later.sort((a, b) => a.on.localeCompare(b.on) || a.index - b.index);
+  return later[0]?.item ?? null;
+};
+var ruleEndingBefore = (line, from, on, index = 1) => {
+  const rule = parseRRule(line);
+  if (!rule)
+    return line;
+  const last = addDays(from, -1);
+  const until = rule.until ? untilDate(rule.until, "UTC") : null;
+  if (until && until <= last)
+    return line;
+  if (rule.count !== null && on) {
+    let date = on;
+    for (let step = 0, at = index;date && date < from && step < STEPS_MAX; step++)
+      date = nextRepeatDate(line, date, at++);
+    if (!date)
+      return line;
+  }
+  return formatRRule({ ...rule, count: null, until: last.replace(/-/g, "") });
+};
+var endedBefore = (repeat, from) => {
+  const before = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on < from);
+  return withExceptions({ ...repeat, rule: ruleEndingBefore(repeat.rule, from, repeat.on, repeat.index) }, before.length ? Object.fromEntries(before) : undefined);
+};
+var seriesCut = (kept, account, seriesId, from, chosen = null) => {
+  const tasks = Object.values(kept).filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
+  const goes = (entry) => from === null || entry.taskId === chosen || Boolean(entry.repeat.on && entry.repeat.on >= from);
+  const remove = tasks.filter(goes).sort((a, b) => Number(Boolean(a.repeat.next)) - Number(Boolean(b.repeat.next)) || (b.repeat.on ?? "").localeCompare(a.repeat.on ?? "") || b.repeat.index - a.repeat.index);
+  const keep = from === null ? [] : tasks.filter((entry) => !goes(entry)).map((entry) => ({ type: "gtask.kept", account, listId: entry.listId, taskId: entry.taskId, patch: { repeat: endedBefore(entry.repeat, from) } }));
+  return { remove, keep };
+};
+
+// src/domain/gtaskAdvanced.ts
+var driveQuery = (text) => {
+  const words = text.trim();
+  const base = "trashed = false and mimeType != 'application/vnd.google-apps.folder'";
+  return words ? `${base} and name contains '${words.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'` : base;
+};
+var taskWindows = (items, kept, from, to, today, zone) => {
+  const out = [];
+  const seen = new Set;
+  const window = (base, time, duration) => ({
+    ...base,
+    start: instantAt(base.date, time, zone),
+    end: instantAt(base.date, Math.min(24 * 60, time + (duration ?? TASK_MINUTES)), zone)
+  });
+  for (const item of items) {
+    const found = kept[googleTaskKey(item.account, item.id)];
+    const own = googleTaskKey(item.account, item.id);
+    if (!found || seen.has(own) || item.completed || !item.due || item.due < from || item.due > to || found.time === null)
+      continue;
+    const decline = found.busy && found.decline ? found.decline : null;
+    if (!found.doNotDisturb && !decline)
+      continue;
+    seen.add(own);
+    out.push(window({ account: item.account, listId: item.listId, taskId: item.id, key: `task:${item.id}:${item.due}`, title: item.title, date: item.due, doNotDisturb: Boolean(found.doNotDisturb), decline }, found.time, found.duration));
+  }
+  for (const upcoming of upcomingTasks(kept, items, from, to, today)) {
+    const template = upcoming.template;
+    const values = upcomingValues(upcoming);
+    const declines = Boolean(template.busy && template.decline);
+    if (values.time === null || !template.doNotDisturb && !declines)
+      continue;
+    const head = kept[googleTaskKey(upcoming.account, upcoming.taskId)];
+    const decline = declines ? { mode: template.decline.mode, message: template.decline.message, since: template.decline.since ?? head?.decline?.since ?? head?.updatedAt ?? new Date(0).toISOString() } : null;
+    out.push(window({ account: upcoming.account, listId: upcoming.listId, taskId: upcoming.taskId, key: `upcoming:${upcoming.seriesId}:${upcoming.on}`, title: values.title, date: values.due, doNotDisturb: Boolean(template.doNotDisturb), decline }, values.time, values.duration));
+  }
+  return out.sort((a, b) => a.start.localeCompare(b.start) || a.key.localeCompare(b.key));
+};
+var quietNotifications = (all, windows) => {
+  const quiet = windows.filter((window) => window.doNotDisturb).map((window) => ({ window, start: Date.parse(window.start), end: Date.parse(window.end) }));
+  if (!quiet.length)
+    return [...all];
+  return all.map((item) => {
+    const others = quiet.filter(({ window }) => !(window.account === item.account && window.taskId === item.taskId && window.date === item.date));
+    let at = Date.parse(item.at);
+    const was = at;
+    for (let moved = true, rounds = 0;moved && rounds < 50; rounds++) {
+      moved = false;
+      for (const { start, end } of others) {
+        if (at >= start && at < end) {
+          at = end;
+          moved = true;
+        }
+      }
+    }
+    return at === was ? item : { ...item, at: new Date(at).toISOString(), held: true };
+  }).sort((a, b) => a.at.localeCompare(b.at) || a.key.localeCompare(b.key));
+};
+var invitationsToDecline = (window, events, declined = new Set) => {
+  const decline = window.decline;
+  if (!decline)
+    return [];
+  const [start, end] = [Date.parse(window.start), Date.parse(window.end)];
+  const since = Date.parse(decline.since);
+  return events.filter((event) => {
+    if (event.mine || !event.meeting || event.response === null || event.response === "declined" || declined.has(event.id))
+      return false;
+    if (!(Date.parse(event.start) < end && Date.parse(event.end) > start))
+      return false;
+    return decline.mode === "all" || Date.parse(event.created) > since;
+  });
 };
 
 // service/googleData.ts
 var CALENDAR = "https://www.googleapis.com/calendar/v3";
 var TASKS = "https://tasks.googleapis.com/tasks/v1";
 var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+var DRIVE = "https://www.googleapis.com/drive/v3";
+var DRIVE_MAX = 30;
 var EVENT_FIELDS = "accessRole,nextPageToken,items(id,status,summary,location,transparency,colorId,eventType,start,end,recurringEventId,originalStartTime,attendees(email,self,organizer,resource,responseStatus),organizer(email,self),guestsCanModify,locked,privateCopy,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),extendedProperties,htmlLink)";
 var LIMITS = { calendars: 10, events: 8, lists: 5, tasks: 40, due: 20 };
 var MAIL_MAX = 25;
@@ -4083,9 +4522,33 @@ ${calendarId}`;
       await this.accounts.request(account, "POST", `${base}?${query}`, body);
     }
   }
-  async respond(account, calendarId, eventId, response, scope) {
+  async respond(account, calendarId, eventId, response, scope, comment) {
     const found = await this.withSeries(account, calendarId, eventId);
-    return this.run(account, calendarId, planRsvp({ scope, response, ...found }), "all");
+    return this.run(account, calendarId, planRsvp({ scope, response, ...found, ...comment ? { comment } : {} }), "all");
+  }
+  async invitations(account, timeMin, timeMax) {
+    const { items } = await this.pages(account, (token) => `${CALENDAR}/calendars/primary/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: "nextPageToken,items(id,status,summary,start,end,created,eventType,organizer(email,self),attendees(email,self,organizer,responseStatus))", ...token ? { pageToken: token } : {} })}`, 2);
+    return items.flatMap((raw) => {
+      if (!raw.id || raw.status === "cancelled" || !raw.start?.dateTime || !raw.end?.dateTime)
+        return [];
+      const self = raw.attendees?.find((attendee) => attendee.self);
+      const response = self?.responseStatus;
+      return [{
+        id: raw.id,
+        summary: raw.summary ?? "(No title)",
+        start: new Date(raw.start.dateTime).toISOString(),
+        end: new Date(raw.end.dateTime).toISOString(),
+        created: raw.created ?? new Date(0).toISOString(),
+        response: response === "needsAction" || response === "declined" || response === "tentative" || response === "accepted" ? response : null,
+        mine: Boolean(raw.organizer?.self || self?.organizer),
+        meeting: !raw.eventType || raw.eventType === "default"
+      }];
+    });
+  }
+  async driveFiles(account, text) {
+    const query = new URLSearchParams({ q: driveQuery(text), orderBy: "recency desc", pageSize: String(DRIVE_MAX), fields: "files(id,name,mimeType,webViewLink,modifiedTime)" });
+    const answer = await this.accounts.request(account, "GET", `${DRIVE}/files?${query}`);
+    return (answer?.files ?? []).flatMap((file) => file.id && /^[A-Za-z0-9_-]{1,200}$/.test(file.id) && file.webViewLink && /^https:\/\//.test(file.webViewLink) ? [{ id: file.id, title: (file.name ?? "").trim().slice(0, 500) || "(Untitled)", mimeType: (file.mimeType ?? "").slice(0, 200), url: file.webViewLink, ...file.modifiedTime ? { modifiedTime: file.modifiedTime } : {} }] : []);
   }
   async moveEvent(account, calendarId, eventId, destination, sendUpdates) {
     const instance = await this.mustEvent(account, calendarId, eventId);
@@ -4709,255 +5172,6 @@ var googleWriteRoute = async (req, url, ctx) => {
 import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
 import { dirname as dirname3 } from "node:path";
 
-// src/domain/gcalendar.ts
-var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-var SHORT = MONTHS.map((month) => month.slice(0, 3));
-var parts2 = (key) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
-var keyOf2 = (year, month, day) => `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-var daysInMonth4 = (key) => {
-  const { year, month } = parts2(key);
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
-};
-var addMonths = (key, n) => {
-  const { year, month, day } = parts2(key);
-  const index = year * 12 + (month - 1) + n;
-  const first = keyOf2(Math.floor(index / 12), index % 12 + 1, 1);
-  return keyOf2(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth4(first)));
-};
-
-// src/domain/gtaskKept.ts
-var keptFor = (state, item) => state.googleTasks?.[googleTaskKey(item.account, item.id)] ?? null;
-var nthWeekday = (monthKey, code) => {
-  const match = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/.exec(code);
-  if (!match)
-    return null;
-  const nth = Number(match[1] ?? "1");
-  const day = WEEKDAY_CODES.indexOf(match[2]);
-  const first = `${monthKey.slice(0, 8)}01`;
-  const length = daysInMonth4(first);
-  const offset = (day - weekday(first) + 7) % 7;
-  const dates = Array.from({ length: 5 }, (_, index) => 1 + offset + index * 7).filter((value) => value <= length);
-  const chosen = nth > 0 ? dates[nth - 1] : dates[dates.length + nth];
-  return chosen ? `${first.slice(0, 8)}${String(chosen).padStart(2, "0")}` : null;
-};
-var stepRule = (rule, date) => {
-  const every = rule.interval;
-  switch (rule.freq) {
-    case "DAILY":
-      return addDays(date, every);
-    case "WEEKLY": {
-      const days = [...new Set(rule.byDay.map((code) => WEEKDAY_CODES.indexOf(code.slice(-2))).filter((day) => day >= 0))];
-      if (!days.length)
-        return addDays(date, 7 * every);
-      const start = WEEKDAY_CODES.indexOf(rule.other.find(([key]) => key === "WKST")?.[1] ?? "MO");
-      const place = (day) => (day - Math.max(0, start) + 7) % 7;
-      const sorted = days.sort((a, b) => place(a) - place(b));
-      const here = place(weekday(date));
-      const later = sorted.find((day) => place(day) > here);
-      return later !== undefined ? addDays(date, place(later) - here) : addDays(date, 7 * every - here + place(sorted[0]));
-    }
-    case "MONTHLY":
-      for (let step = 1;step <= 48; step++) {
-        const month = addMonths(`${date.slice(0, 8)}01`, step * every);
-        let candidate;
-        if (rule.byDay.length === 1)
-          candidate = nthWeekday(month, rule.byDay[0]);
-        else {
-          const wanted = rule.byMonthDay[0] ?? Number(date.slice(8));
-          const length = daysInMonth4(month);
-          const day = wanted < 0 ? length + wanted + 1 : wanted;
-          candidate = day >= 1 && day <= length ? `${month.slice(0, 8)}${String(day).padStart(2, "0")}` : null;
-        }
-        if (candidate && candidate > date)
-          return candidate;
-      }
-      return null;
-    case "YEARLY":
-      for (let step = 1;step <= 8; step++) {
-        const year = Number(date.slice(0, 4)) + step * every;
-        const month = rule.byMonth[0] ?? Number(date.slice(5, 7));
-        const day = rule.byMonthDay[0] ?? Number(date.slice(8));
-        const first = `${year}-${String(month).padStart(2, "0")}-01`;
-        if (day >= 1 && day <= daysInMonth4(first))
-          return `${first.slice(0, 8)}${String(day).padStart(2, "0")}`;
-      }
-      return null;
-  }
-};
-var nextRepeatDate = (line, date, index) => {
-  const rule = parseRRule(line);
-  if (!rule)
-    return null;
-  if (rule.count !== null && index >= rule.count)
-    return null;
-  const next = stepRule(rule, date);
-  if (!next)
-    return null;
-  const until = rule.until ? untilDate(rule.until, "UTC") : null;
-  return until && next > until ? null : next;
-};
-var UPCOMING_MAX = 62;
-var STEPS_MAX = 4000;
-var scheduledOn = (kept, item) => kept.repeat?.on ?? item.due;
-var templateOf = (task, kept, date, start = date) => ({
-  title: task.title,
-  notes: task.notes,
-  time: kept.time,
-  duration: kept.duration,
-  deadline: kept.deadline ? daysBetween(date, kept.deadline) : null,
-  start,
-  ...kept.time !== null && kept.busy ? { busy: true } : {},
-  ...kept.time !== null && kept.visibility && kept.visibility !== "default" ? { visibility: kept.visibility } : {}
-});
-var seriesTemplate = (kept, item) => {
-  if (kept.repeat?.template)
-    return kept.repeat.template;
-  const on = scheduledOn(kept, item);
-  return on ? templateOf(item, kept, on) : null;
-};
-var occurrenceValues = (template, on, change) => ({
-  title: change?.title ?? template.title,
-  notes: change?.notes ?? template.notes,
-  due: change?.date ?? on,
-  time: change?.time !== undefined ? change.time : template.time,
-  duration: change?.time !== undefined ? change.duration ?? null : template.duration,
-  deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline)
-});
-var withExceptions = (repeat, exceptions) => {
-  const { exceptions: _old, ...rest } = repeat;
-  return exceptions ? { ...rest, exceptions } : rest;
-};
-var occurrenceTask = (repeat, template, date, index) => {
-  const values = occurrenceValues(template, date, repeat.exceptions?.[date]);
-  const ahead = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on > date);
-  return {
-    title: values.title,
-    notes: values.notes,
-    due: values.due,
-    kept: {
-      time: values.time,
-      duration: values.duration,
-      deadline: values.deadline,
-      repeat: { rule: repeat.rule, seriesId: repeat.seriesId, index, next: null, on: date, template, ...ahead.length ? { exceptions: Object.fromEntries(ahead) } : {} },
-      ...values.time !== null && template.busy ? { busy: true } : {},
-      ...values.time !== null && template.visibility ? { visibility: template.visibility } : {}
-    }
-  };
-};
-var nextOccurrence = (item, kept) => {
-  const repeat = kept.repeat;
-  let date = scheduledOn(kept, item);
-  let index = repeat?.index ?? 0;
-  let found = null;
-  for (let step = 0;repeat && date && !found && step < STEPS_MAX; step++) {
-    date = nextRepeatDate(repeat.rule, date, index);
-    if (!date)
-      break;
-    index += 1;
-    if (!repeat.exceptions?.[date]?.skip)
-      found = date;
-  }
-  return { item, kept, template: seriesTemplate(kept, item), date: found, index };
-};
-var upcomingValues = (task) => occurrenceValues(task.template, task.on, task.change);
-var upcomingTasks = (kept, shown, from, to, today) => {
-  const taken = new Set;
-  for (const item of shown) {
-    if (!item.due)
-      continue;
-    const series = kept[googleTaskKey(item.account, item.id)]?.repeat?.seriesId;
-    if (series)
-      taken.add(`${series}
-${item.due}`);
-  }
-  const projected = new Set;
-  const out = [];
-  for (const source of Object.values(kept)) {
-    const repeat = source.repeat;
-    const rule = repeat && !repeat.next && repeat.on && repeat.template ? parseRRule(repeat.rule) : null;
-    if (!repeat?.on || !repeat.template || !rule)
-      continue;
-    const until = rule.until ? untilDate(rule.until, "UTC") : null;
-    const changes = repeat.exceptions ?? {};
-    const last = Object.entries(changes).reduce((latest, [on, change]) => change.date && change.date >= from && change.date <= to && on > latest ? on : latest, to);
-    let date = repeat.on;
-    let index = repeat.index;
-    for (let step = 0, made = 0;step < STEPS_MAX && made < UPCOMING_MAX; step++) {
-      if (rule.count !== null && index >= rule.count)
-        break;
-      const next = stepRule(rule, date);
-      if (!next || until && next > until || next > last)
-        break;
-      date = next;
-      index += 1;
-      const change = changes[next];
-      const on = change?.date ?? next;
-      if (change?.skip || on < from || on > to || on < today)
-        continue;
-      const own = `${repeat.seriesId}
-${next}`;
-      if (projected.has(own) || taken.has(`${repeat.seriesId}
-${on}`))
-        continue;
-      projected.add(own);
-      out.push({ account: source.account, listId: source.listId, taskId: source.taskId, seriesId: repeat.seriesId, rule: repeat.rule, index, on: next, date: on, template: repeat.template, ...change ? { change } : {} });
-      made++;
-    }
-  }
-  return out;
-};
-var deadlineGroups = (kept, accounts, from, to) => {
-  const groups = new Map;
-  for (const entry of Object.values(kept)) {
-    if (!entry.deadline || entry.deadline < from || entry.deadline > to || !accounts.includes(entry.account))
-      continue;
-    const key = `${entry.account}
-${entry.listId}`;
-    const group = groups.get(key) ?? { account: entry.account, listId: entry.listId, ids: [] };
-    group.ids.push(entry.taskId);
-    groups.set(key, group);
-  }
-  return [...groups.values()];
-};
-var seriesNextIn = (state, items, repeat, except) => {
-  const later = items.flatMap((item) => {
-    const theirs = item.id === except ? null : keptFor(state, item)?.repeat;
-    if (!theirs || theirs.seriesId !== repeat.seriesId)
-      return [];
-    return (theirs.on && repeat.on ? theirs.on > repeat.on : theirs.index > repeat.index) ? [{ item, on: theirs.on ?? "", index: theirs.index }] : [];
-  });
-  later.sort((a, b) => a.on.localeCompare(b.on) || a.index - b.index);
-  return later[0]?.item ?? null;
-};
-var ruleEndingBefore = (line, from, on, index = 1) => {
-  const rule = parseRRule(line);
-  if (!rule)
-    return line;
-  const last = addDays(from, -1);
-  const until = rule.until ? untilDate(rule.until, "UTC") : null;
-  if (until && until <= last)
-    return line;
-  if (rule.count !== null && on) {
-    let date = on;
-    for (let step = 0, at = index;date && date < from && step < STEPS_MAX; step++)
-      date = nextRepeatDate(line, date, at++);
-    if (!date)
-      return line;
-  }
-  return formatRRule({ ...rule, count: null, until: last.replace(/-/g, "") });
-};
-var endedBefore = (repeat, from) => {
-  const before = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on < from);
-  return withExceptions({ ...repeat, rule: ruleEndingBefore(repeat.rule, from, repeat.on, repeat.index) }, before.length ? Object.fromEntries(before) : undefined);
-};
-var seriesCut = (kept, account, seriesId, from, chosen = null) => {
-  const tasks = Object.values(kept).filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
-  const goes = (entry) => from === null || entry.taskId === chosen || Boolean(entry.repeat.on && entry.repeat.on >= from);
-  const remove = tasks.filter(goes).sort((a, b) => Number(Boolean(a.repeat.next)) - Number(Boolean(b.repeat.next)) || (b.repeat.on ?? "").localeCompare(a.repeat.on ?? "") || b.repeat.index - a.repeat.index);
-  const keep = from === null ? [] : tasks.filter((entry) => !goes(entry)).map((entry) => ({ type: "gtask.kept", account, listId: entry.listId, taskId: entry.taskId, patch: { repeat: endedBefore(entry.repeat, from) } }));
-  return { remove, keep };
-};
-
 // src/domain/gtaskNotify.ts
 var TASK_NOTIFY_MINUTES = 9 * 60;
 var taskNotifications = (dueToday, deadlineTasks, kept, today, zone) => {
@@ -5040,7 +5254,8 @@ class TaskNotifications {
     const zone = state.settings.timezone ?? "UTC";
     const today = todayIn(zone, new Date(this.now()));
     const [due, deadlines] = await Promise.all([this.reads.due(accounts, today), this.reads.byIds(deadlineGroups(state.googleTasks, accounts, today, today))]);
-    const all = taskNotifications(due.items, deadlines.items, this.state().googleTasks, today, zone);
+    const kept = this.state().googleTasks;
+    const all = quietNotifications(taskNotifications(due.items, deadlines.items, kept, today, zone), taskWindows(due.items, kept, today, today, today, zone));
     const given = await this.load();
     const now = this.now();
     const keys = new Set(given.keys());
@@ -5212,6 +5427,139 @@ ${seriesId}`;
     const result = this.planner.execute(bodies.map((body) => ({ cmd: newId(), ...body })));
     if (!result.ok)
       throw new GoogleError(500, `The Planner did not keep it: ${result.error}`);
+  }
+}
+
+// service/googleDecline.ts
+import { mkdir as mkdir4, readFile as readFile4, rename as rename4, writeFile as writeFile4 } from "node:fs/promises";
+import { dirname as dirname4 } from "node:path";
+var DECLINE_AHEAD_DAYS = 14;
+var EVERY_MS = 5 * 60000;
+var AFTER_CHANGE_MS = 1500;
+var KEEP_MS2 = 30 * 24 * 60 * 60000;
+var WINDOWS_MAX = 40;
+
+class MeetingDecliner {
+  file;
+  state;
+  reads;
+  calendar;
+  options;
+  queue = Promise.resolve();
+  timer = null;
+  declined = null;
+  constructor(file, state, reads, calendar, options = {}) {
+    this.file = file;
+    this.state = state;
+    this.reads = reads;
+    this.calendar = calendar;
+    this.options = options;
+  }
+  start(planner) {
+    setInterval(() => this.soon(0), EVERY_MS).unref?.();
+    planner.onPersist((events) => {
+      if (events.some((event) => event.type === "gtask.kept" && ["decline", "time", "duration", "busy", "repeat"].some((field) => (field in event.patch))))
+        this.soon(AFTER_CHANGE_MS);
+    });
+    this.soon(AFTER_CHANGE_MS);
+  }
+  soon(ms) {
+    if (this.timer)
+      clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.run().then((pass) => pass.errors.length && this.options.log?.(`declining meetings: ${pass.errors.join("; ")}`), (error) => this.options.log?.(`declining meetings: ${error instanceof Error ? error.message : String(error)}`));
+    }, ms);
+    this.timer.unref?.();
+  }
+  run() {
+    const next = this.queue.then(() => this.runNow());
+    this.queue = next.catch(() => {});
+    return next;
+  }
+  async declinedFor(account, taskId) {
+    const declined = await this.load();
+    return [...declined.values()].filter((entry) => entry.account === account && entry.taskId === taskId).sort((a, b) => b.at.localeCompare(a.at));
+  }
+  async runNow() {
+    const state = this.state();
+    const kept = state.googleTasks;
+    const wanted = Object.values(kept).filter((entry) => entry.time !== null && (entry.busy && entry.decline || entry.repeat?.template?.busy && entry.repeat.template.decline && !entry.repeat.next));
+    if (!wanted.length)
+      return { declined: [], errors: [] };
+    const accounts = new Set(await this.reads.accounts());
+    const groups = new Map;
+    for (const entry of wanted) {
+      if (!accounts.has(entry.account))
+        continue;
+      const key = `${entry.account}
+${entry.listId}`;
+      const group = groups.get(key) ?? { account: entry.account, listId: entry.listId, ids: [] };
+      group.ids.push(entry.taskId);
+      groups.set(key, group);
+    }
+    if (!groups.size)
+      return { declined: [], errors: [] };
+    const now = this.options.now?.() ?? Date.now();
+    const zone = state.settings.timezone ?? "UTC";
+    const today = todayIn(zone, new Date(now));
+    const read = await this.reads.byIds([...groups.values()]);
+    const errors = [...read.errors];
+    const windows = taskWindows(read.items, this.state().googleTasks, today, addDays(today, DECLINE_AHEAD_DAYS), today, zone).filter((window) => window.decline && accounts.has(window.account) && Date.parse(window.end) > now).slice(0, WINDOWS_MAX);
+    const declined = await this.load();
+    const out = [];
+    for (const window of windows) {
+      let events;
+      try {
+        events = await this.calendar.invitations(window.account, window.start, window.end);
+      } catch (error) {
+        errors.push(`${window.account}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      const before = new Set([...declined.values()].filter((entry) => entry.account === window.account).map((entry) => entry.eventId));
+      for (const invitation of invitationsToDecline(window, events, before)) {
+        try {
+          await this.calendar.respond(window.account, "primary", invitation.id, "declined", "this", window.decline.message);
+          const entry = { account: window.account, taskId: window.taskId, task: window.title, eventId: invitation.id, summary: invitation.summary, start: invitation.start, at: new Date(now).toISOString() };
+          declined.set(`${window.account}
+${invitation.id}`, entry);
+          out.push(entry);
+        } catch (error) {
+          errors.push(`"${invitation.summary}": ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+    if (out.length) {
+      await this.save(declined, now);
+      this.options.onDeclined?.();
+    }
+    return { declined: out, errors };
+  }
+  async load() {
+    if (this.declined)
+      return this.declined;
+    const declined = new Map;
+    try {
+      const parsed = JSON.parse(await readFile4(this.file, "utf8"));
+      for (const entry of Array.isArray(parsed.declined) ? parsed.declined : []) {
+        const item = entry;
+        if (typeof item?.account === "string" && typeof item.eventId === "string" && typeof item.taskId === "string" && typeof item.at === "string")
+          declined.set(`${item.account}
+${item.eventId}`, item);
+      }
+    } catch {}
+    this.declined = declined;
+    return declined;
+  }
+  async save(declined, now) {
+    for (const [key, entry] of declined)
+      if (now - Date.parse(entry.at) > KEEP_MS2)
+        declined.delete(key);
+    await mkdir4(dirname4(this.file), { recursive: true, mode: 448 });
+    const temp = `${this.file}.${process.pid}.tmp`;
+    await writeFile4(temp, `${JSON.stringify({ version: 1, declined: [...declined.values()] })}
+`, { mode: 384 });
+    await rename4(temp, this.file);
   }
 }
 
@@ -5741,20 +6089,25 @@ sync = new SyncManager(store, planner, log);
 await sync.init();
 var snapshot = () => ({ ...planner.snapshot(), sync: sync.status() });
 var github = new GitHubSource;
-var feeds = new CalendarFeeds(join4(dirname4(dir), "cache"));
-var linearWorkspaces = new LinearWorkspaces(join4(dirname4(dir), "linear-workspaces.json"), undefined, log);
-var google = new GoogleAccounts(join4(dirname4(dir), "google-accounts.json"), undefined, undefined, log);
+var feeds = new CalendarFeeds(join4(dirname5(dir), "cache"));
+var linearWorkspaces = new LinearWorkspaces(join4(dirname5(dir), "linear-workspaces.json"), undefined, log);
+var google = new GoogleAccounts(join4(dirname5(dir), "google-accounts.json"), undefined, undefined, log);
 var googleData = new GoogleData(google);
 var googleCalendars = new GoogleCalendars(googleData);
 var googleDueTasks = new GoogleDueTasks(googleData);
 var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
 var taskAccounts = async () => (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email);
-var taskNotifications2 = new TaskNotifications(join4(dirname4(dir), "task-notifications.json"), () => planner.state, {
+var taskNotifications2 = new TaskNotifications(join4(dirname5(dir), "task-notifications.json"), () => planner.state, {
   accounts: taskAccounts,
   due: (accounts, date) => googleDueTasks.read(accounts, date, date, false),
   byIds: (groups) => googleDueTasks.byIds(groups, false)
 });
 var series = new GoogleSeries(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleDueTasks.forget() });
+var decliner = new MeetingDecliner(join4(dirname5(dir), "declined-meetings.json"), () => planner.state, {
+  accounts: async () => (await google.status()).accounts.filter((account) => account.workspace && account.features.includes("calendar") && account.features.includes("tasks")).map((account) => account.email),
+  byIds: (groups) => googleDueTasks.byIds(groups, true)
+}, googleData, { log, onDeclined: () => googleCalendars.forget() });
+decliner.start(planner);
 var opencodeConfig = opencodeConfigDir();
 var opencodeInfo = new OpenCodeInfo;
 var agentCommands = new CommandFiles(opencodeConfig, log);
@@ -5852,6 +6205,24 @@ var googleRoute = async (req, url) => {
   }
   if (path === "/google/tasks/notifications" && req.method === "POST") {
     return ok(await taskNotifications2.take());
+  }
+  if (path === "/google/tasks/decline" && req.method === "POST") {
+    return ok(await decliner.run());
+  }
+  if (path === "/google/tasks/declined" && req.method === "GET") {
+    const [email, task] = [url.searchParams.get("account"), url.searchParams.get("task")];
+    if (!isEmail2(email) || !isGoogleId(task))
+      return { status: 400, body: { error: "account and task are required" } };
+    return ok({ declined: await decliner.declinedFor(email, task) });
+  }
+  if (path === "/google/drive/files" && req.method === "GET") {
+    const [email, text] = [url.searchParams.get("account"), url.searchParams.get("q") ?? ""];
+    if (!isEmail2(email) || text.length > 200)
+      return { status: 400, body: { error: "account is required, and the search must be at most 200 characters" } };
+    const account = (await google.status()).accounts.find((item) => item.email === email.toLowerCase());
+    if (!account?.features.includes("drive"))
+      return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
+    return ok({ files: await googleData.driveFiles(email, text) });
   }
   if (path === "/google/tasks/linked" && req.method === "POST") {
     const body = await readJson(req);

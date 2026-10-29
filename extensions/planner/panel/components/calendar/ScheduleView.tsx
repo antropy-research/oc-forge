@@ -55,7 +55,7 @@ export const ScheduleView = ({ from, to, events, onDay }: { from: DateKey; to: D
                 <li key={itemKey(item)}>
                   <button
                     class={`schedule-item${taskClass(event)}${task?.completed ? ' is-done' : ''}${deadlinePassed(event, view.state, view.today) ? ' is-overdue' : ''}${answerClass(event)}`}
-                    style={{ '--item-color': eventColor(event, view.state.calendars) }}
+                    style={{ '--item-color': eventColor(event, view.state) }}
                     aria-label={task || event.upcoming ? taskEventLabel(event, view.state, view.today, zone) : event.pendingTasks ? eventLabel(event, zone) : `${event.title}, ${event.allDay ? 'all day' : range(event.start, event.end, zone, day.date)}`}
                     onClick={(click) => calendarUi.open({ kind: popoverKind(event), event, anchor: anchorOf(click.currentTarget) })}
                   >
@@ -136,7 +136,7 @@ export const SearchResults = ({ query, onDay }: { query: string; onDay: (date: D
               <li key={event.id}>
                 <button
                   class={`schedule-item${answerClass(event)}`}
-                  style={{ '--item-color': eventColor(event, view.state.calendars) }}
+                  style={{ '--item-color': eventColor(event, view.state) }}
                   aria-label={`${event.title}, ${event.allDay ? 'all day' : range(event.start, event.end, zone, date)}`}
                   onClick={(click) => calendarUi.open({ kind: 'event', event, anchor: anchorOf(click.currentTarget) })}
                 >

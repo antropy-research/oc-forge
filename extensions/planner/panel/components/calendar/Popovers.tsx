@@ -11,6 +11,7 @@ import { describeRecurrence } from '../../../src/domain/rrule.ts';
 import { descriptionText } from '../../../src/domain/gevents.ts';
 import { taskForGoogleTask, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google.ts';
 import { KEPT_HINT, advancedLabel, keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
+import { colorName, driveKind, quietLabel, type DeclinedMeeting } from '../../../src/domain/gtaskAdvanced.ts';
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
@@ -20,7 +21,7 @@ import { anchorOf, calendarUi, eventDetail, popoverKind, removeEvent, respond, t
 import { plannedLabel } from '../GitHubPanel.tsx';
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
-import { answerClass, eventColor, eventLabel, GOOGLE_TASKS_COLOR, inkOn, isTaskEvent, taskClass, taskEventLabel } from './items.ts';
+import { answerClass, eventColor, eventLabel, inkOn, isTaskEvent, taskClass, taskEventLabel } from './items.ts';
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const close = () => calendarUi.open(null);
@@ -94,7 +95,7 @@ export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: 
     };
   }, [event.id]);
   const calendar = view.state.calendars[event.calendarId];
-  const color = eventColor(event, view.state.calendars);
+  const color = eventColor(event, view.state);
   const day = eventSpan(event, zone).first;
   const planned = taskForEvent(view.state.tasks, event, day);
   const minutes = event.allDay ? null : Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60_000);
@@ -282,6 +283,18 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   const due = item.due ?? zonedDateMinutes(event.start, zone).date;
   const kept = keptFor(view.state, item);
   const time = keptTimeLabel(kept);
+  const color = eventColor(event, view.state);
+  const quiet = quietLabel(kept);
+  // The meetings the Planner declined during it ("Automatically decline meetings").
+  const [declined, setDeclined] = useState<DeclinedMeeting[]>([]);
+  useEffect(() => {
+    if (!kept?.decline) return;
+    let live = true;
+    google.declinedFor(item.account, item.id).then((found) => live && setDeclined(found)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [item.id, Boolean(kept?.decline)]);
   const remove = async () => {
     // A repeating task asks, as Google Calendar does: this one (the series goes on), this and the following ones, or all of them.
     const scope = kept?.repeat ? await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: DELETE_CHOICES }) : 'this';
@@ -317,7 +330,7 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
         </button>
       </div>
       <div class="pop-row pop-head">
-        <span class="pop-icon" style={{ color: GOOGLE_TASKS_COLOR }}><Icon name={item.completed ? 'done' : 'circle'} /></span>
+        <span class="pop-icon" style={{ color }} title={kept?.color ? colorName(kept.color) : 'List color'}><Icon name={item.completed ? 'done' : 'circle'} /></span>
         <div class="pop-main">
           <h2 class={`pop-title${item.completed ? ' is-done' : ''}`}>{item.title}</h2>
           <div class="pop-when">{item.due ? `${longDay(item.due)}${time ? ` ⋅ ${time}` : ''}` : 'No date'}</div>
@@ -336,7 +349,36 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
           <div class="pop-main">{advancedLabel(kept)}</div>
         </div>
       )}
-      {(time || kept?.deadline || kept?.repeat || kept?.starredAt) && (
+      {quiet && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name={kept?.doNotDisturb ? 'dnd' : 'declined'} /></span>
+          <div class="pop-main">
+            {quiet}
+            {kept?.decline && kept.busy && <div class="muted pop-small">"{kept.decline.message}" · {kept.decline.mode === 'all' ? 'new and existing meetings' : 'only new meeting invitations'}</div>}
+            {declined.length > 0 && (
+              <ul class="pop-declined" aria-label="Meetings declined">
+                {declined.map((meeting) => <li key={meeting.eventId}>Declined: {meeting.summary}</li>)}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+      {(kept?.attachments?.length ?? 0) > 0 && (
+        <div class="pop-row">
+          <span class="pop-icon"><Icon name="attach" /></span>
+          <ul class="pop-main pop-attachments" aria-label="Attachments">
+            {kept!.attachments!.map((file) => (
+              <li key={file.id}>
+                <button class="link" aria-label={`Open ${file.title}`} title="Open in Google Drive" onClick={() => void host.openUrl(file.url)}>
+                  <span class="pop-file" style={{ color: driveKind(file.mimeType).color }}><Icon name="file" size={16} /></span>
+                  {file.title}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(time || kept?.deadline || kept?.repeat || kept?.starredAt || kept?.color || kept?.attachments) && (
         <div class="pop-row">
           <span class="pop-icon"><Icon name="info" /></span>
           <div class="muted pop-small">{KEPT_HINT}.</div>
@@ -446,7 +488,7 @@ export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; ancho
         </button>
       </div>
       <div class="pop-row pop-head">
-        <span class="pop-icon" style={{ color: GOOGLE_TASKS_COLOR }}><Icon name="repeat" /></span>
+        <span class="pop-icon" style={{ color: eventColor(event, view.state) }}><Icon name="repeat" /></span>
         <div class="pop-main">
           <h2 class="pop-title">{values.title}</h2>
           <div class="pop-when">{longDay(upcoming.date)}{time ? ` ⋅ ${time}` : ''}</div>
@@ -506,7 +548,7 @@ export const DayPopover = ({ date, events, anchor, onDay }: { date: DateKey; eve
       </div>
       <ul class="day-popover-list">
         {today.map((event) => {
-          const color = eventColor(event, view.state.calendars);
+          const color = eventColor(event, view.state);
           const task = isTaskEvent(event) || Boolean(event.upcoming);
           return (
             <li key={event.id}>

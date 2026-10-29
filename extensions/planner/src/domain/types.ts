@@ -88,11 +88,43 @@ export interface GoogleTaskKept {
   busy?: true;
   /** Google Calendar's visibility for a task with a time; absent: the calendar's default. */
   visibility?: 'public' | 'private';
+  /** Its color on the calendar, one of Google Calendar's; absent: its list's color. */
+  color?: string;
+  /** Google Drive files attached to it, at most 25, as Google Calendar attaches them to a task. */
+  attachments?: TaskAttachment[];
+  /**
+   * Google Calendar's "Do not disturb" for a task with a time (work and school accounts): the
+   * Planner's own notifications that come during it wait until it ends.
+   */
+  doNotDisturb?: true;
+  /** Google Calendar's "Automatically decline meetings" for a task with a time set Busy (work and school accounts). */
+  decline?: TaskDecline;
   updatedAt: string;
 }
 
 /** Google Calendar's visibility choices for an event or a task with a time. */
 export type TaskVisibility = 'default' | 'public' | 'private';
+
+/** A Google Drive file attached to a task: Drive's id for it, its name, its type and where it opens. */
+export interface TaskAttachment {
+  id: string;
+  title: string;
+  mimeType: string;
+  /** Where Drive opens it (https). */
+  url: string;
+}
+
+/**
+ * Meetings declined during a task, as Google Calendar declines them for one set Busy: every
+ * invitation then ('all', new and existing meetings) or only those that arrive once it is on
+ * ('new'), each answered "Declined" with `message`.
+ */
+export interface TaskDecline {
+  mode: 'all' | 'new';
+  message: string;
+  /** When it was turned on. */
+  since: string;
+}
 
 /**
  * What each next occurrence of a repeating Google task is made from, as
@@ -110,9 +142,15 @@ export interface GoogleTaskTemplate {
   deadline: number | null;
   /** The day the schedule counts from. */
   start: DateKey;
-  /** Busy and visibility are the series', as Google Calendar keeps one for all of a series. */
+  /** Busy and visibility are the series', as Google Calendar keeps one for all of a series; so are its other advanced settings. */
   busy?: true;
   visibility?: 'public' | 'private';
+  color?: string;
+  doNotDisturb?: true;
+  /** Declining meetings, since it was turned on for the series (when known). */
+  decline?: Omit<TaskDecline, 'since'> & { since?: string };
+  /** The Drive files each next occurrence has attached. */
+  attachments?: TaskAttachment[];
 }
 
 /**
@@ -439,6 +477,14 @@ export interface Settings {
    * Calendar shows yours from the start; once per account, so hiding it later stays hidden.
    */
   googleCalendarsIntroduced: string[];
+  /**
+   * Google Calendar's task lists under "My calendars": each list's color on the calendar and the
+   * lists hidden there, by `${account}\n${listId}`; Google Tasks' API has neither.
+   */
+  googleTaskListColors?: Record<string, string>;
+  googleTaskListsHidden?: string[];
+  /** The task lists in the order the user put them (Google Tasks lets one drag them); Google's API keeps no order. */
+  googleTaskListOrder?: string[];
   /** Named agents (an OpenCode agent and a model) to assign tasks to. */
   agentPresets: AgentPreset[];
 }

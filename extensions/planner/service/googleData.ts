@@ -1,7 +1,7 @@
 // What the Planner reads from and writes to Google, through GoogleAccounts:
 // calendars and their events (read, created, changed, answered), working
-// sessions as events, Google Tasks (lists, tasks, subtasks, order), and Gmail
-// messages. Lists are read page after page; where the Planner stops early it
+// sessions as events, Google Tasks (lists, tasks, subtasks, order), Gmail
+// messages, and Drive files' names to attach to a task. Lists are read page after page; where the Planner stops early it
 // says so rather than leaving the rest out quietly. Every call is short, since
 // the host restarts a service that takes more than 20 seconds to answer.
 import type { CalendarEvent } from '../src/domain/ics.ts';
@@ -22,6 +22,7 @@ import {
 } from '../src/domain/google.ts';
 import { checkEventInput, eventBody, planDelete, planEdit, planRsvp, type EditScope, type EventInput, type EventOp, type EventPlan } from '../src/domain/gevents.ts';
 import { isDateKey } from '../src/domain/dates.ts';
+import { driveQuery, type DriveFile, type Invitation } from '../src/domain/gtaskAdvanced.ts';
 import { newId } from '../src/domain/ids.ts';
 import type { DateKey, TaskVisibility } from '../src/domain/types.ts';
 import { GoogleError, type GoogleAccounts } from './google.ts';
@@ -29,6 +30,9 @@ import { GoogleError, type GoogleAccounts } from './google.ts';
 const CALENDAR = 'https://www.googleapis.com/calendar/v3';
 const TASKS = 'https://tasks.googleapis.com/tasks/v1';
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const DRIVE = 'https://www.googleapis.com/drive/v3';
+/** Files a Drive search lists at most, as a picker's first screen. */
+const DRIVE_MAX = 30;
 const EVENT_FIELDS =
   'accessRole,nextPageToken,items(id,status,summary,location,transparency,colorId,eventType,start,end,recurringEventId,originalStartTime,attendees(email,self,organizer,resource,responseStatus),organizer(email,self),guestsCanModify,locked,privateCopy,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),extendedProperties,htmlLink)';
 /** Pages read at most: Google's page sizes make each limit thousands of items. */
@@ -416,11 +420,54 @@ export class GoogleData {
     }
   }
 
-  /** Answer an invitation, for this occurrence or the whole series. */
-  async respond(account: string, calendarId: string, eventId: string, response: GoogleResponse, scope: 'this' | 'all'): Promise<number> {
+  /** Answer an invitation, for this occurrence or the whole series; `comment` goes to the organizer with it. */
+  async respond(account: string, calendarId: string, eventId: string, response: GoogleResponse, scope: 'this' | 'all', comment?: string): Promise<number> {
     const found = await this.withSeries(account, calendarId, eventId);
     // The organizer hears the answer, as when answering in Google Calendar.
-    return this.run(account, calendarId, planRsvp({ scope, response, ...found }), 'all');
+    return this.run(account, calendarId, planRsvp({ scope, response, ...found, ...(comment ? { comment } : {}) }), 'all');
+  }
+
+  /**
+   * The events on the account's own calendar between two instants, as "Automatically decline meetings" looks at
+   * them: each occurrence on its own, with my answer, who organizes it, its kind and when it was made.
+   */
+  async invitations(account: string, timeMin: string, timeMax: string): Promise<Invitation[]> {
+    const { items } = await this.pages<RawGoogleEvent>(
+      account,
+      (token) => `${CALENDAR}/calendars/primary/events?${new URLSearchParams({ singleEvents: 'true', orderBy: 'startTime', timeMin, timeMax, maxResults: '250', fields: 'nextPageToken,items(id,status,summary,start,end,created,eventType,organizer(email,self),attendees(email,self,organizer,responseStatus))', ...(token ? { pageToken: token } : {}) })}`,
+      2,
+    );
+    return items.flatMap((raw) => {
+      if (!raw.id || raw.status === 'cancelled' || !raw.start?.dateTime || !raw.end?.dateTime) return [];
+      const self = raw.attendees?.find((attendee) => attendee.self);
+      const response = self?.responseStatus;
+      return [{
+        id: raw.id,
+        summary: raw.summary ?? '(No title)',
+        start: new Date(raw.start.dateTime).toISOString(),
+        end: new Date(raw.end.dateTime).toISOString(),
+        created: raw.created ?? new Date(0).toISOString(),
+        response: response === 'needsAction' || response === 'declined' || response === 'tentative' || response === 'accepted' ? response : null,
+        mine: Boolean(raw.organizer?.self || self?.organizer),
+        meeting: !raw.eventType || raw.eventType === 'default',
+      }];
+    });
+  }
+
+  // ── Google Drive ───────────────────────────────────────────────────────────
+
+  /**
+   * Drive files whose name has `text`, newest first (the newest of all when empty), as Google's Drive picker finds
+   * them to attach to a task: their names, types and addresses, never their contents.
+   */
+  async driveFiles(account: string, text: string): Promise<DriveFile[]> {
+    const query = new URLSearchParams({ q: driveQuery(text), orderBy: 'recency desc', pageSize: String(DRIVE_MAX), fields: 'files(id,name,mimeType,webViewLink,modifiedTime)' });
+    const answer = await this.accounts.request<{ files?: { id?: string; name?: string; mimeType?: string; webViewLink?: string; modifiedTime?: string }[] }>(account, 'GET', `${DRIVE}/files?${query}`);
+    return (answer?.files ?? []).flatMap((file) =>
+      file.id && /^[A-Za-z0-9_-]{1,200}$/.test(file.id) && file.webViewLink && /^https:\/\//.test(file.webViewLink)
+        ? [{ id: file.id, title: (file.name ?? '').trim().slice(0, 500) || '(Untitled)', mimeType: (file.mimeType ?? '').slice(0, 200), url: file.webViewLink, ...(file.modifiedTime ? { modifiedTime: file.modifiedTime } : {}) }]
+        : [],
+    );
   }
 
   /** Move an event (or a whole series) to another of the account's calendars. */

@@ -8,6 +8,7 @@ import { pendingEvent } from '../../src/domain/gtaskPending.ts';
 import { useGoogle, usePlanner, useView } from './context.ts';
 import { calendarUi, useCalendarUi, withPending } from './gcal.ts';
 import { usePendingTasks } from './pendingTasks.ts';
+import { inHiddenList } from '../components/calendar/items.ts';
 
 export interface CalendarFeedState {
   events: CalendarEvent[];
@@ -74,6 +75,7 @@ export const useCalendarEvents = (from: DateKey, to: DateKey, options: { decline
   const shown = timed.flatMap((event) => (event.googleTask ? [event.googleTask] : []));
   const pendingEntry = pendingEvent(pending, view.today, zone);
   const beside = options.tasks && tasks ? [...deadlineEvents([...shown, ...(feed.deadlineTasks ?? [])], kept ?? {}, from, to, zone), ...upcomingTasks(kept ?? {}, shown, from, to, view.today).map((task) => upcomingEvent(task, zone)), ...(pendingEntry ? [pendingEntry] : [])] : [];
-  const events = withPending([...timed, ...beside], ui.pending, ui.added, instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone));
+  // A task list hidden under "My calendars" shows none of its tasks.
+  const events = withPending([...timed, ...beside], ui.pending, ui.added, instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone)).filter((event) => !inHiddenList(event, view.state.settings));
   return { ...feed, events: options.declined ? events : events.filter((event) => event.google?.response !== 'declined') };
 };

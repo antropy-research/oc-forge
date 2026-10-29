@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type TaskVisibility, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskAttachment, type TaskDecline, type TaskRun, type TaskSourceRef, type TaskVisibility, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 import { parseRRule } from './rrule.ts';
 import { linearDisplayProblem } from './linearDisplay.ts';
@@ -88,9 +88,16 @@ export type EventBody =
 
 /**
  * What a user sets on a Google task that the Planner keeps (Google Tasks' API cannot): `starred` stars or unstars it;
- * `busy` false makes it Free again, `visibility` 'default' gives it the calendar's default again.
+ * `busy` false makes it Free again, `visibility` 'default' gives it the calendar's default again, `color` null its
+ * list's color, `attachments` [] none, `doNotDisturb` false and `decline` null turn those off. A decline without
+ * `since` is on from when it is kept, or since it was turned on.
  */
-export type GoogleTaskKeptPatch = Partial<Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline' | 'repeat'> & { starred: boolean; busy: boolean; visibility: TaskVisibility }>;
+export type GoogleTaskKeptPatch = Partial<
+  Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline' | 'repeat'> & { starred: boolean; busy: boolean; visibility: TaskVisibility; color: string | null; attachments: TaskAttachment[]; doNotDisturb: boolean; decline: DeclineInput | null }
+>;
+
+/** "Automatically decline meetings" as it is set: since when it is on is the Planner's to keep. */
+export type DeclineInput = Omit<TaskDecline, 'since'> & { since?: string };
 
 export type EventType = EventBody['type'];
 
@@ -146,7 +153,35 @@ export const GOOGLE_NOTES_MAX = 8192;
 
 const isGoogleTaskId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024;
 
-const GTASK_TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'start', 'busy', 'visibility'];
+const GTASK_TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'start', 'busy', 'visibility', 'color', 'doNotDisturb', 'decline', 'attachments'];
+
+/** Google Calendar attaches at most this many Drive files to a task. */
+export const ATTACHMENTS_MAX = 25;
+/** The longest message a declined meeting's organizer gets. */
+export const DECLINE_MESSAGE_MAX = 500;
+const ATTACHMENT_FIELDS = ['id', 'title', 'mimeType', 'url'];
+
+/** Drive files attached to a task: Drive's id for each, a name, a type and an https address, once each, at most 25. */
+const attachmentsProblem = (value: unknown): string | null => {
+  if (!Array.isArray(value) || value.length > ATTACHMENTS_MAX) return `attachments are at most ${ATTACHMENTS_MAX} Drive files`;
+  for (const file of value) {
+    if (!isRecord(file) || typeof file.id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(file.id)) return "an attachment needs Drive's id for the file";
+    if (typeof file.title !== 'string' || !file.title.trim() || file.title.length > 500) return "an attachment's name is 1-500 characters";
+    if (typeof file.mimeType !== 'string' || file.mimeType.length > 200) return "an attachment's type is text, at most 200 characters";
+    if (typeof file.url !== 'string' || file.url.length > 2000 || !/^https:\/\//.test(file.url)) return 'an attachment opens at an https address';
+    if (Object.keys(file).some((field) => !ATTACHMENT_FIELDS.includes(field))) return 'an attachment has an unknown field';
+  }
+  return new Set(value.map((file: { id: string }) => file.id)).size === value.length ? null : 'a file is attached once';
+};
+
+/** "Automatically decline meetings": new and existing ('all') or only new ('new') invitations, a message, and since when. */
+const declineProblem = (value: unknown): string | null => {
+  if (!isRecord(value)) return 'decline is an object, or null';
+  if (value.mode !== 'all' && value.mode !== 'new') return 'decline mode is all or new';
+  if (typeof value.message !== 'string' || value.message.length > DECLINE_MESSAGE_MAX) return `a decline message is text, at most ${DECLINE_MESSAGE_MAX} characters`;
+  if (value.since !== undefined && !(typeof value.since === 'string' && value.since.length <= 40 && !Number.isNaN(Date.parse(value.since)))) return 'decline since is an instant';
+  return Object.keys(value).some((field) => !['mode', 'message', 'since'].includes(field)) ? 'decline has an unknown field' : null;
+};
 
 /** A repeating Google task's template: Google's title and details, and what the Planner keeps, for each next occurrence. */
 const validateGtaskTemplate = (value: unknown): string | null => {
@@ -159,6 +194,10 @@ const validateGtaskTemplate = (value: unknown): string | null => {
   if (!isDateKey(value.start)) return 'template start must be a date';
   if (value.busy !== undefined && value.busy !== true) return 'template busy is true, or left out (free)';
   if (value.visibility !== undefined && value.visibility !== 'public' && value.visibility !== 'private') return 'template visibility is public or private, or left out (the default)';
+  if (value.color !== undefined && !isColor(value.color)) return 'template color must be #rrggbb';
+  if (value.doNotDisturb !== undefined && value.doNotDisturb !== true) return 'template doNotDisturb is true, or left out';
+  const problem = (value.decline !== undefined ? declineProblem(value.decline) : null) ?? (value.attachments !== undefined ? attachmentsProblem(value.attachments) : null);
+  if (problem) return `template: ${problem}`;
   return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? 'template has an unknown field' : null;
 };
 
@@ -182,16 +221,23 @@ const validateGtaskException = (value: unknown): string | null => {
   return null;
 };
 
-/** What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule (with its series' template), a star, Busy, a visibility. */
+/**
+ * What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule (with its series' template), a
+ * star, Busy, a visibility, a color, Drive attachments, Do not disturb and declining meetings.
+ */
 const validateKeptPatch = (patch: unknown): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'time' && !(value === null || (Number.isInteger(value) && (value as number) >= 0 && (value as number) < 24 * 60))) return 'time must be minutes after midnight, or null';
     else if (key === 'duration' && !(value === null || (Number.isInteger(value) && (value as number) >= 5 && (value as number) <= 24 * 60))) return 'duration must be 5 to 1440 minutes, or null';
     else if (key === 'deadline' && !(value === null || isDateKey(value))) return 'deadline must be a date or null';
-    else if ((key === 'starred' || key === 'busy') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if ((key === 'starred' || key === 'busy' || key === 'doNotDisturb') && typeof value !== 'boolean') return `${key} must be true or false`;
     else if (key === 'visibility' && value !== 'default' && value !== 'public' && value !== 'private') return 'visibility must be default, public or private';
-    else if (key === 'repeat') {
+    else if (key === 'color' && !(value === null || isColor(value))) return "color must be #rrggbb, or null (its list's)";
+    else if (key === 'attachments' || key === 'decline') {
+      const problem = key === 'attachments' ? attachmentsProblem(value) : value === null ? null : declineProblem(value);
+      if (problem) return problem;
+    } else if (key === 'repeat') {
       if (value === null) continue;
       if (!isRecord(value) || typeof value.rule !== 'string' || value.rule.length > 500 || !parseRRule(value.rule)) return 'repeat needs an RRULE';
       if (!isId(value.seriesId)) return 'repeat needs a series id';
@@ -211,7 +257,7 @@ const validateKeptPatch = (patch: unknown): string | null => {
         }
       }
       if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next', 'on', 'template', 'exceptions'].includes(field))) return 'repeat has an unknown field';
-    } else if (!['time', 'duration', 'deadline', 'starred', 'repeat', 'busy', 'visibility'].includes(key)) return `unknown field ${key}`;
+    } else if (!['time', 'duration', 'deadline', 'starred', 'repeat', 'busy', 'visibility', 'color', 'attachments', 'doNotDisturb', 'decline'].includes(key)) return `unknown field ${key}`;
   }
   return null;
 };
@@ -259,6 +305,11 @@ const isGoogleCalendarRef = (value: unknown): boolean =>
 const isGoogleEventLink = (value: unknown): value is GoogleEventLink =>
   isGoogleCalendarRef(value) && isShortText((value as Record<string, unknown>).eventId, 1024) && ((value as Record<string, unknown>).eventId as string).length > 0;
 
+/** A task list in the settings: its account and id, as `${account}\n${listId}`. */
+const isTaskListKey = (value: unknown): boolean => typeof value === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}\n[^\n]{1,1024}$/.test(value);
+/** At most this many task lists have a color, a place, or are hidden. */
+const TASK_LISTS_MAX = 500;
+
 const validateSettingsPatch = (patch: unknown): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
@@ -281,9 +332,11 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'googleTasksOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'googleTasksOnComplete must be ask, complete or nothing';
     else if ((key === 'googleTasksImportCompletion' || key === 'googleTasksDueFromPlan' || key === 'googleTasksOnCalendar' || key === 'googleTaskNotifications') && typeof value !== 'boolean') return `${key} must be true or false`;
     else if (key === 'googleCalendarsIntroduced' && !(Array.isArray(value) && value.length <= 50 && value.every((email) => typeof email === 'string' && email.length <= 254 && email.includes('@')))) return 'googleCalendarsIntroduced must be at most 50 email addresses';
+    else if (key === 'googleTaskListColors' && !(isRecord(value) && Object.keys(value).length <= TASK_LISTS_MAX && Object.entries(value).every(([list, color]) => isTaskListKey(list) && isColor(color)))) return `googleTaskListColors must be at most ${TASK_LISTS_MAX} task lists, each a #rrggbb color`;
+    else if ((key === 'googleTaskListsHidden' || key === 'googleTaskListOrder') && !(Array.isArray(value) && value.length <= TASK_LISTS_MAX && value.every(isTaskListKey) && new Set(value).size === value.length)) return `${key} must be at most ${TASK_LISTS_MAX} task lists, once each`;
     else if (key === 'agentPresets' && !(Array.isArray(value) && value.length <= 30 && value.every(isAgentPreset) && new Set(value.map((preset: { id: string }) => preset.id)).size === value.length)) return 'agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null';
     else if (key === 'agentPresets') continue;
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar', 'googleTaskNotifications', 'googleCalendarsIntroduced'].includes(key)) return `unknown setting ${key}`;
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar', 'googleTaskNotifications', 'googleCalendarsIntroduced', 'googleTaskListColors', 'googleTaskListsHidden', 'googleTaskListOrder'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };

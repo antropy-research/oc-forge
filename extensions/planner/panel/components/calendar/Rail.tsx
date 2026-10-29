@@ -1,8 +1,10 @@
 // Google Calendar's left rail: Create, the mini month, and "My calendars" and
-// "Other calendars" with a colored checkbox each.
+// "Other calendars" with a colored checkbox each; under "My calendars", Tasks
+// and each task list, with its own checkbox and color.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarSubscription, DateKey } from '../../../src/domain/types.ts';
-import type { GoogleCalendarInfo } from '../../../src/domain/google.ts';
+import type { GoogleCalendarInfo, GoogleTaskList } from '../../../src/domain/google.ts';
+import { orderedLists, taskListColor, taskListKey } from '../../../src/domain/gtaskAdvanced.ts';
 import { addDays } from '../../../src/domain/dates.ts';
 import { addMonths, longDay, monthStart, monthWeeks } from '../../../src/domain/gcalendar.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
@@ -77,10 +79,10 @@ const RowMenu = ({ name, onOnly, color, onColor, onClose }: { name: string; onOn
   );
 };
 
-const CalendarRow = ({ name, color, checked, onToggle, onOnly, onColor, note }: { name: string; color: string; checked: boolean; onToggle: (checked: boolean) => void; onOnly: () => void; onColor: ((color: string) => void) | null; note?: string }) => {
+const CalendarRow = ({ name, color, checked, onToggle, onOnly, onColor, note, nested = false }: { name: string; color: string; checked: boolean; onToggle: (checked: boolean) => void; onOnly: () => void; onColor: ((color: string) => void) | null; note?: string; nested?: boolean }) => {
   const [menu, setMenu] = useState(false);
   return (
-    <li class={`cal-row${menu ? ' has-menu' : ''}`} style={{ '--cal-color': color }}>
+    <li class={`cal-row${menu ? ' has-menu' : ''}${nested ? ' is-nested' : ''}`} style={{ '--cal-color': color }}>
       <label class="cal-check" title={note ?? name}>
         <input type="checkbox" checked={checked} onChange={(event) => onToggle(event.currentTarget.checked)} />
         <span class="cal-name">{name}</span>
@@ -111,16 +113,31 @@ export const CalendarList = () => {
   const others = gv.calendars.filter((calendar) => !mine.includes(calendar));
   // Google calendars shown here whose account is not listed (not read yet, or removed) and ICS feeds.
   const orphans = subscriptions.filter((item) => !item.google || !gv.calendars.some((calendar) => calendar.account === item.google!.account && calendar.id === item.google!.calendarId));
-  const tasksOn = view.state.settings.googleTasksOnCalendar;
-  /** Show only one calendar (or only tasks), as Google Calendar's "Display this only". */
-  const only = async (keep: { google?: GoogleCalendarInfo; subscription?: CalendarSubscription; tasks?: boolean }) => {
+  const settings = view.state.settings;
+  const tasksOn = settings.googleTasksOnCalendar;
+  // Each task list, under Tasks, with its own checkbox and color, as Google Calendar lists them (in the user's order).
+  const taskLists = tasks ? orderedLists(gv.lists, settings.googleTaskListOrder) : [];
+  const severalTaskAccounts = new Set(taskLists.map((list) => list.account)).size > 1;
+  const hidden = settings.googleTaskListsHidden ?? [];
+  /** Show only one calendar (or only tasks, or one task list), as Google Calendar's "Display this only". */
+  const only = async (keep: { google?: GoogleCalendarInfo; subscription?: CalendarSubscription; tasks?: boolean; list?: GoogleTaskList }) => {
     const target = keep.google ? subscriptionOf(keep.google) : keep.subscription ?? null;
     const bodies = subscriptions.filter((item) => item.visible && item.id !== target?.id).map((item) => ({ type: 'calendar.updated' as const, calendarId: item.id, patch: { visible: false } }));
     if (bodies.length) await client.dispatch(bodies);
     if (keep.google) await google.setVisible(keep.google, true);
     else if (keep.subscription && !keep.subscription.visible) await google.setVisible(keep.subscription, true);
-    if (Boolean(keep.tasks) !== tasksOn) await client.dispatch([{ type: 'settings.updated', patch: { googleTasksOnCalendar: Boolean(keep.tasks) } }]);
+    const patch: Partial<typeof settings> = {};
+    if (Boolean(keep.tasks) !== tasksOn) patch.googleTasksOnCalendar = Boolean(keep.tasks);
+    if (keep.list) patch.googleTaskListsHidden = taskLists.filter((list) => list !== keep.list).map((list) => taskListKey(list.account, list.id));
+    if (Object.keys(patch).length) await client.dispatch([{ type: 'settings.updated', patch }]);
   };
+  /** A task list's checkbox: its tasks on the calendar or not (checking one shows tasks again when they were off). */
+  const showList = (list: GoogleTaskList, shown: boolean) => {
+    const key = taskListKey(list.account, list.id);
+    const next = shown ? hidden.filter((item) => item !== key) : [...new Set([...hidden, key])];
+    void client.dispatch([{ type: 'settings.updated', patch: { googleTaskListsHidden: next, ...(shown && !tasksOn ? { googleTasksOnCalendar: true } : {}) } }]);
+  };
+  const recolorList = (list: GoogleTaskList) => (color: string) => void client.dispatch([{ type: 'settings.updated', patch: { googleTaskListColors: { ...(settings.googleTaskListColors ?? {}), [taskListKey(list.account, list.id)]: color } } }]);
   const recolor = (subscription: CalendarSubscription | null) => (subscription ? (color: string) => void client.dispatch([{ type: 'calendar.updated', calendarId: subscription.id, patch: { color } }]) : null);
   const row = (calendar: GoogleCalendarInfo) => {
     const subscription = subscriptionOf(calendar);
@@ -151,12 +168,25 @@ export const CalendarList = () => {
                 name="Tasks"
                 color={GOOGLE_TASKS_COLOR}
                 checked={tasksOn}
-                note="Google tasks with a date, on that day"
+                note="Google tasks with a date, on that day; each list's color is under it"
                 onToggle={(checked) => void client.dispatch([{ type: 'settings.updated', patch: { googleTasksOnCalendar: checked } }])}
                 onOnly={() => void only({ tasks: true })}
                 onColor={null}
               />
             )}
+            {taskLists.map((list) => (
+              <CalendarRow
+                key={`tasks:${list.account}:${list.id}`}
+                nested
+                name={`${list.title}${severalTaskAccounts ? ` · ${list.account}` : ''}`}
+                color={taskListColor(settings, list.account, list.id)}
+                checked={tasksOn && !hidden.includes(taskListKey(list.account, list.id))}
+                note={`Tasks in ${list.title}, in this color unless a task has its own (kept in the Planner)`}
+                onToggle={(checked) => showList(list, checked)}
+                onOnly={() => void only({ tasks: true, list })}
+                onColor={recolorList(list)}
+              />
+            ))}
             {!accounts.length && !tasks && <li class="hint">Connect Google in Settings → Google to see your calendars here.</li>}
             {accounts.length > 0 && !gv.calendars.length && !gv.calendarErrors.length && <li class="hint">Loading calendars…</li>}
             {gv.calendarErrors.map((error) => <li key={error.account} class="danger">{error.account ? `${error.account}: ` : ''}{error.message}</li>)}

@@ -295,7 +295,9 @@ describe('what the Planner keeps for Google tasks', () => {
     expect(check({ time: 1440 })).toMatch(/time/);
     expect(check({ duration: 2 })).toMatch(/duration/);
     expect(check({ repeat: { rule: 'every monday', seriesId: 's1', index: 1, next: null } })).toMatch(/RRULE/);
-    expect(check({ color: 'red' })).toMatch(/unknown field/);
+    // A color is one of Google Calendar's, as #rrggbb (round 10); anything else the Planner does not keep.
+    expect(check({ color: 'red' })).toMatch(/color must be #rrggbb/);
+    expect(check({ priority: 'high' })).toMatch(/unknown field/);
     const state = foldEvents([kept({ time: 600, starred: true }), kept({ deadline: '2026-10-30' })]);
     expect(state.googleTasks[googleTaskKey(ME, 'gt1')]).toMatchObject({ time: 600, deadline: '2026-10-30', listId: 'L1' });
     expect(keptFor(state, { account: ME, id: 'gt1' })?.starredAt).toBeTruthy();

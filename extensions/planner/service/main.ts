@@ -15,6 +15,7 @@ import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimebo
 import { googleWriteRoute } from './googleRoutes.ts';
 import { TaskNotifications } from './taskNotifications.ts';
 import { GoogleSeries } from './googleSeries.ts';
+import { MeetingDecliner } from './googleDecline.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { deadlineGroups } from '../src/domain/gtaskKept.ts';
 import { pendingRange, pendingTasks } from '../src/domain/gtaskPending.ts';
@@ -60,6 +61,18 @@ const taskNotifications = new TaskNotifications(join(dirname(dir), 'task-notific
 });
 // Repeating Google tasks: one change of a series at a time, whichever window asks.
 const series = new GoogleSeries(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleDueTasks.forget() });
+// "Automatically decline meetings" for Busy tasks of work and school accounts; what was declined stays beside the data.
+const decliner = new MeetingDecliner(
+  join(dirname(dir), 'declined-meetings.json'),
+  () => planner.state,
+  {
+    accounts: async () => (await google.status()).accounts.filter((account) => account.workspace && account.features.includes('calendar') && account.features.includes('tasks')).map((account) => account.email),
+    byIds: (groups) => googleDueTasks.byIds(groups, true),
+  },
+  googleData,
+  { log, onDeclined: () => googleCalendars.forget() },
+);
+decliner.start(planner);
 // Agents to assign tasks to: one OpenCode command per preset, in OpenCode's own config folder.
 const opencodeConfig = opencodeConfigDir();
 const opencodeInfo = new OpenCodeInfo();
@@ -173,6 +186,23 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
   if (path === '/google/tasks/notifications' && req.method === 'POST') {
     // The task notifications come by now that no Planner surface has had yet; each is given once.
     return ok(await taskNotifications.take());
+  }
+  if (path === '/google/tasks/decline' && req.method === 'POST') {
+    // "Automatically decline meetings" now, after a task's change: the meetings it declined.
+    return ok(await decliner.run());
+  }
+  if (path === '/google/tasks/declined' && req.method === 'GET') {
+    const [email, task] = [url.searchParams.get('account'), url.searchParams.get('task')];
+    if (!isEmail(email) || !isGoogleId(task)) return { status: 400, body: { error: 'account and task are required' } };
+    return ok({ declined: await decliner.declinedFor(email, task) });
+  }
+  if (path === '/google/drive/files' && req.method === 'GET') {
+    // Drive's files by name, to attach to a task, as Google Calendar's "Add a Google Drive attachment" finds them.
+    const [email, text] = [url.searchParams.get('account'), url.searchParams.get('q') ?? ''];
+    if (!isEmail(email) || text.length > 200) return { status: 400, body: { error: 'account is required, and the search must be at most 200 characters' } };
+    const account = (await google.status()).accounts.find((item) => item.email === email.toLowerCase());
+    if (!account?.features.includes('drive')) return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
+    return ok({ files: await googleData.driveFiles(email, text) });
   }
   if (path === '/google/tasks/linked' && req.method === 'POST') {
     // The tasks behind linked Planner tasks, to bring those up to date.

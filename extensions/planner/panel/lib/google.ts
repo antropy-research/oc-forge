@@ -3,7 +3,7 @@
 // tasks, and writing completion and due dates back to Google Tasks the way the
 // Linear integration writes back to Linear (ask, do, or not).
 import type { HostClient } from '@openchamber/sdk';
-import { GOOGLE_NOTES_MAX, GTASK_EXCEPTIONS_MAX, type Command, type EventBody, type GoogleTaskKeptPatch } from '../../src/domain/events.ts';
+import { GOOGLE_NOTES_MAX, GTASK_EXCEPTIONS_MAX, type Command, type DeclineInput, type EventBody, type GoogleTaskKeptPatch } from '../../src/domain/events.ts';
 import {
   findMovedTask,
   GONE_STATUS,
@@ -46,20 +46,62 @@ import { newId } from '../../src/domain/ids.ts';
 import { addDays } from '../../src/domain/dates.ts';
 import { longDay } from '../../src/domain/gcalendar.ts';
 import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
-import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Task, TaskVisibility } from '../../src/domain/types.ts';
+import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Task, TaskAttachment, TaskVisibility } from '../../src/domain/types.ts';
+import type { DeclinedMeeting, DriveFile } from '../../src/domain/gtaskAdvanced.ts';
 import type { Origin, PlannerClient, Snapshot } from './client.ts';
 import { calendarUi } from './gcal.ts';
 
 /**
- * What a Google task's form sets: Google's own fields, and what the Planner keeps for it; Busy and a visibility
- * only with a time (left out: as they are).
+ * What a Google task's form sets: Google's own fields, and what the Planner keeps for it; Busy, a visibility, Do not
+ * disturb and declining meetings only with a time, declining only Busy (left out: as they are), a color (null: its
+ * list's) and Drive attachments.
  */
 export interface TaskFields {
   title: string;
   notes: string;
   due: DateKey | null;
-  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { rule: string | null; busy?: boolean; visibility?: TaskVisibility };
+  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & {
+    rule: string | null;
+    busy?: boolean;
+    visibility?: TaskVisibility;
+    color?: string | null;
+    attachments?: TaskAttachment[];
+    doNotDisturb?: boolean;
+    decline?: DeclineInput | null;
+  };
 }
+
+/** The advanced settings a form's fields give a task, from what is kept for it now where the form leaves one out. */
+export const advancedOf = (fields: TaskFields['kept'], kept: GoogleTaskKept | null) => {
+  const timed = fields.time !== null;
+  const busy = timed && (fields.busy ?? Boolean(kept?.busy));
+  const decline = busy ? (fields.decline !== undefined ? fields.decline : kept?.decline ?? null) : null;
+  return {
+    busy,
+    visibility: timed ? fields.visibility ?? kept?.visibility ?? ('default' as TaskVisibility) : ('default' as TaskVisibility),
+    doNotDisturb: timed && (fields.doNotDisturb ?? Boolean(kept?.doNotDisturb)),
+    // Declining stays on since it was turned on; a new message or mode keeps that.
+    decline: decline ? { mode: decline.mode, message: decline.message, ...(decline.since ?? kept?.decline?.since ? { since: decline.since ?? kept!.decline!.since } : {}) } : null,
+    color: fields.color !== undefined ? fields.color : kept?.color ?? null,
+  };
+};
+
+/** Whether the form changes a task's series-wide advanced settings (availability, visibility, color, Do not disturb, declining). */
+export const advancedChanged = (fields: TaskFields['kept'], kept: GoogleTaskKept | null): boolean => {
+  const next = advancedOf(fields, kept);
+  return (
+    next.busy !== Boolean(kept?.busy) ||
+    next.visibility !== (kept?.visibility ?? 'default') ||
+    next.doNotDisturb !== Boolean(kept?.doNotDisturb) ||
+    next.color !== (kept?.color ?? null) ||
+    (next.decline?.mode ?? null) !== (kept?.decline?.mode ?? null) ||
+    (next.decline?.message ?? null) !== (kept?.decline?.message ?? null)
+  );
+};
+
+/** Whether the form changes a task's attachments. */
+export const attachmentsChanged = (fields: TaskFields['kept'], kept: GoogleTaskKept | null): boolean =>
+  fields.attachments !== undefined && JSON.stringify(fields.attachments.map((file) => file.id)) !== JSON.stringify((kept?.attachments ?? []).map((file) => file.id));
 
 /** Why a repeating task cannot go to another list: Google Tasks keeps it in its own. */
 export const REPEATING_STAYS = 'A repeating task stays in its list, as in Google Tasks';
@@ -82,12 +124,14 @@ export const DELETE_CHOICES: { id: DeleteScope; label: string }[] = [
   { id: 'all', label: 'All tasks' },
 ];
 
-export type GoogleFeature = 'calendar' | 'tasks' | 'mail';
+export type GoogleFeature = 'calendar' | 'tasks' | 'mail' | 'drive';
 
 export interface GoogleAccountView {
   email: string;
   features: GoogleFeature[];
   addedAt: string;
+  /** A work or school account (Google Workspace). */
+  workspace?: boolean;
 }
 
 export interface GoogleStatusView {
@@ -214,6 +258,55 @@ export class GoogleStore {
 
   accountsWith(feature: GoogleFeature): GoogleAccountView[] {
     return (this.view.status?.accounts ?? []).filter((account) => account.features.includes(feature));
+  }
+
+  /** Whether an account allowed a feature. */
+  allows(account: string, feature: GoogleFeature): boolean {
+    return Boolean(this.view.status?.accounts.find((item) => item.email === account)?.features.includes(feature));
+  }
+
+  /** A work or school account (Google Workspace): Google Calendar gives its tasks Do not disturb and declining meetings. */
+  isWorkspace(account: string): boolean {
+    return Boolean(this.view.status?.accounts.find((item) => item.email === account)?.workspace);
+  }
+
+  /**
+   * Ask Google for one more feature of an account (Drive, to attach files), the way the Planner asks for the others:
+   * a sign-in for what it has plus that one, which Google adds to what was allowed before.
+   */
+  allow(account: string, feature: GoogleFeature): Promise<void> {
+    const current = this.view.status?.accounts.find((item) => item.email === account)?.features ?? [];
+    return this.connect([...new Set([...current, feature])]);
+  }
+
+  /** Drive files whose name has `text` (the latest when empty), to attach to a task. */
+  async searchDrive(account: string, text: string): Promise<DriveFile[]> {
+    const answer = await this.client.call<{ files: DriveFile[] }>('GET', `/google/drive/files?account=${encodeURIComponent(account)}&q=${encodeURIComponent(text)}`);
+    return answer.files ?? [];
+  }
+
+  /** The meetings the Planner declined for a task. */
+  async declinedFor(account: string, taskId: string): Promise<DeclinedMeeting[]> {
+    const answer = await this.client.call<{ declined: DeclinedMeeting[] }>('GET', `/google/tasks/declined?account=${encodeURIComponent(account)}&task=${encodeURIComponent(taskId)}`);
+    return answer.declined ?? [];
+  }
+
+  /** "Automatically decline meetings" now, after a task's change; says what it declined. */
+  declineSoon(): void {
+    void this.client
+      .call<{ declined: DeclinedMeeting[]; errors: string[] }>('POST', '/google/tasks/decline')
+      .then((answer) => {
+        const declined = answer.declined ?? [];
+        if (declined.length) {
+          calendarUi.refresh();
+          const names = declined.slice(0, 3).map((meeting) => `"${meeting.summary}"`).join(', ');
+          this.client.notify(`Declined ${declined.length === 1 ? 'a meeting' : `${declined.length} meetings`} during "${declined[0]!.task}": ${names}${declined.length > 3 ? '…' : ''}`);
+        }
+        if (answer.errors?.length) this.client.notify(`Some meetings were not declined: ${answer.errors[0]}`);
+      })
+      .catch(() => {
+        // The service declines them at its next pass.
+      });
   }
 
   async checkStatus(): Promise<void> {
@@ -821,13 +914,22 @@ export class GoogleStore {
     try {
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account, listId, ...fields, ...(fields.notes ? {} : { notes: undefined }) });
       if (!answer.task) throw new Error('Google did not return the task');
-      const { rule, busy, visibility, ...rest } = kept;
-      // Availability and visibility come with a time; Free and the default visibility are kept as nothing.
+      const { rule, busy, visibility, color, attachments, doNotDisturb, decline, ...rest } = kept;
+      // Availability, visibility, Do not disturb and declining come with a time (declining with Busy); Free, the
+      // default visibility, its list's color and no attachments are kept as nothing.
       const timed = (rest.time ?? null) !== null;
-      const advanced = { ...(timed && busy ? { busy: true } : {}), ...(timed && visibility && visibility !== 'default' ? { visibility } : {}) };
+      const advanced = {
+        ...(timed && busy ? { busy: true } : {}),
+        ...(timed && visibility && visibility !== 'default' ? { visibility } : {}),
+        ...(timed && doNotDisturb ? { doNotDisturb: true } : {}),
+        ...(timed && busy && decline ? { decline: { ...decline, since: decline.since ?? new Date().toISOString() } } : {}),
+        ...(color ? { color } : {}),
+        ...(attachments?.length ? { attachments } : {}),
+      };
       const template = fields.due ? templateOf({ title: fields.title, notes: fields.notes ?? '' }, { time: rest.time ?? null, duration: rest.duration ?? null, deadline: rest.deadline ?? null, ...advanced }, fields.due) : null;
       const patch: GoogleTaskKeptPatch = { ...rest, ...advanced, ...(rule && fields.due && template ? { repeat: { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template } } : {}) };
       if (Object.values(patch).some((value) => value !== null && value !== undefined && value !== false)) await this.setKept(answer.task, patch);
+      if (advanced.decline) this.declineSoon();
       this.patchBoard(key, (this.view.board[key]?.items ?? []).map((item) => (item.id === temp.id ? answer.task! : item)));
       this.afterTaskWrite(account, listId, Boolean(fields.due));
       // Google may renumber the other tasks' places: read the list as Google has it now.
@@ -872,14 +974,21 @@ export class GoogleStore {
     if ((kept?.time ?? null) !== fields.kept.time) patch.time = fields.kept.time;
     if ((kept?.duration ?? null) !== fields.kept.duration) patch.duration = fields.kept.duration;
     if ((kept?.deadline ?? null) !== fields.kept.deadline) patch.deadline = fields.kept.deadline;
-    // Availability and visibility come with a time (left out of the fields: as they are), and are a series' own, as
-    // Google Calendar keeps one for a whole series: a change of them is for all its tasks.
-    const busy = fields.kept.time !== null && (fields.kept.busy ?? Boolean(kept?.busy));
-    const visibility = fields.kept.time !== null ? fields.kept.visibility ?? kept?.visibility ?? 'default' : 'default';
-    const advanced = busy !== Boolean(kept?.busy) || visibility !== (kept?.visibility ?? 'default');
+    // Availability, visibility, Do not disturb and declining come with a time (left out of the fields: as they are),
+    // and they and its color are a series' own, as Google Calendar keeps one for a whole series: a change of them is
+    // for all its tasks. Attachments are this task's, or (All tasks) the series'.
+    const next = advancedOf(fields.kept, kept);
+    const { busy, visibility, doNotDisturb, color } = next;
+    const decline = next.decline && !next.decline.since ? { ...next.decline, since: new Date().toISOString() } : next.decline;
+    const advanced = advancedChanged(fields.kept, kept);
     if (busy !== Boolean(kept?.busy)) patch.busy = busy;
     if (visibility !== (kept?.visibility ?? 'default')) patch.visibility = visibility;
-    const timing = { ...fields.kept, busy, visibility };
+    if (doNotDisturb !== Boolean(kept?.doNotDisturb)) patch.doNotDisturb = doNotDisturb;
+    if ((decline?.mode ?? null) !== (kept?.decline?.mode ?? null) || (decline?.message ?? null) !== (kept?.decline?.message ?? null)) patch.decline = decline;
+    if (color !== (kept?.color ?? null)) patch.color = color;
+    if (attachmentsChanged(fields.kept, kept)) patch.attachments = fields.kept.attachments ?? [];
+    const attachments = fields.kept.attachments ?? kept?.attachments ?? [];
+    const timing = { ...fields.kept, busy, visibility, doNotDisturb, decline, color, attachments };
     const all = scope === 'all' || Boolean(repeat && rule && (rule !== repeat.rule || advanced));
     if (!rule || !fields.due) {
       if (repeat) patch.repeat = null;
@@ -910,7 +1019,19 @@ export class GoogleStore {
       for (const other of Object.values(state.googleTasks)) {
         if (other.repeat?.seriesId !== repeat.seriesId || other.taskId === item.id || other.repeat.next) continue;
         const own = other.repeat;
-        const timing = template ? { time: template.time, duration: template.duration, deadline: own.on ? (template.deadline === null ? null : addDays(own.on, template.deadline)) : other.deadline, busy: Boolean(template.busy), visibility: template.visibility ?? ('default' as const) } : {};
+        const timing = template
+          ? {
+              time: template.time,
+              duration: template.duration,
+              deadline: own.on ? (template.deadline === null ? null : addDays(own.on, template.deadline)) : other.deadline,
+              busy: Boolean(template.busy),
+              visibility: template.visibility ?? ('default' as const),
+              color: template.color ?? null,
+              doNotDisturb: Boolean(template.doNotDisturb),
+              decline: template.decline ?? null,
+              attachments: template.attachments ?? [],
+            }
+          : {};
         others.push({ type: 'gtask.kept', account: other.account, listId: other.listId, taskId: other.taskId, patch: series ? { ...timing, repeat: withExceptions({ ...own, rule: series.rule, ...(template ? { template } : {}) }, series.exceptions) } : { repeat: null } });
       }
     }
@@ -931,6 +1052,8 @@ export class GoogleStore {
     const at = now ?? item;
     const bodies: EventBody[] = [...(Object.keys(patch).length ? [{ type: 'gtask.kept' as const, account: at.account, listId: at.listId, taskId: at.id, patch }] : []), ...others];
     if (bodies.length) await this.client.dispatch(bodies);
+    // Meetings it overlaps are declined now, not at the next pass.
+    if (decline && (patch.decline !== undefined || patch.time !== undefined || patch.duration !== undefined || patch.busy !== undefined || google.due !== undefined)) this.declineSoon();
     // Linked Planner tasks take Google's change at once.
     if (now) await this.syncItems([now]);
     else calendarUi.refresh();

@@ -7,7 +7,10 @@
 // and a timed task's availability and visibility. Each task shows the Planner
 // task planning it, and can be planned from here.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { DateKey, GoogleTaskKept, TaskVisibility } from '../../src/domain/types.ts';
+import type { DateKey, GoogleTaskKept, TaskAttachment, TaskVisibility } from '../../src/domain/types.ts';
+import { DECLINE_MESSAGE_MAX, type DeclineInput } from '../../src/domain/events.ts';
+import { DEFAULT_DECLINE_MESSAGE, colorName, taskListColor } from '../../src/domain/gtaskAdvanced.ts';
+import { TaskAttachments, TaskColorMenu } from './TaskExtras.tsx';
 import { addDays, isDateKey } from '../../src/domain/dates.ts';
 import { shortDay, weekdayShort } from '../../src/domain/gcalendar.ts';
 import { describeRecurrence } from '../../src/domain/rrule.ts';
@@ -16,7 +19,7 @@ import { KEPT_HINT, TASKS_API_REFERENCE, VISIBILITY_LABELS, keptFor, keptTimeLab
 import { completedItems, dateGroups, dropTarget, indentTarget, moveDownTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
-import { DELETE_CHOICES, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { DELETE_CHOICES, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, advancedChanged, attachmentsChanged, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
 import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
@@ -103,23 +106,40 @@ export const UNTIMED_ADVANCED = 'A task without a time is free and private, as i
 /** What a task's availability and visibility do here, and what they cannot do in Google. */
 export const ADVANCED_NOTE =
   'Busy: the Planner plans other work around it (auto-schedule, playlist times). Visibility goes to the working sessions the Planner writes to Google Calendar for it; Google Calendar itself shows others no task the Planner times, as it gets no time for it and keeps a task without one private';
+/** What a task's color does here. */
+export const COLOR_NOTE = "Color: the task's on the Planner's calendar, over its list's (Google Calendar gets no color for a task from other apps)";
+/** What Do not disturb does here, and what a web app can't mute. */
+export const DND_NOTE =
+  "Mutes the Planner's own task notifications during this task: they come when it ends. Google Chat, other apps and OpenChamber's own notifications aren't muted: the Planner can't reach them";
+/** What "Automatically decline meetings" does here. */
+export const DECLINE_NOTE = 'The Planner answers the invitations on your calendar that overlap this task "Declined", with this message to the organizer, as Google Calendar does';
+/** Google Calendar's own words for declining when a task is Free. */
+export const DECLINE_FREE = 'Unavailable for "Free" time entries';
+/** Why a personal account's task has no Do not disturb or declining. */
+export const WORKSPACE_ONLY = 'Do not disturb and Automatically decline meetings are for work and school accounts, as in Google Calendar';
+/** Why one upcoming task of a series does not change its attachments here. */
+export const SERIES_ATTACHMENTS = "Its series' attachments (Edit → All tasks changes them)";
 
 /**
- * Title, details, date and time (or all day), deadline, repeat, star and
- * advanced settings (availability and visibility) of a task, edited in place,
- * as Google Tasks' task form and Google Calendar's (and, over the calendar,
- * its list). A new task's form stays open after Enter for the next one, as
- * Google Tasks keeps adding. Subtasks, and tasks with subtasks, do not repeat,
- * nor does a repeating task take subtasks (nor in Google Tasks): those
- * controls are unavailable, with the reason. As in Google Calendar, only a
- * task with a time has availability and visibility. One upcoming task of a
- * series, edited alone, shows its series' repeat, availability and visibility
- * there, unavailable, and no star (it is no Google task yet). A save Google
- * refuses leaves the form open with what was typed and why, so Save can try
- * again.
+ * Title, details, Drive attachments, date and time (or all day), deadline,
+ * repeat, star and advanced settings (color, availability, Do not disturb,
+ * declining meetings and visibility) of a task, edited in place, as Google
+ * Tasks' task form and Google Calendar's (and, over the calendar, its list).
+ * A new task's form stays open after Enter for the next one, as Google Tasks
+ * keeps adding. Subtasks, and tasks with subtasks, do not repeat, nor does a
+ * repeating task take subtasks (nor in Google Tasks): those controls are
+ * unavailable, with the reason. As in Google Calendar, only a task with a time
+ * has availability, visibility, Do not disturb and declining (declining only
+ * Busy), and only a work or school account has Do not disturb and declining.
+ * One upcoming task of a series, edited alone, shows its series' repeat,
+ * advanced settings and attachments there, unavailable, and no star (it is no
+ * Google task yet). A save Google refuses leaves the form open with what was
+ * typed and why, so Save can try again.
  */
-export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star = true, lists, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false, advancedNote = null }: {
+export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star = true, lists, onSave, onCancel, onSubtask, subtaskNote = null, keepOpen = false, advancedNote = null, account: accountProp }: {
   item: Partial<GoogleTaskItem>;
+  /** The account a new task goes to (its list's); an existing task's is its own. */
+  account?: string;
   kept: GoogleTaskKept | null;
   depth: 0 | 1;
   canRepeat: boolean;
@@ -139,8 +159,9 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   /** Why its availability and visibility cannot change here (one task of a series: they are the series'). */
   advancedNote?: string | null;
 }) => {
-  const { client } = usePlanner();
+  const { client, google } = usePlanner();
   const view = useView();
+  const gv = useGoogle();
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [title, setTitle] = useState(item.title ?? '');
   const [notes, setNotes] = useState(item.notes ?? '');
@@ -152,8 +173,18 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   const [starred, setStarred] = useState(Boolean(kept?.starredAt));
   const [busy, setBusy] = useState(Boolean(kept?.busy));
   const [visibility, setVisibility] = useState<TaskVisibility>(visibilityOf(kept));
-  const [advanced, setAdvanced] = useState(Boolean(kept?.busy || kept?.visibility));
+  const [color, setColor] = useState<string | null>(kept?.color ?? null);
+  const [attachments, setAttachments] = useState<TaskAttachment[]>(kept?.attachments ?? []);
+  const [doNotDisturb, setDoNotDisturb] = useState(Boolean(kept?.doNotDisturb));
+  const [decline, setDecline] = useState<DeclineInput | null>(kept?.decline ?? null);
+  const [advanced, setAdvanced] = useState(Boolean(kept?.busy || kept?.visibility || kept?.color || kept?.doNotDisturb || kept?.decline));
   const [listId, setListId] = useState(item.listId ?? '');
+  const account = item.account ?? accountProp ?? null;
+  // Google Calendar gives only work and school accounts Do not disturb and declining meetings (null: not known yet).
+  const eligible = account && gv.status ? google.isWorkspace(account) : null;
+  const workspace = Boolean(eligible);
+  const timed = Boolean(due) && time !== null;
+  const listColor = taskListColor(view.state.settings, account ?? '', listId || item.listId || '');
   const [custom, setCustom] = useState(false);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -177,9 +208,21 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
     if (!title.trim()) return onCancel();
     setSaving(true);
     setProblem(null);
-    // Google Calendar's repeating tasks have no end time; availability and visibility come with a time.
-    const timed = Boolean(due) && time !== null;
-    onSave({ title: title.trim(), notes, due, kept: { time: due ? time : null, duration: due && time !== null && !rule ? duration : null, deadline, rule: due && canRepeat ? rule : null, busy: timed && busy, visibility: timed ? visibility : 'default' } }, starred, listId || undefined).then(
+    // Google Calendar's repeating tasks have no end time; availability, visibility, Do not disturb and declining come
+    // with a time, declining with Busy; an account not known yet to be a work or school one keeps the last two as they are.
+    const fields = {
+      time: due ? time : null,
+      duration: due && time !== null && !rule ? duration : null,
+      deadline,
+      rule: due && canRepeat ? rule : null,
+      busy: timed && busy,
+      visibility: timed ? visibility : ('default' as const),
+      color,
+      attachments,
+      doNotDisturb: eligible === null ? undefined : timed && eligible && doNotDisturb,
+      decline: eligible === null ? undefined : timed && eligible && busy ? decline : null,
+    };
+    onSave({ title: title.trim(), notes, due, kept: fields }, starred, listId || undefined).then(
       () => {
         if (!mounted.current) return;
         setSaving(false);
@@ -194,6 +237,10 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
         setStarred(false);
         setBusy(false);
         setVisibility('default');
+        setColor(null);
+        setAttachments([]);
+        setDoNotDisturb(false);
+        setDecline(null);
         setAdvanced(false);
         titleRef.current?.focus();
       },
@@ -210,6 +257,7 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
     <div class={`gt-form depth-${depth}`} role="group" aria-label={item.id ? `Edit ${item.title}` : 'New task'} onKeyDown={(event) => event.key === 'Escape' && !custom && onCancel()}>
       <input ref={titleRef} class="gt-form-title" aria-label="Title" placeholder="Title" value={title} onInput={(event) => setTitle(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && save()} />
       <textarea class="gt-form-notes" aria-label="Details" placeholder="Details" rows={2} value={notes} onInput={(event) => setNotes(event.currentTarget.value)} />
+      <TaskAttachments account={account} files={attachments} note={advancedNote ? SERIES_ATTACHMENTS : null} onChange={setAttachments} />
       <div class="gt-form-row" role="group" aria-label="Date and time">
         <Icon name="calendar" size={16} />
         <input type="date" aria-label="Date" value={due ?? ''} onChange={(event) => setDue(isDateKey(event.currentTarget.value) ? event.currentTarget.value : null)} />
@@ -315,18 +363,67 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
       <div class="gt-form-row gt-form-advanced">
         <Icon name="tune" size={16} />
         <button class="link" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>Advanced settings</button>
-        {!advanced && (busy || visibility !== 'default') && due && time !== null && <span class="gt-form-note">{busy ? 'Busy' : 'Free'} · {VISIBILITY_LABELS[visibility]}</span>}
+        {!advanced && <span class="gt-color-dot" style={{ background: color ?? listColor }} title={color ? colorName(color) : 'List color'} />}
+        {!advanced && due && time !== null && (busy || visibility !== 'default' || (workspace && doNotDisturb)) && (
+          <span class="gt-form-note">{busy ? 'Busy' : 'Free'} · {VISIBILITY_LABELS[visibility]}{workspace ? ` · Do not disturb is ${doNotDisturb ? 'ON' : 'OFF'}` : ''}</span>
+        )}
       </div>
       {advanced && (
-        <div class="gt-form-row gt-form-advanced-fields" role="group" aria-label="Advanced settings">
-          <select aria-label="Availability" value={due && time !== null && busy ? 'busy' : 'free'} disabled={!due || time === null || Boolean(advancedNote)} title={advancedNote ?? (!due || time === null ? UNTIMED_ADVANCED : 'Show me as busy or free')} onChange={(event) => setBusy(event.currentTarget.value === 'busy')}>
-            <option value="free">Free</option>
-            <option value="busy">Busy</option>
-          </select>
-          <select aria-label="Visibility" value={due && time !== null ? visibility : 'default'} disabled={!due || time === null || Boolean(advancedNote)} title={advancedNote ?? (!due || time === null ? UNTIMED_ADVANCED : 'Who sees its details')} onChange={(event) => setVisibility(event.currentTarget.value as TaskVisibility)}>
-            {(['default', 'public', 'private'] as const).map((choice) => <option key={choice} value={choice}>{VISIBILITY_LABELS[choice]}</option>)}
-          </select>
-          <span class="gt-form-note">{advancedNote ?? (!due || time === null ? UNTIMED_ADVANCED : ADVANCED_NOTE)}.</span>
+        <div class="gt-form-advanced-fields" role="group" aria-label="Advanced settings">
+          <div class="gt-adv-row">
+            <Icon name="calendar" size={16} />
+            <TaskColorMenu color={color} listColor={listColor} disabled={Boolean(advancedNote)} note={advancedNote ?? undefined} onChange={setColor} />
+            <span class="gt-form-note">{color ? colorName(color) : 'List color'}</span>
+          </div>
+          <div class="gt-adv-row">
+            <Icon name="work" size={16} />
+            <select aria-label="Availability" value={timed && busy ? 'busy' : 'free'} disabled={!timed || Boolean(advancedNote)} title={advancedNote ?? (!timed ? UNTIMED_ADVANCED : 'Show me as busy or free')} onChange={(event) => setBusy(event.currentTarget.value === 'busy')}>
+              <option value="free">Free</option>
+              <option value="busy">Busy</option>
+            </select>
+          </div>
+          {workspace && (
+            <label class="gt-adv-check">
+              <input type="checkbox" aria-label="Do not disturb" checked={timed && doNotDisturb} disabled={!timed || Boolean(advancedNote)} onChange={(event) => setDoNotDisturb(event.currentTarget.checked)} />
+              <span class="gt-adv-check-text">
+                <span class="gt-dnd-label"><span class="gt-dnd-mark"><Icon name="dnd" size={16} /></span>Do not disturb</span>
+                <span class="gt-form-note">{DND_NOTE}</span>
+              </span>
+            </label>
+          )}
+          {workspace && (
+            <label class="gt-adv-check">
+              <input
+                type="checkbox"
+                aria-label="Automatically decline meetings"
+                checked={timed && busy && decline !== null}
+                disabled={!timed || !busy || Boolean(advancedNote)}
+                onChange={(event) => setDecline(event.currentTarget.checked ? kept?.decline ?? { mode: 'new', message: DEFAULT_DECLINE_MESSAGE } : null)}
+              />
+              <span class="gt-adv-check-text">
+                <span>Automatically decline meetings</span>
+                <span class="gt-form-note">{!timed ? UNTIMED_ADVANCED : !busy ? DECLINE_FREE : DECLINE_NOTE}</span>
+              </span>
+            </label>
+          )}
+          {workspace && timed && busy && decline && (
+            <div class="gt-adv-row gt-adv-decline" role="group" aria-label="Declining meetings">
+              <select aria-label="Meetings to decline" value={decline.mode} disabled={Boolean(advancedNote)} onChange={(event) => setDecline({ ...decline, mode: event.currentTarget.value === 'all' ? 'all' : 'new' })}>
+                <option value="new">Only new meeting invitations</option>
+                <option value="all">New and existing meetings</option>
+              </select>
+              <input class="gt-adv-message" aria-label="Message" placeholder="Message" maxLength={DECLINE_MESSAGE_MAX} value={decline.message} disabled={Boolean(advancedNote)} onInput={(event) => setDecline({ ...decline, message: event.currentTarget.value })} />
+            </div>
+          )}
+          <div class="gt-adv-row">
+            <Icon name="lock" size={16} />
+            <select aria-label="Visibility" value={timed ? visibility : 'default'} disabled={!timed || Boolean(advancedNote)} title={advancedNote ?? (!timed ? UNTIMED_ADVANCED : 'Who sees its details')} onChange={(event) => setVisibility(event.currentTarget.value as TaskVisibility)}>
+              {(['default', 'public', 'private'] as const).map((choice) => <option key={choice} value={choice}>{VISIBILITY_LABELS[choice]}</option>)}
+            </select>
+          </div>
+          <span class="gt-form-note">{advancedNote ?? (!timed ? UNTIMED_ADVANCED : ADVANCED_NOTE)}.</span>
+          {!advancedNote && <span class="gt-form-note">{COLOR_NOTE}.</span>}
+          {!workspace && account && <span class="gt-form-note">{WORKSPACE_ONLY}.</span>}
         </div>
       )}
       <KeptHint />
@@ -345,16 +442,24 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   );
 };
 
-/** A task's date (with its kept time), repeat, deadline and the Planner task planning it, as chips. */
+/** A task's date (with its kept time), repeat, deadline, attachments and the Planner task planning it, as chips. */
 const TaskChips = ({ item, kept, list }: { item: GoogleTaskItem; kept: GoogleTaskKept | null; list?: string }) => {
+  const { host } = usePlanner();
   const view = useView();
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const linked = taskForGoogleTask(view.state, item);
   const time = keptTimeLabel(kept);
   const deadline = kept?.deadline ?? null;
-  if (!item.due && !deadline && !kept?.repeat && !linked && !list) return null;
+  const files = kept?.attachments ?? [];
+  if (!item.due && !deadline && !kept?.repeat && !linked && !list && !files.length) return null;
   return (
     <span class="gt-chips">
+      {files.slice(0, 2).map((file) => (
+        <button key={file.id} class="gt-file-chip" aria-label={`Open attachment ${file.title}`} title={`${file.title} (Google Drive)`} onClick={(event) => { event.stopPropagation(); void host.openUrl(file.url); }}>
+          <Icon name="attach" size={13} /> {file.title}
+        </button>
+      ))}
+      {files.length > 2 && <span class="gt-file-chip is-more">+{files.length - 2}</span>}
       {item.due && (
         <span class={`gt-due${item.due < view.today && !item.completed ? ' is-overdue' : ''}`} title={time ? 'The time is kept in the Planner' : undefined}>
           {dueChip(item.due, view.today)}
@@ -420,10 +525,11 @@ export const useTaskSave = () => {
   const view = useView();
   return async (item: GoogleTaskItem, fields: TaskFields, starred: boolean, scope?: RepeatScope, listId?: string): Promise<boolean> => {
     const kept = keptFor(view.state, item);
-    // Availability and visibility are a series' own: changing them is for all its tasks, as a new rule is.
-    const advanced = (fields.kept.time !== null && (fields.kept.busy ?? Boolean(kept?.busy))) !== Boolean(kept?.busy) || (fields.kept.time !== null ? fields.kept.visibility ?? visibilityOf(kept) : 'default') !== visibilityOf(kept);
+    // Availability, visibility, color, Do not disturb and declining are a series' own: changing them is for all its
+    // tasks, as a new rule is.
+    const advanced = advancedChanged(fields.kept, kept);
     const changed =
-      fields.title !== item.title || fields.notes !== item.notes || fields.due !== item.due || fields.kept.time !== (kept?.time ?? null) || fields.kept.duration !== (kept?.duration ?? null) || fields.kept.deadline !== (kept?.deadline ?? null) || fields.kept.rule !== (kept?.repeat?.rule ?? null) || advanced;
+      fields.title !== item.title || fields.notes !== item.notes || fields.due !== item.due || fields.kept.time !== (kept?.time ?? null) || fields.kept.duration !== (kept?.duration ?? null) || fields.kept.deadline !== (kept?.deadline ?? null) || fields.kept.rule !== (kept?.repeat?.rule ?? null) || advanced || attachmentsChanged(fields.kept, kept);
     const star = Boolean(kept?.starredAt) !== starred ? starred : undefined;
     const moveTo = listId && listId !== item.listId ? listId : undefined;
     if (changed) {
@@ -563,7 +669,19 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
   };
   /** A new task from its form, which shows Google's refusal (and keeps what was typed). */
   const addTask = (fields: TaskFields, starred: boolean, where: { parent: string | null; previous: string | null }) =>
-    google.addListTask(list.account, list.id, { title: fields.title, notes: fields.notes, due: fields.due, parent: where.parent, previous: where.previous }, { time: fields.kept.time, duration: fields.kept.duration, deadline: fields.kept.deadline, rule: fields.kept.rule, starred, busy: fields.kept.busy, visibility: fields.kept.visibility });
+    google.addListTask(list.account, list.id, { title: fields.title, notes: fields.notes, due: fields.due, parent: where.parent, previous: where.previous }, {
+      time: fields.kept.time,
+      duration: fields.kept.duration,
+      deadline: fields.kept.deadline,
+      rule: fields.kept.rule,
+      starred,
+      busy: fields.kept.busy,
+      visibility: fields.kept.visibility,
+      color: fields.kept.color,
+      attachments: fields.kept.attachments,
+      doNotDisturb: fields.kept.doNotDisturb,
+      decline: fields.kept.decline,
+    });
 
   /** One open task: check, title, details, date and time, deadline, repeat, the Planner task planning it, star and menu; edited in place. */
   const openRow = (row: TaskRow) => {
@@ -721,7 +839,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
       {board && !board.complete && <p class="hint">This list is longer than the Planner reads at once; Google Tasks shows the rest.</p>}
       {!board?.items.length && board?.loading && <p class="hint">Loading…</p>}
       {adding && !adding.parent && !adding.previous && (
-        <TaskForm item={{}} kept={null} depth={0} canRepeat keepOpen onCancel={() => setAdding(null)} onSave={(fields, starred) => addTask(fields, starred, { parent: null, previous: null })} />
+        <TaskForm item={{}} account={list.account} kept={null} depth={0} canRepeat keepOpen onCancel={() => setAdding(null)} onSave={(fields, starred) => addTask(fields, starred, { parent: null, previous: null })} />
       )}
       {sort === 'date' && (
         <ul class="gt-rows" aria-label={`${list.title} tasks by date`}>
@@ -780,6 +898,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
                 <li key={`add-${item.id}`} class="gt-row depth-1 is-editing">
                   <TaskForm
                     item={{}}
+                    account={list.account}
                     kept={null}
                     depth={1}
                     canRepeat={false}

@@ -16,6 +16,12 @@ export interface FakeWorld {
   lists: { id: string; title: string }[];
   defaultList: string;
   tasks: Record<string, any[]>;
+  /** The scopes the account granted the Planner; a sign-in adds the ones it asks for. Default: Calendar, Tasks and Gmail. */
+  granted?: string[];
+  /** A work or school account's Google Workspace domain (its ID token's `hd`); none: a personal account. */
+  hostedDomain?: string;
+  /** The account's Drive, by name, type and address. */
+  driveFiles?: { id: string; name: string; mimeType: string; webViewLink: string; modifiedTime?: string; trashed?: boolean }[];
 }
 
 export interface FakeGoogle {
@@ -31,5 +37,9 @@ export interface FakeGoogle {
   close(): Promise<void>;
 }
 
+export const DEFAULT_SCOPES: string[];
+export const DRIVE_SCOPE: string;
+/** The code a sign-in's redirect carries in this fake: the scopes it asked for (its auth URL's `scope`). */
+export function fakeAuthCode(scope: string): string;
 export function defaultFakeWorld(options?: { account?: string; today?: string; zone?: string }): FakeWorld;
 export function startFakeGoogle(world?: FakeWorld): Promise<FakeGoogle>;

@@ -334,7 +334,7 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       return;
     case 'gtask.kept': {
       const key = googleTaskKey(event.account, event.taskId);
-      const { starred, busy, visibility, ...patch } = event.patch;
+      const { starred, busy, visibility, color, attachments, doNotDisturb, decline, ...patch } = event.patch;
       const before = state.googleTasks[key] ?? { account: event.account, listId: event.listId, taskId: event.taskId, time: null, duration: null, deadline: null, repeat: null, starredAt: null, updatedAt: event.at };
       const starredAt = starred === undefined ? before.starredAt : starred ? before.starredAt ?? event.at : null;
       const next: GoogleTaskKept = { ...before, ...patch, listId: event.listId, starredAt, updatedAt: event.at };
@@ -346,13 +346,33 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
         if (visibility === 'default') delete next.visibility;
         else next.visibility = visibility;
       }
-      // As in Google Calendar, a task without a time is free and private: availability and visibility go with the time.
+      if (color !== undefined) {
+        if (color) next.color = color;
+        else delete next.color;
+      }
+      if (attachments !== undefined) {
+        if (attachments.length) next.attachments = attachments;
+        else delete next.attachments;
+      }
+      if (doNotDisturb !== undefined) {
+        if (doNotDisturb) next.doNotDisturb = true;
+        else delete next.doNotDisturb;
+      }
+      // Declining is on since it was turned on: a new message or mode keeps that.
+      if (decline !== undefined) {
+        if (decline) next.decline = { mode: decline.mode, message: decline.message, since: decline.since ?? before.decline?.since ?? event.at };
+        else delete next.decline;
+      }
+      // As in Google Calendar, a task without a time is free and private: availability, visibility, Do not disturb and
+      // declining meetings go with the time; meetings are declined only while it is Busy.
       if (next.time === null) {
         delete next.busy;
         delete next.visibility;
+        delete next.doNotDisturb;
       }
+      if (!next.busy) delete next.decline;
       // Nothing kept any more: the task is Google's alone again.
-      if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null) delete state.googleTasks[key];
+      if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null && !next.color && !next.attachments) delete state.googleTasks[key];
       else state.googleTasks[key] = next;
       return;
     }

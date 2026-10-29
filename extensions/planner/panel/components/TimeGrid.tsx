@@ -222,9 +222,9 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
       const start = startLocal.date < date ? 0 : startLocal.minutes;
       const end = endLocal.date > date ? DAY_MIN : endLocal.minutes;
       // A Google task with a time kept in the Planner, as Google Calendar shows a timed task; a repeating one's upcoming occurrences too.
-      if (isTaskEvent(event)) items.push({ kind: 'task', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: compactClock(start), event, done: Boolean(event.googleTask?.completed) });
-      else if (event.upcoming) items.push({ kind: 'upcoming', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: compactClock(start), event });
-      else items.push({ kind: 'event', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state.calendars), detail: `${compactRange(start, end)}${event.location ? `, ${event.location}` : ''}`, event, clipped: startLocal.date < date || endLocal.date > date });
+      if (isTaskEvent(event)) items.push({ kind: 'task', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state), detail: compactClock(start), event, done: Boolean(event.googleTask?.completed) });
+      else if (event.upcoming) items.push({ kind: 'upcoming', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state), detail: compactClock(start), event });
+      else items.push({ kind: 'event', id: event.id, start, end: Math.max(end, start + SNAP), title: event.title, color: eventColor(event, view.state), detail: `${compactRange(start, end)}${event.location ? `, ${event.location}` : ''}`, event, clipped: startLocal.date < date || endLocal.date > date });
     }
     return items;
   };
@@ -338,7 +338,7 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
           />
         ))}
         {fitted.shown.map(({ item: event, col, span, slot, fromBefore, toAfter }) => {
-          const color = eventColor(event, view.state.calendars);
+          const color = eventColor(event, view.state);
           const task = isTaskEvent(event) ? event.googleTask! : null;
           const movable = isMovableTask(event);
           const planned = task ? plannedTask(view.state, event) : null;

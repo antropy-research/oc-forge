@@ -1,9 +1,12 @@
 // A fake Google on a loopback port, for the Planner service started with
-// PLANNER_GOOGLE_API_BASE=<base>: OAuth tokens, Google Calendar (calendar
+// PLANNER_GOOGLE_API_BASE=<base>: OAuth tokens (a sign-in's code grants the
+// scopes it asked for, on top of the ones granted before, and its ID token says
+// the account's work or school domain), user info, Google Calendar (calendar
 // list; events with weekly and daily series, their occurrences and exceptions;
-// insert, patch, delete, move, instances) and Google Tasks (lists, tasks with
-// subtasks and order, move between lists), each list in pages. Every request is
-// logged in `requests`. Used by tests/googleService.test.ts and the e2e journeys.
+// insert, patch, delete, move, instances), Google Tasks (lists, tasks with
+// subtasks and order, move between lists), each list in pages, and Google
+// Drive's file search (only with the Drive scope). Every request is logged in
+// `requests`. Used by tests/googleService.test.ts and the e2e journeys.
 import http from 'node:http';
 
 const pad = (n, width = 2) => String(n).padStart(width, '0');
@@ -74,6 +77,12 @@ const occurrences = (event, untilMs, defaultZone) => {
   }
   return out;
 };
+
+/** What the account allowed the Planner unless a world says: Calendar, Tasks and Gmail. */
+export const DEFAULT_SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly', 'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/tasks', 'https://www.googleapis.com/auth/gmail.readonly'];
+export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.metadata.readonly';
+/** The code Google's redirect carries in this fake: the scopes the sign-in asked for, so the token answer grants them. */
+export const fakeAuthCode = (scope) => Buffer.from(JSON.stringify({ scope })).toString('base64url');
 
 export const defaultFakeWorld = ({ account = 'harness@example.com', today = new Date().toISOString().slice(0, 10), zone = 'America/Los_Angeles' } = {}) => {
   const at = (days, hour, minute = 0) => new Date(instant(addDays(today, days), hour * 3600 + minute * 60, zone)).toISOString();
@@ -190,8 +199,32 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       fail.next = null;
       return [status, { error: { code: status, message } }];
     }
+    if (path === '/token' && body.grant_type === 'authorization_code') {
+      // A sign-in: Google keeps what the account granted before (include_granted_scopes) and adds what it just allowed,
+      // and says who it is in the ID token (`hd`: a work or school account's domain).
+      let asked = [];
+      try {
+        asked = String(JSON.parse(Buffer.from(String(body.code ?? ''), 'base64url').toString('utf8')).scope ?? '').split(' ').filter(Boolean);
+      } catch {
+        asked = [];
+      }
+      world.granted = [...new Set([...(world.granted ?? DEFAULT_SCOPES), ...asked])];
+      const claims = { email: world.account, email_verified: true, ...(world.hostedDomain ? { hd: world.hostedDomain } : {}) };
+      return [200, { access_token: `fake-${next++}`, expires_in: 3600, token_type: 'Bearer', refresh_token: `fake-refresh-${next++}`, scope: world.granted.join(' '), id_token: ['e30', Buffer.from(JSON.stringify(claims)).toString('base64url'), 'sig'].join('.') }];
+    }
     if (path === '/token') return [200, { access_token: `fake-${next++}`, expires_in: 3600, token_type: 'Bearer' }];
     if (path === '/revoke') return [200, {}];
+    if (path === '/oauth2/v3/userinfo' && method === 'GET') return [200, { sub: '1', email: world.account, email_verified: true, ...(world.hostedDomain ? { hd: world.hostedDomain } : {}) }];
+    // Google Drive: file names, types and addresses, by a part of the name (Drive's `name contains '…'`), newest first.
+    if (path === '/drive/v3/files' && method === 'GET') {
+      if (!(world.granted ?? DEFAULT_SCOPES).includes(DRIVE_SCOPE)) return [403, { error: { code: 403, message: 'Request had insufficient authentication scopes.' } }];
+      const q = query.get('q') ?? '';
+      const name = /name contains '((?:[^'\\]|\\.)*)'/.exec(q)?.[1]?.replace(/\\(.)/g, '$1');
+      const files = (world.driveFiles ?? [])
+        .filter((file) => !file.trashed && file.mimeType !== 'application/vnd.google-apps.folder' && (!name || file.name.toLowerCase().includes(name.toLowerCase())))
+        .sort((a, b) => (b.modifiedTime ?? '').localeCompare(a.modifiedTime ?? ''));
+      return [200, { files: files.slice(0, Number(query.get('pageSize') ?? 100)).map(({ trashed: _trashed, ...file }) => file) }];
+    }
     // Google Calendar
     if (path === '/calendar/v3/users/me/calendarList' && method === 'GET') return [200, page(world.calendars.map(({ id: calendarId, summary, accessRole, backgroundColor, primary }) => ({ id: calendarId, summary, accessRole, backgroundColor, ...(primary ? { primary } : {}) })), query, 'calendarList')];
     let match = /^\/calendar\/v3\/calendars\/([^/]+)\/events(?:\/([^/]+))?(?:\/(instances|move))?$/.exec(path);
@@ -219,7 +252,7 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
         return [200, page(found, query, 'events', { accessRole: calendar.accessRole, timeZone: world.zone })];
       }
       if (!eventId && method === 'POST') {
-        const event = { ...structuredClone(body), id: id('ev'), organizer: { email: calendar.id === 'primary' ? world.account : calendar.id, self: true }, status: 'confirmed' };
+        const event = { ...structuredClone(body), id: id('ev'), organizer: { email: calendar.id === 'primary' ? world.account : calendar.id, self: true }, status: 'confirmed', created: new Date().toISOString() };
         delete event.conferenceData;
         applyConference(event, body, query);
         calendar.events.set(event.id, event);
@@ -379,7 +412,7 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       JSON.stringify({
         version: 1,
         client: { id: `${'1234567'.repeat(2)}-${'abcdefghij'.repeat(3)}.apps.googleusercontent.com`, secret: `GOCSPX-${'f'.repeat(28)}` },
-        accounts: [{ email: world.account, refreshToken: 'fake-refresh-token', scopes: ['openid', 'email', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly', 'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/tasks', 'https://www.googleapis.com/auth/gmail.readonly'], addedAt: new Date().toISOString() }],
+        accounts: [{ email: world.account, refreshToken: 'fake-refresh-token', scopes: world.granted ?? DEFAULT_SCOPES, addedAt: new Date().toISOString(), domain: world.hostedDomain ?? null }],
       }),
     close: () => new Promise((resolve) => server.close(resolve)),
   };

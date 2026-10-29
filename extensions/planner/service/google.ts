@@ -1,6 +1,6 @@
 // Google accounts for the Planner: OAuth with a desktop client the user creates
 // in their own Google Cloud project, and the requests the Planner makes to
-// Calendar, Tasks and Gmail with it. OpenChamber gives an extension one
+// Calendar, Tasks, Gmail and Drive with it. OpenChamber gives an extension one
 // integration, which Linear has, and its OAuth callback needs HTTPS or
 // localhost, so the sign-in runs here: Google redirects the browser to a
 // one-off loopback listener on this machine, or, when the browser is elsewhere,
@@ -13,20 +13,26 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
 
-export const GOOGLE_FEATURES = ['calendar', 'tasks', 'mail'] as const;
+export const GOOGLE_FEATURES = ['calendar', 'tasks', 'mail', 'drive'] as const;
 export type GoogleFeature = (typeof GOOGLE_FEATURES)[number];
 
-/** What each feature asks Google for; the least that does the job. */
+/**
+ * What each feature asks Google for; the least that does the job. Drive: the names, types and addresses of the
+ * user's files, to find one to attach to a task (never their contents).
+ */
 export const FEATURE_SCOPES: Record<GoogleFeature, readonly string[]> = {
   calendar: ['https://www.googleapis.com/auth/calendar.calendarlist.readonly', 'https://www.googleapis.com/auth/calendar.events'],
   tasks: ['https://www.googleapis.com/auth/tasks'],
   mail: ['https://www.googleapis.com/auth/gmail.readonly'],
+  drive: ['https://www.googleapis.com/auth/drive.metadata.readonly'],
 };
 const IDENTITY_SCOPES = ['openid', 'email'];
 
 export const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 export const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
+/** Who an account is (its work or school domain), for one connected before the Planner kept that. */
+const USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 /** The Google APIs the Planner calls; nothing else goes out with a token. */
 const API_ORIGINS = ['https://www.googleapis.com/', 'https://tasks.googleapis.com/', 'https://gmail.googleapis.com/'];
 /** The host gives up on a service request after 20 seconds, and then restarts the service. */
@@ -40,6 +46,11 @@ interface StoredAccount {
   refreshToken: string;
   scopes: string[];
   addedAt: string;
+  /**
+   * The Google Workspace domain of a work or school account (Google's `hd`), null for a personal one; absent for an
+   * account connected before the Planner kept it, until Google is asked.
+   */
+  domain?: string | null;
 }
 
 interface StoredClient {
@@ -53,6 +64,8 @@ export interface GoogleAccountInfo {
   /** The features Google granted every scope for. */
   features: GoogleFeature[];
   addedAt: string;
+  /** A work or school account (Google Workspace): Google Calendar gives these Do not disturb and declining meetings. */
+  workspace: boolean;
 }
 
 export interface GoogleStatus {
@@ -111,12 +124,22 @@ const page = (title: string, text: string): string =>
 export const featuresOf = (scopes: readonly string[]): GoogleFeature[] => GOOGLE_FEATURES.filter((feature) => FEATURE_SCOPES[feature].every((scope) => scopes.includes(scope)));
 
 /** The email in an ID token's payload; the token came straight from Google over TLS, so it is not verified again. */
-export const emailFromIdToken = (idToken: string | undefined): string | null => {
+export const emailFromIdToken = (idToken: string | undefined): string | null => identityFromIdToken(idToken)?.email ?? null;
+
+/** A Google Workspace domain as Google gives it (`hd`), or null for none. */
+const domainOf = (value: unknown): string | null => (typeof value === 'string' && /^[a-z0-9.-]{1,253}$/i.test(value) ? value.toLowerCase() : null);
+
+/**
+ * Who an ID token says the account is: its email, and the Google Workspace domain of a work or school account
+ * (Google's `hd` claim; a personal account has none).
+ */
+export const identityFromIdToken = (idToken: string | undefined): { email: string; domain: string | null } | null => {
   const payload = idToken?.split('.')[1];
   if (!payload) return null;
   try {
-    const email = (JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { email?: unknown }).email;
-    return typeof email === 'string' && /^[^\s@]+@[^\s@]+$/.test(email) ? email.toLowerCase() : null;
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { email?: unknown; hd?: unknown };
+    const email = claims.email;
+    return typeof email === 'string' && /^[^\s@]+@[^\s@]+$/.test(email) ? { email: email.toLowerCase(), domain: domainOf(claims.hd) } : null;
   } catch {
     return null;
   }
@@ -150,10 +173,15 @@ export const googleStatus = (status: number): number => {
 
 const isStoredAccount = (value: unknown): value is StoredAccount => {
   const item = value as Record<string, unknown> | null;
-  return Boolean(item) && typeof item!.email === 'string' && typeof item!.refreshToken === 'string' && typeof item!.addedAt === 'string' && Array.isArray(item!.scopes) && item!.scopes.every((scope) => typeof scope === 'string');
+  return (
+    Boolean(item) && typeof item!.email === 'string' && typeof item!.refreshToken === 'string' && typeof item!.addedAt === 'string' && Array.isArray(item!.scopes) && item!.scopes.every((scope) => typeof scope === 'string') &&
+    (item!.domain === undefined || item!.domain === null || typeof item!.domain === 'string')
+  );
 };
 
-const publicInfo = (account: StoredAccount): GoogleAccountInfo => ({ email: account.email, features: featuresOf(account.scopes), addedAt: account.addedAt });
+const publicInfo = (account: StoredAccount): GoogleAccountInfo => ({ email: account.email, features: featuresOf(account.scopes), addedAt: account.addedAt, workspace: Boolean(account.domain) });
+/** How long the Planner waits for Google to say whether an older account is a work or school one. */
+const IDENTIFY_MS = 4000;
 
 interface SignIn {
   state: string;
@@ -171,6 +199,8 @@ export class GoogleAccounts {
   private writes: Promise<unknown> = Promise.resolve();
   private readonly signIns = new Map<string, SignIn>();
   private readonly tokens = new Map<string, { token: string; expires: number }>();
+  /** Accounts connected before the Planner kept their domain, asked once each. */
+  private readonly identifying = new Map<string, Promise<void>>();
 
   constructor(
     private readonly file: string,
@@ -181,7 +211,33 @@ export class GoogleAccounts {
 
   async status(): Promise<GoogleStatus> {
     await this.load();
+    const unknown = this.accounts.filter((account) => account.domain === undefined);
+    if (unknown.length) await Promise.race([Promise.all(unknown.map((account) => this.identify(account.email))), new Promise((resolve) => setTimeout(resolve, IDENTIFY_MS).unref?.())]);
     return { client: this.client ? { id: this.client.id } : null, accounts: this.accounts.map(publicInfo) };
+  }
+
+  /**
+   * Ask Google once whether an account connected before the Planner kept its domain is a work or school one (the
+   * `hd` of its user info), as a sign-in now tells from its ID token. Unanswered, it counts as a personal account.
+   */
+  private identify(email: string): Promise<void> {
+    let pending = this.identifying.get(email);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const info = await this.request<{ hd?: unknown }>(email, 'GET', USERINFO_URL);
+          const domain = domainOf(info?.hd);
+          await this.serial(async () => {
+            this.accounts = this.accounts.map((item) => (item.email === email && item.domain === undefined ? { ...item, domain } : item));
+            await this.save();
+          });
+        } catch (error) {
+          this.log(`could not tell whether ${email} is a work or school account: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      })();
+      this.identifying.set(email, pending);
+    }
+    return pending;
   }
 
   /** The OAuth client (a "Desktop app" client in the user's Google Cloud project). */
@@ -223,7 +279,7 @@ export class GoogleAccounts {
   async startSignIn(features: readonly GoogleFeature[]): Promise<{ id: string; authUrl: string; redirectUri: string }> {
     await this.load();
     if (!this.client) throw new GoogleError(400, 'Add the OAuth client first');
-    if (features.length === 0) throw new GoogleError(400, 'Choose at least one of Calendar, Tasks and Gmail');
+    if (features.length === 0) throw new GoogleError(400, 'Choose at least one of Calendar, Tasks, Gmail and Drive');
     this.expireSignIns();
     const id = base64url(randomBytes(12));
     const state = base64url(randomBytes(24));
@@ -349,9 +405,12 @@ export class GoogleAccounts {
     if (!client) throw new GoogleError(400, 'The OAuth client was removed');
     const answer = await this.token({ grant_type: 'authorization_code', code, code_verifier: signIn.verifier, redirect_uri: signIn.redirectUri, client_id: client.id, client_secret: client.secret });
     if (!answer.refresh_token) throw new GoogleError(400, 'Google sent no refresh token; remove the Planner at myaccount.google.com/permissions and connect again');
-    const email = emailFromIdToken(answer.id_token);
-    if (!email) throw new GoogleError(400, "Google did not say which account this is (the 'email' scope was not granted)");
-    const account: StoredAccount = { email, refreshToken: answer.refresh_token, scopes: (answer.scope ?? '').split(' ').filter(Boolean), addedAt: new Date().toISOString() };
+    const identity = identityFromIdToken(answer.id_token);
+    if (!identity) throw new GoogleError(400, "Google did not say which account this is (the 'email' scope was not granted)");
+    const { email, domain } = identity;
+    // With include_granted_scopes, Google's answer lists every scope the account has granted the Planner, the ones
+    // granted before this sign-in too: a feature asked for later (Drive) adds to the others.
+    const account: StoredAccount = { email, refreshToken: answer.refresh_token, scopes: (answer.scope ?? '').split(' ').filter(Boolean), addedAt: new Date().toISOString(), domain };
     await this.serial(async () => {
       const index = this.accounts.findIndex((item) => item.email === email);
       if (index < 0 && this.accounts.length >= MAX_ACCOUNTS) throw new GoogleError(400, `At most ${MAX_ACCOUNTS} Google accounts`);
