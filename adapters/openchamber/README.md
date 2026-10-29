@@ -2,7 +2,8 @@
 
 oc-forge's additions to OpenChamber's extension host: the five things
 `AGENTS.md` asks of the Planner and VS Code extensions that the released
-extension API (2.5.2) cannot do. They are applied to `vendors/openchamber`
+extension API cannot do (2.5.2's, and 2.5.3's, whose SDK changed only a
+comment). They are applied to `vendors/openchamber`
 while its web package is built; the vendor is never written. With no extension
 using them, the adapted OpenChamber looks and behaves as the release (the
 end-to-end check compares screenshots: 0.00% of pixels differ).
@@ -155,7 +156,10 @@ activation (a key press or click in the frame gives one for about 5 s).
   tab is; choosing a session tab hides the page (it stays mounted) and shows
   that chat. A page whose extension has tabs keeps the strip instead of
   "← title". Tabs need OpenChamber's "Session tabs" setting (off by default in
-  2.5.2): without the strip they are not shown (`tabs.state().strip` says so).
+  2.5.2 and 2.5.3): without the strip they are not shown (`tabs.state().strip` says so).
+  With 2.5.3's separate tabs per workspace on, the strip shows the current
+  workspace's session tabs, then the extension tabs, which are the same in every
+  workspace.
   Tabs are not persisted: after a reload the extension opens the ones it wants.
 - **Kept-alive pages.** The page of an extension with tabs is mounted (hidden,
   with its size kept) as soon as it has a tab, and stays mounted while it has
@@ -279,7 +283,8 @@ upstream fixes them (`edits/fixes.ts`):
   desktop shell's own window handling, nor relay mode).
 - **No persistence** of header tabs and routes; rail entries return with the
   next poll.
-- **Versions.** Written against and run end to end on 2.5.2. On 2.5.1 (the pin
-  `planner` still has until CI moves it) every edit applies and the adapted
-  tree type-checks (`--check-only`), so CI stays green across the move, but it
-  was not run there.
+- **Versions.** Written against 2.5.2 and run end to end there. On 2.5.3, the
+  pin since 2026-10-29, every edit applies unchanged, the adapted tree
+  type-checks, and the end-to-end check passes against the stock 2.5.3 release
+  (108/108). When CI moves the pin, `--check-only` on the new tree says which
+  anchors moved.

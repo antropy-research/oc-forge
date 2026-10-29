@@ -85,7 +85,7 @@
     "build:service": "openchamber-guest-bundle --node service/main.ts service/main.js"
   },
   "devDependencies": {
-    "@openchamber/sdk": "2.5.2",
+    "@openchamber/sdk": "2.5.3",
     "@types/bun": "^1.4.4",
     "@types/node": "^26.6.5",
     "graphql": "16",

@@ -12,8 +12,8 @@ import { tabs } from "./edits/tabs"
 
 export type { Adapter, Edit } from "./apply"
 
-// The OpenChamber release the anchors were written against.
-export const TARGET = { version: "2.5.2", commit: "c4919abc1e7a0a3beeaa126666487806bf79cfe0" } as const
+// The OpenChamber release the anchors are checked against: vendors/openchamber's pin (written against 2.5.2).
+export const TARGET = { version: "2.5.3", commit: "95af6769797693bf049f4e6a801e373b5220447b" } as const
 
 export const adapters: readonly Adapter[] = [core, rail, tabs, links, pages, fixes]
 

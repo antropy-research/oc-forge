@@ -1,5 +1,6 @@
-// Two throwaway OpenChamber 2.5.2 instances on this machine for the end-to-end
-// check: `stock` (the npm release) and `adapted` (dist/openchamber-web-<v>.tgz),
+// Two throwaway OpenChamber instances on this machine for the end-to-end check,
+// of the release vendors.json pins: `stock` (that npm release) and `adapted`
+// (dist/openchamber-web-<v>.tgz, built from vendors/openchamber),
 // each with its own HOME, data dir and loopback port, the same extensions and
 // one demo project. Nothing is shared with the dev containers or with the
 // session that runs this (see instanceEnv).
@@ -21,9 +22,12 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const work = process.env.WORK ?? '/tmp/opencode/oc-adapters/e2e';
-const version = process.env.OPENCHAMBER_VERSION ?? '2.5.2';
+// The releases vendors.json pins (CI moves them), unless set: OpenChamber's, and the VS Code Server's for the VS Code
+// extension (Microsoft's build of that release).
+const pins = JSON.parse(readFileSync(join(repo, 'vendors.json'), 'utf8'));
+const version = process.env.OPENCHAMBER_VERSION ?? pins.openchamber.release.replace(/^v/, '');
 const packageFile = process.env.PACKAGE ?? join(repo, `dist/openchamber-web-${version}.tgz`);
-const VSCODE_VERSION = process.env.VSCODE_VERSION ?? '1.140.0';
+const VSCODE_VERSION = process.env.VSCODE_VERSION ?? pins.vscode.release.replace(/^v/, '');
 // Two stacks can run side by side with their own WORK and STACK_PORT_BASE (stock, adapted, VS Code Server).
 const BASE = Number(process.env.STACK_PORT_BASE ?? 35350);
 export const VSCODE_PORT = BASE + 2;
@@ -60,7 +64,8 @@ const prepare = async () => {
 
   // The check's own tools: Playwright, and the SDK the test extension's page bundles.
   const deps = join(work, 'deps');
-  if (!existsSync(join(deps, 'node_modules/playwright-core')) || !existsSync(join(deps, 'node_modules/@openchamber/sdk'))) {
+  const versionOf = (file) => (existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).version : null);
+  if (!existsSync(join(deps, 'node_modules/playwright-core')) || versionOf(join(deps, 'node_modules/@openchamber/sdk/package.json')) !== version) {
     mkdirSync(deps, { recursive: true });
     writeFileSync(join(deps, 'package.json'), '{ "name": "ocforge-e2e-deps", "private": true, "type": "module" }\n');
     execFileSync('bun', ['add', 'playwright-core@1.63.0', `@openchamber/sdk@${version}`], { cwd: deps, stdio: 'inherit', env: env() });
@@ -68,7 +73,9 @@ const prepare = async () => {
 
   // The VS Code Server for the web the VS Code extension connects to, the build the dev image runs.
   const server = join(work, 'vscode-server');
-  if (!existsSync(join(server, 'bin/code-server'))) {
+  if (!existsSync(join(server, 'bin/code-server')) || versionOf(join(server, 'product.json')) !== VSCODE_VERSION) {
+    stop('vscode');
+    rmSync(server, { recursive: true, force: true });
     mkdirSync(server, { recursive: true });
     const archive = join(work, `vscode-server-${VSCODE_VERSION}.tar.gz`);
     execFileSync('curl', ['-fsSL', `https://update.code.visualstudio.com/${VSCODE_VERSION}/server-linux-x64-web/stable`, '-o', archive]);

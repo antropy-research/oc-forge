@@ -79,6 +79,11 @@ try {
     return (Array.isArray(listed) ? listed : listed.data ?? []).some((session) => session.id === chatId);
   }, 120_000);
 
+  // An earlier run's tunnels close once nobody has polled them for 45 s; until then its connections would count as
+  // this run's, and their end as this run's end.
+  const quiet = await until(async () => connections() === 0 && (await health()).tunnels === 0, 150_000);
+  check('the VS Code Server is quiet before the run: no earlier connection left', quiet, `${connections()} open`);
+
   // ── 1. A workbench in OpenChamber's VS Code panel holds its connections ──
   const before = connections();
   const logBefore = serverLog().length;
