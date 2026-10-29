@@ -209,22 +209,37 @@ export async function startHarness({
   const login = await context.request.post(`${base}/auth/session`, { data: { password } });
   if (login.status() !== 200) throw new Error(`login failed: ${login.status()}`);
 
+  /**
+   * The host's answer to a request a route forwards. A connection the host closed as the request went out
+   * (ECONNRESET, more likely with two windows loading) is tried once more; a request that still fails is aborted, as
+   * the browser would fail it, instead of its rejection ending the journey before it reports.
+   */
+  const forwarded = (handle) => async (route) => {
+    const fetch = () => route.fetch();
+    let response;
+    try {
+      response = await fetch().catch((error) => (/ECONNRESET|socket hang up/.test(String(error)) ? fetch() : Promise.reject(error)));
+    } catch (error) {
+      console.error(`harness: ${route.request().method()} ${new URL(route.request().url()).pathname} failed: ${String(error).split('\n')[0]}`);
+      await route.abort().catch(() => {});
+      return;
+    }
+    await handle(route, response).catch(() => {});
+  };
   // Which extension each frame grant opens (the host mints one per frame).
   const grants = new Map();
-  await context.route((url) => /^\/api\/guests\/[^/]+\/frame-grant$/.test(new URL(url).pathname), async (route) => {
+  await context.route((url) => /^\/api\/guests\/[^/]+\/frame-grant$/.test(new URL(url).pathname), forwarded(async (route, response) => {
     const id = new URL(route.request().url()).pathname.split('/')[3];
-    const response = await route.fetch();
     const json = await response.json().catch(() => null);
     if (json?.grant) grants.set(json.grant, id);
     await route.fulfill({ response, json });
-  });
+  }));
   // Your panel bundle and stylesheet, with the host's own headers.
-  await context.route((url) => /\/api\/guest-files\/[^/]+\/panel\/(main\.js|styles\.css)$/.test(new URL(url).pathname), async (route) => {
+  await context.route((url) => /\/api\/guest-files\/[^/]+\/panel\/(main\.js|styles\.css)$/.test(new URL(url).pathname), forwarded(async (route, original) => {
     const parts = new URL(route.request().url()).pathname.split('/');
-    const original = await route.fetch();
     if (grants.get(parts[3]) !== 'oc-forge-planner') return route.fulfill({ response: original });
     await route.fulfill({ response: original, body: readFileSync(join(planner, 'panel', parts.at(-1))) });
-  });
+  }));
 
   const github = {
     status: { available: true, login: 'harness-user', message: null },
@@ -235,12 +250,15 @@ export async function startHarness({
     const outer = route.request().postDataJSON();
     const body = outer.body ? (() => { try { return JSON.parse(outer.body); } catch { return outer.body; } })() : undefined;
     serviceCalls.push({ method: outer.method, path: outer.path });
+    // A page closed while its request was on its way (a second window a journey closes) has nobody to answer: Playwright
+    // has settled its route already, and answering it again must not end the journey.
+    const answerWith = (json) => route.fulfill({ json }).catch(() => {});
     const custom = serviceOverride ? await serviceOverride({ method: outer.method, path: outer.path, query: outer.query, body }) : undefined;
-    if (custom !== undefined) return route.fulfill({ json: { status: custom.__status ?? 200, body: JSON.stringify(custom.__status ? custom.body : custom) } });
-    if (outer.path === '/github/status') return route.fulfill({ json: { status: 200, body: JSON.stringify(github.status) } });
+    if (custom !== undefined) return answerWith({ status: custom.__status ?? 200, body: JSON.stringify(custom.__status ? custom.body : custom) });
+    if (outer.path === '/github/status') return answerWith({ status: 200, body: JSON.stringify(github.status) });
     const query = outer.query ? `?${new URLSearchParams(outer.query)}` : '';
-    const answer = await call(outer.method, `${outer.path}${outer.path.includes('?') ? '' : query}`, outer.body);
-    await route.fulfill({ json: { status: answer.status, body: answer.text } });
+    const answer = await call(outer.method, `${outer.path}${outer.path.includes('?') ? '' : query}`, outer.body).catch((error) => ({ status: 502, text: JSON.stringify({ error: `harness: the private service did not answer (${String(error).split('\n')[0]})` }) }));
+    await answerWith({ status: answer.status, body: answer.text });
   });
 
   const linearCalls = [];
