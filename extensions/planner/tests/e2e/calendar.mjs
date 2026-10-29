@@ -19,8 +19,11 @@
 // deadline on its own day in the all-day section; deleting "This task" while
 // Google refuses its next one deletes nothing, and deleting again makes one;
 // one upcoming task deleted or edited on its own (This task), the series
-// passing over or taking it when it gets there; titles that read in full;
-// the layout at 1440 and 1024 px.
+// passing over or taking it when it gets there; "This and following tasks"
+// from an upcoming one, the earlier ones staying, and "All tasks", the
+// completed ones going too; two windows completing one occurrence at once
+// make one next task between them; titles that read in full; the layout at
+// 1440 and 1024 px.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/calendar.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
@@ -1015,7 +1018,7 @@ try {
   await shot('cal-42-drag-not-nested');
   await f.getByRole('radio', { name: 'Calendar' }).click();
 
-  // ── 12. An upcoming occurrence's series: Edit → All tasks (asked once, before the editor), then Delete → All future tasks ──
+  // ── 12. An upcoming occurrence's series: Edit → All tasks (asked once, before the editor), then Delete → All tasks ──
   await goTo(addDays(dayAfter, 1));
   const standupUpcoming = () => f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).first();
   await standupUpcoming().click();
@@ -1041,11 +1044,13 @@ try {
   await standupUpcoming().click();
   await standupSeries.getByRole('button', { name: 'Delete task' }).click();
   const deleteSeries = f.getByRole('alertdialog', { name: 'Delete repeating task' });
-  await deleteSeries.getByRole('radio', { name: 'All future tasks' }).check();
+  await deleteSeries.getByRole('radio', { name: 'All tasks' }).check();
   await shot('cal-48-delete-series-question');
   await deleteSeries.getByRole('button', { name: 'OK' }).click();
   const seriesGone = await until(async () => requests('DELETE', `/tasks/v1/lists/L1/tasks/${standupId}`).length === 1 && !(await keptOf(standupId)) && (await f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).count()) === 0);
-  check('Delete → All future tasks from an upcoming occurrence deletes the open task in Google, and no upcoming one is left', Boolean(seriesGone), JSON.stringify({ deletes: requests('DELETE', /\/tasks\//).map((request) => request.path), upcoming: await f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).count() }));
+  // Its completed tasks too (the one-off first, then the 9am one), as Google Calendar's All tasks deletes them.
+  const historyGone = await until(() => [dailyId, second?.id].every((id) => id && !fake.tasks.get('L1').some((task) => task.id === id)));
+  check('Delete → All tasks from an upcoming occurrence deletes the whole series in Google, its open task and its completed ones, and no upcoming one is left', Boolean(seriesGone) && Boolean(historyGone), JSON.stringify({ deletes: requests('DELETE', /\/tasks\//).map((request) => request.path), upcoming: await f.locator('.grid-item.is-upcoming', { hasText: 'Harness standup' }).count() }));
   await todayButton.click();
 
   // ── 13. An edit Google refuses is all or nothing (review 4): a daily task at 1pm, All tasks to a new title at 4pm, refused with a 503 ──
@@ -1581,6 +1586,135 @@ try {
   };
   const openOf = (title, except = []) => fake.tasks.get('L1').filter((task) => task.title === title && task.status !== 'completed' && !except.includes(task.id));
   const keptWith = (id) => until(() => keptOf(id).then((kept) => (kept?.repeat ? kept : null)));
+  /**
+   * Review 8: two windows (two tabs of one OpenChamber) on the same Tasks list complete the same occurrence at once,
+   * their requests for its next one held until both are on their way, and Google slow to make it. One next task
+   * between them, linked, in Google, in the plan and in both windows, after reloading both too; then both complete
+   * that one at once with Google refusing the first try: again exactly one, and never a second head of the series.
+   */
+  const twoWindows = async (size) => {
+    const d = (days) => addDays(today, days);
+    const twin = `Harness twin ${size}`;
+    const twinId = await dailyTask(twin, 540);
+    const seriesId = (await keptWith(twinId)).repeat.seriesId;
+    const other = await h.context.newPage();
+    await other.setViewportSize(page.viewportSize());
+    other.setDefaultTimeout(15_000);
+    await other.addLocatorHandler(other.getByText('OpenCode update'), async () => {
+      await other.locator('li.toast', { hasText: 'OpenCode update' }).getByRole('button', { name: 'Close', exact: true }).first().click({ timeout: 2000 }).catch(() => {});
+    });
+    other.on('pageerror', (error) => plannerErrors.push(`second window pageerror: ${error.message}`));
+    other.on('console', (message) => {
+      if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(`second window: ${message.text().slice(0, 300)}`);
+    });
+    const g = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+    /** The second window on the Tasks view, opened as the harness opens the first. */
+    const openOther = async () => {
+      await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+      const home = g.getByRole('heading', { name: 'Home' });
+      if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
+        const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
+        if (await button.isVisible().catch(() => false)) await button.click();
+        else {
+          await other.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+          await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
+        }
+        await home.waitFor({ timeout: 30_000 });
+      }
+      const menu = g.getByRole('button', { name: 'Planner menu' });
+      if (await menu.isVisible().catch(() => false)) await menu.click();
+      await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: 'Calendar', exact: true }).click();
+      await g.getByRole('radio', { name: 'Tasks', exact: true }).click();
+      await g.getByRole('region', { name: 'My Tasks' }).locator('li.gt-row', { hasText: twin }).first().waitFor({ timeout: 15_000 });
+    };
+    // Each window's request for the next one is held until the other's is on its way too (or 8 s), then both go on.
+    const matcher = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/service/request';
+    let held = [];
+    let asked = 0;
+    let holding = false;
+    let timer = null;
+    const letGo = () => {
+      holding = false;
+      clearTimeout(timer);
+      for (const route of held.splice(0)) route.fallback().catch(() => {});
+    };
+    const hold = (route) => {
+      if (!holding || route.request().postDataJSON()?.path !== '/google/tasks/next') return route.fallback();
+      asked += 1;
+      held.push(route);
+      if (held.length >= 2) letGo();
+      else timer = setTimeout(letGo, 8000);
+    };
+    await page.route(matcher, hold);
+    await other.route(matcher, hold);
+    const rows = (frame) => frame.getByRole('region', { name: 'My Tasks' }).locator('ul[aria-label="My Tasks tasks"] > li.gt-row', { hasText: twin }).evaluateAll((items) => items.map((item) => item.getAttribute('data-task')));
+    const box = (frame) => frame.getByRole('region', { name: 'My Tasks' }).getByRole('checkbox', { name: `Mark ${twin} complete`, exact: true });
+    const posts = () => requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => request.body?.title === twin).map((request) => request.body?.due);
+    const plan = async () => {
+      const series = Object.values((await state()).googleTasks ?? {}).filter((kept) => kept.repeat?.seriesId === seriesId);
+      return { heads: series.filter((kept) => !kept.repeat.next).map((kept) => kept.taskId), indexes: series.map((kept) => kept.repeat.index).sort(), links: Object.fromEntries(series.map((kept) => [kept.taskId, kept.repeat.next])) };
+    };
+    /** Both windows complete the one open task at once; the task each window's list shows open afterwards. */
+    const completeInBoth = async () => {
+      held = [];
+      asked = 0;
+      holding = true;
+      fake.delayNext('POST', '/tasks/v1/lists/L1/tasks', 1500);
+      await Promise.all([box(f).click(), box(g).click()]);
+      await until(() => asked >= 2 && !holding, 15_000);
+      await until(() => openOf(twin).length >= 1, 20_000);
+      // Time for a second next task, were one on its way.
+      await page.waitForTimeout(2500);
+      return { asked, open: openOf(twin).map((task) => ({ id: task.id, due: task.due })), windows: [await settle(() => rows(f), (ids) => ids.length === 1), await settle(() => rows(g), (ids) => ids.length === 1)] };
+    };
+    try {
+      await toPage('Tasks');
+      await openOther();
+      const first = await completeInBoth();
+      const second = first.open[0]?.id;
+      const firstPlan = await plan();
+      await h.shot(`cal-89-two-windows-first-${size}`);
+      await other.screenshot({ path: `${out}/cal-89-two-windows-second-${size}.png` });
+      const onlyOne = (seen, plan, id, date, made) => seen.asked === 2 && seen.open.length === 1 && seen.open[0].id === id && seen.open[0].due === due(date) && seen.windows.every((ids) => ids.length === 1 && ids[0] === id) && plan.heads.length === 1 && plan.heads[0] === id && posts().length === made;
+      // Reloaded, both: the same one, nothing more.
+      await reload();
+      await toPage('Tasks');
+      await openOther();
+      const reloaded = { asked: 2, open: openOf(twin).map((task) => ({ id: task.id, due: task.due })), windows: [await settle(() => rows(f), (ids) => ids.length === 1), await settle(() => rows(g), (ids) => ids.length === 1)] };
+      const reloadedPlan = await plan();
+      check(
+        `${size} px: two windows complete the same occurrence at once (their requests held until both are on their way, Google slow): Google gets one next task, tomorrow, linked to it, the only head of its series; both windows list that one, after reloading both too`,
+        Boolean(second) && onlyOne(first, firstPlan, second, d(1), 2) && firstPlan.links[twinId] === second && firstPlan.indexes.join() === '1,2' && onlyOne(reloaded, reloadedPlan, second, d(1), 2) && reloadedPlan.links[twinId] === second,
+        JSON.stringify({ first, firstPlan, reloaded, reloadedPlan, posts: posts() }),
+      );
+      // Again with that one, Google refusing the first try: the other window's makes it, once.
+      fake.failNext('POST', '/tasks/v1/lists/L1/tasks', 503, 'Backend Error');
+      const refusal = (frame) => frame.locator('.toast[role="alert"]', { hasText: `Google Tasks did not take the next "${twin}"` }).waitFor({ timeout: 20_000 });
+      const saying = Promise.any([refusal(f), refusal(g)]).then(() => true, () => false);
+      const retried = await completeInBoth();
+      const third = retried.open[0]?.id;
+      const said = await saying;
+      await h.shot(`cal-90-two-windows-retried-first-${size}`);
+      await other.screenshot({ path: `${out}/cal-90-two-windows-retried-second-${size}.png` });
+      const retriedPlan = await plan();
+      await reload();
+      await toPage('Tasks');
+      await openOther();
+      const again = { asked: 2, open: openOf(twin).map((task) => ({ id: task.id, due: task.due })), windows: [await settle(() => rows(f), (ids) => ids.length === 1), await settle(() => rows(g), (ids) => ids.length === 1)] };
+      const againPlan = await plan();
+      check(
+        `${size} px: after the reload, both complete the next one at once with Google refusing the first try: one window says so, the other's makes the one after it (the day after tomorrow), linked, once; reloaded again, no other task or head appears`,
+        Boolean(third) && Boolean(said) && onlyOne(retried, retriedPlan, third, d(2), 4) && retriedPlan.links[second] === third && retriedPlan.indexes.join() === '1,2,3' && onlyOne(again, againPlan, third, d(2), 4) && posts().join('|') === [today, d(1), d(2), d(2)].map(due).join('|'),
+        JSON.stringify({ retried, retriedPlan, said, again, againPlan, posts: posts() }),
+      );
+      await h.shot(`cal-91-two-windows-reloaded-${size}`);
+      await removeTasks([twinId, second, third].filter(Boolean), `twin-${size}`);
+    } finally {
+      letGo();
+      await page.unroute(matcher, hold).catch(() => {});
+      await other.close().catch(() => {});
+    }
+  };
   const occurrences = async (size) => {
     const d = (days) => addDays(today, days);
     await toPage('Calendar');
@@ -1667,8 +1801,8 @@ try {
     const snack = await f.locator('.gcal-snack', { hasText: 'Task deleted' }).isVisible().catch(() => false);
     const skipped = { tomorrow: await settle(() => countsOn(d(1), skip), (seen) => seen.upcoming === 0 && seen.real === 0), dayAfter: await settle(() => countsOn(d(2), skip), (seen) => seen.upcoming === 1) };
     check(
-      `${size} px: an upcoming task offers Edit and Delete; Delete asks This task or All future tasks, and This task leaves tomorrow empty while the day after still shows its task; the series, its open task and Google stay as they were`,
-      offered.includes('Edit task') && offered.includes('Delete task') && deleteChoices.map((text) => text.trim()).join('|') === 'This task|All future tasks' && snack && Boolean(skipKept) && skipKept.repeat.on === today && skipKept.repeat.template?.title === skip
+      `${size} px: an upcoming task offers Edit and Delete; Delete asks This task, This and following tasks or All tasks, as Google Calendar does, and This task leaves tomorrow empty while the day after still shows its task; the series, its open task and Google stay as they were`,
+      offered.includes('Edit task') && offered.includes('Delete task') && deleteChoices.map((text) => text.trim()).join('|') === 'This task|This and following tasks|All tasks' && snack && Boolean(skipKept) && skipKept.repeat.on === today && skipKept.repeat.template?.title === skip
         && skipped.tomorrow.upcoming === 0 && skipped.tomorrow.real === 0 && skipped.dayAfter.upcoming === 1 && openOf(skip).length === 1 && openOf(skip)[0].due === due(today),
       JSON.stringify({ offered, deleteChoices, snack, exceptions: skipKept?.repeat?.exceptions, skipped }),
     );
@@ -1755,7 +1889,7 @@ try {
     await weekOf(d(4));
     await shot(`cal-82-edited-date-reached-${size}`);
 
-    // 3. From an upcoming task, All tasks still changes the series, and Delete all future tasks still ends it.
+    // 3. From an upcoming task, Edit → All tasks still changes the series, and Delete → All tasks deletes it whole.
     await settle(() => countsOn(d(5), skip), (seen) => seen.upcoming === 1);
     await upcomingOn(d(5), skip).click();
     await upcomingDetails.getByRole('button', { name: 'Edit task' }).click();
@@ -1775,18 +1909,80 @@ try {
     await shot(`cal-83-all-tasks-${size}`);
     await upcomingOn(d(5), skip).click();
     await upcomingDetails.getByRole('button', { name: 'Delete task' }).click();
-    await deleteQuestion.getByRole('radio', { name: 'All future tasks' }).check();
+    await deleteQuestion.getByRole('radio', { name: 'All tasks' }).check();
     await deleteQuestion.getByRole('button', { name: 'OK' }).click();
+    const done = [skipId, second?.id, third?.id].filter(Boolean);
     const ended = fourth ? await until(async () => requests('DELETE', `/tasks/v1/lists/L1/tasks/${fourth.id}`).length === 1 && !(await keptOf(fourth.id)), 15_000) : false;
+    const historyGone = await until(() => done.every((id) => !fake.tasks.get('L1').some((task) => task.id === id)), 15_000);
     const endedSeen = await settle(async () => f.locator('.grid-item.is-upcoming', { hasText: skip }).count(), (count) => count === 0);
-    const projectionsLeft = Object.values((await state()).googleTasks ?? {}).filter((kept) => kept.repeat?.template?.title === skip && !kept.repeat.next).length;
+    const keptLeft = Object.values((await state()).googleTasks ?? {}).filter((kept) => kept.repeat?.template?.title === skip).length;
     check(
-      `${size} px: Delete → All future tasks from an upcoming task still ends the series: its open task deleted in Google, nothing kept to repeat, no upcoming task left`,
-      Boolean(ended) && endedSeen === 0 && projectionsLeft === 0 && openOf(skip).length === 0,
-      JSON.stringify({ ended, endedSeen, projectionsLeft, open: openOf(skip).map((task) => task.id) }),
+      `${size} px: Delete → All tasks from an upcoming task deletes the whole series: its open task and its completed ones in Google, nothing kept for it, no upcoming task left`,
+      Boolean(ended) && Boolean(historyGone) && endedSeen === 0 && keptLeft === 0 && openOf(skip).length === 0,
+      JSON.stringify({ ended, historyGone, endedSeen, keptLeft, open: openOf(skip).map((task) => task.id), left: fake.tasks.get('L1').filter((task) => done.includes(task.id)).map((task) => task.id) }),
     );
     await shot(`cal-84-series-ended-${size}`);
-    await removeTasks([skipId, second?.id, third?.id].filter(Boolean), `skip-${size}`);
+    await removeTasks(done, `skip-${size}`);
+
+    // 4. This and following tasks (review 8): the series ends the day before the chosen upcoming task, two days ahead.
+    const cut = `Harness cut ${size}`;
+    const cutId = await dailyTask(cut, 600);
+    const cutDetails = f.getByRole('dialog', { name: `Repeating Google task: ${cut}` });
+    const cutBefore = await keptWith(cutId);
+    await settle(() => countsOn(d(2), cut), (seen) => seen.upcoming === 1);
+    await upcomingOn(d(2), cut).click();
+    await cutDetails.getByRole('button', { name: 'Delete task' }).click();
+    const cutChoices = await deleteQuestion.locator('label').allInnerTexts();
+    await deleteQuestion.getByRole('radio', { name: 'This and following tasks' }).check();
+    await shot(`cal-85-following-question-${size}`);
+    await deleteQuestion.getByRole('button', { name: 'OK' }).click();
+    const until1 = d(1).replace(/-/g, '');
+    const cutKept = await until(() => keptOf(cutId).then((kept) => (kept?.repeat?.rule === `RRULE:FREQ=DAILY;UNTIL=${until1}` ? kept : null)), 15_000);
+    /** Today's real task, tomorrow's upcoming one at 10am, nothing from the chosen day on. */
+    const cutSeen = async () => ({
+      today: await settle(() => countsOn(today, cut), (seen) => seen.real === 1),
+      tomorrow: await settle(() => countsOn(d(1), cut), (seen) => seen.upcoming === 1 && seen.at === 600),
+      chosen: await settle(() => countsOn(d(2), cut), (seen) => seen.upcoming === 0 && seen.real === 0),
+      after: await settle(() => countsOn(d(3), cut), (seen) => seen.upcoming === 0 && seen.real === 0),
+      later: await countsOn(d(6), cut),
+    });
+    const earlierKept = (seen) => seen.today.real === 1 && seen.tomorrow.upcoming === 1 && seen.tomorrow.at === 600 && seen.chosen.upcoming + seen.chosen.real === 0 && seen.after.upcoming + seen.after.real === 0 && seen.later.upcoming + seen.later.real === 0;
+    const cutShown = await cutSeen();
+    await weekOf(d(2));
+    await shot(`cal-86-following-deleted-${size}`);
+    const cutGoogle = () => fake.tasks.get('L1').find((task) => task.id === cutId);
+    const asBefore = cutGoogle()?.status === 'needsAction' && cutGoogle()?.due === due(today) && requests('DELETE', `/tasks/v1/lists/L1/tasks/${cutId}`).length === 0;
+    await reload();
+    const cutReloaded = await cutSeen();
+    check(
+      `${size} px: Delete on the upcoming task two days ahead asks This task, This and following tasks or All tasks; This and following tasks keeps today's open task (Google unchanged, the series ending tomorrow: "until ${until1}") and tomorrow's upcoming one at 10am, and nothing shows from that day on, after a reload too`,
+      cutChoices.map((text) => text.trim()).join('|') === 'This task|This and following tasks|All tasks' && asBefore && Boolean(cutKept) && cutKept.repeat.on === today && JSON.stringify(cutKept.repeat.template) === JSON.stringify(cutBefore.repeat.template) && cutKept.time === 600
+        && earlierKept(cutShown) && earlierKept(cutReloaded),
+      JSON.stringify({ cutChoices, asBefore, cutKept, cutShown, cutReloaded }),
+    );
+    await weekOf(today);
+    await shot(`cal-87-following-reloaded-${size}`);
+    // The earlier ones done: tomorrow's is made from the series, and nothing after it, the chosen day included.
+    await openReal(today, cut);
+    await f.getByRole('dialog', { name: `Google task: ${cut}` }).getByRole('button', { name: 'Mark completed' }).click();
+    const cutNext = await until(() => openOf(cut, [cutId])[0], 15_000);
+    const cutNextKept = cutNext ? await keptWith(cutNext.id) : null;
+    await toPage('Tasks');
+    await myTasks.getByRole('checkbox', { name: `Mark ${cut} complete`, exact: true }).click();
+    await until(() => cutNext && fake.tasks.get('L1').find((task) => task.id === cutNext.id)?.status === 'completed', 15_000);
+    await page.waitForTimeout(1500);
+    const cutEnded = { open: openOf(cut).length, chosen: await settle(() => countsOn(d(2), cut), (seen) => seen.upcoming === 0 && seen.real === 0), posts: requests('POST', '/tasks/v1/lists/L1/tasks').filter((request) => request.body?.title === cut).map((request) => request.body?.due) };
+    check(
+      `${size} px: once today's and tomorrow's are completed, the series has made only tomorrow's (10am, from its template) and nothing from the chosen day on`,
+      cutNext?.due === due(d(1)) && cutNextKept?.time === 600 && cutNextKept.repeat?.on === d(1) && cutEnded.open === 0 && cutEnded.chosen.upcoming === 0 && cutEnded.chosen.real === 0 && cutEnded.posts.join('|') === [due(today), due(d(1))].join('|'),
+      JSON.stringify({ cutNext, cutNextKept, cutEnded }),
+    );
+    await weekOf(d(2));
+    await shot(`cal-88-following-earlier-done-${size}`);
+    await removeTasks([cutId, cutNext?.id].filter(Boolean), `cut-${size}`);
+
+    // 5. Two windows complete the same occurrence at once (review 8): one next task between them, linked, after a reload too.
+    await twoWindows(size);
   };
   await occurrences(1440);
   await page.setViewportSize({ width: 1024, height: 768 });
