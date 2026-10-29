@@ -26,7 +26,11 @@
 // task or All tasks) while another completes today's and Google is slow to
 // make tomorrow's, the one next task carrying the edit; one moved alone onto
 // another occurrence's day shown beside it, and completing either leaving the
-// other; titles that read in full; the layout at 1440 and 1024 px.
+// other; a task's form open in one window while another moves the series'
+// time or cuts it short, saving its title alone keeping both, the question
+// offering This task and All tasks, and a time changed in both windows asked
+// about (Keep theirs, Save mine), as a Planner task's notes are; titles that
+// read in full; the layout at 1440 and 1024 px.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/calendar.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
@@ -2026,6 +2030,249 @@ try {
     );
     await removeTasks(made, `review9-${size}`);
   };
+  /**
+   * Review 10, P0: a task's form open in the first window while the second window changes its series; the form saves
+   * its change from what it showed, over the series as it is. Its title alone keeps the 1pm given meanwhile (the task,
+   * the series, after a reload, and the next task) and keeps a cut by This and following tasks (the question offers
+   * This task and All tasks, from the series as it is; the cut days stay gone after a reload). A time changed in both
+   * windows is asked ("Time was changed to 3pm in another window (yours: 10am)"): Save mine at 1440, Keep theirs at
+   * 1024. At 1440, a Planner task's notes too: left alone in the first window's details they keep the second
+   * window's, changed in both they are asked.
+   */
+  const review10 = async (size) => {
+    const d = (days) => addDays(today, days);
+    const other = await h.context.newPage();
+    await other.setViewportSize(page.viewportSize());
+    other.setDefaultTimeout(15_000);
+    await other.addLocatorHandler(other.getByText('OpenCode update'), async () => {
+      await other.locator('li.toast', { hasText: 'OpenCode update' }).getByRole('button', { name: 'Close', exact: true }).first().click({ timeout: 2000 }).catch(() => {});
+    });
+    other.on('pageerror', (error) => plannerErrors.push(`second window pageerror: ${error.message}`));
+    other.on('console', (message) => {
+      if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(`second window: ${message.text().slice(0, 300)}`);
+    });
+    const g = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+    const gTasks = g.getByRole('region', { name: 'My Tasks' });
+    const gQuestion = g.getByRole('alertdialog', { name: 'Edit repeating task' });
+    const gLane = (date) => g.locator(`.day-lane[data-date="${date}"]`);
+    /** The second window opened (or reloaded) on one of the Planner's pages, as the harness opens the first. */
+    const openOther = async (pageName = 'Calendar') => {
+      await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+      const home = g.getByRole('heading', { name: 'Home' });
+      if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
+        const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
+        if (await button.isVisible().catch(() => false)) await button.click();
+        else {
+          await other.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+          await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
+        }
+        await home.waitFor({ timeout: 30_000 });
+      }
+      const menu = g.getByRole('button', { name: 'Planner menu' });
+      if (await menu.isVisible().catch(() => false)) await menu.click();
+      await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: pageName, exact: true }).click();
+    };
+    /** In the second window: the task's time set to `time` in its form in the Tasks view, saved for All tasks. */
+    const timeInOther = async (title, time) => {
+      await g.getByRole('radio', { name: 'Tasks', exact: true }).click();
+      await gTasks.getByRole('button', { name: `Edit ${title}`, exact: true }).click();
+      const form = gTasks.getByRole('group', { name: `Edit ${title}` });
+      await form.getByRole('combobox', { name: 'Time', exact: true }).selectOption(String(time));
+      await form.getByRole('button', { name: 'Done' }).click();
+      await gQuestion.getByRole('radio', { name: 'All tasks' }).check();
+      await gQuestion.getByRole('button', { name: 'OK' }).click();
+      await form.waitFor({ state: 'detached', timeout: 15_000 });
+    };
+    /** In the second window: the series cut from `from`, at its upcoming task on the calendar (Delete → This and following tasks). */
+    const cutInOther = async (title, from) => {
+      await g.getByRole('radio', { name: 'Calendar', exact: true }).click();
+      await g.getByRole('button', { name: /^View:/ }).click();
+      await g.getByRole('menuitemradio', { name: /^Week/ }).click();
+      await g.getByRole('main').getByRole('button', { name: 'Today', exact: true }).click();
+      for (let step = 0; step < 3 && !(await gLane(from).count()); step++) await g.getByRole('button', { name: 'Next week' }).click();
+      const upcoming = gLane(from).locator('.grid-item.is-upcoming', { hasText: title }).first();
+      await upcoming.waitFor({ timeout: 15_000 });
+      await upcoming.click();
+      await g.getByRole('dialog', { name: `Repeating Google task: ${title}` }).getByRole('button', { name: 'Delete task' }).click();
+      const asked = g.getByRole('alertdialog', { name: 'Delete repeating task' });
+      await asked.getByRole('radio', { name: 'This and following tasks' }).check();
+      await asked.getByRole('button', { name: 'OK' }).click();
+    };
+    /** The first window in front long enough to look again (it does every 5 s): its plan as it is now, its open form as it opened. */
+    const firstLooks = async () => {
+      await page.bringToFront();
+      await page.waitForTimeout(6500);
+    };
+    const question = f.getByRole('alertdialog', { name: 'Edit repeating task' });
+    /** The first window's form saved for All tasks: the question's choices, and whether the form closed (saved). */
+    const saveAll = async (form, shotName) => {
+      await form.getByRole('button', { name: 'Done' }).click();
+      const asked = await question.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+      const choices = asked ? (await question.locator('label').allInnerTexts()).map((label) => label.trim()) : [];
+      await shot(shotName);
+      if (asked) {
+        await question.getByRole('radio', { name: 'All tasks' }).check();
+        await question.getByRole('button', { name: 'OK' }).click();
+      }
+      const closed = await form.waitFor({ state: 'detached', timeout: 15_000 }).then(() => true).catch(() => false);
+      return { choices, closed, said: closed ? [] : await form.locator('[role="alert"]').allInnerTexts().catch(() => []) };
+    };
+    const googleTitle = (id) => fake.tasks.get('L1').find((task) => task.id === id)?.title;
+    const made = [];
+    try {
+      // 1. Only the title changed in the first window's open form, while the second window moves the series to 1pm.
+      const stale = `Harness stale ${size}`;
+      const renamed = `${stale} renamed`;
+      const staleId = await dailyTask(stale, 540);
+      made.push(staleId);
+      await myTasks.getByRole('button', { name: `Edit ${stale}`, exact: true }).click();
+      const formA = myTasks.getByRole('group', { name: `Edit ${stale}` });
+      await formA.getByRole('textbox', { name: 'Title' }).fill(renamed);
+      await openOther();
+      await timeInOther(stale, 780);
+      const moved = Boolean(await until(() => keptOf(staleId).then((kept) => kept?.time === 780 && kept.repeat?.template?.time === 780), 10_000));
+      await firstLooks();
+      const shownTime = await formA.getByRole('combobox', { name: 'Time', exact: true }).inputValue();
+      const saved = await saveAll(formA, `cal-110-stale-question-${size}`);
+      const after = await until(() => keptOf(staleId).then((kept) => (kept?.repeat?.template?.title === renamed ? kept : null)), 10_000);
+      const titled = googleTitle(staleId);
+      await reload();
+      await toPage('Tasks');
+      const rowText = await settle(() => myTasks.locator(`li.gt-row[data-task="${staleId}"]`).innerText().catch(() => ''), (text) => text.includes(renamed) && text.includes('1pm'));
+      await shot(`cal-111-stale-reloaded-${size}`);
+      const reloaded = await keptOf(staleId);
+      // Completed later: the next task is at 1pm, with the new title.
+      await myTasks.getByRole('checkbox', { name: `Mark ${renamed} complete`, exact: true }).click();
+      const next = await until(() => openOf(renamed, [staleId])[0], 15_000);
+      if (next) made.push(next.id);
+      const nextKept = next ? await until(() => keptOf(next.id).then((kept) => (kept?.repeat ? kept : null)), 10_000) : null;
+      check(
+        `${size} px: a daily 9am task's form open in one window, its title alone changed; another window moves the series to 1pm (All tasks); saving the title (All tasks, offered with This task) leaves the task and the series at 1pm, after a reload too, and the next task is at 1pm with the new title`,
+        moved && shownTime === '540' && saved.closed && saved.choices.join('|') === 'This task|All tasks' && after?.time === 780 && after.repeat.template.time === 780 && after.repeat.rule === 'RRULE:FREQ=DAILY' && titled === renamed
+          && rowText.includes(renamed) && rowText.includes('1pm') && reloaded?.time === 780 && reloaded.repeat?.template?.time === 780 && next?.due === due(d(1)) && nextKept?.time === 780 && nextKept.repeat?.template?.time === 780,
+        JSON.stringify({ next: next && { id: next.id, due: next.due }, nextKept: nextKept && { time: nextKept.time }, rowText, reloaded: reloaded && { time: reloaded.time, template: reloaded.repeat?.template?.time }, after: after && { time: after.time, rule: after.repeat.rule, template: after.repeat.template.time }, titled, moved, shownTime, saved }),
+      );
+
+      // 2. The time changed in both windows: asked, never one side silently. Save mine at 1440, Keep theirs at 1024.
+      await toPage('Tasks');
+      await myTasks.getByRole('button', { name: `Edit ${renamed}`, exact: true }).click();
+      const formC = myTasks.getByRole('group', { name: `Edit ${renamed}` });
+      await formC.getByRole('combobox', { name: 'Time', exact: true }).selectOption('600');
+      await openOther();
+      await timeInOther(renamed, 900);
+      const theirs = Boolean(next && (await until(() => keptOf(next.id).then((kept) => kept?.time === 900), 10_000)));
+      await page.bringToFront();
+      await formC.getByRole('button', { name: 'Done' }).click();
+      const banner = formC.locator('.edit-conflict');
+      const asked = await banner.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+      const said = asked ? await banner.innerText() : '';
+      const untouched = next ? (await keptOf(next.id))?.time : null;
+      await shot(`cal-112-conflict-${size}`);
+      const choice = size === 1440 ? 'Save mine' : 'Keep theirs';
+      if (asked) await banner.getByRole('button', { name: choice }).click();
+      // Save mine goes on to the question (the form changed a time); Keep theirs leaves nothing to save.
+      if (choice === 'Save mine' && (await question.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false))) {
+        await question.getByRole('radio', { name: 'All tasks' }).check();
+        await question.getByRole('button', { name: 'OK' }).click();
+      }
+      const settledClosed = await formC.waitFor({ state: 'detached', timeout: 15_000 }).then(() => true).catch(() => false);
+      const wanted = choice === 'Save mine' ? 600 : 900;
+      const settled = next ? await until(() => keptOf(next.id).then((kept) => (kept?.time === wanted && kept.repeat?.template?.time === wanted ? kept : null)), 10_000) : null;
+      check(
+        `${size} px: the same task's time changed in both windows (10am in the open form, 3pm saved in the other): Done says "Time was changed to 3pm in another window (yours: 10am)" with Keep theirs and Save mine and writes nothing; ${choice} then leaves it at ${wanted === 600 ? '10am' : '3pm'}, for the series too`,
+        theirs && asked && said.includes('Time was changed to 3pm in another window (yours: 10am)') && said.includes('Keep theirs') && said.includes('Save mine') && untouched === 900 && settledClosed && Boolean(settled),
+        JSON.stringify({ theirs, asked, said, untouched, settledClosed, settled: settled && { time: settled.time, template: settled.repeat?.template } }),
+      );
+
+      // 3. Only the title changed in the open form while the other window cuts the series from the day after tomorrow.
+      const cut = `Harness stale cut ${size}`;
+      const cutRenamed = `${cut} renamed`;
+      const cutId = await dailyTask(cut, 540);
+      made.push(cutId);
+      await myTasks.getByRole('button', { name: `Edit ${cut}`, exact: true }).click();
+      const formB = myTasks.getByRole('group', { name: `Edit ${cut}` });
+      await formB.getByRole('textbox', { name: 'Title' }).fill(cutRenamed);
+      await openOther();
+      await cutInOther(cut, d(2));
+      const cutRule = `RRULE:FREQ=DAILY;UNTIL=${d(1).replace(/-/g, '')}`;
+      const cutDone = Boolean(await until(() => keptOf(cutId).then((kept) => kept?.repeat?.rule === cutRule), 15_000));
+      await firstLooks();
+      const cutSaved = await saveAll(formB, `cal-113-stale-cut-question-${size}`);
+      const cutAfter = await until(() => keptOf(cutId).then((kept) => (kept?.repeat?.template?.title === cutRenamed ? kept : null)), 10_000);
+      const cutTitled = googleTitle(cutId);
+      await reload();
+      const cutSeen = {
+        tomorrow: await settle(() => countsOn(d(1), cutRenamed), (seen) => seen.upcoming === 1),
+        chosen: await settle(() => countsOn(d(2), cutRenamed), (seen) => seen.upcoming + seen.real === 0),
+        after: await countsOn(d(3), cutRenamed),
+      };
+      await weekOf(d(2));
+      await shot(`cal-114-stale-cut-reloaded-${size}`);
+      check(
+        `${size} px: a daily task's form open in one window, its title alone changed; the other window cuts the series from the day after tomorrow (This and following tasks); saving offers This task and All tasks (not All tasks alone), and All tasks keeps the cut: tomorrow's task shows renamed, the cut days stay empty after a reload`,
+        cutDone && cutSaved.closed && cutSaved.choices.join('|') === 'This task|All tasks' && cutAfter?.repeat?.rule === cutRule && cutTitled === cutRenamed
+          && cutSeen.tomorrow.upcoming === 1 && cutSeen.chosen.upcoming + cutSeen.chosen.real === 0 && cutSeen.after.upcoming + cutSeen.after.real === 0,
+        JSON.stringify({ cutDone, cutSaved, cutAfter: cutAfter && cutAfter.repeat, cutTitled, cutSeen }),
+      );
+
+      // 4. At 1440, a Planner task's notes in both windows' details.
+      if (size === 1440) {
+        const noted = `Harness noted ${size}`;
+        const notedId = `harness-noted-${size}`;
+        await h.call('POST', '/commands', { commands: [{ cmd: `harness-noted-${size}`, type: 'task.created', task: { id: notedId, title: noted, notes: 'First notes', placement: { kind: 'day', date: today }, position: 1024 } }] });
+        const notesNow = async () => (await state()).tasks[notedId]?.notes;
+        try {
+          await navTo('Today');
+          await f.getByRole('button', { name: `Open ${noted}` }).first().click();
+          const detailsA = f.getByRole('dialog', { name: 'Task details' });
+          const notesA = detailsA.getByRole('textbox', { name: 'Notes' });
+          await notesA.waitFor();
+          await openOther('Today');
+          await g.getByRole('button', { name: `Open ${noted}` }).first().click();
+          const notesB = g.getByRole('dialog', { name: 'Task details' }).getByRole('textbox', { name: 'Notes' });
+          await notesB.fill('Notes from the second window');
+          await notesB.press('Tab');
+          const second = Boolean(await until(async () => (await notesNow()) === 'Notes from the second window', 10_000));
+          await firstLooks();
+          // Into the first window's notes and out again, typing nothing.
+          await notesA.click();
+          await detailsA.getByRole('textbox', { name: 'Title' }).click();
+          await page.waitForTimeout(1500);
+          const keptAlone = await notesNow();
+          const shownAlone = await notesA.inputValue();
+          // Both change them: the first window's is asked about.
+          await notesA.click();
+          await notesA.fill('Notes from the first window');
+          await notesB.fill('Notes from the second window, again');
+          await notesB.press('Tab');
+          const again = Boolean(await until(async () => (await notesNow()) === 'Notes from the second window, again', 10_000));
+          await page.bringToFront();
+          await detailsA.getByRole('textbox', { name: 'Title' }).click();
+          const notesBanner = detailsA.locator('.edit-conflict');
+          const notesAsked = await notesBanner.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+          const notesSaid = notesAsked ? await notesBanner.innerText() : '';
+          const notesUntouched = await notesNow();
+          await shot(`cal-115-notes-conflict-${size}`);
+          if (notesAsked) await notesBanner.getByRole('button', { name: 'Keep theirs' }).click();
+          await page.waitForTimeout(1000);
+          const notesKept = await notesNow();
+          const notesShown = await notesA.inputValue();
+          check(
+            `${size} px: a Planner task's details open in two windows: notes changed in the second stay when the first window's notes are entered and left untouched (and show there); changed in both, the first says "Notes were changed elsewhere" with Keep theirs and Save mine, writes nothing, and Keep theirs shows the second's`,
+            second && keptAlone === 'Notes from the second window' && shownAlone === 'Notes from the second window' && again && notesAsked && notesSaid.includes('Notes were changed elsewhere') && notesUntouched === 'Notes from the second window, again'
+              && notesKept === 'Notes from the second window, again' && notesShown === notesKept,
+            JSON.stringify({ second, keptAlone, shownAlone, again, notesAsked, notesSaid, notesUntouched, notesKept, notesShown }),
+          );
+          await page.keyboard.press('Escape');
+        } finally {
+          await h.call('POST', '/commands', { commands: [{ cmd: `harness-noted-${size}-gone`, type: 'task.deleted', taskId: notedId }] });
+        }
+      }
+    } finally {
+      await other.close().catch(() => {});
+      await removeTasks(made, `review10-${size}`);
+    }
+  };
   const occurrences = async (size) => {
     const d = (days) => addDays(today, days);
     await toPage('Calendar');
@@ -2298,6 +2545,10 @@ try {
     // 6. Review 9: tomorrow's task edited in a second window while the first completes today's (This task, All tasks);
     //    today's moved alone onto tomorrow, beside tomorrow's own.
     await review9(size);
+
+    // 7. Review 10: a task's form open in one window while the other changes its series (its time, a cut); both
+    //    windows changing one time, and (1440) a Planner task's notes.
+    await review10(size);
   };
   await occurrences(1440);
   await page.setViewportSize({ width: 1024, height: 768 });
