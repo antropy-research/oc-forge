@@ -172,7 +172,9 @@ container, and its `gh` (the agent's and the service's) reaches it through a Uni
 The journey puts the container back as it was at the end.
 
 `sunsama.mjs` runs this checkout's panel and a private copy of its service in the dev
-container's OpenChamber (`tests/e2e/harness.mjs`): the sources panel, drags onto days and the
+container's OpenChamber (`tests/e2e/harness.mjs`; on oc-forge's adapted OpenChamber it keeps
+the page's service requests on HTTP, where its routes answer them, with the host's
+`oc-forge:service-socket` switch): the sources panel, drags onto days and the
 calendar, daily planning, the assignee picker, and two real chats in `planner-demo-a` as
 OpenCode's read-only plan agent, through a command file it writes to the container
 (`oc-planner-harness-plan.md`) and removes, with the chats and worktrees, at the end.
@@ -180,9 +182,14 @@ OpenCode's read-only plan agent, through a command file it writes to the contain
 The built `panel/main.js` and `service/main.js` are committed so the folder installs
 without a build. The repository's root `.gitignore` ignores `lib/`; this package's own
 `.gitignore` re-includes `panel/lib/`. A manifest that changes capabilities or service
-permissions needs approval again. The e2e journey cleans up before and after itself
-(tasks, chats, worktrees, folders, calendars, the Linear page layout, the Google session
-calendar) and mocks Linear and the Small Model at the host's routes, and a second Linear
+permissions needs approval again. The e2e journey (`run.mjs`) works in the installed
+Planner's real plan and leaves it as it found it. First it removes what a crashed run left
+(tasks, chats, worktrees, time entries, calendar blocks, series, folders, calendars,
+objectives, ritual text carrying a run's tag). At the end it removes what it made and puts
+the rituals and settings it changed back as they were: the day's planning, shutdown and
+highlights, the week's planning and review, the Linear page's display, the Pomodoro
+lengths, the Google session calendar. Its last check compares the plan with the one it
+found (tasks, time, calendar, rituals, settings). It mocks Linear and the Small Model at the host's routes, and a second Linear
 workspace, Google and pull request lookups at the service's routes, so it never touches a
 real Linear workspace or Google account. Its one real Linear call
 sends a made-up key, to check that the service refuses a key Linear rejects.

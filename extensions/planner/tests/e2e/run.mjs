@@ -51,19 +51,101 @@ for (const enabled of [false, true]) {
   if (toggle.status() !== 200) check(`service restart (${enabled ? 'enable' : 'pause'})`, false, `status ${toggle.status()}`);
 }
 
-/** Remove every e2e task, run, chat, worktree, calendar, objective, series, folder and highlight. */
-const cleanUp = async (final) => {
-  const call = async (method, path, body) => {
-    const response = await context.request.post(`${base}/api/guests/oc-forge-planner/service/request`, { data: { method, path, ...(body ? { body: JSON.stringify(body) } : {}) } });
-    const outer = await response.json().catch(() => ({}));
-    return JSON.parse(outer.body ?? '{}');
+/** One request to the Planner's own service in the container, the way its page sends one. */
+const serviceCall = async (method, path, body) => {
+  const response = await context.request.post(`${base}/api/guests/oc-forge-planner/service/request`, { data: { method, path, ...(body ? { body: JSON.stringify(body) } : {}) } });
+  const outer = await response.json().catch(() => ({}));
+  return JSON.parse(outer.body ?? '{}');
+};
+
+const isTestTitle = (title) => /^e2e-/.test(title ?? '');
+const isTestTitledTask = (task) => isTestTitle(task.title) || Boolean(task.sessionRef?.title?.includes('e2e-'));
+const isTestTask = (task) => !task.deletedAt && isTestTitledTask(task);
+/** A run, time entry, calendar block or the timer of a test task, deleted or not. */
+const ofTestTask = (state, item) => Boolean(state.tasks[item.taskId] && isTestTitledTask(state.tasks[item.taskId]));
+// The text the journey types into rituals carries the run's tag, so what a crashed run wrote there is known by it.
+const TEST_TEXT = /\be2e-[a-z0-9]{6,}\b/;
+const hasTestText = (record) => Object.values(record).some((value) => (typeof value === 'string' && TEST_TEXT.test(value)) || (Array.isArray(value) && value.some((item) => TEST_TEXT.test(item?.text ?? ''))));
+const isBlank = (value) => value === null || value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
+/** A ritual record as the owner sees it: ritual.saved merges, so an emptied field stands for one never written. */
+const compact = (record) => JSON.stringify(Object.entries(record ?? {}).filter(([, value]) => !isBlank(value)).sort(([a], [b]) => a.localeCompare(b)));
+const blankField = (field) => (field === 'items' ? [] : ['completedAt', 'publishedAt', 'shutdownTime'].includes(field) ? null : '');
+
+/** The plan as its owner sees it, part by part, to tell what a run left changed. */
+const ownerView = (state) => {
+  const pick = (items, keep) => Object.fromEntries(Object.entries(items ?? {}).filter(([, item]) => keep(item)).map(([id, item]) => [id, JSON.stringify(item)]));
+  return {
+    tasks: pick(state.tasks, (task) => !task.deletedAt),
+    entries: pick(state.entries, () => true),
+    blocks: pick(state.blocks, () => true),
+    calendars: pick(state.calendars, () => true),
+    objectives: pick(state.objectives, (objective) => !objective.deletedAt),
+    // A series stopped from its first day makes no task.
+    series: pick(state.series, (series) => !(series.stoppedFrom && series.stoppedFrom <= series.startDate)),
+    folders: pick(state.folders, (folder) => !folder.deletedAt),
+    channels: pick(state.channels, (channel) => !channel.deletedAt),
+    runs: pick(state.runs, () => true),
+    googleTasks: pick(state.googleTasks, () => true),
+    rituals: Object.fromEntries(Object.entries(state.rituals ?? {}).map(([key, record]) => [key, compact(record)]).filter(([, record]) => record !== '[]')),
+    settings: Object.fromEntries(Object.entries(state.settings ?? {}).map(([key, value]) => [key, JSON.stringify(value)])),
+    timer: { timer: JSON.stringify(state.timer ?? null) },
   };
-  const isTestTask = (task) => !task.deletedAt && (/^e2e-/.test(task.title) || Boolean(task.sessionRef?.title?.includes('e2e-')));
+};
+const viewChanges = (before, after) => Object.keys(before).flatMap((part) => [...new Set([...Object.keys(before[part]), ...Object.keys(after[part])])]
+  .filter((key) => before[part][key] !== after[part][key])
+  .map((key) => `${part} ${key}: ${before[part][key] === undefined ? 'added' : after[part][key] === undefined ? 'gone' : 'changed'}`));
+
+// The owner's plan as this run found it, once a crashed run's leftovers are gone: the run puts its rituals and
+// settings back to it, and checks that it leaves the plan as it was.
+let found = null;
+
+/**
+ * The commands that take test data out of the plan: test tasks (by their e2e- titles) and what outlives them (their
+ * runs, the timer, time entries, calendar blocks), test calendars, objectives, series and folders, and what the
+ * journey wrote into rituals and settings. With `target`, the plan the run found, rituals and settings go back to it
+ * exactly; without it, a ritual with a crashed run's tagged text loses that text and the completion that came with
+ * it, and the Google phase's fake account is forgotten.
+ */
+const cleanupCommands = (state, target, tag) => {
+  const introduced = state.settings.googleCalendarsIntroduced ?? [];
+  const settings = target
+    ? Object.fromEntries(Object.entries(target.settings).filter(([key, value]) => JSON.stringify(state.settings[key]) !== JSON.stringify(value)))
+    : {
+      // The Google phase's fake account must not stay the calendar sessions are written to, nor stay remembered.
+      ...(state.settings.googleTimebox?.account === 'e2e@example.com' ? { googleTimebox: null } : {}),
+      ...(introduced.includes('e2e@example.com') ? { googleCalendarsIntroduced: introduced.filter((email) => email !== 'e2e@example.com') } : {}),
+    };
+  const rituals = Object.entries(state.rituals ?? {}).flatMap(([key, record]) => {
+    const goal = target ? target.rituals[key] ?? {} : !hasTestText(record) ? record : Object.fromEntries(Object.entries(record).map(([field, value]) => [field,
+      Array.isArray(value) ? value.filter((item) => !TEST_TEXT.test(item?.text ?? '')) : typeof value === 'string' && TEST_TEXT.test(value) ? '' : field === 'completedAt' || field === 'publishedAt' ? null : value]));
+    if (compact(record) === compact(goal)) return [];
+    const [ritual, date] = key.split(':');
+    const fields = Object.fromEntries(Object.keys({ ...record, ...goal }).map((field) => [field, goal[field] ?? blankField(field)]));
+    return [{ cmd: `cleanup-${ritual}-${date}-${tag}`, type: 'ritual.saved', ritual, date, fields }];
+  });
+  return [
+    ...(Object.keys(settings).length ? [{ cmd: `cleanup-settings-${tag}`, type: 'settings.updated', patch: settings }] : []),
+    ...Object.values(state.runs ?? {}).filter((item) => ofTestTask(state, item)).map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
+    ...(state.timer && ofTestTask(state, state.timer) ? [{ cmd: `cleanup-timer-${tag}`, type: 'timer.stopped' }] : []),
+    ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
+    // A task's time entries and calendar blocks outlive it, in the Stats and on the calendar.
+    ...Object.values(state.entries ?? {}).filter((entry) => ofTestTask(state, entry)).map((entry) => ({ cmd: `cleanup-${entry.id}`, type: 'time.deleted', entryId: entry.id })),
+    ...Object.values(state.blocks ?? {}).filter((block) => ofTestTask(state, block)).map((block) => ({ cmd: `cleanup-${block.id}`, type: 'block.deleted', blockId: block.id })),
+    ...Object.values(state.calendars).filter((calendar) => isTestTitle(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
+    ...Object.values(state.objectives ?? {}).filter((objective) => isTestTitle(objective.title) && !objective.deletedAt).map((objective) => ({ cmd: `cleanup-${objective.id}`, type: 'objective.deleted', objectiveId: objective.id })),
+    // The journey stops its series from tomorrow, which still covers today; stopped from its first day it covers none.
+    ...Object.values(state.series ?? {}).filter((series) => isTestTitle(series.template.title) && !(series.stoppedFrom && series.stoppedFrom <= series.startDate)).map((series) => ({ cmd: `cleanup-${series.id}-${tag}`, type: 'series.stopped', seriesId: series.id, from: series.startDate })),
+    ...Object.values(state.folders ?? {}).filter((folder) => isTestTitle(folder.name) && !folder.deletedAt).map((folder) => ({ cmd: `cleanup-${folder.id}`, type: 'folder.deleted', folderId: folder.id })),
+    ...rituals,
+  ];
+};
+
+/** Takes out of the dev container's Planner everything a run made: tasks, chats, worktrees, rituals, settings, ... */
+const cleanUp = async (final) => {
   try {
-    const { state } = await call('GET', '/state');
-    const testTaskIds = new Set(Object.values(state.tasks).filter(isTestTask).map((task) => task.id));
-    const testRuns = Object.values(state.runs ?? {}).filter((item) => testTaskIds.has(item.taskId));
+    let { state } = await serviceCall('GET', '/state');
     // Real chats the journey started in the dev container, then the worktrees and branches it made.
+    const testRuns = Object.values(state.runs ?? {}).filter((item) => ofTestTask(state, item));
     for (const session of new Map(testRuns.map((item) => [item.sessionId, item])).values()) {
       await context.request.delete(`${base}/api/session/${session.sessionId}?directory=${encodeURIComponent(session.directory ?? '')}`).catch(() => {});
     }
@@ -72,35 +154,22 @@ const cleanUp = async (final) => {
     } catch (error) {
       console.log(`INFO worktree cleanup: ${String(error).split('\n')[0]}`);
     }
-    const display = { linearLayout: 'list', linearGroupBy: 'status', linearOrderBy: 'priority', linearImportCompletion: false };
-    // The Google phase's fake account must not stay the calendar sessions are written to.
-    const googleLeft = state.settings.googleTimebox?.account === 'e2e@example.com';
-    // The Planner shows a new account's own calendar once; the journey's fake account must not stay remembered.
-    const introduced = state.settings.googleCalendarsIntroduced ?? [];
-    const displayChanged = Object.entries(display).some(([key, value]) => state.settings[key] !== undefined && state.settings[key] !== value);
-    const commands = [
-      // The Linear page's layout is a setting; put it back so the next run starts from the list.
-      ...(displayChanged ? [{ cmd: `cleanup-display-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: display }] : []),
-      ...(googleLeft ? [{ cmd: `cleanup-google-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: { googleTimebox: null } }] : []),
-      ...(introduced.includes('e2e@example.com') ? [{ cmd: `cleanup-introduced-${run}-${final ? 'end' : 'start'}`, type: 'settings.updated', patch: { googleCalendarsIntroduced: introduced.filter((email) => email !== 'e2e@example.com') } }] : []),
-      ...testRuns.map((item) => ({ cmd: `cleanup-${item.id}`, type: 'run.removed', runId: item.id })),
-      ...(state.timer && /^e2e-/.test(state.tasks[state.timer.taskId]?.title ?? '') ? [{ cmd: `cleanup-timer-${run}`, type: 'timer.stopped' }] : []),
-      ...Object.values(state.tasks).filter(isTestTask).map((task) => ({ cmd: `cleanup-${task.id}`, type: 'task.deleted', taskId: task.id })),
-      ...Object.values(state.calendars).filter((calendar) => /^e2e-/.test(calendar.name)).map((calendar) => ({ cmd: `cleanup-${calendar.id}`, type: 'calendar.removed', calendarId: calendar.id })),
-      ...Object.values(state.objectives ?? {}).filter((objective) => /^e2e-/.test(objective.title) && !objective.deletedAt).map((objective) => ({ cmd: `cleanup-${objective.id}`, type: 'objective.deleted', objectiveId: objective.id })),
-      ...Object.values(state.series ?? {}).filter((series) => /^e2e-/.test(series.template.title) && !series.stoppedFrom).map((series) => ({ cmd: `cleanup-${series.id}`, type: 'series.stopped', seriesId: series.id, from: '2000-01-01' })),
-      ...Object.values(state.folders ?? {}).filter((folder) => /^e2e-/.test(folder.name) && !folder.deletedAt).map((folder) => ({ cmd: `cleanup-${folder.id}`, type: 'folder.deleted', folderId: folder.id })),
-      // Custom highlights the journey typed in are not tasks; drop them from the day's record too.
-      ...Object.entries(state.rituals ?? {})
-        .filter(([key, record]) => key.startsWith('highlights:') && (record.items ?? []).some((item) => /^e2e-/.test(item.text)))
-        .map(([key, record]) => ({ cmd: `cleanup-hl-${key.slice('highlights:'.length)}-${run}`, type: 'ritual.saved', ritual: 'highlights', date: key.slice('highlights:'.length), fields: { items: record.items.filter((item) => !/^e2e-/.test(item.text)) } })),
-    ];
-    if (commands.length) {
-      const answer = await call('POST', '/commands', { commands });
-      if (answer.error) console.log(`INFO cleanup batch rejected: ${answer.error} (command ${answer.index})`);
+    // Deleting a task whose timer runs logs one more entry, so look again until nothing is left.
+    for (let pass = 1; pass <= 3; pass += 1) {
+      const commands = cleanupCommands(state, final ? found : null, `${run}-${final ? 'end' : 'start'}-${pass}`);
+      if (!commands.length) break;
+      // A request's body holds at most 64 000 characters.
+      for (let at = 0; at < commands.length; at += 100) {
+        const answer = await serviceCall('POST', '/commands', { commands: commands.slice(at, at + 100) });
+        if (answer.error) console.log(`INFO cleanup batch rejected: ${answer.error} (command ${at + answer.index})`);
+      }
+      ({ state } = await serviceCall('GET', '/state'));
     }
-    const after = await call('GET', '/state');
-    if (final) check('cleanup leaves no live test tasks', !Object.values(after.state.tasks).some(isTestTask));
+    if (final) {
+      check('cleanup leaves no live test tasks', !Object.values(state.tasks).some(isTestTask));
+      const changes = found ? viewChanges(ownerView(found), ownerView(state)) : ['the plan could not be read before the run'];
+      check("the run leaves the owner's plan as it found it (tasks, time, calendar, rituals, settings)", changes.length === 0, changes.slice(0, 4).join('; '));
+    }
   } catch (error) {
     if (final) check('cleanup leaves no live test tasks', false, String(error));
   }
@@ -108,6 +177,12 @@ const cleanUp = async (final) => {
 
 // A crashed earlier run may have left test data behind; start from a clean planner.
 await cleanUp(false);
+found = (await serviceCall('GET', '/state').catch(() => ({}))).state ?? null;
+// The journey starts from the Linear page's default display, a setting; the owner's own comes back at the end.
+const display = { linearLayout: 'list', linearGroupBy: 'status', linearOrderBy: 'priority', linearImportCompletion: false };
+if (found && Object.entries(display).some(([key, value]) => found.settings[key] !== value)) {
+  await serviceCall('POST', '/commands', { commands: [{ cmd: `display-${run}`, type: 'settings.updated', patch: display }] });
+}
 
 // OpenChamber's own Linear connection may be signed in to a real workspace in the dev container. Until the
 // journey's fake Linear takes over (later routes win), the Planner sees no connection and reaches no Linear.
@@ -436,7 +511,8 @@ try {
   await frame.getByRole('textbox', { name: 'Add objective' }).press('Enter');
   await frame.locator('li.objective input.objective-title').first().waitFor({ timeout: 10_000 });
   await frame.getByRole('button', { name: /Intention/ }).click();
-  await frame.getByRole('textbox', { name: 'Weekly intention' }).fill('Get the Sunsama features in.');
+  // Ritual text carries the run's tag: a run that crashes before its cleanup leaves text the next run knows.
+  await frame.getByRole('textbox', { name: 'Weekly intention' }).fill(`Get the Sunsama features in (${run}).`);
   await frame.getByRole('button', { name: 'Finish planning' }).click();
   await frame.getByRole('heading', { name: 'Home' }).waitFor();
   check('weekly planning saves an objective and finishes', true);
@@ -456,24 +532,26 @@ try {
   check('estimate step shows the workload against the threshold', /of work planned/.test(await frame.locator('.workload').innerText()));
   await frame.getByRole('button', { name: /Finalize/ }).click();
   check('finalize step lists the plan', (await frame.locator('.plan-text').innerText()).includes(`${run} ritual task (0:25)`));
-  await frame.getByRole('textbox', { name: 'Obstacles' }).fill('Too many meetings');
+  const obstacles = `Too many meetings (${run})`;
+  await frame.getByRole('textbox', { name: 'Obstacles' }).fill(obstacles);
   await frame.locator('.plan-text').click();
   await shot('13-daily-planning');
   await frame.getByRole('button', { name: 'Start my day' }).click();
   await frame.getByRole('heading', { name: 'Today' }).waitFor();
-  const planned = await waitForState((latest) => Boolean(latest.state.rituals[`planning:${todayKey}`]?.completedAt) && latest.state.rituals[`planning:${todayKey}`]?.obstacles === 'Too many meetings');
-  check('daily planning records completion and obstacles', Boolean(planned.state.rituals[`planning:${todayKey}`]?.completedAt) && planned.state.rituals[`planning:${todayKey}`]?.obstacles === 'Too many meetings', JSON.stringify(planned.state.rituals[`planning:${todayKey}`] ?? Object.keys(planned.state.rituals)));
+  const planned = await waitForState((latest) => Boolean(latest.state.rituals[`planning:${todayKey}`]?.completedAt) && latest.state.rituals[`planning:${todayKey}`]?.obstacles === obstacles);
+  check('daily planning records completion and obstacles', Boolean(planned.state.rituals[`planning:${todayKey}`]?.completedAt) && planned.state.rituals[`planning:${todayKey}`]?.obstacles === obstacles, JSON.stringify(planned.state.rituals[`planning:${todayKey}`] ?? Object.keys(planned.state.rituals)));
 
   await frame.getByRole('button', { name: 'Daily shutdown', exact: true }).click();
   await frame.getByRole('heading', { name: 'Daily shutdown' }).waitFor();
   check('shutdown review lists today\'s completed work', (await frame.locator('.review-list').innerText()).includes(run));
   await frame.getByRole('button', { name: /Reflect/ }).click();
-  await frame.getByRole('textbox', { name: 'Reflection' }).fill('Calendar work went well.');
+  const reflection = `Calendar work went well (${run}).`;
+  await frame.getByRole('textbox', { name: 'Reflection' }).fill(reflection);
   await frame.locator('.ritual-section label.stacked').click({ position: { x: 2, y: 2 } });
   await frame.getByRole('button', { name: 'Done for the day' }).click();
   await frame.getByRole('heading', { name: 'Daily highlights' }).waitFor();
-  const shutdownState = await waitForState((latest) => latest.state.rituals[`shutdown:${todayKey}`]?.reflection === 'Calendar work went well.' && Boolean(latest.state.rituals[`shutdown:${todayKey}`]?.completedAt));
-  check('shutdown records reflection and completion', shutdownState.state.rituals[`shutdown:${todayKey}`]?.reflection === 'Calendar work went well.' && Boolean(shutdownState.state.rituals[`shutdown:${todayKey}`]?.completedAt), JSON.stringify(shutdownState.state.rituals[`shutdown:${todayKey}`] ?? {}));
+  const shutdownState = await waitForState((latest) => latest.state.rituals[`shutdown:${todayKey}`]?.reflection === reflection && Boolean(latest.state.rituals[`shutdown:${todayKey}`]?.completedAt));
+  check('shutdown records reflection and completion', shutdownState.state.rituals[`shutdown:${todayKey}`]?.reflection === reflection && Boolean(shutdownState.state.rituals[`shutdown:${todayKey}`]?.completedAt), JSON.stringify(shutdownState.state.rituals[`shutdown:${todayKey}`] ?? {}));
 
   await frame.getByRole('button', { name: new RegExp(`^Star ${run}`) }).first().click();
   await frame.getByRole('textbox', { name: 'Add highlight' }).fill(`${run} helped a teammate`);
@@ -509,7 +587,7 @@ try {
   await frame.getByRole('heading', { name: 'Weekly review' }).waitFor();
   const reviewText = await frame.locator('.ritual-body').innerText();
   check('weekly review shows the objective and the body of work', reviewText.includes(`${run} launch planner`) && reviewText.includes(`${run} write plan`));
-  await frame.getByRole('textbox', { name: 'Weekly journal' }).fill('Solid week.');
+  await frame.getByRole('textbox', { name: 'Weekly journal' }).fill(`Solid week (${run}).`);
   // Ritual records are per week and persist across runs; either label is fine.
   await frame.getByRole('button', { name: /^(Wrap up the week|Wrapped up)$/ }).click();
   await frame.getByRole('button', { name: 'Wrapped up' }).waitFor({ timeout: 10_000 });
