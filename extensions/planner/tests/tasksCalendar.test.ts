@@ -155,7 +155,7 @@ describe('the service gives each notification once', () => {
     dirs.push(dir);
     const reads: NotificationReads & { due: NotificationReads['due'] } = {
       accounts: async () => [ME],
-      due: async (_accounts, date) => ({ items: items.filter((one) => one.due === date), errors: [] }),
+      due: async (_accounts, from, to) => ({ items: items.filter((one) => one.due !== null && one.due >= from && one.due <= to), errors: [] }),
       byIds: async (groups) => ({ items: items.filter((one) => groups.some((group) => group.ids.includes(one.id))), errors: [] }),
     };
     const file = join(dir, 'task-notifications.json');

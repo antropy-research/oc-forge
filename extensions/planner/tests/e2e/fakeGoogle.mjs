@@ -237,7 +237,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       const files = (world.driveFiles ?? [])
         .filter((file) => !file.trashed && file.mimeType !== 'application/vnd.google-apps.folder' && (!name || file.name.toLowerCase().includes(name.toLowerCase())))
         .sort((a, b) => (b.modifiedTime ?? '').localeCompare(a.modifiedTime ?? ''));
-      return [200, { files: files.slice(0, Number(query.get('pageSize') ?? 100)).map(({ trashed: _trashed, ...file }) => file) }];
+      const [from, size] = [Number(query.get('pageToken') ?? 0), Number(query.get('pageSize') ?? 100)];
+      return [200, { files: files.slice(from, from + size).map(({ trashed: _trashed, ...file }) => file), ...(from + size < files.length ? { nextPageToken: String(from + size) } : {}) }];
     }
     // Google Calendar
     if (path === '/calendar/v3/users/me/calendarList' && method === 'GET') return [200, page(world.calendars.map(({ id: calendarId, summary, accessRole, backgroundColor, primary }) => ({ id: calendarId, summary, accessRole, backgroundColor, ...(primary ? { primary } : {}) })), query, 'calendarList')];

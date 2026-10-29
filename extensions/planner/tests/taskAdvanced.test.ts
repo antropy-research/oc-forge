@@ -29,9 +29,11 @@ import {
   DEFAULT_DECLINE_MESSAGE,
   TASKS_COLOR,
   colorName,
+  declineCarriesOn,
   driveKind,
   driveQuery,
   invitationsToDecline,
+  meetingsToDecline,
   moveList,
   orderedLists,
   quietLabel,
@@ -214,6 +216,26 @@ describe('Do not disturb and declining meetings (work and school accounts)', () 
     }
   });
 
+  test('one held by a task that runs to midnight comes just after midnight, the next day, not lost with its day', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'planner-dnd-'));
+    try {
+      const state = stateWith({ type: 'settings.updated', patch: { timezone: ZONE } }, keep('late', { time: 23 * 60 + 30, duration: 60, doNotDisturb: true }), keep('call', { time: 23 * 60 + 45 }));
+      const items = [item({ id: 'late', title: 'Late block' }), item({ id: 'call', title: 'Call home' })];
+      const asked: string[][] = [];
+      const reads: NotificationReads = { accounts: async () => [ME], due: async (_accounts, from, to) => (asked.push([from, to]), { items, errors: [] }), byIds: async () => ({ items: [], errors: [] }) };
+      const now = { at: Date.parse(at(23 * 60 + 50)) };
+      const service = new TaskNotifications(join(dir, 'given.json'), () => state, reads, () => now.at);
+      const before = await service.take();
+      expect([before.notifications.map((one) => one.taskId), before.next]).toEqual([['late'], at(0, addDays(TODAY, 1))]);
+      now.at = Date.parse(at(5, addDays(TODAY, 1)));
+      expect((await service.take()).notifications.map((one) => [one.taskId, one.held, one.at])).toEqual([['call', true, at(0, addDays(TODAY, 1))]]);
+      expect(asked.at(-1)).toEqual([TODAY, addDays(TODAY, 1)]);
+      expect((await service.take()).notifications).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('which invitations a Busy task declines: someone else\'s meetings overlapping it, not declined yet; "only new" leaves older ones', () => {
     const window = { account: ME, listId: 'L1', taskId: 'gt1', key: 'k', title: 'Deep work', date: TODAY, start: at(600), end: at(720), doNotDisturb: false, decline: { mode: 'all' as const, message: 'Busy', since: at(500) } };
     const invite = (patch: Partial<Invitation>): Invitation => ({ id: 'i', summary: 'Sync', start: at(630), end: at(690), created: at(400), response: 'needsAction', mine: false, meeting: true, ...patch });
@@ -249,7 +271,7 @@ describe('Do not disturb and declining meetings (work and school accounts)', () 
       const invitations: Invitation[] = [{ id: 'sync', summary: 'Sync', start: at(15 * 60 + 15), end: at(15 * 60 + 45), created: at(60), response: 'needsAction', mine: false, meeting: true }];
       const responded: unknown[][] = [];
       const calendar = {
-        invitations: async () => invitations,
+        invitationPage: async () => ({ items: invitations, next: null }),
         respond: async (...args: unknown[]) => {
           responded.push(args);
           invitations[0] = { ...invitations[0]!, response: 'declined' };
@@ -275,6 +297,140 @@ describe('Do not disturb and declining meetings (work and school accounts)', () 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // Review 10: three daily Busy series at 9, 10 and 11 make 45 times in the two weeks; a pass looked at the first 40
+  // alone, so the meeting at 11 on the last day stayed unanswered while the pass said nothing was wrong.
+  describe('every time of every task, read once per pass; a pass that stops at a bound carries on and says where', () => {
+    const day = (n: number) => addDays(TODAY, n);
+    const series = (id: string, minutes: number, message: string): EventBody => {
+      const decline = { mode: 'all' as const, message, since: '2026-10-28T00:00:00.000Z' };
+      const template = templateOf({ title: id, notes: '' }, { time: minutes, duration: null, deadline: null, busy: true, decline }, TODAY);
+      return keep(`${id}-1`, { time: minutes, busy: true, decline: { mode: 'all', message }, repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: id, index: 1, next: null, on: TODAY, template } });
+    };
+    const daily = stateWith({ type: 'settings.updated', patch: { timezone: ZONE } }, series('nine', 9 * 60, 'At nine'), series('ten', 10 * 60, 'At ten'), series('eleven', 11 * 60, 'At eleven'));
+    const heads = [item({ id: 'nine-1', title: 'nine' }), item({ id: 'ten-1', title: 'ten' }), item({ id: 'eleven-1', title: 'eleven' })];
+    const reads = { accounts: async () => [ME], byIds: async () => ({ items: heads, errors: [] }) };
+    const invite = (id: string, date: string, minutes: number, patch: Partial<Invitation> = {}): Invitation => ({ id, summary: id, start: at(minutes, date), end: at(minutes + 30, date), created: '2026-10-01T00:00:00.000Z', response: 'needsAction', mine: false, meeting: true, ...patch });
+    /** Google's events.list on the primary calendar: the ones ending after timeMin and starting before timeMax, in start order, `size` a page. */
+    const google = (events: Invitation[], size = 2500) => {
+      const pages: { timeMin: string; timeMax: string; token: string | undefined }[] = [];
+      const responded: string[][] = [];
+      const calendar = {
+        invitationPage: async (_account: string, timeMin: string, timeMax: string, token?: string) => {
+          pages.push({ timeMin, timeMax, token });
+          const found = events.filter((event) => event.end > timeMin && event.start < timeMax).sort((a, b) => a.start.localeCompare(b.start));
+          const from = Number(token ?? 0);
+          return { items: found.slice(from, from + size), next: from + size < found.length ? String(from + size) : null };
+        },
+        respond: async (_account: string, _calendar: string, eventId: string, response: string, _scope: string, comment?: string) => {
+          responded.push([eventId, comment ?? '']);
+          const at = events.findIndex((event) => event.id === eventId);
+          events[at] = { ...events[at]!, response: response as Invitation['response'] };
+          return 1;
+        },
+      };
+      return { calendar, pages, responded };
+    };
+    const decliner = (dir: string, calendar: ReturnType<typeof google>['calendar'], options: ConstructorParameters<typeof MeetingDecliner>[4] = {}) =>
+      new MeetingDecliner(join(dir, 'declined.json'), () => daily, reads, calendar, { now: () => Date.parse(at(8 * 60)), ...options });
+    const withDir = async (run: (dir: string) => Promise<void>) => {
+      const dir = mkdtempSync(join(tmpdir(), 'planner-decline-'));
+      try {
+        await run(dir);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    test("the reviewer's three series: one read of the two weeks declines the meetings at 11 on day 1 and day 14, each once, with the 11 o'clock task's message", () =>
+      withDir(async (dir) => {
+        const windows = taskWindows(heads, daily.googleTasks, TODAY, day(14), TODAY, ZONE).filter((window) => window.decline);
+        expect(windows.length).toBe(45);
+        // Their other meetings, accepted already or mine, fill the calendar around them.
+        const events = [invite('day-1', day(1), 11 * 60), invite('day-14', day(14), 11 * 60), ...Array.from({ length: 60 }, (_, n) => invite(`busy-${n}`, day(n % 15), 13 * 60 + (n % 4) * 30, n % 2 ? { response: 'accepted' } : { mine: true }))];
+        const fake = google(events);
+        const service = decliner(dir, fake.calendar);
+        const first = await service.run();
+        expect(first.declined.map((one) => [one.eventId, one.taskId, one.task])).toEqual([
+          ['day-1', 'eleven-1', 'eleven'],
+          ['day-14', 'eleven-1', 'eleven'],
+        ]);
+        expect(fake.responded).toEqual([['day-1', 'At eleven'], ['day-14', 'At eleven']]);
+        expect([first.errors, first.more]).toEqual([[], []]);
+        // One read, from now to the end of the last time.
+        expect(fake.pages).toEqual([{ timeMin: at(9 * 60), timeMax: at(11 * 60 + 30, day(14)), token: undefined }]);
+        // A repeated pass declines nothing twice; no series was turned off for it.
+        const again = await service.run();
+        expect([again.declined, again.more]).toEqual([[], []]);
+        expect(fake.responded).toHaveLength(2);
+        expect(Object.values(daily.googleTasks).every((entry) => entry.decline && entry.busy)).toBe(true);
+      }));
+
+    test('a calendar longer than a pass reads: the next pass reads on from the page it stopped before, and says where it is', () =>
+      withDir(async (dir) => {
+        // Pages of 2 events, one page a pass.
+        const events = [invite('a', day(1), 9 * 60), invite('b', day(1), 12 * 60, { response: 'accepted', mine: true }), invite('c', day(3), 10 * 60), invite('d', day(5), 15 * 60, { mine: true }), invite('e', day(9), 11 * 60), invite('f', day(12), 16 * 60, { mine: true }), invite('g', day(14), 9 * 60)];
+        const fake = google(events, 2);
+        const service = decliner(dir, fake.calendar, { pagesMax: 1 });
+        const passes = [];
+        for (let n = 0; n < 4; n++) passes.push(await service.run());
+        expect(passes.map((pass) => pass.declined.map((one) => one.eventId))).toEqual([['a'], ['c'], ['e'], ['g']]);
+        expect(passes.map((pass) => pass.more.map((left) => left.from))).toEqual([[events[1]!.start], [events[3]!.start], [events[5]!.start], []]);
+        expect(fake.pages.map((page) => page.token)).toEqual([undefined, '2', '4', '6']);
+        // While it carries on, the task's details say from where; once through, nothing.
+        expect(service.progress(ME)).toBeNull();
+        const stopped = decliner(dir, google([invite('x', day(1), 9 * 60), invite('y', day(2), 9 * 60), invite('z', day(3), 9 * 60)], 2).calendar, { pagesMax: 1 });
+        expect((await stopped.run()).more).toEqual([{ account: ME, from: at(9 * 60, day(2)) }]);
+        expect(stopped.progress(ME)).toBe(at(9 * 60, day(2)));
+        expect(declineCarriesOn(at(9 * 60, day(2)), ZONE)).toBe('The Planner is still going through your meetings from October 31, 9 AM on: it declines the rest in a moment');
+      }));
+
+    test('out of time: a pass declines no more after its share of time, and the next one goes on from the meeting it stopped at', () =>
+      withDir(async (dir) => {
+        const events = [invite('a', day(1), 9 * 60), invite('b', day(2), 10 * 60), invite('c', day(3), 11 * 60), invite('d', day(4), 9 * 60), invite('e', day(5), 10 * 60)];
+        const fake = google(events);
+        // Each decline takes 3 s of a 5 s pass: two a pass (one always goes, so a pass never stalls).
+        const clock = { at: 0 };
+        const respond = fake.calendar.respond;
+        fake.calendar.respond = async (...args: Parameters<typeof respond>) => {
+          clock.at += 3000;
+          return respond(...args);
+        };
+        const service = decliner(dir, fake.calendar, { budgetMs: 5000, clock: () => clock.at });
+        const first = await service.run();
+        expect([first.declined.map((one) => one.eventId), first.more]).toEqual([['a', 'b'], [{ account: ME, from: events[2]!.start }]]);
+        const second = await service.run();
+        expect([second.declined.map((one) => one.eventId), second.more]).toEqual([['c', 'd'], [{ account: ME, from: events[4]!.start }]]);
+        const third = await service.run();
+        expect([third.declined.map((one) => one.eventId), third.more]).toEqual([['e'], []]);
+        expect(fake.responded.map(([id]) => id)).toEqual(['a', 'b', 'c', 'd', 'e']);
+      }));
+
+    test("one Google refuses is said once and tried again in the next round; it holds up none of the others", () =>
+      withDir(async (dir) => {
+        const events = [invite('refused', day(1), 9 * 60), invite('fine', day(2), 9 * 60)];
+        const fake = google(events, 1);
+        const respond = fake.calendar.respond;
+        let refuse = true;
+        fake.calendar.respond = async (...args: Parameters<typeof respond>) => {
+          if (args[2] === 'refused' && refuse) throw new Error('Forbidden');
+          return respond(...args);
+        };
+        const service = decliner(dir, fake.calendar, { pagesMax: 1 });
+        const first = await service.run();
+        expect([first.declined, first.errors, first.more.length]).toEqual([[], ['"refused": Forbidden'], 1]);
+        const second = await service.run();
+        expect([second.declined.map((one) => one.eventId), second.errors, second.more]).toEqual([['fine'], [], []]);
+        refuse = false;
+        expect((await service.run()).declined.map((one) => one.eventId)).toEqual(['refused']);
+      }));
+
+    test('each invitation once, for the earliest task time it overlaps', () => {
+      const windows = taskWindows(heads, daily.googleTasks, TODAY, day(1), TODAY, ZONE);
+      const long = invite('long', day(1), 9 * 60 + 15, { end: at(10 * 60 + 15, day(1)) });
+      expect(meetingsToDecline(windows, [long, invite('lunch', day(1), 12 * 60)]).map(({ invitation, window }) => [invitation.id, window.decline!.message])).toEqual([['long', 'At nine']]);
+    });
   });
 });
 
@@ -488,7 +644,21 @@ describe('the routes, against a fake Google (a work account without Drive yet)',
     const found = await call('GET', `/google/drive/files?account=${encodeURIComponent(account)}&q=budget`);
     expect(found.body.files).toEqual([{ id: 'd-budget', title: 'Budget 2027', mimeType: 'application/vnd.google-apps.spreadsheet', url: 'https://docs.google.com/spreadsheets/d/d-budget/edit', modifiedTime: '2026-10-25T10:00:00Z' }]);
     const asked = fake.requests.filter((request) => request.path === '/drive/v3/files').at(-1)!;
-    expect(asked.query).toMatchObject({ q: "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'budget'", fields: 'files(id,name,mimeType,webViewLink,modifiedTime)' });
+    expect(asked.query).toMatchObject({ q: "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'budget'", fields: 'nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime)' });
+    expect(found.body.next).toBeNull();
+    // More files than a page: the picker's "More files" reads the next page, until Drive has none.
+    const world = fake.world as { driveFiles: unknown[] };
+    const before = world.driveFiles;
+    world.driveFiles = [...before, ...Array.from({ length: 35 }, (_, n) => ({ id: `d-notes-${n}`, name: `Notes ${n}`, mimeType: 'application/pdf', webViewLink: `https://drive.google.com/file/d/d-notes-${n}/view`, modifiedTime: `2026-09-${String((n % 28) + 1).padStart(2, '0')}T10:00:00Z` }))];
+    try {
+      const first = await call('GET', `/google/drive/files?account=${encodeURIComponent(account)}&q=notes`);
+      expect([first.body.files.length, first.body.next]).toEqual([30, '30']);
+      const second = await call('GET', `/google/drive/files?account=${encodeURIComponent(account)}&q=notes&pageToken=30`);
+      expect([second.body.files.length, second.body.next]).toEqual([5, null]);
+      expect(new Set([...first.body.files, ...second.body.files].map((file: { id: string }) => file.id)).size).toBe(35);
+    } finally {
+      world.driveFiles = before;
+    }
   });
 
   test("Undo after Delete: Google undeletes a task it deleted a moment ago, with its subtasks; only deleted: false is taken", async () => {

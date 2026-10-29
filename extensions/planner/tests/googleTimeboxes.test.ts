@@ -157,6 +157,30 @@ describe('Google Calendar changes come back', () => {
     expect(google.calls).toEqual([]);
   });
 
+  test('more sessions missing from a read than it asks Google about: each has its turn, ten at a time, the longest unasked first', async () => {
+    const { planner, google, timeboxes, run } = await setup();
+    const ids = Array.from({ length: 12 }, (_, n) => `b${n + 1}`);
+    run(...ids.map((id, n) => block(id, `2026-10-26T${String(8 + n).padStart(2, '0')}:00:00.000Z`, `2026-10-26T${String(8 + n).padStart(2, '0')}:30:00.000Z`)));
+    await timeboxes.settled();
+    const events = ids.map((id) => planner.state.blocks[id]!.google!.eventId);
+    // The first ten's events do not read (Google fails on them); the last two were deleted in Google.
+    google.events.delete(events[10]!);
+    google.events.delete(events[11]!);
+    const asked: string[] = [];
+    const event = google.event.bind(google);
+    google.event = async (account, calendarId, eventId) => {
+      asked.push(eventId);
+      if (events.indexOf(eventId) < 10) throw new GoogleError(500, 'Google answered HTTP 500');
+      return event(account, calendarId, eventId);
+    };
+    expect(await timeboxes.reconcile(reads([]), ...range)).toBe(0);
+    expect(asked).toEqual(events.slice(0, 10));
+    // The next read asks about the two not asked about yet first: they were deleted there, so here too.
+    expect(await timeboxes.reconcile(reads([]), ...range)).toBe(2);
+    expect(asked.slice(10, 12).sort()).toEqual(events.slice(10).sort());
+    expect(['b11', 'b12'].filter((id) => planner.state.blocks[id])).toEqual([]);
+  });
+
   test('a read older than the last write here is not believed', async () => {
     const { planner, timeboxes, run } = await setup();
     run(block('b1', '2026-10-26T17:00:00.000Z', '2026-10-26T18:00:00.000Z'));

@@ -104,7 +104,7 @@ does not have or a Google product the Planner is not. Journeys run at 1440x900 a
 | Advanced settings: change the color of your tasks (9901136) | Done now | Task form → Advanced settings → Task color (Google's eleven or List color); each list's color under My calendars | TC advanced, `taskAdvanced.test.ts` |
 | Advanced settings: Free or Busy; visibility (9901136) | Done | Availability, Visibility | TC tasks |
 | Advanced settings: Do not disturb, work or school accounts only (9901136) | Done now | Do not disturb (the Planner's own notifications wait until the task ends) | TC advanced, `taskAdvanced.test.ts` |
-| Advanced settings: Automatically decline meetings if Busy, work or school only (9901136) | Done now | Automatically decline meetings: new and existing or only new, a message; declined in Google Calendar | TC advanced, `taskAdvanced.test.ts` |
+| Advanced settings: Automatically decline meetings if Busy, work or school only (9901136) | Done now | Automatically decline meetings: new and existing or only new, a message; declined in Google Calendar. Every time of every such task in the two weeks ahead is matched against one paged read of the account's calendar per pass (round 11: a pass used to look at the first 40 times alone); a pass that reaches a bound (4 pages of 2,500 events, 5 s) carries on a few seconds later from where it stopped, and the toast and the task's details say from where | TC advanced (three daily series, 45 times), `taskAdvanced.test.ts` |
 | Tasks in Calendar: Create, Add a task (9901136) | Done | Calendar → Tasks (or Google → Google Tasks) | C |
 | Mark a task complete (circle; Mark completed) (9901136, 7675838) | Done | Check circle on the grid and in lists; details → Mark completed; "Task completed" with Undo (and Ctrl/⌘+Z), as Google Tasks and Google Calendar say it: open again, and a repeating task's next one taken back while untouched (the service's, `GoogleSeries.uncomplete`) | C, TC tasks, `gtaskSeries.test.ts`, `tasksInventory.test.ts` |
 | View tasks: My calendars → Tasks checked (9901136) | Done | Rail → Tasks; each list's own checkbox now too | C, TC advanced |
@@ -154,6 +154,29 @@ does not have or a Google product the Planner is not. Journeys run at 1440x900 a
 | Dark theme (14286238) | Done | Follows OpenChamber's theme | |
 | Limits: 100,000 tasks, 20,000 open per list; repeat at most every 1000 units (7675838, 16540694) | N/A | Google's own limits, enforced by Google (the Planner reads up to 4,000 open tasks of a list and says when there are more) | |
 | Work or school accounts: the administrator turns Tasks and Drive on (7675772, 17017692) | N/A | Google Workspace's admin console | |
+
+## Google's limits, one by one
+
+Round 11 went through every place the Planner stops reading or writing Google before the end,
+so that none leaves something out without saying so (review 10 found declining meetings
+looking at the first 40 task times alone). Each is now complete, says so, or is Google's own.
+
+| Where | Bound | When it is reached |
+|---|---|---|
+| Declining meetings (`service/googleDecline.ts`) | One read of the account's calendar per pass over all the times, 4 pages of 2,500 events and 5 s of declining a pass | The next pass carries on from that page or that meeting, 5 s later; the toast and the task's details say "still going through your meetings from …" (`taskAdvanced.test.ts`) |
+| Declining meetings: how far ahead | Two weeks of a task's times | A later time is declined once it comes within the two weeks; the task form's note says so. Reading a repeating task's every future time every five minutes would read the whole calendar |
+| Google Calendar's events of a range; calendar list; a series' occurrences before one | 8 pages of 2,500 events; 10 pages of 250 calendars; 8 pages of 2,500 | An error says the Planner reads at most that many |
+| Event search (`/`) | A year back and two ahead; 2 pages of 250 per calendar | The results say the range; "Google found more than this; add a word" |
+| Google Tasks: lists, a list's open tasks, tasks due in a range | 5 pages of 1,000 lists; 40 pages of 100 tasks; 20 pages of 100 a list | An error says the Planner reads at most that many |
+| Google Tasks: a list with its completed tasks (Tasks view, printing) | 40 pages of 100 | The list says "This list is longer than the Planner reads at once; Google Tasks shows the rest"; its printout says so too |
+| Pending tasks | The past 365 days | Google Calendar's own: "all uncompleted tasks from the last 365 days" (9901136); the entry says so |
+| Task notifications | Today's, and yesterday's held past midnight by Do not disturb | Google Calendar's web notifications come while it is open; one missed while no Planner surface was open comes the same day. Round 11: one Do not disturb held to midnight came on no day; it now comes just after midnight (`taskAdvanced.test.ts`) |
+| Task notifications shown at once | 3 | The rest are counted: "N more task notifications today: see the Planner's calendar" |
+| Gmail search | 25 a page | More loads the next page, until Gmail has none |
+| Drive search (Add a Google Drive attachment) | 30 a page | Round 11: More files loads the next page, until Drive has none (it used to stop at 30 silently) |
+| Working sessions moved or deleted in Google | 10 missing events looked up a read | Round 11: the ones looked up longest ago go first, so each has its turn (ten that failed used to keep the rest from ever being looked up) (`googleTimeboxes.test.ts`) |
+| A task's links from Google (From Gmail, From Keep) | 10 | Google gives a task one link, to where it came from |
+| Attachments, notes, titles, a series' changed tasks | 25 files; 8,192 and 1,024 characters; 200 | Google's own limits for an event's attachments and a task's text, and a bound on what a series keeps; refused with the reason |
 
 ## Setup
 

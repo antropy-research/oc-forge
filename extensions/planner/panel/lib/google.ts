@@ -45,7 +45,7 @@ import { addDays } from '../../src/domain/dates.ts';
 import { longDay } from '../../src/domain/gcalendar.ts';
 import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
 import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Task, TaskAttachment, TaskVisibility } from '../../src/domain/types.ts';
-import type { DeclinedMeeting, DriveFile } from '../../src/domain/gtaskAdvanced.ts';
+import { declineCarriesOn, type DeclinedMeeting, type DriveFile } from '../../src/domain/gtaskAdvanced.ts';
 import type { Origin, PlannerClient, Snapshot } from './client.ts';
 import { calendarUi } from './gcal.ts';
 
@@ -304,29 +304,33 @@ export class GoogleStore {
     return this.connect([...new Set([...current, feature])]);
   }
 
-  /** Drive files whose name has `text` (the latest when empty), to attach to a task. */
-  async searchDrive(account: string, text: string): Promise<DriveFile[]> {
-    const answer = await this.client.call<{ files: DriveFile[] }>('GET', `/google/drive/files?account=${encodeURIComponent(account)}&q=${encodeURIComponent(text)}`);
-    return answer.files ?? [];
+  /** A page of the Drive files whose name has `text` (the latest when empty), to attach to a task, and the next page's token. */
+  async searchDrive(account: string, text: string, pageToken?: string | null): Promise<{ files: DriveFile[]; next: string | null }> {
+    const answer = await this.client.call<{ files: DriveFile[]; next?: string | null }>('GET', `/google/drive/files?account=${encodeURIComponent(account)}&q=${encodeURIComponent(text)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`);
+    return { files: answer.files ?? [], next: answer.next ?? null };
   }
 
-  /** The meetings the Planner declined for a task. */
-  async declinedFor(account: string, taskId: string): Promise<DeclinedMeeting[]> {
-    const answer = await this.client.call<{ declined: DeclinedMeeting[] }>('GET', `/google/tasks/declined?account=${encodeURIComponent(account)}&task=${encodeURIComponent(taskId)}`);
-    return answer.declined ?? [];
+  /** The meetings the Planner declined for a task, and where its declining carries on (`more`; null when it is through). */
+  async declinedFor(account: string, taskId: string): Promise<{ declined: DeclinedMeeting[]; more: string | null }> {
+    const answer = await this.client.call<{ declined: DeclinedMeeting[]; more?: string | null }>('GET', `/google/tasks/declined?account=${encodeURIComponent(account)}&task=${encodeURIComponent(taskId)}`);
+    return { declined: answer.declined ?? [], more: answer.more ?? null };
   }
 
-  /** "Automatically decline meetings" now, after a task's change; says what it declined. */
+  /**
+   * "Automatically decline meetings" now, after a task's change; says what it declined, and, when the pass stopped at
+   * one of its bounds, that the Planner carries on (the service's next pass does, a few seconds later).
+   */
   declineSoon(): void {
     void this.client
-      .call<{ declined: DeclinedMeeting[]; errors: string[] }>('POST', '/google/tasks/decline')
+      .call<{ declined: DeclinedMeeting[]; errors: string[]; more?: { account: string; from: string }[] }>('POST', '/google/tasks/decline')
       .then((answer) => {
         const declined = answer.declined ?? [];
+        const more = answer.more?.[0] ? ` ${declineCarriesOn(answer.more[0].from, this.client.getView().state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)}.` : '';
         if (declined.length) {
           calendarUi.refresh();
           const names = declined.slice(0, 3).map((meeting) => `"${meeting.summary}"`).join(', ');
-          this.client.notify(`Declined ${declined.length === 1 ? 'a meeting' : `${declined.length} meetings`} during "${declined[0]!.task}": ${names}${declined.length > 3 ? '…' : ''}`);
-        }
+          this.client.notify(`Declined ${declined.length === 1 ? 'a meeting' : `${declined.length} meetings`} during "${declined[0]!.task}": ${names}${declined.length > 3 ? ` and ${declined.length - 3} more` : ''}.${more}`);
+        } else if (more) this.client.notify(more.trim());
         if (answer.errors?.length) this.client.notify(`Some meetings were not declined: ${answer.errors[0]}`);
       })
       .catch(() => {

@@ -1610,6 +1610,7 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .drive-search { display: flex; align-items: center; gap: 8px; background: var(--pl-soft); border-radius: 18px; padding: 4px 12px; color: var(--oc-muted); }
 .drive-search input { flex: 1; border: 0; background: transparent; outline: 0; font: inherit; font-size: 13px; color: var(--oc-fg); min-width: 0; }
 .drive-files { list-style: none; margin: 0; padding: 0; max-height: min(46vh, 360px); overflow: auto; }
+.drive-more { align-self: flex-start; margin: 6px 0 0; }
 .drive-file { display: grid; grid-template-columns: auto auto 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
 .drive-file:hover { background: var(--pl-soft); }
 .drive-file.is-on { background: color-mix(in srgb, var(--oc-primary) 14%, transparent); }

@@ -118,7 +118,8 @@ export const COLOR_NOTE = "Color: the task's on the Planner's calendar, over its
 export const DND_NOTE =
   "Mutes the Planner's own task notifications during this task: they come when it ends. Google Chat, other apps and OpenChamber's own notifications aren't muted: the Planner can't reach them";
 /** What "Automatically decline meetings" does here. */
-export const DECLINE_NOTE = 'The Planner answers the invitations on your calendar that overlap this task "Declined", with this message to the organizer, as Google Calendar does';
+export const DECLINE_NOTE =
+  'The Planner answers the invitations on your calendar that overlap this task "Declined", with this message to the organizer, as Google Calendar does: its times in the next two weeks, and a later time once it comes within them';
 /** Google Calendar's own words for declining when a task is Free. */
 export const DECLINE_FREE = 'Unavailable for "Free" time entries';
 /** Why a personal account's task has no Do not disturb or declining. */
