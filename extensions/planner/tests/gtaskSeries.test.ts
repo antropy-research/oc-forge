@@ -6,7 +6,8 @@
 // they were.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, listKey, type TaskFields } from '../panel/lib/google.ts';
+import { GoogleStore, TaskConflict, listKey, type TaskFields } from '../panel/lib/google.ts';
+import { formValuesOf, seriesShown, withOccurrence, type FormValues } from '../src/domain/gtaskForm.ts';
 import type { PlannerClient, Snapshot } from '../panel/lib/client.ts';
 import { GoogleError } from '../service/google.ts';
 import { GoogleSeries, type SeriesData } from '../service/googleSeries.ts';
@@ -122,6 +123,8 @@ const service = () => {
       getView: () => ({ state: view, today: '2026-10-29' }),
       call: async (method: string, path: string, body?: any) => {
         calls.push({ method, path, ...(body === undefined ? {} : { body }) });
+        // The plan as the service has it now (a form's save reads it again).
+        if (method === 'GET' && path === '/state') return snapshot();
         if (path === '/google/tasks/next') return { ...(await series.next(body.account, body.listId, body.id, { completed: body.completed, due: body.due })), ...snapshot() };
         if (path.startsWith('/google/tasks/series?')) return { ...(await series.remove(query(path).get('account')!, query(path).get('series')!, query(path).get('from'), query(path).get('task'))), ...snapshot() };
         if (path === '/google/tasks/occurrence') {
@@ -163,7 +166,15 @@ const service = () => {
       notify: (message: string) => notes.push(message),
       onCommitted: () => () => {},
     } as unknown as PlannerClient;
-    return { store: new GoogleStore(host, client, 'page'), notes, calls, view: () => view, dispatch: (bodies: EventBody[]) => client.dispatch(bodies) };
+    return {
+      store: new GoogleStore(host, client, 'page'),
+      notes,
+      calls,
+      view: () => view,
+      dispatch: (bodies: EventBody[]) => client.dispatch(bodies),
+      /** The window looks again, as the panel does every 5 s: its view has the plan as it is (an open form does not). */
+      look: () => client.adopt(snapshot()),
+    };
   };
 
   return {
@@ -716,6 +727,106 @@ describe("round 10's fields through the series (merge)", () => {
     expect(keptFor(world.state(), first)!.repeat!.template).toMatchObject({ busy: true, color: RED, decline: { mode: 'all', message: 'Busy' } });
     await flush();
     expect(a.calls.some((call) => call.path === '/google/tasks/decline')).toBe(true);
+  });
+});
+
+
+/** What a task's form sends with `values` in it, from what it showed (`base`). */
+const sentFrom = (values: FormValues, base: FormValues): TaskFields => ({
+  title: values.title,
+  notes: values.notes,
+  due: values.due,
+  kept: { time: values.time, duration: values.duration, deadline: values.deadline, rule: values.rule, busy: values.busy, visibility: values.visibility, color: values.color, attachments: values.attachments, doNotDisturb: values.doNotDisturb, decline: values.decline },
+  base,
+});
+/** What one upcoming occurrence's editor shows (its baseline): the occurrence, no repeat or end of its own, as the form has it. */
+const occurrenceForm = (state: PlannerState, google: Map<string, GoogleTaskItem>, date: string) => {
+  const upcoming = upcomingOn(state, date);
+  const head = google.get(upcoming.taskId)!;
+  return { upcoming, base: { ...withOccurrence(formValuesOf(head, keptFor(state, head)), upcomingValues(upcoming)), rule: null, duration: null } };
+};
+
+describe('a task form open while its task or series changes (review 10)', () => {
+  test("a window that has not looked again since another window's change: its save reads the plan again, so the change it made over that one is asked about, and one it left alone stays", async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Stale');
+    const shown = formValuesOf(first, keptFor(a.view(), first));
+    const b = world.window();
+    await b.store.saveListTask(first, sentFrom({ ...shown, time: 780 }, shown), 'all');
+    // A's own view is still from before: 9am.
+    expect(keptFor(a.view(), first)!.time).toBe(540);
+    const refused = await a.store.saveListTask(first, sentFrom({ ...shown, time: 600 }, shown), 'all').catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(TaskConflict);
+    expect((refused as TaskConflict).fields).toEqual(['time']);
+    expect(a.calls.some((call) => call.method === 'GET' && call.path === '/state')).toBe(true);
+    expect(keptFor(world.state(), first)!.time).toBe(780);
+    await a.store.saveListTask(first, sentFrom({ ...shown, notes: 'New notes' }, shown), 'all');
+    expect(keptFor(world.state(), first)).toMatchObject({ time: 780, repeat: { template: { notes: 'New notes', time: 780 } } });
+    expect(world.google.get(first.id)!.notes).toBe('New notes');
+  });
+
+  test('cut short while the form was open, This task: the new title is this task\'s alone, and the cut stays', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Cut alone');
+    const shown = formValuesOf(first, keptFor(a.view(), first));
+    const b = world.window();
+    await b.store.deleteSeries({ account: ME, seriesId, from: '2026-10-31' });
+    const cut = keptFor(world.state(), first)!.repeat!.rule;
+    expect(cut).toBe('RRULE:FREQ=DAILY;UNTIL=20261030');
+    await a.look();
+    await a.store.saveListTask(first, sentFrom({ ...shown, title: 'Cut alone, this one' }, shown), 'this');
+    expect(world.google.get(first.id)!.title).toBe('Cut alone, this one');
+    expect(keptFor(world.state(), first)!.repeat).toMatchObject({ rule: cut, template: { title: 'Cut alone' } });
+    expect(upcomingTasks(world.state().googleTasks, [], '2026-10-30', '2026-11-02', '2026-10-29').map((task) => task.on)).toEqual(['2026-10-30']);
+    // What it changed is its title alone: the question offers This task and All tasks.
+    expect((await a.store.formCheck(first, sentFrom({ ...shown, title: 'Cut alone, this one' }, shown))).changes).toEqual(['title']);
+  });
+
+  test("Edit → All tasks open while the series moves to 1pm: saving only a new title keeps 1pm, for the series and its open task", async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Series form');
+    // A opens Edit → All tasks: the template, on the open task's date.
+    const series = seriesShown(first, keptFor(a.view(), first)!)!;
+    const shown = formValuesOf(series.item, series.kept);
+    const b = world.window();
+    const own = formValuesOf(first, keptFor(b.view(), first));
+    await b.store.saveListTask(first, sentFrom({ ...own, time: 780 }, own), 'all');
+    await a.look();
+    await a.store.saveListTask(first, sentFrom({ ...shown, title: 'Series form, renamed' }, shown), 'all', { shows: 'series' });
+    expect(keptFor(world.state(), first)).toMatchObject({ time: 780, repeat: { template: { title: 'Series form, renamed', time: 780 } } });
+    // Its 10am, set there, is asked about: the template is at 1pm now.
+    const refused = await a.store.saveListTask(first, sentFrom({ ...shown, time: 600 }, shown), 'all', { shows: 'series' }).catch((error: unknown) => error);
+    expect((refused as TaskConflict).fields).toEqual(['time']);
+    expect((refused as TaskConflict).now.time).toBe(780);
+  });
+
+  test("one upcoming task's editor open while another window changes that task's time: a new title alone keeps that time; a new time of its own is asked about", async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'One day');
+    const formA = occurrenceForm(a.view(), world.google, '2026-10-30');
+    const formA2 = occurrenceForm(a.view(), world.google, '2026-10-30');
+    const b = world.window();
+    const formB = occurrenceForm(b.view(), world.google, '2026-10-30');
+    await b.store.editOccurrence(formB.upcoming, sentFrom({ ...formB.base, time: 900 }, formB.base));
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-30']).toEqual({ time: 900, duration: null });
+    await a.look();
+    await a.store.editOccurrence(formA.upcoming, sentFrom({ ...formA.base, title: 'One day with Ann' }, formA.base));
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-30']).toEqual({ title: 'One day with Ann', time: 900, duration: null });
+    const refused = await a.store.editOccurrence(formA2.upcoming, sentFrom({ ...formA2.base, time: 960 }, formA2.base)).catch((error: unknown) => error);
+    expect((refused as TaskConflict).fields).toEqual(['time']);
+    expect((refused as TaskConflict).now.time).toBe(900);
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-30']).toEqual({ title: 'One day with Ann', time: 900, duration: null });
+    // Made meanwhile (the task before it completed): the made task as it is is what the editor is checked against.
+    await b.store.completeListTask(world.google.get(first.id)!, true);
+    const made = openTask(world)[0]!;
+    expect(made.title).toBe('One day with Ann');
+    const late = await a.store.editOccurrence(formA2.upcoming, sentFrom({ ...formA2.base, title: 'One day, late' }, formA2.base)).catch((error: unknown) => error);
+    expect((late as TaskConflict).fields).toEqual(['title']);
+    expect((late as TaskConflict).now.title).toBe('One day with Ann');
   });
 });
 

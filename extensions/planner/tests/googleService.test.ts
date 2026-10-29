@@ -7,7 +7,14 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { HostClient } from '@openchamber/sdk';
 import { addDays, todayIn } from '../src/domain/dates.ts';
+import type { EventBody } from '../src/domain/events.ts';
+import type { GoogleTaskItem } from '../src/domain/google.ts';
+import { formValuesOf, settleConflicts, type FormValues } from '../src/domain/gtaskForm.ts';
+import { keptFor, upcomingTasks } from '../src/domain/gtaskKept.ts';
+import { GoogleStore, TaskConflict, type TaskFields } from '../panel/lib/google.ts';
+import type { PlannerClient, Snapshot } from '../panel/lib/client.ts';
 import { defaultFakeWorld, startFakeGoogle, type FakeGoogle } from './e2e/fakeGoogle.mjs';
 
 const token = 'google-service-test-token';
@@ -457,5 +464,150 @@ describe("round 10's fields and Undo through the service (merge)", () => {
     expect(kept2.body).toMatchObject({ nextKept: true });
     expect(fake.tasks.get('L1')!.find((one) => one.id === again.task.id)).toMatchObject({ title: 'Harness undo done, edited', status: 'needsAction' });
     expect(heads(kept2.body.state.googleTasks, seriesId)).toEqual([again.task.id]);
+  });
+});
+
+describe('a task form open while the series changes, through the service (review 10)', () => {
+  const DAILY = 'RRULE:FREQ=DAILY';
+  const host = { storage: { get: async () => undefined, set: async () => {}, delete: async () => {}, keys: async () => [] } } as unknown as HostClient;
+  /**
+   * A Planner window on the service: the panel's own GoogleStore, its view of the plan moving on only with the
+   * service's answers to it (and when it reads the plan again), as the panel's does.
+   */
+  const window = async () => {
+    let view = (await call('GET', '/state')).body as Snapshot;
+    const client = {
+      getView: () => ({ state: view.state, today }),
+      call: async (method: string, path: string, body?: unknown) => {
+        const answer = await call(method, path, body);
+        if (answer.status >= 400) throw new Error(answer.body.error ?? `the service answered ${answer.status}`);
+        return answer.body;
+      },
+      adopt: async (snapshot: Snapshot) => {
+        if (snapshot?.state && snapshot.state.version >= view.state.version) view = snapshot;
+      },
+      dispatch: async (bodies: EventBody[]) => {
+        const answer = await commands(...(bodies as unknown as Record<string, unknown>[]));
+        if (answer.status !== 200) throw new Error(answer.body.error);
+        view = answer.body as Snapshot;
+      },
+      activity: async () => [],
+      notify: () => {},
+      onCommitted: () => () => {},
+    } as unknown as PlannerClient;
+    return {
+      store: new GoogleStore(host, client, 'page'),
+      view: () => view.state,
+      /** The window looks again, as the panel does every 5 s: its view has the plan as it is, an open form does not. */
+      look: async () => client.adopt((await call('GET', '/state')).body as Snapshot),
+    };
+  };
+  const googleTask = async (id: string) => (await call('POST', '/google/tasks/linked', { groups: [{ account: ME, listId: 'L1', ids: [id] }] })).body.tasks[0] as GoogleTaskItem;
+  /** A form opened in `on` on a task: what it shows (its baseline). */
+  const opened = async (on: Awaited<ReturnType<typeof window>>, id: string) => {
+    const item = await googleTask(id);
+    return { item, shown: formValuesOf(item, keptFor(on.view(), item)) };
+  };
+  /** What a form sends with `values` in it, from what it showed. */
+  const sent = (values: FormValues, shown: FormValues): TaskFields => ({
+    title: values.title,
+    notes: values.notes,
+    due: values.due,
+    kept: { time: values.time, duration: values.duration, deadline: values.deadline, rule: values.rule, busy: values.busy, visibility: values.visibility, color: values.color, attachments: values.attachments, doNotDisturb: values.doNotDisturb, decline: values.decline },
+    base: shown,
+  });
+  const entry = async (id: string) => (await kept())[`${ME}\n${id}`];
+
+  test("A's form open; B moves the series to 1pm, All tasks; A saves only a new title, All tasks: the task and the series keep 1pm, and so does the next task", async () => {
+    const { id } = await daily('Harness stale time');
+    const a = await window();
+    const formA = await opened(a, id);
+    const b = await window();
+    const formB = await opened(b, id);
+    await b.store.saveListTask(formB.item, sent({ ...formB.shown, time: 780 }, formB.shown), 'all');
+    expect(await entry(id)).toMatchObject({ time: 780, repeat: { template: { time: 780 } } });
+    // A's window has looked again (1pm); its form still shows 9am, and changes the title alone.
+    await a.look();
+    expect(keptFor(a.view(), formA.item)!.time).toBe(780);
+    expect(formA.shown.time).toBe(540);
+    await a.store.saveListTask(formA.item, sent({ ...formA.shown, title: 'Harness stale time, renamed' }, formA.shown), 'all');
+    expect(await entry(id)).toMatchObject({ time: 780, repeat: { rule: DAILY, template: { title: 'Harness stale time, renamed', time: 780 } } });
+    expect((await googleTask(id)).title).toBe('Harness stale time, renamed');
+    // What the form changed is its title alone, and nothing of it conflicts.
+    expect(await a.store.formCheck(formA.item, sent({ ...formA.shown, title: 'Harness stale time, renamed' }, formA.shown))).toMatchObject({ changes: ['title'], conflicts: [] });
+    // Later completed: the next task is at 1pm, renamed.
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    const next = (await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: today })).body;
+    expect(next.task.title).toBe('Harness stale time, renamed');
+    expect(next.state.googleTasks[`${ME}\n${next.task.id}`]).toMatchObject({ time: 780 });
+  });
+
+  test("A's form open; the series is cut (This and following tasks); A saves only a new title: This task and All tasks are both offered, and All tasks keeps the cut", async () => {
+    const { id, seriesId } = await daily('Harness stale cut');
+    const a = await window();
+    const form = await opened(a, id);
+    const from = addDays(today, 2);
+    // From an upcoming occurrence (no Google task yet), as the calendar asks This and following tasks there.
+    expect((await call('DELETE', `/google/tasks/series?${q({ account: ME, series: seriesId, from })}`)).status).toBe(200);
+    const cut = (await entry(id)).repeat.rule as string;
+    expect(cut).toMatch(/^RRULE:FREQ=DAILY;UNTIL=/);
+    await a.look();
+    const renamed = sent({ ...form.shown, title: 'Harness stale cut, renamed' }, form.shown);
+    await a.store.saveListTask(form.item, renamed, 'all');
+    const after = await entry(id);
+    expect(after.repeat).toMatchObject({ rule: cut, template: { title: 'Harness stale cut, renamed' } });
+    const state = (await call('GET', '/state')).body.state;
+    expect(upcomingTasks(state.googleTasks, [], today, addDays(today, 6), today).filter((task) => task.seriesId === seriesId).map((task) => task.on)).toEqual([addDays(today, 1)]);
+    // The question comes from the series as it is, and the form changed no rule: This task and All tasks, not All tasks alone.
+    const check = await a.store.formCheck(form.item, renamed);
+    expect(check.changes).toEqual(['title']);
+    expect(check.kept?.repeat?.rule).toBe(cut);
+  });
+
+  test('a field the form changed that changed meanwhile too is asked, nothing written; Save mine then writes it, Keep theirs leaves it', async () => {
+    const { id } = await daily('Harness conflict');
+    const a = await window();
+    const form = await opened(a, id);
+    const b = await window();
+    const formB = await opened(b, id);
+    await b.store.saveListTask(formB.item, sent({ ...formB.shown, time: 780 }, formB.shown), 'all');
+    await a.look();
+    const before = await entry(id);
+    // A moves it to 10am and renames it: the time changed meanwhile too.
+    const mine = { ...form.shown, title: 'Harness conflict, renamed', time: 600 };
+    const refused = await a.store.saveListTask(form.item, sent(mine, form.shown), 'all').catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(TaskConflict);
+    expect((refused as TaskConflict).fields).toEqual(['time']);
+    expect((refused as TaskConflict).now.time).toBe(780);
+    expect(await entry(id)).toEqual(before);
+    expect((await googleTask(id)).title).toBe('Harness conflict');
+    // Keep theirs: 1pm stays, the new title is saved.
+    const theirs = settleConflicts(form.shown, mine, (refused as TaskConflict).now, ['time'], 'theirs');
+    await a.store.saveListTask(form.item, sent(theirs.mine, theirs.base), 'all');
+    expect(await entry(id)).toMatchObject({ time: 780, repeat: { template: { title: 'Harness conflict, renamed', time: 780 } } });
+    // Save mine, from a form open since before: 10am over 1pm, asked first.
+    const again = settleConflicts(form.shown, mine, (refused as TaskConflict).now, ['time'], 'mine');
+    await a.store.saveListTask(form.item, sent({ ...again.mine, title: 'Harness conflict, renamed' }, { ...again.base, title: 'Harness conflict, renamed' }), 'all');
+    expect(await entry(id)).toMatchObject({ time: 600, repeat: { template: { time: 600 } } });
+  });
+
+  test("a repeat changed in the form after the series was cut is asked, never put over the cut unasked; a title changed in Google Tasks meanwhile, too", async () => {
+    const { id, seriesId } = await daily('Harness cut conflict');
+    const a = await window();
+    const form = await opened(a, id);
+    expect((await call('DELETE', `/google/tasks/series?${q({ account: ME, series: seriesId, from: addDays(today, 2) })}`)).status).toBe(200);
+    const cut = (await entry(id)).repeat.rule as string;
+    await a.look();
+    const weekly = { ...form.shown, rule: 'RRULE:FREQ=WEEKLY' };
+    const refused = await a.store.saveListTask(form.item, sent(weekly, form.shown), 'all').catch((error: unknown) => error);
+    expect((refused as TaskConflict).fields).toEqual(['rule']);
+    expect((refused as TaskConflict).now.rule).toBe(cut);
+    expect((await entry(id)).repeat.rule).toBe(cut);
+    // Renamed in Google's own apps while the form was open, and renamed in the form too.
+    fake.tasks.get('L1')!.find((task) => task.id === id)!.title = 'Renamed in Google Tasks';
+    const titled = await a.store.saveListTask(form.item, sent({ ...form.shown, title: 'Renamed in the form' }, form.shown), 'this').catch((error: unknown) => error);
+    expect((titled as TaskConflict).fields).toEqual(['title']);
+    expect((titled as TaskConflict).now.title).toBe('Renamed in Google Tasks');
+    expect((await googleTask(id)).title).toBe('Renamed in Google Tasks');
   });
 });
