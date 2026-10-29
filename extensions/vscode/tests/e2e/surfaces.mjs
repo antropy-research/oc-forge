@@ -39,6 +39,10 @@
 //      tabs come back once each (Markdown's preview, which VS Code revives
 //      under a new key, too), and closed tabs stay closed, VS Code's own state
 //      included;
+//  13. the page alone (what a new browser tab from Cmd/Ctrl+click loads: no
+//      rail view, no terminal): its last tab closed, the hidden page keeps the
+//      folder's tabs empty before OpenChamber removes it, and after a reload
+//      no tab comes back, nor with the next file;
 // and, with OpenChamber's session tabs off, the page keeps VS Code's own tab
 // bar. It also measures each workbench's start and memory (`<size>-frames.json`).
 //
@@ -53,6 +57,7 @@
 // README). The stack copies this checkout's extensions when it starts (`up`),
 // so build the extension first. Never prints the UI password or the VS Code token.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1018,8 +1023,12 @@ const openInVscode = async (seeded, chatB) => {
   const openInVscodeOn = async (title) => {
     await page.locator('[role="tablist"] [role="tab"]', { hasText: title }).first().click();
     await until(async () => !(await pageShown(page)), 10_000);
+    const item = page.getByRole('menuitem', { name: 'Open in VS Code' });
+    // The menu closes when focus leaves the page, as when VS Code in the rail panel shows "OpenChamber is now in …"
+    // for the chat's folder just then: opened again once.
     await openChatMenu(page);
-    await page.getByRole('menuitem', { name: 'Open in VS Code' }).click({ timeout: 10_000 });
+    if (!(await item.waitFor({ timeout: 5_000 }).then(() => true).catch(() => false))) await openChatMenu(page);
+    await item.click({ timeout: 10_000 });
   };
   try {
     await page.goto(`${base}/?session=${seeded[0]}`);
@@ -1051,6 +1060,8 @@ const openInVscode = async (seeded, chatB) => {
     await shot(page, `${size}-10-99-failure`).catch(() => undefined);
   } finally {
     await context.close();
+    // VS Code shows the first folder again for the next journeys, however this one ended (the extension keeps it).
+    await request.post(`${base}/api/guests/${VSCODE}/storage`, { data: { op: 'set', key: 'folder', value: project } }).catch(() => undefined);
   }
 };
 
@@ -1079,6 +1090,85 @@ const withoutStrip = async (seeded) => {
   }
 };
 
+/** A folder's tabs, as the page keeps them in the service (`/tabs/save`): the scratch stack's state file. */
+const savedTabsOf = (folder) => {
+  const dir = join(work, 'adapted/home/.local/share/openchamber-vscode/state');
+  const suffix = `.${createHash('sha256').update(folder).digest('hex').slice(0, 16)}.tabs.json`;
+  const file = existsSync(dir) ? readdirSync(dir).find((name) => name.endsWith(suffix)) : undefined;
+  if (!file) return [];
+  try {
+    return JSON.parse(readFileSync(join(dir, file), 'utf8')).map((tab) => tab.title);
+  } catch {
+    return null;
+  }
+};
+
+// ── 13. The page alone (what a new browser tab from Cmd/Ctrl+click loads: no rail view, no terminal). The last tab
+// closed, OpenChamber keeps the page a few seconds, hidden, and the page keeps the folder's tabs and VS Code's state ──
+const pageAlone = async () => {
+  const size = '1440x900, the page alone';
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await context.request.post(`${base}/auth/session`, { data: { password } });
+  const page = await context.newPage();
+  const roles = () => Promise.all(page.frames().filter((frame) => frame.url().includes('/workbench/index.html'))
+    .map((frame) => frame.evaluate(() => document.documentElement.dataset.ocVscodeRole).catch(() => null))).then((list) => list.filter(Boolean));
+  try {
+    // The address a Cmd/Ctrl+click on a link to linked.md opens (`links.page` + the editor's route).
+    const key = `vscode-remote://${new URL(vscodeUrl).host}${join(project, 'linked.md')}`;
+    await page.goto(`${base}/?extension=${VSCODE}&route=${encodeURIComponent(`/editor?key=${encodeURIComponent(key)}`)}`);
+    const linkedShown = await until(async () => await pageShown(page) && await pageFrame(page).locator('.monaco-editor[data-uri$="/linked.md"] .view-line').first().isVisible(), 180_000);
+    await pageStarted(page);
+    const alone = await roles();
+    check(`[${size}] 13 the link opens linked.md in the page, which runs alone (no rail view, no terminal)`, Boolean(linkedShown) && alone.length === 1 && alone[0] === 'editor', `parts: ${alone.join(', ') || 'none'}`);
+    // Every tab closed, the last one too (VS Code may have restored others in the page).
+    const closed = [];
+    let lastAt = 0;
+    for (let guard = 0; guard < 8 && (await headerTabs(page)).length > 0; guard++) {
+      const [tab] = await headerTabs(page);
+      const element = page.locator(`[data-oc-forge-tab="${VSCODE}:${tab.id}"]`).first();
+      await element.hover();
+      await element.getByRole('button', { name: 'Close tab' }).click();
+      lastAt = Date.now();
+      closed.push(tab.title);
+      await until(async () => !(await headerTabs(page)).some((item) => item.id === tab.id), 10_000);
+    }
+    const hidden = !(await pageShown(page));
+    const emptied = await until(() => (savedTabsOf(project)?.length === 0 ? Date.now() : null), 12_000);
+    const kept = await roles();
+    check(`[${size}] 13 its last tab closed, the hidden page keeps the folder's tabs empty before it goes`, hidden && Boolean(emptied),
+      `closed ${closed.join(' | ')}; page ${hidden ? 'hidden' : 'shown'}; saved ${emptied ? `empty ${((emptied - lastAt) / 1000).toFixed(1)} s after the last close` : `still ${JSON.stringify(savedTabsOf(project))}`}; parts then: ${kept.join(', ') || 'none'}`);
+    // VS Code saves its own state too, before the page goes (a few seconds after the close).
+    await wait(10_000);
+    await page.reload({ waitUntil: 'load' });
+    // After the reload the rail view brings the folder's tabs back, as it would for any tab left: none must come.
+    await until(async () => (await rail(page)).some((entry) => entry.id === entrySurface('explorer')), 60_000);
+    await entryButton(page, 'explorer').click();
+    const view = viewFrame(page);
+    await view.locator('.explorer-folders-view .monaco-list-row', { hasText: 'notes.ts' }).first().waitFor({ timeout: 120_000 });
+    await wait(5_000);
+    const afterReload = (await headerTabs(page)).map((tab) => tab.title);
+    // And VS Code's own state doesn't reopen them with the next file.
+    await view.locator('.explorer-folders-view .monaco-list-row', { hasText: 'notes.ts' }).first().click();
+    const only = await until(async () => {
+      const titles = (await headerTabs(page)).map((tab) => tab.title);
+      return titles.length === 1 && titles[0].includes('notes.ts') && await pageFrame(page).locator('.monaco-editor[data-uri$="notes.ts"] .view-line').first().isVisible() ? titles : null;
+    }, 120_000);
+    await pageStarted(page);
+    await wait(2_000);
+    const settled = (await headerTabs(page)).map((tab) => tab.title);
+    check(`[${size}] 13 after a reload none of them comes back: the rail view brings back no tab, and the next file opened is the only one`,
+      afterReload.length === 0 && Boolean(only) && settled.length === 1, `after the reload: ${afterReload.join(' | ') || 'none'}; then: ${settled.join(' | ')}`);
+    await shot(page, `${size.replace(/, /g, '-').replace(/ /g, '-')}-13-after-reload`);
+    await closeHeaderTab(page, 'notes.ts');
+    await until(async () => (await headerTabs(page)).length === 0, 10_000);
+  } catch (error) {
+    check(`[${size}] the journey ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+    await shot(page, '1440x900-13-failure').catch(() => undefined);
+  } finally {
+    await context.close();
+  }
+};
+
 try {
   const seeded = await seed();
   await classic();
@@ -1086,6 +1176,7 @@ try {
   await journey({ width: 1024, height: 768 }, seeded.chats, false);
   await openInVscode(seeded.chats, seeded.chatB);
   await withoutStrip(seeded.chats);
+  await pageAlone();
 } catch (error) {
   check('the check ran to the end', false, String(error.message ?? error).split('\n')[0]);
 } finally {

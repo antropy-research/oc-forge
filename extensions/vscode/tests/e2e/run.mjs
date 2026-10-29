@@ -174,9 +174,9 @@ try {
 
   /** "Open in VS Code" from a chat of the other demo project, opened from the sidebar so that it takes that folder. */
   const openOtherChat = async () => {
-    await sessionIn(projectB);
-    await page.goto(`${base}/`, { waitUntil: 'load' });
-    await page.getByText(`${run} chat planner-demo-b`, { exact: true }).first().click({ timeout: 20_000 });
+    // By its address: OpenChamber 2.5.3 keeps a new chat's row in the sidebar moving, which a click waits out.
+    const other = await sessionIn(projectB);
+    await page.goto(`${base}/?session=${other}`, { waitUntil: 'load' });
     await openChatMenu();
     await page.getByRole('menuitem', { name: 'Open in VS Code' }).click({ timeout: 10_000 });
   };
@@ -527,7 +527,8 @@ try {
   check('nothing opened in another page or tab', popups.length === 0, popups.join(' '));
   check('no errors from the extension', problems.length === 0, problems.slice(0, 3).join(' | '));
 } catch (error) {
-  check('journey completed', false, String(error).split('\n')[0]);
+  // Playwright's call log after the message says what the step was waiting for.
+  check('journey completed', false, String(error).split('\n').slice(0, 8).map((line) => line.trim()).filter(Boolean).join(' / '));
   await context.pages()[0]?.screenshot({ path: join(out, '99-failure.png') }).catch(() => {});
 } finally {
   for (const { id, directory } of sessions) await context.request.delete(`${base}/api/session/${id}?directory=${encodeURIComponent(directory)}`).catch(() => {});
