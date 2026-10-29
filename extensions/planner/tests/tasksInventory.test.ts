@@ -182,14 +182,19 @@ describe("Gmail's Add to Tasks", () => {
 });
 
 describe("Google Tasks' keyboard shortcuts", () => {
-  const press = (key: string, inTasks: boolean, mods: Partial<KeyboardEvent> = {}) => {
-    const target = { tagName: 'BUTTON', isContentEditable: false, closest: (selector: string) => (inTasks && selector === '.tasks-app' ? {} : null) };
+  const press = (key: string, where: 'task' | 'view' | 'outside', mods: Partial<KeyboardEvent> = {}) => {
+    const row = { dataset: { task: 'gt1' } };
+    const closest = (selector: string) => (selector === '.tasks-app' && where !== 'outside' ? {} : selector === 'li[data-task]' && where === 'task' ? row : null);
+    const target = { tagName: 'BUTTON', isContentEditable: false, closest };
     return plannerKeeps({ key, ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, target, ...mods } as unknown as KeyboardEvent, { surface: 'page', page: 'calendar', mac: false });
   };
-  test('in the Tasks view the Planner keeps them from OpenChamber (indent, move, subtask, the list, Undo); elsewhere they are OpenChamber\'s', () => {
-    for (const key of [']', '[', 'ArrowUp', 'ArrowDown', 'Enter', '/', 'z']) expect(press(key, true)).toBe(true);
-    expect(press(']', false)).toBe(false);
-    expect(press('Tab', true)).toBe(false);
+  test("on a task the Planner keeps them from OpenChamber (indent, move, subtask), and the list and Undo anywhere in the Tasks view; elsewhere they are OpenChamber's", () => {
+    for (const key of [']', '[', 'ArrowUp', 'ArrowDown', '/', 'z']) expect(press(key, 'task')).toBe(true);
+    expect(press('Enter', 'task', { altKey: true })).toBe(true);
+    for (const key of ['/', 'z']) expect(press(key, 'view')).toBe(true);
+    for (const key of [']', '[', 'ArrowUp']) expect(press(key, 'view')).toBe(false);
+    expect(press(']', 'outside')).toBe(false);
+    expect(press('Tab', 'task')).toBe(false);
   });
   test('the list of them is Google\'s, with the two this surface cannot do and why', () => {
     expect(TASK_SHORTCUTS).toHaveLength(17);

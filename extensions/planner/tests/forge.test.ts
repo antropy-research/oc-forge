@@ -49,3 +49,51 @@ describe('the keys the Planner keeps from OpenChamber', () => {
     expect(plannerKeeps(press('k', { ctrl: true }), { ...linux, surface: 'panel' })).toBe(false);
   });
 });
+
+/**
+ * A press in the Tasks view: on a focused task (its row's handler acts there), its edit form's title, a Tasks nav
+ * button, or a row's menu, as the DOM answers `closest` for each.
+ */
+const inTasks = (key: string, mods: { ctrl?: boolean; meta?: boolean; alt?: boolean; shift?: boolean }, where: 'task' | 'new-task' | 'nav' | 'menu' | 'adding') => {
+  const tag = where === 'new-task' ? 'INPUT' : 'BUTTON';
+  const ancestors: Record<string, boolean> = {
+    '.tasks-app': true,
+    'li[data-task]': where === 'task' || where === 'menu' || where === 'adding',
+    '.gt-form, .menu, .modal': where === 'new-task' || where === 'menu',
+  };
+  const row = { dataset: { task: where === 'adding' ? 'new-0mvtx' : 'gt1' } };
+  const target = { tagName: tag, isContentEditable: false, closest: (selector: string) => (ancestors[selector] ? (selector === 'li[data-task]' ? row : {}) : null) };
+  return { ...press(key, mods), target } as unknown as KeyboardEvent;
+};
+const calendar = { surface: 'page', page: 'calendar', mac: false };
+const calendarMac = { ...calendar, mac: true };
+
+describe("Google Tasks' shortcuts in the Tasks view, and OpenChamber's history keys", () => {
+  test('kept while a task has the focus, where its row acts on them: indent, move (to the top or bottom with Shift), a subtask', () => {
+    for (const key of ['[', ']', 'ArrowUp', 'ArrowDown']) {
+      expect(plannerKeeps(inTasks(key, { ctrl: true }, 'task'), calendar)).toBe(true);
+      expect(plannerKeeps(inTasks(key, { meta: true }, 'task'), calendarMac)).toBe(true);
+    }
+    expect(plannerKeeps(inTasks('ArrowUp', { ctrl: true, shift: true }, 'task'), calendar)).toBe(true);
+    expect(plannerKeeps(inTasks('Enter', { ctrl: true, alt: true }, 'task'), calendar)).toBe(true);
+    // Ctrl+Enter alone does nothing on a task: OpenChamber's.
+    expect(plannerKeeps(inTasks('Enter', { ctrl: true }, 'task'), calendar)).toBe(false);
+  });
+
+  test("forwarded from a Tasks nav button, the New task field, a row's menu and a task being added: there Ctrl/⌘+[ and ] are OpenChamber's history back and forward", () => {
+    for (const where of ['nav', 'new-task', 'menu', 'adding'] as const) {
+      expect(plannerKeeps(inTasks('[', { ctrl: true }, where), calendar)).toBe(false);
+      expect(plannerKeeps(inTasks(']', { meta: true }, where), calendarMac)).toBe(false);
+    }
+    expect(plannerKeeps(inTasks('ArrowDown', { ctrl: true }, 'nav'), calendar)).toBe(false);
+  });
+
+  test('the shortcut list and Undo anywhere in the Tasks view; Ctrl/⌘+1 never kept', () => {
+    for (const where of ['task', 'nav', 'new-task'] as const) {
+      expect(plannerKeeps(inTasks('/', { ctrl: true }, where), calendar)).toBe(true);
+      expect(plannerKeeps(inTasks('1', { ctrl: true }, where), calendar)).toBe(false);
+      expect(plannerKeeps(inTasks('1', { meta: true }, where), calendarMac)).toBe(false);
+    }
+    expect(plannerKeeps(inTasks('z', { ctrl: true }, 'nav'), calendar)).toBe(true);
+  });
+});

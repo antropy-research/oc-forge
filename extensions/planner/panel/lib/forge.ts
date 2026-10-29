@@ -118,8 +118,9 @@ const editsText = (event: KeyboardEvent, mac: boolean): boolean => {
  * tab, the sidebar, its command palette) goes to OpenChamber, not to Chrome,
  * from a field too (Cmd/Ctrl+1 in a task's title switches OpenChamber's tab).
  * Kept: what a field uses for editing (editsText), the Planner page's own
- * command palette (Cmd/Ctrl+K), and the Linear page's Cmd/Ctrl+B (list or
- * board).
+ * command palette (Cmd/Ctrl+K), the Linear page's Cmd/Ctrl+B (list or
+ * board), and in the Tasks view Google Tasks' own shortcuts: its list and
+ * Undo anywhere there, the ones on a task while a task has the focus.
  */
 export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; page: string; mac: boolean }): boolean => {
   const target = event.target as HTMLElement | null;
@@ -128,8 +129,23 @@ export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; pag
   const key = event.key.toLowerCase();
   if (where.surface === 'page' && mod && key === 'k') return true;
   if (where.surface === 'page' && where.page === 'linear' && mod && key === 'b') return true;
-  // Google Tasks' own shortcuts while its view has the focus: indent ([ ]), move (Up/Down, with Shift), a subtask
-  // (Alt+Enter), the shortcut list (/) and Undo (z).
-  if (mod && target?.closest?.('.tasks-app') && /^(\[|\]|arrowup|arrowdown|enter|\/|z)$/.test(key)) return true;
+  if (mod && target?.closest?.('.tasks-app')) {
+    // The Tasks view's shortcut list (/) and Undo (z), anywhere in it.
+    if (key === '/' || key === 'z') return true;
+    // Google Tasks' own shortcuts while focus is on a task, where its row acts on them (as VS Code keeps its keys):
+    // indent ([ ]), move (Up/Down, with Shift to the top or the bottom) and a subtask (Alt+Enter). Elsewhere, Ctrl/⌘+[
+    // and ] are OpenChamber's history back and forward.
+    if (onTask(target) && (event.altKey ? key === 'enter' : /^(\[|\]|arrowup|arrowdown)$/.test(key))) return true;
+  }
   return false;
+};
+
+/**
+ * Focus on a task of the Tasks view, where its row's handler acts (`TasksView`'s `onKey`): an open task's row, not
+ * one being added, outside its form, a menu, a dialog and any text field.
+ */
+const onTask = (target: HTMLElement): boolean => {
+  const row = target.closest?.<HTMLElement>('li[data-task]');
+  if (!row || row.dataset?.task?.startsWith('new-')) return false;
+  return !target.closest('.gt-form, .menu, .modal') && !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) && !target.isContentEditable;
 };
