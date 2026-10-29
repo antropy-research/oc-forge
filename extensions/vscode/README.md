@@ -207,7 +207,10 @@ its icon, opening its view, and losing the icon when uninstalled; files from the
 editor in the main area, kept across a chat, the unsaved dot, closing asks to save in a prompt within the page's
 frame, no VS Code tab bar); the terminal at the bottom (a command, a second terminal, a split, the shell picker, kept
 while file tabs show); Ctrl+Alt+→ and Ctrl+1 acting in VS Code; nothing opening another page but the Ctrl+click tabs;
-the page with session tabs off keeping VS Code's tab bar. At 1440×900 also: Markdown's preview in the stock instance's
+the page with session tabs off keeping VS Code's tab bar; Additional Views as extensions come and go (95 containers,
+then one more installed and uninstalled while the rail view stays mounted: reopened, it lists exactly the containers
+behind it then and opens each, and the Explorer shows, lit, once the container shown is uninstalled).
+At 1440×900 also: Markdown's preview in the stock instance's
 whole workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a
 rail view; Ctrl+click on a link in a rail view (the probe extension's welcome view) and on a file link in the terminal
 opening a new browser tab on that file's editor while this tab stays as it was, a plain click opening it here;

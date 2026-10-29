@@ -53,6 +53,11 @@
 //  15. a terminal right after an earlier session: three browser windows in a
 //      row each open the terminal and run a command in it, and the terminal's
 //      part adds no terminal to the ones VS Code reconnects;
+//  16. "Additional Views" as extensions come and go, at both sizes: with
+//      containers already behind it, one more installed and then uninstalled
+//      while the rail view stays mounted; reopened, it lists exactly the
+//      containers behind it then and opens each; uninstalled while its view
+//      shows, a container gives way to the Explorer, which the rail lights;
 // and, with OpenChamber's session tabs off, the page keeps VS Code's own tab
 // bar. It also measures each workbench's start and memory (`<size>-frames.json`).
 //
@@ -348,6 +353,34 @@ const makeProbe = () => {
 `);
   writeFileSync(join(dir, '[Content_Types].xml'), '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".json" ContentType="application/json"/><Default Extension=".vsixmanifest" ContentType="text/xml"/><Default Extension=".svg" ContentType="image/svg+xml"/></Types>');
   const vsix = join(dir, 'probe.vsix');
+  execFileSync('zip', ['-qr', vsix, '[Content_Types].xml', 'extension.vsixmanifest', 'extension'], { cwd: dir });
+  return { dir, vsix };
+};
+// More activity-bar containers than the rail has room for (the host takes 100 entries: 94 containers beside the
+// built-ins and the terminal), each with a view whose welcome text names it, as a .vsix.
+const MANY = { publisher: 'ocforge-e2e', name: 'surfaces-many', count: 95 };
+const manyWelcome = (index) => `Many container ${index} is here.`;
+const makeMany = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'surfaces-many-'));
+  mkdirSync(join(dir, 'extension'), { recursive: true });
+  const containers = Array.from({ length: MANY.count }, (_, index) => ({ id: `many${String(index + 1).padStart(3, '0')}`, title: `Many ${index + 1}`, icon: '$(beaker)' }));
+  writeFileSync(join(dir, 'extension/package.json'), JSON.stringify({
+    name: MANY.name, publisher: MANY.publisher, version: '0.0.1', displayName: 'Surfaces many', engines: { vscode: '^1.80.0' },
+    contributes: {
+      viewsContainers: { activitybar: containers },
+      views: Object.fromEntries(containers.map((container) => [container.id, [{ id: `${container.id}.view`, name: container.title }]])),
+      viewsWelcome: containers.map((container, index) => ({ view: `${container.id}.view`, contents: manyWelcome(index + 1) })),
+    },
+  }));
+  writeFileSync(join(dir, 'extension.vsixmanifest'), `<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata><Identity Language="en-US" Id="${MANY.name}" Version="0.0.1" Publisher="${MANY.publisher}" /><DisplayName>Surfaces many</DisplayName><Description xml:space="preserve">Many view containers for the end-to-end check.</Description><Properties><Property Id="Microsoft.VisualStudio.Code.Engine" Value="^1.80.0" /></Properties></Metadata>
+  <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation><Dependencies/>
+  <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" /></Assets>
+</PackageManifest>
+`);
+  writeFileSync(join(dir, '[Content_Types].xml'), '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".json" ContentType="application/json"/><Default Extension=".vsixmanifest" ContentType="text/xml"/></Types>');
+  const vsix = join(dir, 'many.vsix');
   execFileSync('zip', ['-qr', vsix, '[Content_Types].xml', 'extension.vsixmanifest', 'extension'], { cwd: dir });
   return { dir, vsix };
 };
@@ -1370,6 +1403,101 @@ const terminalAfterSessions = async (chat) => {
     reconnected[1] >= 1 && reconnected[2] === reconnected[1], `terminals reconnected: ${reconnected.join(', ')}`);
 };
 
+// ── 16. "Additional Views" as extensions come and go: with containers already behind it, another one is installed and
+// then uninstalled while the rail view stays mounted. Reopened each time, it lists exactly the containers behind it
+// then, and opens each of them. Uninstalled while its view shows, a container gives way to the Explorer, which the
+// rail lights; the rail view is the same workbench throughout ──
+const overflowAtRuntime = async (chat, viewport) => {
+  const size = `${viewport.width}x${viewport.height}, Additional Views at runtime`;
+  const label = size.replace(/, /g, '-').replace(/ /g, '-');
+  const many = makeMany();
+  const probe = makeProbe();
+  const context = await browser.newContext({ viewport });
+  await context.request.post(`${base}/auth/session`, { data: { password } });
+  const page = await context.newPage();
+  const MORE = 'additional-views';
+  const lit = async () => (await rail(page)).filter((entry) => entry.pressed && entry.id.startsWith(entrySurface(''))).map((entry) => entry.id.slice(entrySurface('').length));
+  const moreLabel = () => entryButton(page, MORE).first().evaluate((button) => button.getAttribute('aria-label') ?? button.getAttribute('title') ?? '').catch(() => '');
+  const viewFrameOf = async () => {
+    for (const frame of page.frames()) {
+      if (frame.url().includes('/workbench/index.html') && await frame.evaluate(() => document.documentElement.dataset.ocVscodeRole).catch(() => null) === 'view') return frame;
+    }
+    return null;
+  };
+  const shows = (text) => until(() => viewFrame(page).getByText(text, { exact: true }).first().isVisible(), 30_000);
+  /** "Additional Views" reopened: its quick pick's rows, then dismissed or one of them picked. */
+  const reopen = async (pick = null) => {
+    // A click on the entry the panel shows closes the panel: from the Explorer when it is that entry.
+    if ((await lit()).includes(MORE)) {
+      await entryButton(page, 'explorer').click();
+      await until(() => viewFrame(page).locator('.explorer-folders-view').first().isVisible(), 20_000);
+    }
+    await entryButton(page, MORE).click();
+    const rows = viewFrame(page).locator('.quick-input-widget .quick-input-list .monaco-list-row');
+    await rows.first().waitFor({ timeout: 30_000 });
+    await wait(500);
+    const titles = (await rows.allInnerTexts()).map((text) => text.trim().split('\n')[0]);
+    if (pick && titles.includes(pick)) await rows.nth(titles.indexOf(pick)).click();
+    else await page.keyboard.press('Escape');
+    return titles;
+  };
+  try {
+    serverCli('--install-extension', many.vsix, '--force');
+    await page.goto(`${base}/?session=${chat}`);
+    await until(async () => (await rail(page)).some((entry) => entry.id === entrySurface(MORE)), 60_000);
+    await entryButton(page, 'explorer').click();
+    await until(() => viewFrame(page).locator('.explorer-folders-view .monaco-list-row').first().isVisible(), 120_000);
+    const frame = await until(viewFrameOf, 20_000);
+    await frame.evaluate(() => {
+      window.__surfacesOverflow = 'mounted';
+    });
+    const first = await reopen();
+    // Opening it shows a container behind it (the first, or the one shown last).
+    const exact = (titles, expected) => JSON.stringify(titles) === JSON.stringify(expected);
+    check(`[${size}] 16 with ${MANY.count} containers "Additional Views" lists the two the rail has no room for`, exact(first, ['Many 94', 'Many 95']), `${await moreLabel()}: ${first.join(' | ')}`);
+    // Another container installed, the rail view still mounted: the host's count first, then the list.
+    serverCli('--install-extension', probe.vsix, '--force');
+    const counted = await until(async () => (await moreLabel()).includes('(3)'), 30_000);
+    const third = await reopen(PROBE.title);
+    const probeShown = await shows(PROBE.welcome);
+    await shot(page, `${label}-16-installed`);
+    const opened = [];
+    for (const [title, text] of [['Many 94', manyWelcome(94)], ['Many 95', manyWelcome(95)]]) {
+      await reopen(title);
+      opened.push(`${title} ${await shows(text) ? 'opens' : 'NOT shown'}`);
+    }
+    check(`[${size}] 16 one more installed while the rail view stays mounted: reopened, "Additional Views" lists it too, and each of the three opens`,
+      counted && exact(third, ['Many 94', 'Many 95', PROBE.title]) && probeShown && opened.every((item) => item.endsWith('opens')),
+      `${await moreLabel()}: ${third.join(' | ')}; ${PROBE.title} ${probeShown ? 'opens' : 'NOT shown'}; ${opened.join('; ')}`);
+    // Uninstalled while its view shows: the Explorer instead, lit; the list is two again.
+    await reopen(PROBE.title);
+    await shows(PROBE.welcome);
+    const removedAt = Date.now();
+    serverCli('--uninstall-extension', `${PROBE.publisher}.${PROBE.name}`);
+    const explorer = await until(async () => exact(await lit(), ['explorer']) && await viewFrame(page).locator('.explorer-folders-view').first().isVisible(), 30_000);
+    const after = (await until(async () => (await moreLabel()).includes('(2)'), 30_000)) ? await reopen() : [];
+    await shot(page, `${label}-16-uninstalled`);
+    check(`[${size}] 16 uninstalled while its view shows: the Explorer shows and is lit, and "Additional Views" lists the two again`,
+      explorer && exact(after, ['Many 94', 'Many 95']), `${explorer ? `Explorer lit ${((Date.now() - removedAt) / 1000).toFixed(1)} s after the uninstall` : `lit: ${(await lit()).join(', ') || 'nothing'}`}; ${after.join(' | ') || 'no list'}`);
+    const same = await frame.evaluate(() => window.__surfacesOverflow).catch(() => null);
+    check(`[${size}] 16 ... all in the same rail view, never reloaded`, same === 'mounted', String(same));
+  } catch (error) {
+    check(`[${size}] the journey ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+    await shot(page, `${label}-16-failure`).catch(() => undefined);
+  } finally {
+    for (const id of [`${PROBE.publisher}.${PROBE.name}`, `${MANY.publisher}.${MANY.name}`]) {
+      try {
+        serverCli('--uninstall-extension', id);
+      } catch {
+        // Not installed.
+      }
+    }
+    rmSync(many.dir, { recursive: true, force: true });
+    rmSync(probe.dir, { recursive: true, force: true });
+    await context.close();
+  }
+};
+
 try {
   const seeded = await seed();
   await classic();
@@ -1380,13 +1508,17 @@ try {
   await pageAlone(seeded.chats[0]);
   await twoTabs(seeded.chats[0]);
   await terminalAfterSessions(seeded.chats[0]);
+  await overflowAtRuntime(seeded.chats[0], { width: 1440, height: 900 });
+  await overflowAtRuntime(seeded.chats[0], { width: 1024, height: 768 });
 } catch (error) {
   check('the check ran to the end', false, String(error.message ?? error).split('\n')[0]);
 } finally {
-  try {
-    serverCli('--uninstall-extension', `${PROBE.publisher}.${PROBE.name}`);
-  } catch {
-    // Not installed.
+  for (const id of [`${PROBE.publisher}.${PROBE.name}`, `${MANY.publisher}.${MANY.name}`]) {
+    try {
+      serverCli('--uninstall-extension', id);
+    } catch {
+      // Not installed.
+    }
   }
   for (const file of ['notes.ts', 'linked.md']) rmSync(join(project, file), { force: true });
   for (const file of [`${run}-1440.txt`, `${run}-1024.txt`, `${run}-under-1440.txt`]) rmSync(join('/tmp', file), { force: true });
