@@ -1118,6 +1118,8 @@ const printJourney = async (viewport) => {
     check(`${size}: in All tasks the list with the focus is the one that prints, alone (Errands)`, both.heading === 'Errands' && both.titles.length === 2 && !both.text.includes('Print task'), JSON.stringify({ heading: both.heading, rows: both.titles.length }));
     await page.emulateMedia({ media: 'screen' });
     if (modals) {
+      // Print media hid the focused row, and Chrome let go of the focus: back on it, as one would click it.
+      await errands.getByRole('listitem', { name: 'Errand one' }).locator('.gt-body-edit').focus();
       await page.keyboard.press('Control+p');
       const got = (await until(async () => (await prints()).prints.length === 3, 5000)) ? (await prints()).prints[2] : null;
       check(`${size}: and Ctrl+P there prints Errands`, got?.heading === 'Errands' && got.titles.length === 2, JSON.stringify(got));
