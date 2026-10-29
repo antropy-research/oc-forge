@@ -247,6 +247,18 @@ instance to list the chats, restarts the instance (`stack.mjs restart
 <stock|adapted>`) when it does not, and lists those restarts in
 `results.json`.
 
+## Fixes
+
+Host bugs an extension runs into, worked around in the adapted build until
+upstream fixes them (`edits/fixes.ts`):
+
+- **A first slash command in a new folder** (OpenCode 2.2 with OpenChamber 2.5.2).
+  - OpenCode 2.2 loads a folder's commands on the first request for them, and answers that request with none. A folder that has loaded them always lists its built-ins (`init`, `review`).
+  - OpenChamber looks a command up once, right before it sends. So `/name args` sent first in a folder whose commands nobody had asked for, such as a worktree just made, went out as a plain prompt, and the chat ran on the default agent.
+  - This is what every Planner assignment to a chosen agent or preset does: it starts the chat in a new worktree with the assignee's command.
+  - The live lookup now asks again while the answer is empty, every 250 ms for up to 3 s (`host/commands.ts`).
+  - Measured on 2026-10-28 for a worktree OpenChamber had just made: the first answer was empty (18 ms), the next one had the commands (272 ms).
+
 ## Limits and choices
 
 - **Bottom zone width.** The bottom zone stays under the chat column, as in

@@ -122,7 +122,11 @@ team sharing. An extension cannot choose a chat's agent or model, so the Planner
 through OpenCode commands; OpenChamber 2.5.2 sends a new chat's first message before
 OpenCode has loaded the commands of a folder it has just started, so an assignment's new
 worktree is made first, with an empty "Worktree for …" chat that the extension cannot
-delete. The service cannot reach OpenChamber's own OpenCode server (it has a password), so
+delete. OpenCode 2.2 loads a folder's commands only when they are first asked for, and
+answers that first request with none, so on a stock OpenChamber the assignee's command can
+still go out as a plain prompt (the chat then runs on the default agent); oc-forge's
+adapted OpenChamber asks again until the folder's commands are there
+(`adapters/openchamber/README.md`, "Fixes"). The service cannot reach OpenChamber's own OpenCode server (it has a password), so
 it can only ask OpenCode's background server, when one runs, whether a new command is
 listed; otherwise it waits a moment.
 Google's own APIs set further limits: Google Tasks' API keeps a task's date without a time
