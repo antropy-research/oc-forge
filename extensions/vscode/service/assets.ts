@@ -5,7 +5,7 @@
 // extension's folder (`vscode-web/<commit>/`), because an extension frame can
 // load files from its own package and from nowhere else.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -53,9 +53,23 @@ const walk = async (root: string, dir: string, out: string[]): Promise<void> => 
   }
 };
 
+/** `ready.json`: what a prepared workbench is. */
+interface Marker {
+  format?: number;
+  files?: number;
+  source?: 'local' | 'download';
+  missing?: unknown;
+  /** The list a cache made over HTTP came from (`listStamp`). */
+  list?: string;
+  /** Every file written, as the frame loads it (since 2026-10-29; older markers have `files` only). */
+  manifest?: unknown[];
+}
+
 export class WorkbenchAssets {
   private readonly jobs = new Map<string, AssetState>();
   private stamp: string | null = null;
+  /** Commits whose incomplete cache was logged. */
+  private readonly warned = new Set<string>();
 
   constructor(
     /** `<package>/vscode-web`. */
@@ -85,10 +99,10 @@ export class WorkbenchAssets {
     const marker = join(this.cacheRoot, commit, MARKER);
     if (existsSync(marker)) {
       try {
-        const ready = JSON.parse(readFileSync(marker, 'utf8')) as { format?: number; files?: number; source?: 'local' | 'download'; missing?: unknown; list?: string };
+        const ready = JSON.parse(readFileSync(marker, 'utf8')) as Marker;
         // One made over HTTP has the files its list named: from an older list it lacks those added since, and is
         // prepared again. One made from an install on this machine has all of them.
-        if (ready.format === CACHE_FORMAT && (ready.source !== 'download' || ready.list === this.listStamp())) {
+        if (ready.format === CACHE_FORMAT && (ready.source !== 'download' || ready.list === this.listStamp()) && this.complete(commit, ready)) {
           this.refreshWebviewHost(commit);
           const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
           return { state: 'ready', path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? 'local', surfaces };
@@ -97,8 +111,30 @@ export class WorkbenchAssets {
         // A broken marker: prepare again.
       }
     }
-    // A cache that was ready but is gone (or older) is prepared again.
+    // A cache that was ready but is gone (or older, or incomplete) is prepared again.
     return { state: 'idle' };
+  }
+
+  /**
+   * Whether a cache still has the files it was made with. A copy of the extension's folder can keep the marker but
+   * lose some of them (one that skipped every `node_modules` folder kept no xterm, and the terminal stayed blank).
+   * The marker lists them; one written before it did names how many there were.
+   */
+  private complete(commit: string, ready: Marker): boolean {
+    const dir = join(this.cacheRoot, commit);
+    let missing: string[];
+    if (Array.isArray(ready.manifest)) {
+      missing = ready.manifest.filter((path) => typeof path !== 'string' || !existsSync(join(dir, path))).map(String);
+    } else {
+      const present = readdirSync(dir, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name !== MARKER).length;
+      missing = present < (ready.files ?? 0) ? [`${(ready.files ?? 0) - present} of ${ready.files}`] : [];
+    }
+    if (missing.length === 0) return true;
+    if (!this.warned.has(commit)) {
+      this.warned.add(commit);
+      this.log(`VS Code ${commit.slice(0, 8)}: the prepared workbench lacks files (${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ` and ${missing.length - 3} more` : ''}); it is prepared again`);
+    }
+    return false;
   }
 
   /**
@@ -175,15 +211,18 @@ export class WorkbenchAssets {
       let next = 0;
       let files = 0;
       const missing: string[] = [];
+      const written = new Set<string>();
       const worker = async (): Promise<void> => {
         while (next < wanted.length) {
           const path = wanted[next++]!;
           const body = await read(path);
           job.done += 1;
           if (!body) continue;
-          const target = join(tmp, clientFileName(path)!);
+          const name = clientFileName(path)!;
+          const target = join(tmp, name);
           await mkdir(dirname(target), { recursive: true });
           await writeFile(target, transform(path, body, codicon, missing));
+          written.add(name);
           files += 1;
         }
       };
@@ -191,12 +230,17 @@ export class WorkbenchAssets {
       if (this.webviewHost) {
         const pre = join(tmp, WEBVIEW_PRE);
         await mkdir(pre, { recursive: true });
-        for (const name of WEBVIEW_FILES) await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
+        for (const name of WEBVIEW_FILES) {
+          await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
+          written.add(`${WEBVIEW_PRE}/${name}`);
+        }
       }
       for (const file of ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js']) {
         if (!existsSync(join(tmp, file))) throw new Error(`${file} is missing from the VS Code Server`);
       }
-      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, ...(local ? {} : { list: this.listStamp() }), at: new Date().toISOString() }));
+      const manifest = [...written].sort();
+      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, ...(local ? {} : { list: this.listStamp() }), manifest, at: new Date().toISOString() }));
+      this.warned.delete(page.commit);
       const final = join(this.cacheRoot, page.commit);
       await rm(final, { recursive: true, force: true });
       await rename(tmp, final);

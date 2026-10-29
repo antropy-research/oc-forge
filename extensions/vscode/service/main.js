@@ -66,7 +66,7 @@ var commitOfBase = (base) => /\/(?:stable|insider|exploration)-([0-9a-f]{40})\/s
 
 // service/assets.ts
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -256,6 +256,7 @@ class WorkbenchAssets {
   webviewHost;
   jobs = new Map;
   stamp = null;
+  warned = new Set;
   constructor(cacheRoot, downloadList, log, candidates = localInstallCandidates, webviewHost = null) {
     this.cacheRoot = cacheRoot;
     this.downloadList = downloadList;
@@ -278,7 +279,7 @@ class WorkbenchAssets {
     if (existsSync(marker)) {
       try {
         const ready = JSON.parse(readFileSync(marker, "utf8"));
-        if (ready.format === CACHE_FORMAT && (ready.source !== "download" || ready.list === this.listStamp())) {
+        if (ready.format === CACHE_FORMAT && (ready.source !== "download" || ready.list === this.listStamp()) && this.complete(commit, ready)) {
           this.refreshWebviewHost(commit);
           const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
           return { state: "ready", path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? "local", surfaces };
@@ -286,6 +287,23 @@ class WorkbenchAssets {
       } catch {}
     }
     return { state: "idle" };
+  }
+  complete(commit, ready) {
+    const dir = join(this.cacheRoot, commit);
+    let missing;
+    if (Array.isArray(ready.manifest)) {
+      missing = ready.manifest.filter((path) => typeof path !== "string" || !existsSync(join(dir, path))).map(String);
+    } else {
+      const present = readdirSync(dir, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name !== MARKER).length;
+      missing = present < (ready.files ?? 0) ? [`${(ready.files ?? 0) - present} of ${ready.files}`] : [];
+    }
+    if (missing.length === 0)
+      return true;
+    if (!this.warned.has(commit)) {
+      this.warned.add(commit);
+      this.log(`VS Code ${commit.slice(0, 8)}: the prepared workbench lacks files (${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ` and ${missing.length - 3} more` : ""}); it is prepared again`);
+    }
+    return false;
   }
   refreshWebviewHost(commit) {
     if (!this.webviewHost)
@@ -353,6 +371,7 @@ class WorkbenchAssets {
       let next = 0;
       let files = 0;
       const missing = [];
+      const written = new Set;
       const worker = async () => {
         while (next < wanted.length) {
           const path = wanted[next++];
@@ -360,9 +379,11 @@ class WorkbenchAssets {
           job.done += 1;
           if (!body)
             continue;
-          const target = join(tmp, clientFileName(path));
+          const name = clientFileName(path);
+          const target = join(tmp, name);
           await mkdir(dirname(target), { recursive: true });
           await writeFile(target, transform(path, body, codicon, missing));
+          written.add(name);
           files += 1;
         }
       };
@@ -370,14 +391,18 @@ class WorkbenchAssets {
       if (this.webviewHost) {
         const pre = join(tmp, WEBVIEW_PRE);
         await mkdir(pre, { recursive: true });
-        for (const name of WEBVIEW_FILES)
+        for (const name of WEBVIEW_FILES) {
           await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
+          written.add(`${WEBVIEW_PRE}/${name}`);
+        }
       }
       for (const file of ["out/vs/code/browser/workbench/workbench.js", "out/vs/code/browser/workbench/workbench.css", "out/nls.messages.js"]) {
         if (!existsSync(join(tmp, file)))
           throw new Error(`${file} is missing from the VS Code Server`);
       }
-      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, ...local ? {} : { list: this.listStamp() }, at: new Date().toISOString() }));
+      const manifest = [...written].sort();
+      await writeFile(join(tmp, MARKER), JSON.stringify({ format: CACHE_FORMAT, commit: page.commit, files, source: job.source, missing, ...local ? {} : { list: this.listStamp() }, manifest, at: new Date().toISOString() }));
+      this.warned.delete(page.commit);
       const final = join(this.cacheRoot, page.commit);
       await rm(final, { recursive: true, force: true });
       await rename(tmp, final);

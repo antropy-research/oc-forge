@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { WorkbenchAssets, type AssetState } from '../service/assets.ts';
@@ -155,6 +155,37 @@ describe('preparing the workbench of a VS Code Server', () => {
     fromInstall.prepare(server, page);
     expect(await settle(fromInstall)).toMatchObject({ state: 'ready', source: 'local' });
     expect(new WorkbenchAssets(local, () => [...older, 'out/other.js'], () => {}, () => []).status(commit).state).toBe('ready');
+  });
+
+  test('a cache that lost some of its files is prepared again, whatever its marker says; its marker lists them', async () => {
+    const install = fakeInstall();
+    const server = { staticFile: async () => null } as unknown as VscodeServer;
+    const cache = mkdtempSync(join(tmpdir(), 'vscode-cache-'));
+    const first = new WorkbenchAssets(cache, () => [], () => {}, () => [install]);
+    first.prepare(server, page);
+    expect(await settle(first)).toMatchObject({ state: 'ready', source: 'local' });
+    const marker = JSON.parse(readFileSync(join(cache, commit, 'ready.json'), 'utf8'));
+    expect(marker.manifest).toContain('node_modules/vscode-oniguruma/release/onig.wasm.json');
+    expect(marker.manifest).toContain('out/vs/code/browser/workbench/workbench.js');
+    expect(marker.manifest).toHaveLength(marker.files);
+    // Copied without its node_modules (a copy that skips every node_modules folder): the marker stays, the files go.
+    rmSync(join(cache, commit, 'node_modules'), { recursive: true });
+    const logged: string[] = [];
+    const copy = new WorkbenchAssets(cache, () => [], (message) => logged.push(message), () => [install]);
+    expect(copy.status(commit).state).toBe('idle');
+    expect(copy.status(commit).state).toBe('idle');
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('node_modules/vscode-oniguruma/release/');
+    copy.prepare(server, page);
+    expect(await settle(copy)).toMatchObject({ state: 'ready' });
+    expect(existsSync(join(cache, commit, 'node_modules/vscode-oniguruma/release/onig.wasm.json'))).toBe(true);
+    // A marker written before the list: the number of files it names.
+    const older = JSON.parse(readFileSync(join(cache, commit, 'ready.json'), 'utf8'));
+    delete older.manifest;
+    writeFileSync(join(cache, commit, 'ready.json'), JSON.stringify(older));
+    expect(new WorkbenchAssets(cache, () => [], () => {}).status(commit).state).toBe('ready');
+    rmSync(join(cache, commit, 'node_modules'), { recursive: true });
+    expect(new WorkbenchAssets(cache, () => [], () => {}).status(commit).state).toBe('idle');
   });
 
   test('a release whose workbench the patches do not fit fails with the reason', async () => {
