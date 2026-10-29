@@ -138,7 +138,12 @@ Keys Chrome keeps in a normal tab (Ctrl+Tab, Cmd+W, Cmd+Option+←/→) reach VS
 **Tunnels.** Each workbench holds 2 of the service's tunnels (its management connection and its extension host's).
 A browser window runs up to 3 workbenches, so 6, and 12 for the 45 s a reloaded frame's old tunnels linger; past
 `MAX_TUNNELS` the least recently polled one is closed, which ends a live workbench. The limit is 128 (was 32): room
-for about ten such windows.
+for about ten such windows. A frame long-polls once for both of its tunnels (`/tunnel/recv` with its `poller`): a
+poll held open takes one of the browser's connections to OpenChamber, and over plain HTTP (HTTP/1.1) Chrome opens six
+per host, for all its tabs. With a poll per tunnel, the three workbenches of a window held all six with
+OpenChamber's own event stream, and every other request (the tunnels' sends, the files a webview loads,
+OpenChamber's own calls) waited in the browser until a poll came back, on VS Code's 5 s keep-alive: a Markdown
+preview revived after a reload took minutes to load its 60-odd files one after another, and stayed blank.
 
 **Cost** (adapters' scratch stack, VS Code 1.143.1, Chromium headless; `tests/e2e/surfaces.mjs` writes
 `<size>-frames.json`; two runs at 1440×900 and 1024×768). Each workbench, from its frame's navigation to running,
@@ -152,8 +157,11 @@ a tab or is opened.
 **Limits.**
 - A file a rail view or the terminal hands to a page that is still starting (VS Code restoring, the page closing
   editors closed before) opens once the page is ready, and takes the focus then.
-- A Markdown preview that wasn't the editor on top in its group (behind the SCM diff) when OpenChamber reloads comes
-  back as its tab but stays blank when shown (dev container, Code - OSS 1.143.1); one that was on top renders again.
+- Over plain HTTP, a second browser tab of OpenChamber with VS Code's parts (a Cmd/Ctrl+click tab beside the first)
+  makes six polls and two event streams, more than Chrome's six connections per host, and starves: on the scratch
+  stack the second tab's VS Code didn't show its file within 2 minutes (its tunnels' first sends never left the
+  browser), and the first tab stopped answering too until the second went. Over HTTPS (HTTP/2, e.g. `tailscale
+  serve`) requests share one connection and Chrome's per-host limit doesn't apply.
 - The terminal's part reconnects to the folder's terminals as it starts. Within about a minute of another window's
   VS Code on that folder going away (a reload, a closed browser tab), VS Code's cross-window detach can stall it: the
   panel opens without a terminal until that window's connection is gone.

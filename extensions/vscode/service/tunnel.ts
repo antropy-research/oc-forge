@@ -4,6 +4,13 @@
 // the frame sends batches and long-polls for what arrived. VS Code's remote
 // protocol keeps its own framing and reconnects on its own, so a tunnel only
 // has to keep order.
+//
+// A frame polls once for all its tunnels (`receiveFor` its `poller`): a poll
+// held open takes one of the browser's connections to OpenChamber, which over
+// HTTP/1.1 has six per host for all its tabs. One poll per tunnel (two per
+// workbench, three workbenches in a window) took them all, and every other
+// request (sends, the files a webview loads, OpenChamber's own) waited until a
+// poll came back, every few seconds.
 import { randomBytes } from 'node:crypto';
 import net from 'node:net';
 import tls from 'node:tls';
@@ -155,10 +162,17 @@ interface Tunnel {
   closed: TunnelClose | null;
   waiters: (() => void)[];
   polledAt: number;
+  /** The frame that polls for it with its others (`receiveFor`), if it does. */
+  poller: string | null;
 }
+
+export type TunnelAnswer = { events: TunnelEvent[]; closed: TunnelClose | null };
+const GONE: TunnelClose = { code: 1006, reason: 'tunnel gone', wasClean: false };
 
 export class Tunnels {
   private readonly tunnels = new Map<string, Tunnel>();
+  /** Polls waiting for something on one of a frame's tunnels, by poller. */
+  private readonly pollWaiters = new Map<string, (() => void)[]>();
   /** Sockets not yet closed, those of closed tunnels included. */
   private readonly live = new Set<SocketLike>();
   private next = 1;
@@ -169,14 +183,15 @@ export class Tunnels {
     this.sweeper.unref?.();
   }
 
-  open(url: string, headers: Record<string, string>): string {
+  open(url: string, headers: Record<string, string>, poller: string | null = null): string {
     if (this.tunnels.size >= MAX_TUNNELS) this.sweep(true);
     const id = `t${this.next++}-${Math.random().toString(36).slice(2, 8)}`;
     const socket = this.factory(url, headers);
     socket.binaryType = 'arraybuffer';
-    const tunnel: Tunnel = { socket, queue: [], queued: 0, closed: null, waiters: [], polledAt: this.now() };
+    const tunnel: Tunnel = { socket, queue: [], queued: 0, closed: null, waiters: [], polledAt: this.now(), poller };
     const wake = () => {
       for (const waiter of tunnel.waiters.splice(0)) waiter();
+      if (poller) for (const waiter of this.pollWaiters.get(poller)?.splice(0) ?? []) waiter();
     };
     const push = (event: TunnelEvent) => {
       tunnel.queue.push(event);
@@ -212,9 +227,9 @@ export class Tunnels {
   }
 
   /** What arrived since the last poll, waiting up to `waitMs` for something. */
-  async receive(id: string, waitMs = POLL_WAIT_MS): Promise<{ events: TunnelEvent[]; closed: TunnelClose | null }> {
+  async receive(id: string, waitMs = POLL_WAIT_MS): Promise<TunnelAnswer> {
     const tunnel = this.tunnels.get(id);
-    if (!tunnel) return { events: [], closed: { code: 1006, reason: 'tunnel gone', wasClean: false } };
+    if (!tunnel) return { events: [], closed: GONE };
     tunnel.polledAt = this.now();
     if (tunnel.queue.length === 0 && !tunnel.closed) {
       await new Promise<void>((resolve) => {
@@ -226,12 +241,56 @@ export class Tunnels {
       });
     }
     tunnel.polledAt = this.now();
+    const { events, closed } = this.take(id, tunnel, 0);
+    return { events, closed };
+  }
+
+  /**
+   * What arrived on a frame's tunnels (those it opened with its `poller`, one opened while the poll waits too) since
+   * its last poll, by tunnel; of the `ids` it waits on, gone ones are answered as closed. Waits up to `waitMs` for
+   * something on any of them; tunnels with nothing are left out.
+   */
+  async receiveFor(poller: string, ids: readonly string[], waitMs = POLL_WAIT_MS): Promise<Record<string, TunnelAnswer>> {
+    const answers: Record<string, TunnelAnswer> = {};
+    for (const id of ids) if (!this.tunnels.has(id)) answers[id] = { events: [], closed: GONE };
+    const mine = () => [...this.tunnels].filter(([, tunnel]) => tunnel.poller === poller);
+    for (const [, tunnel] of mine()) tunnel.polledAt = this.now();
+    const ready = () => mine().some(([, tunnel]) => tunnel.queue.length > 0 || tunnel.closed);
+    if (Object.keys(answers).length === 0 && mine().length > 0 && !ready()) {
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          clearTimeout(timer);
+          const waiters = (this.pollWaiters.get(poller) ?? []).filter((waiter) => waiter !== done);
+          if (waiters.length > 0) this.pollWaiters.set(poller, waiters);
+          else this.pollWaiters.delete(poller);
+          resolve();
+        };
+        const timer = setTimeout(done, waitMs);
+        this.pollWaiters.set(poller, [...(this.pollWaiters.get(poller) ?? []), done]);
+      });
+    }
+    let used = 0;
+    for (const [id, tunnel] of mine()) {
+      tunnel.polledAt = this.now();
+      if (tunnel.queue.length === 0 && !tunnel.closed) continue;
+      const { events, closed, size } = this.take(id, tunnel, used);
+      used += size;
+      if (events.length > 0 || closed) answers[id] = { events, closed };
+    }
+    return answers;
+  }
+
+  /**
+   * A tunnel's queued events, as many as fit in a poll besides the `used` characters other tunnels took (at least
+   * one when nothing else did); a closed tunnel goes once they are all taken.
+   */
+  private take(id: string, tunnel: Tunnel, used: number): TunnelAnswer & { size: number } {
     const events: TunnelEvent[] = [];
     let size = 0;
     while (tunnel.queue.length > 0) {
       const event = tunnel.queue[0]!;
       const length = event.type === 'data' ? event.data.length : 0;
-      if (events.length > 0 && size + length > POLL_BYTES) break;
+      if ((events.length > 0 || used > 0) && used + size + length > POLL_BYTES) break;
       tunnel.queue.shift();
       tunnel.queued -= length;
       size += length;
@@ -239,7 +298,7 @@ export class Tunnels {
     }
     const closed = tunnel.queue.length === 0 ? tunnel.closed : null;
     if (closed) this.tunnels.delete(id);
-    return { events, closed };
+    return { events, closed, size };
   }
 
   close(id: string): void {
@@ -252,6 +311,7 @@ export class Tunnels {
       // Already closing.
     }
     for (const waiter of tunnel.waiters.splice(0)) waiter();
+    if (tunnel.poller) for (const waiter of this.pollWaiters.get(tunnel.poller)?.splice(0) ?? []) waiter();
   }
 
   /** Close tunnels nobody polls (their frame is gone); with `oldest`, also the least recently polled one. */

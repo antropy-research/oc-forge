@@ -1,6 +1,7 @@
 // VS Code's web socket (its IWebSocket) over the service: sends go out in
 // order, in batches that fit the host's request size, and a long poll brings
-// in what the VS Code Server sent.
+// in what the VS Code Server sent: one poll for all of a frame's sockets
+// (FramePoll).
 
 type Listener<T> = (value: T) => void;
 interface Disposable {
@@ -24,12 +25,76 @@ const emitter = <T>(): { event: Event<T>; fire: (value: T) => void } => {
   } };
 };
 
+export interface TunnelAnswer {
+  events: ({ type: 'open' } | { type: 'data'; data: string } | { type: 'error'; message: string })[];
+  closed: { code: number; reason: string; wasClean: boolean } | null;
+}
+
 export interface TunnelService {
   open(path: string): Promise<string>;
   send(id: string, chunks: string[]): Promise<{ closed?: boolean }>;
-  receive(id: string): Promise<{ events: ({ type: 'open' } | { type: 'data'; data: string } | { type: 'error'; message: string })[]; closed: { code: number; reason: string; wasClean: boolean } | null }>;
+  /** What arrived on the frame's sockets (those it opened, `ids` among them), by id; held a while if nothing has. */
+  receive(ids: string[]): Promise<{ tunnels?: Record<string, TunnelAnswer> }>;
   close(id: string): Promise<void>;
 }
+
+/**
+ * One long poll for all of a frame's sockets. A poll held open takes one of the browser's connections to OpenChamber,
+ * and over HTTP/1.1 there are six per host for all its tabs: polling per socket (two per workbench, three workbenches
+ * in a window) took them all, and every other request (sends, the files a webview loads, OpenChamber's own) waited
+ * until a poll came back, every few seconds. An answer for a socket whose `open` hasn't come back yet waits for it.
+ */
+class FramePoll {
+  private readonly sockets = new Map<string, { answer(answer: TunnelAnswer): void; fail(error: unknown): void }>();
+  private readonly early = new Map<string, TunnelAnswer[]>();
+  private running = false;
+
+  constructor(private readonly service: TunnelService) {}
+
+  attach(id: string, socket: { answer(answer: TunnelAnswer): void; fail(error: unknown): void }): void {
+    this.sockets.set(id, socket);
+    for (const answer of this.early.get(id) ?? []) socket.answer(answer);
+    this.early.delete(id);
+    if (!this.running) void this.run();
+  }
+
+  detach(id: string): void {
+    this.sockets.delete(id);
+    this.early.delete(id);
+  }
+
+  private async run(): Promise<void> {
+    this.running = true;
+    try {
+      while (this.sockets.size > 0) {
+        let answer;
+        try {
+          answer = await this.service.receive([...this.sockets.keys()]);
+        } catch (error) {
+          for (const socket of [...this.sockets.values()]) socket.fail(error);
+          this.sockets.clear();
+          return;
+        }
+        for (const [id, item] of Object.entries(answer.tunnels ?? {})) {
+          const socket = this.sockets.get(id);
+          if (!socket) this.early.set(id, [...(this.early.get(id) ?? []), item]);
+          else socket.answer(item);
+          // Not polled for again: the service has let it go.
+          if (item.closed) this.sockets.delete(id);
+        }
+      }
+    } finally {
+      this.running = false;
+    }
+  }
+}
+
+const polls = new WeakMap<TunnelService, FramePoll>();
+const pollOf = (service: TunnelService): FramePoll => {
+  let poll = polls.get(service);
+  if (!poll) polls.set(service, (poll = new FramePoll(service)));
+  return poll;
+};
 
 /** Base64 per request: the host takes a body of 64,000 characters, JSON included. */
 const SEND_CHARS = 45_000;
@@ -87,7 +152,7 @@ export class TunnelSocket {
     const target = new URL(url);
     this.id = service.open(`${target.pathname}${target.search}`).then(
       (id) => {
-        void this.poll(id);
+        if (!this.done) pollOf(service).attach(id, { answer: (answer) => this.answer(answer), fail: (error) => this.fail(error) });
         return id;
       },
       (error) => {
@@ -106,28 +171,18 @@ export class TunnelSocket {
   private finish(closed: { code: number; reason: string; wasClean: boolean }): void {
     if (this.done) return;
     this.done = true;
+    void this.id.then((id) => (id ? pollOf(this.service).detach(id) : undefined));
     this.closedEvent.fire({ ...closed, event: undefined });
   }
 
-  private async poll(id: string): Promise<void> {
-    while (!this.done) {
-      let answer;
-      try {
-        answer = await this.service.receive(id);
-      } catch (error) {
-        this.fail(error);
-        return;
-      }
-      for (const event of answer.events) {
-        if (event.type === 'open') this.opened.fire();
-        else if (event.type === 'data') this.data.fire(toArrayBuffer(event.data));
-        else this.errors.fire(new Error(event.message));
-      }
-      if (answer.closed) {
-        this.finish(answer.closed);
-        return;
-      }
+  private answer(answer: TunnelAnswer): void {
+    if (this.done) return;
+    for (const event of answer.events) {
+      if (event.type === 'open') this.opened.fire();
+      else if (event.type === 'data') this.data.fire(toArrayBuffer(event.data));
+      else this.errors.fire(new Error(event.message));
     }
+    if (answer.closed) this.finish(answer.closed);
   }
 
   send(data: ArrayBuffer | ArrayBufferView): void {
@@ -165,6 +220,10 @@ export class TunnelSocket {
   close(): void {
     if (this.done) return;
     this.done = true;
-    void this.id.then((id) => (id ? this.service.close(id) : undefined)).catch(() => {});
+    void this.id.then((id) => {
+      if (!id) return undefined;
+      pollOf(this.service).detach(id);
+      return this.service.close(id);
+    }).catch(() => {});
   }
 }

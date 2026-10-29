@@ -126,7 +126,8 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
   '/tunnel/open': async (body) => {
     const server = serverOf(body);
     if (typeof body.path !== 'string' || !body.path.startsWith('/') || body.path.length > 4096) throw new ServerError('path is required', 400);
-    return { id: tunnels.open(server.socketUrl(body.path), server.socketHeaders()) };
+    const poller = typeof body.poller === 'string' && body.poller.length > 0 && body.poller.length <= 64 ? body.poller : null;
+    return { id: tunnels.open(server.socketUrl(body.path), server.socketHeaders(), poller) };
   },
   '/tunnel/send': async (body) => {
     if (typeof body.id !== 'string' || !Array.isArray(body.chunks) || !body.chunks.every((chunk) => typeof chunk === 'string')) throw new ServerError('id and chunks are required', 400);
@@ -135,7 +136,12 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
     return { ok: true };
   },
   '/tunnel/recv': async (body) => {
-    if (typeof body.id !== 'string') throw new ServerError('id is required', 400);
+    // A frame's one poll for all its tunnels (Tunnels.receiveFor); a single tunnel's, from a frame of an older build.
+    if (typeof body.poller === 'string') {
+      const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string').slice(0, 16) : [];
+      return { tunnels: await tunnels.receiveFor(body.poller, ids) };
+    }
+    if (typeof body.id !== 'string') throw new ServerError('id or poller is required', 400);
     return tunnels.receive(body.id);
   },
   '/tunnel/close': async (body) => {

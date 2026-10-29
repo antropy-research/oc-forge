@@ -1178,11 +1178,13 @@ class ServerSocket {
   }
 }
 var defaultFactory = (url, headers) => new ServerSocket(url, headers);
+var GONE = { code: 1006, reason: "tunnel gone", wasClean: false };
 
 class Tunnels {
   factory;
   now;
   tunnels = new Map;
+  pollWaiters = new Map;
   live = new Set;
   next = 1;
   sweeper;
@@ -1192,16 +1194,19 @@ class Tunnels {
     this.sweeper = setInterval(() => this.sweep(), 1e4);
     this.sweeper.unref?.();
   }
-  open(url, headers) {
+  open(url, headers, poller = null) {
     if (this.tunnels.size >= MAX_TUNNELS)
       this.sweep(true);
     const id = `t${this.next++}-${Math.random().toString(36).slice(2, 8)}`;
     const socket = this.factory(url, headers);
     socket.binaryType = "arraybuffer";
-    const tunnel = { socket, queue: [], queued: 0, closed: null, waiters: [], polledAt: this.now() };
+    const tunnel = { socket, queue: [], queued: 0, closed: null, waiters: [], polledAt: this.now(), poller };
     const wake = () => {
       for (const waiter of tunnel.waiters.splice(0))
         waiter();
+      if (poller)
+        for (const waiter of this.pollWaiters.get(poller)?.splice(0) ?? [])
+          waiter();
     };
     const push = (event) => {
       tunnel.queue.push(event);
@@ -1239,7 +1244,7 @@ class Tunnels {
   async receive(id, waitMs = POLL_WAIT_MS) {
     const tunnel = this.tunnels.get(id);
     if (!tunnel)
-      return { events: [], closed: { code: 1006, reason: "tunnel gone", wasClean: false } };
+      return { events: [], closed: GONE };
     tunnel.polledAt = this.now();
     if (tunnel.queue.length === 0 && !tunnel.closed) {
       await new Promise((resolve) => {
@@ -1251,12 +1256,52 @@ class Tunnels {
       });
     }
     tunnel.polledAt = this.now();
+    const { events, closed } = this.take(id, tunnel, 0);
+    return { events, closed };
+  }
+  async receiveFor(poller, ids, waitMs = POLL_WAIT_MS) {
+    const answers = {};
+    for (const id of ids)
+      if (!this.tunnels.has(id))
+        answers[id] = { events: [], closed: GONE };
+    const mine = () => [...this.tunnels].filter(([, tunnel]) => tunnel.poller === poller);
+    for (const [, tunnel] of mine())
+      tunnel.polledAt = this.now();
+    const ready = () => mine().some(([, tunnel]) => tunnel.queue.length > 0 || tunnel.closed);
+    if (Object.keys(answers).length === 0 && mine().length > 0 && !ready()) {
+      await new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          const waiters = (this.pollWaiters.get(poller) ?? []).filter((waiter) => waiter !== done);
+          if (waiters.length > 0)
+            this.pollWaiters.set(poller, waiters);
+          else
+            this.pollWaiters.delete(poller);
+          resolve();
+        };
+        const timer = setTimeout(done, waitMs);
+        this.pollWaiters.set(poller, [...this.pollWaiters.get(poller) ?? [], done]);
+      });
+    }
+    let used = 0;
+    for (const [id, tunnel] of mine()) {
+      tunnel.polledAt = this.now();
+      if (tunnel.queue.length === 0 && !tunnel.closed)
+        continue;
+      const { events, closed, size } = this.take(id, tunnel, used);
+      used += size;
+      if (events.length > 0 || closed)
+        answers[id] = { events, closed };
+    }
+    return answers;
+  }
+  take(id, tunnel, used) {
     const events = [];
     let size = 0;
     while (tunnel.queue.length > 0) {
       const event = tunnel.queue[0];
       const length = event.type === "data" ? event.data.length : 0;
-      if (events.length > 0 && size + length > POLL_BYTES)
+      if ((events.length > 0 || used > 0) && used + size + length > POLL_BYTES)
         break;
       tunnel.queue.shift();
       tunnel.queued -= length;
@@ -1266,7 +1311,7 @@ class Tunnels {
     const closed = tunnel.queue.length === 0 ? tunnel.closed : null;
     if (closed)
       this.tunnels.delete(id);
-    return { events, closed };
+    return { events, closed, size };
   }
   close(id) {
     const tunnel = this.tunnels.get(id);
@@ -1278,6 +1323,9 @@ class Tunnels {
     } catch {}
     for (const waiter of tunnel.waiters.splice(0))
       waiter();
+    if (tunnel.poller)
+      for (const waiter of this.pollWaiters.get(tunnel.poller)?.splice(0) ?? [])
+        waiter();
   }
   sweep(oldest = false) {
     const now = this.now();
@@ -1401,7 +1449,8 @@ var routes = {
     const server = serverOf(body);
     if (typeof body.path !== "string" || !body.path.startsWith("/") || body.path.length > 4096)
       throw new ServerError("path is required", 400);
-    return { id: tunnels.open(server.socketUrl(body.path), server.socketHeaders()) };
+    const poller = typeof body.poller === "string" && body.poller.length > 0 && body.poller.length <= 64 ? body.poller : null;
+    return { id: tunnels.open(server.socketUrl(body.path), server.socketHeaders(), poller) };
   },
   "/tunnel/send": async (body) => {
     if (typeof body.id !== "string" || !Array.isArray(body.chunks) || !body.chunks.every((chunk) => typeof chunk === "string"))
@@ -1412,8 +1461,12 @@ var routes = {
     return { ok: true };
   },
   "/tunnel/recv": async (body) => {
+    if (typeof body.poller === "string") {
+      const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === "string").slice(0, 16) : [];
+      return { tunnels: await tunnels.receiveFor(body.poller, ids) };
+    }
     if (typeof body.id !== "string")
-      throw new ServerError("id is required", 400);
+      throw new ServerError("id or poller is required", 400);
     return tunnels.receive(body.id);
   },
   "/tunnel/close": async (body) => {

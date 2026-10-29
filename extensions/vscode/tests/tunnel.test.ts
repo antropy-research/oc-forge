@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import net from 'node:net';
 import { Tunnels, type SocketFactory } from '../service/tunnel.ts';
-import { sendBatches, TunnelSocket, type TunnelService } from '../workbench/tunnel.ts';
+import { sendBatches, TunnelSocket, type TunnelAnswer, type TunnelService } from '../workbench/tunnel.ts';
 
 /**
  * A loopback server that answers an upgrade the way the VS Code Server's
@@ -96,6 +96,55 @@ describe('the service side', () => {
     const started = Date.now();
     expect((await poll).events).toEqual([{ type: 'data', data: 'CQ==' }]);
     expect(Date.now() - started).toBeLessThan(1000);
+    tunnels.dispose();
+  });
+
+  test("a frame's one poll answers for all its tunnels, one it opens while the poll waits included", async () => {
+    const { sockets, factory } = fakeSockets();
+    const tunnels = new Tunnels(factory);
+    const a = tunnels.open('ws://x/a', {}, 'frame-1');
+    const b = tunnels.open('ws://x/b', {}, 'frame-1');
+    const other = tunnels.open('ws://x/other', {}, 'frame-2');
+    sockets[0]!.fire('open');
+    sockets[1]!.fire('message', { data: new Uint8Array([1]).buffer });
+    sockets[2]!.fire('open');
+    expect(await tunnels.receiveFor('frame-1', [a, b], 10)).toEqual({ [a]: { events: [{ type: 'open' }], closed: null }, [b]: { events: [{ type: 'data', data: 'AQ==' }], closed: null } });
+    // Nothing more: the poll waits, and a tunnel the frame opens meanwhile wakes it.
+    const poll = tunnels.receiveFor('frame-1', [a, b], 5000);
+    const started = Date.now();
+    const c = tunnels.open('ws://x/c', {}, 'frame-1');
+    setTimeout(() => sockets[3]!.fire('open'), 20);
+    expect(await poll).toEqual({ [c]: { events: [{ type: 'open' }], closed: null } });
+    expect(Date.now() - started).toBeLessThan(1000);
+    // A close wakes it too, and the closed tunnel goes; the other frame's events wait for its own poll.
+    setTimeout(() => sockets[0]!.fire('close', { code: 1000, reason: 'bye', wasClean: true }), 20);
+    expect(await tunnels.receiveFor('frame-1', [a, b, c], 5000)).toEqual({ [a]: { events: [], closed: { code: 1000, reason: 'bye', wasClean: true } } });
+    expect(tunnels.has(a)).toBe(false);
+    expect(await tunnels.receiveFor('frame-2', [other], 10)).toEqual({ [other]: { events: [{ type: 'open' }], closed: null } });
+    tunnels.dispose();
+  });
+
+  test("a frame's poll answers a gone tunnel as closed at once, and keeps within a poll's size", async () => {
+    const { sockets, factory } = fakeSockets();
+    const tunnels = new Tunnels(factory);
+    const a = tunnels.open('ws://x/a', {}, 'frame');
+    const b = tunnels.open('ws://x/b', {}, 'frame');
+    expect(await within(tunnels.receiveFor('frame', [a, 'gone'], 5000), 1000)).toEqual({ gone: { events: [], closed: { code: 1006, reason: 'tunnel gone', wasClean: false } } });
+    // 3 MB each, 4 MB a poll: the second tunnel's waits for the next one, which doesn't wait.
+    sockets[0]!.fire('message', { data: new Uint8Array(2_250_000).buffer });
+    sockets[1]!.fire('message', { data: new Uint8Array(2_250_000).buffer });
+    expect(Object.keys(await tunnels.receiveFor('frame', [a, b], 10))).toEqual([a]);
+    expect(Object.keys(await within(tunnels.receiveFor('frame', [a, b], 5000), 1000))).toEqual([b]);
+    tunnels.dispose();
+  });
+
+  test("a tunnel the frame closes ends the frame's waiting poll at once", async () => {
+    const { factory } = fakeSockets();
+    const tunnels = new Tunnels(factory);
+    const id = tunnels.open('ws://x/', {}, 'frame');
+    const poll = tunnels.receiveFor('frame', [id], 5000);
+    setTimeout(() => tunnels.close(id), 20);
+    expect(await within(poll, 1000)).toEqual({});
     tunnels.dispose();
   });
 
@@ -214,7 +263,7 @@ describe('the frame side', () => {
   test("is VS Code's IWebSocket over the service: open, data, send, close", async () => {
     const received: unknown[] = [];
     const sent: string[][] = [];
-    let polls = 0;
+    const polled: string[][] = [];
     const service: TunnelService = {
       open: async (path) => {
         received.push(path);
@@ -224,10 +273,10 @@ describe('the frame side', () => {
         sent.push(chunks);
         return {};
       },
-      receive: async () => {
-        polls += 1;
-        if (polls === 1) return { events: [{ type: 'open' }, { type: 'data', data: 'AQID' }], closed: null };
-        return { events: [], closed: { code: 1000, reason: 'done', wasClean: true } };
+      receive: async (ids) => {
+        polled.push(ids);
+        if (polled.length === 1) return { tunnels: { t1: { events: [{ type: 'open' }, { type: 'data', data: 'AQID' }], closed: null } } };
+        return { tunnels: { t1: { events: [], closed: { code: 1000, reason: 'done', wasClean: true } } } };
       },
       close: async () => {},
     };
@@ -241,6 +290,49 @@ describe('the frame side', () => {
     expect(received).toEqual(['/?reconnectionToken=abc&skipWebSocketFrames=false']);
     expect(events).toEqual(['open', 'data 1,2,3']);
     expect(sent).toEqual([['BAU=']]);
+    expect(polled).toEqual([['t1'], ['t1']]);
+  });
+
+  test("a frame's sockets share one poll; what comes for a socket before its open has answered waits for it", async () => {
+    const answers: ((value: { tunnels: Record<string, TunnelAnswer> }) => void)[] = [];
+    let inFlight = 0;
+    let most = 0;
+    const polled: string[][] = [];
+    let openB: (id: string) => void = () => {};
+    const service = {
+      open: (path: string) => (path === '/a' ? Promise.resolve('a') : new Promise<string>((resolve) => (openB = resolve))),
+      send: async () => ({}),
+      receive: (ids: string[]) => {
+        polled.push(ids);
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        return new Promise((resolve) => answers.push((value) => {
+          inFlight -= 1;
+          resolve(value);
+        }));
+      },
+      close: async () => {},
+    } as TunnelService;
+    const a = new TunnelSocket('ws://x/a', service);
+    const b = new TunnelSocket('ws://x/b', service);
+    const seen: string[] = [];
+    a.onOpen(() => seen.push('a open'));
+    b.onOpen(() => seen.push('b open'));
+    b.onData((data) => seen.push(`b data ${[...new Uint8Array(data)].join(',')}`));
+    const next = async () => {
+      for (let tries = 0; tries < 50 && answers.length === 0; tries++) await new Promise((resolve) => setTimeout(resolve, 2));
+      return answers.shift()!;
+    };
+    // The first poll carries b's open too, before b's own open has answered.
+    (await next())({ tunnels: { a: { events: [{ type: 'open' }], closed: null }, b: { events: [{ type: 'open' }, { type: 'data', data: 'AQ==' }], closed: null } } });
+    openB('b');
+    (await next())({ tunnels: { a: { events: [], closed: { code: 1000, reason: '', wasClean: true } } } });
+    (await next())({ tunnels: { b: { events: [], closed: { code: 1000, reason: '', wasClean: true } } } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen).toEqual(['a open', 'b open', 'b data 1']);
+    expect(most).toBe(1);
+    // The second poll went before b's open answered; a closed, the third is b's alone.
+    expect(polled).toEqual([['a'], ['a'], ['b']]);
   });
 
   test('a service that fails ends the socket with an error and a close', async () => {
@@ -249,7 +341,7 @@ describe('the frame side', () => {
         throw new Error('no service');
       },
       send: async () => ({}),
-      receive: async () => ({ events: [], closed: null }),
+      receive: async () => ({ tunnels: {} }),
       close: async () => {},
     };
     const socket = new TunnelSocket('ws://x/', service);

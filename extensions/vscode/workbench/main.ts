@@ -202,10 +202,12 @@ const boot = async (): Promise<void> => {
   if (surfaceRole && fresh && fresh.folder !== storedFolder) await host.storage.set('folder', fresh.folder).catch(() => {});
   const configuration = workbenchConfiguration(connected.config, { folder, token: settings.token, mode: modeOf(context), followTheme: settings.followTheme, defaults: roleSettings(role, strip) });
 
+  // This frame's sockets share one poll (tunnel.ts, FramePoll). Not crypto.randomUUID: plain HTTP is no secure context.
+  const poller = [...crypto.getRandomValues(new Uint8Array(12))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   const service: TunnelService = {
-    open: async (path) => (await call<{ id: string }>('/tunnel/open', { ...server, path })).id,
+    open: async (path) => (await call<{ id: string }>('/tunnel/open', { ...server, path, poller })).id,
     send: (id, chunks) => call('/tunnel/send', { id, chunks }),
-    receive: (id) => call('/tunnel/recv', { id }),
+    receive: (ids) => call('/tunnel/recv', { poller, ids }),
     close: async (id) => {
       await call('/tunnel/close', { id });
     },
