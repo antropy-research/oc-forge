@@ -3,8 +3,8 @@
 Sunsama's daily planning inside OpenChamber, with agents as part of the plan:
 collect work, plan the day, focus or hand a task to an agent, answer its questions,
 review the result, and close the day and the week. Built as an OpenChamber SDK
-extension (manifest `apiVersion` 1; SDK 2.5.2, tested on OpenChamber 2.5.2, the latest
-release; web and desktop).
+extension (manifest `apiVersion` 1; SDK 2.5.3, tested on OpenChamber 2.5.3, the latest
+release, both as released and as oc-forge's adapted build; web and desktop).
 
 Plan and progress live in the zmemory project: `.tasks/1024-planner-sunsama-features-plan.md`,
 `.tasks/1025-planner-agents-md-requirements-plan.md` and
@@ -119,7 +119,7 @@ No mobile or VS Code surface, no tray, menu bar or global shortcut, no notificat
 no Planner surface is open, one integration slot (Linear; further Linear workspaces use API
 keys, Google signs in through the service), no Outlook, Slack or Teams, Gmail read-only, no
 team sharing. An extension cannot choose a chat's agent or model, so the Planner does it
-through OpenCode commands; OpenChamber 2.5.2 sends a new chat's first message before
+through OpenCode commands; OpenChamber (2.5.2, and 2.5.3, whose send code is the same here) sends a new chat's first message before
 OpenCode has loaded the commands of a folder it has just started, so an assignment's new
 worktree is made first, with an empty "Worktree for …" chat that the extension cannot
 delete. OpenCode 2.2 loads a folder's commands only when they are first asked for, and
