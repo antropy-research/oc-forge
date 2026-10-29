@@ -57,6 +57,17 @@ describe("openchamber adapters", () => {
     expect(adapted("packages/ui/src/lib/guests/parse.ts")).toContain("  update: guestUpdateSchema.optional(),\n  ocForge: ocForgeManifestField,\n});")
   })
 
+  test("an extension's frames keep the release's sandbox unless the extension asks for allow-modals", () => {
+    const pane = adapted("packages/ui/src/components/layout/PluginPane.tsx")
+    expect(pane).toContain("import { ocForgeFrameSandbox, useOcForgeFrame } from '@/oc-forge/frames';")
+    expect(pane).toContain("      srcDoc={srcDoc}\n      sandbox={ocForgeFrameSandbox(guest)}\n")
+    expect(pane).not.toContain('sandbox="allow-scripts"')
+    // The server's CSP sandbox on the document must allow it too: the browser applies both.
+    expect(adapted("packages/web/server/lib/guests/routes.js")).toContain(
+      "res.setHeader('Content-Security-Policy', `${ocForgeDocumentSandbox(guest)}; ${guestFramePolicy(connectSource, origins)}`);",
+    )
+  })
+
   test("the main layout mounts the host and renders pages through it", () => {
     const layout = adapted("packages/ui/src/components/layout/MainLayout.tsx")
     expect(layout).not.toContain("import { PluginPane }")

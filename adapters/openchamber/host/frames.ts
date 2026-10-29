@@ -48,11 +48,20 @@ const routeFor = (frame: OcForgeFrame, guest: InstalledGuest): string | null => 
   return routed ? useOcForgeStore.getState().routes[guest.id] ?? null : null;
 };
 
+/**
+ * The sandbox of an extension's frames: the release's `allow-scripts`, and `allow-modals` too for one that asks
+ * (`ocForge.modals`), so that its `print()` opens the browser's print dialog on the frame's own document.
+ */
+export const ocForgeFrameSandbox = (guest: Pick<InstalledGuest, 'ocForge'> | null | undefined): string => (
+  guest?.ocForge?.modals ? 'allow-scripts allow-modals' : 'allow-scripts'
+);
+
 export const ocForgeHello = (frame: OcForgeFrame, guest: InstalledGuest): OcForgeHello => {
   const railPanel = frame.surface === 'panel' && Boolean(guest.ocForge?.rail);
   const features = new Set<OcForgeFeature>(['zones', 'keys', 'links']);
   if (railPanel) features.add('rail');
   if (guest.pageEntry) features.add('tabs');
+  if (guest.ocForge?.modals) features.add('modals');
   return {
     version: 1,
     features: OC_FORGE_FEATURES.filter((feature) => features.has(feature)),

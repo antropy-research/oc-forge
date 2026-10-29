@@ -57,7 +57,8 @@ package installs and runs on a stock OpenChamber.
     "apiVersion": 1,
     "zone": "bottom",
     "rail": { "path": "/rail", "interval": 3000 },
-    "page": { "keepBottomZone": true }
+    "page": { "keepBottomZone": true },
+    "modals": true
   }
 }
 ```
@@ -73,6 +74,7 @@ package installs and runs on a stock OpenChamber.
 | `rail.path` | The service path the host polls with `GET` for rail entries (`/…`, no `..`) | `panel.entry`, `contributes.service` (approved) |
 | `rail.interval` | Poll interval in ms, 1000–60000, default 3000; never while the page is hidden | |
 | `page.keepBottomZone` | `true`: while its page shows, OpenChamber's bottom zone stays shown under the page instead of being covered with the chat (an editor area over a terminal); any other page still covers it | `panel.entry`, `page.entry` |
+| `modals` | `true`: the extension's frames (its panels and its page) are sandboxed with `allow-modals` as well as the release's `allow-scripts`, in the frame's `sandbox` attribute and in the `sandbox` of the CSP the server sends with its documents (the browser applies both), so `print()` opens the browser's print dialog on the frame's own document (a list it lays out for print, say); `alert()`, `confirm()` and `prompt()` work too. In an `allow-scripts` frame Chrome ignores `print()`. OpenChamber's own HTML preview in the Files view is sandboxed with `allow-modals` already. The hello's features then include `modals` | `panel.entry` |
 
 The server reads the block from the same `package.json` OpenChamber parsed
 (`server/manifest.js`) and publishes it in the catalog row as `ocForge`.
@@ -140,7 +142,8 @@ or not approved gets `ok: false`.
 | `shortcuts` | the bindings again, after the user rebinds |
 
 `features` lists what the host supports for this frame: `rail` (rail panels of
-extensions with a rail source), `tabs` (extensions with a page), and `zones`,
+extensions with a rail source), `tabs` (extensions with a page), `modals`
+(extensions with `ocForge.modals`: the frame may `print()`), and `zones`,
 `keys`, `links` everywhere.
 
 **Forwardable actions** (`keys`): `switch_session_tab` (held prefix + 1–9),

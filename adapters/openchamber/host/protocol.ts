@@ -10,7 +10,7 @@
 export const OC_FORGE_CHANNEL = 'oc-forge';
 export const OC_FORGE_VERSION = 1;
 
-export const OC_FORGE_FEATURES = ['rail', 'tabs', 'zones', 'keys', 'links'] as const;
+export const OC_FORGE_FEATURES = ['rail', 'tabs', 'zones', 'keys', 'links', 'modals'] as const;
 export type OcForgeFeature = (typeof OC_FORGE_FEATURES)[number];
 
 export const OC_FORGE_ZONES = ['left', 'right', 'bottom'] as const;
@@ -81,6 +81,13 @@ export type OcForgeManifest = {
    * page instead of being covered with the chat (an editor over its terminal).
    */
   page?: { keepBottomZone: true };
+  /**
+   * Its frames are sandboxed with `allow-modals` too: `print()` opens the
+   * browser's print dialog on the frame's own document (and `alert()`,
+   * `confirm()` and `prompt()` work). OpenChamber's frames otherwise have
+   * `allow-scripts` alone, where Chrome ignores `print()`.
+   */
+  modals?: true;
 };
 
 export const OC_FORGE_RAIL_INTERVAL_DEFAULT = 3_000;
@@ -354,6 +361,7 @@ export const readOcForgeManifest = (value: unknown): OcForgeManifest | undefined
     manifest.rail = { path: value.rail.path, interval };
   }
   if (isObject(value.page) && value.page.keepBottomZone === true) manifest.page = { keepBottomZone: true };
+  if (value.modals === true) manifest.modals = true;
   return manifest;
 };
 

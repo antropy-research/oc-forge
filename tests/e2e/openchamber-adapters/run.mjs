@@ -203,6 +203,8 @@ const apiRound = async (browser, base, viewport, seeded, request) => {
 const apiChecks = async (context, page, base, size, seeded, request) => {
 
   // R1: rail entries. The extension was just turned back on: its service starts with the first poll, so wait for its list.
+  // Each round starts from the full list, whatever an earlier round left.
+  await setEntries(request, base, ENTRIES);
   const replaced = (now) => ENTRIES.every((entry) => now.includes(`plugin:${TEST}--${entry.id}`)) && !now.includes(`plugin:${TEST}`);
   const ids = await until(async () => {
     const now = (await rail(page)).map((entry) => entry.id);
@@ -241,6 +243,22 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   await page.locator(`[data-context-surface="plugin:${TEST}--beta"]`).click();
   check(`[${size}] R1 then a click on the first entry shows it, and the panel stays open`,
     await until(async () => (await text(right, '#entry')) === 'beta' && await pressed(page, `plugin:${TEST}--beta`)), `the frame shows ${await text(right, '#entry')}`);
+  await page.locator(`[data-context-surface="plugin:${TEST}--beta"]`).click();
+  await until(async () => !(await pressed(page, `plugin:${TEST}--beta`)));
+  // ocForge.modals: the test extension asks for allow-modals, so its frame's print() opens the print dialog (headless
+  // Chromium fires beforeprint and afterprint); in an allow-scripts frame Chrome ignores it with a console error.
+  // (Alpha is still out of the service's list here; beta is in it.)
+  const printNotes = [];
+  page.on('console', (message) => { if (message.text().includes("call to 'print()'")) printNotes.push(message.text()); });
+  await page.locator(`[data-context-surface="plugin:${TEST}--beta"]`).click();
+  await until(async () => (await text(right, '#entry')) === 'beta');
+  const testSandbox = await page.locator('[data-context-zone="right"] iframe[title="oc-forge test"]').first().getAttribute('sandbox').catch(() => null);
+  const status = await text(right, '#status');
+  check(`[${size}] modals: the extension that asks gets allow-modals, and its hello says so`, testSandbox === 'allow-scripts allow-modals' && /\bmodals\b/.test(status ?? ''),
+    `sandbox "${testSandbox}"; ${status}`);
+  await right.locator('#print').click();
+  check(`[${size}] modals: its print() opens the print dialog instead of being ignored`, await until(async () => (await text(right, '#printed')) === 'printed') && printNotes.length === 0,
+    `${await text(right, '#printed')}; ${printNotes.join(' | ') || 'no console error'}`);
   await page.locator(`[data-context-surface="plugin:${TEST}--beta"]`).click();
   await until(async () => !(await pressed(page, `plugin:${TEST}--beta`)));
   const changed = ENTRIES.filter((entry) => entry.id !== 'beta').concat([{ id: 'delta', title: 'Delta view', icon: 'bug', order: 5 }]);
@@ -285,6 +303,8 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   await shot(page, `${size}-r3-entry-bottom`);
   await page.locator(`[data-context-surface="plugin:${ZONE}"]`).click();
   check(`[${size}] R3 an extension with ocForge.zone bottom opens at the bottom`, await until(async () => (await page.locator(`[data-context-zone="bottom"] iframe[title="oc-forge bottom panel"]`).count()) > 0));
+  const zoneSandbox = await page.locator('[data-context-zone="bottom"] iframe[title="oc-forge bottom panel"]').first().getAttribute('sandbox').catch(() => null);
+  check(`[${size}] modals: an extension that doesn't ask keeps the release's sandbox`, zoneSandbox === 'allow-scripts', `sandbox "${zoneSandbox}"`);
   await page.waitForTimeout(800);
   await shot(page, `${size}-r3-extension-bottom`);
   // The bottom zone under a page: kept under one whose extension asks for it (ocForge.page.keepBottomZone, the test
@@ -589,6 +609,10 @@ const plannerAndVscode = async (page, name) => {
   await openExtensionPage(page, 'Planner');
   const planner = page.frameLocator('.inset-0 > iframe[title="Planner"]');
   check(`[${name}] the Planner page loads`, await planner.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 120_000 }).then(() => true).catch(() => false));
+  // The Planner asks for allow-modals (it prints task lists and the calendar); the release ignores the ocForge block.
+  const plannerSandbox = await page.locator('.inset-0 > iframe[title="Planner"]').first().getAttribute('sandbox').catch(() => null);
+  const wanted = name === 'adapted' ? 'allow-scripts allow-modals' : 'allow-scripts';
+  check(`[${name}] the Planner's frame is sandboxed with ${wanted}`, plannerSandbox === wanted, `sandbox "${plannerSandbox}"`);
   const title = `oc-forge e2e ${name} ${Date.now().toString(36)}`;
   const today = planner.locator('section.day-column.is-today');
   await today.getByRole('button', { name: /Add task/ }).click();
@@ -619,6 +643,8 @@ const plannerAndVscode = async (page, name) => {
   const started = Date.now();
   const workbench = await panel.locator('.monaco-workbench').waitFor({ timeout: 180_000 }).then(() => true).catch(() => false);
   check(`[${name}] the VS Code panel loads VS Code's workbench`, workbench, `${((Date.now() - started) / 1000).toFixed(0)} s after Connect`);
+  const vscodeSandbox = await page.locator('[data-context-zone] iframe[title="VS Code"][src*="/workbench/index.html"]').first().getAttribute('sandbox').catch(() => null);
+  check(`[${name}] the VS Code panel's frame keeps the release's sandbox (it doesn't ask for allow-modals)`, vscodeSandbox === 'allow-scripts', `sandbox "${vscodeSandbox}"`);
   const listed = workbench && await panel.locator('.explorer-folders-view .monaco-list-row', { hasText: 'README.md' }).first().waitFor({ timeout: 90_000 }).then(() => true).catch(() => false);
   check(`[${name}] VS Code works: its Explorer lists the project's files`, listed);
   await page.screenshot({ path: join(out, `extensions-${name}-vscode.png`) });

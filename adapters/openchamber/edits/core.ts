@@ -5,18 +5,20 @@ import { insertAfter, replace, type Adapter } from "../apply"
 
 export const core: Adapter = {
   name: "core",
-  summary: "oc-forge channel for every visible extension frame; `ocForge` manifest block in the catalog; host mounted in the main layout",
+  summary: "oc-forge channel for every visible extension frame, with `allow-modals` for one that asks; `ocForge` manifest block in the catalog; host mounted in the main layout",
   edits: {
     "packages/ui/src/components/layout/PluginPane.tsx": [
       insertAfter(
         "import { DockedPanelSurfaceContext, usePageColors } from '@/hooks/usePageColors';",
-        "\nimport { useOcForgeFrame } from '@/oc-forge/frames';",
+        "\nimport { ocForgeFrameSandbox, useOcForgeFrame } from '@/oc-forge/frames';",
       ),
       insertAfter(
         "  const guestId = pluginIdFromMode(mode);",
         "\n  // oc-forge: the frame's own channel (rail entries, header tabs, keys, routes).\n" +
           "  useOcForgeFrame({ iframeRef, mode, surface, enabled: !headless && !popover && !popoverHost });",
       ),
+      // oc-forge: `allow-modals` too for an extension that asks (`ocForge.modals`): its print() opens the print dialog.
+      replace('      srcDoc={srcDoc}\n      sandbox="allow-scripts"\n', '      srcDoc={srcDoc}\n      sandbox={ocForgeFrameSandbox(guest)}\n'),
     ],
     "packages/ui/src/lib/guests/types.ts": [
       insertAfter("} from '@openchamber/sdk';", "\nimport type { OcForgeManifest } from '@/oc-forge/protocol';"),
@@ -31,6 +33,18 @@ export const core: Adapter = {
         "\nimport { ocForgeManifestField } from '@/oc-forge/manifest-schema';",
       ),
       insertAfter("  update: guestUpdateSchema.optional(),", "\n  ocForge: ocForgeManifestField,"),
+    ],
+    // The server sandboxes every guest document with a CSP `sandbox` too, which the browser intersects with the
+    // frame's: an extension that asks (`ocForge.modals`) gets `allow-modals` in both, or print() stays ignored.
+    "packages/web/server/lib/guests/routes.js": [
+      insertAfter(
+        "import { injectGuestDocumentStyles } from './html-styles.js';",
+        "\nimport { ocForgeDocumentSandbox } from '../oc-forge/manifest.js';",
+      ),
+      replace(
+        "    res.setHeader('Content-Security-Policy', `sandbox allow-scripts; ${guestFramePolicy(connectSource, origins)}`);",
+        "    res.setHeader('Content-Security-Policy', `${ocForgeDocumentSandbox(guest)}; ${guestFramePolicy(connectSource, origins)}`);",
+      ),
     ],
     "packages/web/server/lib/guests/catalog.js": [
       insertAfter(

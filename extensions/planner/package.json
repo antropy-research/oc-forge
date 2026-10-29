@@ -77,6 +77,10 @@
       }
     }
   },
+  "ocForge": {
+    "apiVersion": 1,
+    "modals": true
+  },
   "scripts": {
     "check": "tsc -p .",
     "test": "bun test tests/",
