@@ -109,6 +109,13 @@ export type OcForgeShortcuts = {
    * two-chord sequences are left out: they cannot be forwarded.
    */
   bindings: Partial<Record<OcForgeForwardableAction, string>>;
+  /**
+   * In an installed app window only, where Chrome reserves none of its tab
+   * keys: those keys act on OpenChamber's tabs there, beside the bindings
+   * (`ctrl+tab` and `ctrl+shift+tab` for the next and previous tab, `mod+w`
+   * to close one). In a normal tab Chrome keeps them and a page never gets them.
+   */
+  aliases?: Partial<Record<OcForgeForwardableAction, string[]>>;
 };
 
 export type OcForgeTabsState = { list: OcForgeTab[]; active: string | null; shown: boolean; strip: boolean };
@@ -449,6 +456,9 @@ export const matchHostShortcut = (event: OcForgeKey, shortcuts: OcForgeShortcuts
     if ((OC_FORGE_DIGIT_ACTIONS as readonly string[]).includes(action)) continue;
     const combo = shortcuts.bindings[action];
     if (combo && matchesCombo(event, combo, shortcuts)) return action;
+  }
+  for (const action of OC_FORGE_FORWARDABLE_ACTIONS) {
+    for (const combo of shortcuts.aliases?.[action] ?? []) if (matchesCombo(event, combo, shortcuts)) return action;
   }
   return null;
 };

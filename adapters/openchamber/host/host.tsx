@@ -5,7 +5,7 @@ import React from 'react';
 import { useUIStore } from '@/stores/useUIStore';
 
 import { broadcastOcForge } from './bus.ts';
-import { ocForgeShortcuts } from './keys.ts';
+import { ocForgeShortcuts, useOcForgeAppWindowKeys } from './keys.ts';
 import { useOcForgeDefaultZones, useOcForgeRailPolling } from './rail.ts';
 import { useOcForgeRouteSync } from './routes.ts';
 import { useOcForgeTabsCleanup } from './tabs-state.ts';
@@ -27,5 +27,6 @@ export const OcForgeHost: React.FC = () => {
   useOcForgeTabsCleanup();
   useOcForgeRouteSync();
   useOcForgeShortcutsBroadcast();
+  useOcForgeAppWindowKeys();
   return null;
 };

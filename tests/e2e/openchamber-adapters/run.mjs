@@ -371,6 +371,53 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   check(`[${size}] R4 a forward without a user activation is refused`, (await text(pageFrame(page), '#key-result'))?.startsWith('late: refused: A forwarded key needs a user activation'));
   await shot(page, `${size}-r4-refused`);
 
+  // In an installed app window Chrome reserves none of its tab keys, so they act on OpenChamber's tabs there, beside
+  // OpenChamber's bindings: Ctrl+Tab, Ctrl+Shift+Tab, Cmd/Ctrl+W. Headless Chromium has no app window; with
+  // `oc-forge:app-window` set this window counts as one.
+  const blur = () => page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+  const onChat = (index) => until(async () => page.url().includes(seeded.sessions[index]) && !await pageShown(page), 10_000);
+  // After a load the address bar names the chat before OpenChamber listens for keys: wait for its rail.
+  const listening = async () => {
+    await page.locator(`[data-context-surface="plugin:${TEST}--alpha"]`).waitFor({ timeout: 30_000 }).catch(() => undefined);
+    await wait(1_500);
+  };
+  await page.goto(`${base}/?session=${seeded.sessions[0]}`);
+  await onChat(0);
+  await blur();
+  await page.keyboard.press('Control+Tab');
+  await wait(800);
+  check(`[${size}] R4 in a normal tab Ctrl+Tab stays Chrome's: OpenChamber's tab does not move`, page.url().includes(seeded.sessions[0]), page.url().replace(base, ''));
+  await page.evaluate((key) => localStorage.setItem(key, 'on'), 'oc-forge:app-window');
+  await page.reload();
+  await onChat(0);
+  await listening();
+  await blur();
+  await page.keyboard.press('Control+Tab');
+  const nextTab = await onChat(1);
+  await page.keyboard.press('Control+Shift+Tab');
+  const previousTab = await onChat(0);
+  check(`[${size}] R4 in an app window Ctrl+Tab and Ctrl+Shift+Tab move across OpenChamber's tabs`, Boolean(nextTab && previousTab), page.url().replace(base, ''));
+  if (!await right.locator('#open-a').isVisible({ timeout: 5_000 }).catch(() => false)) await page.locator(`[data-context-surface="plugin:${TEST}--alpha"]`).click();
+  await right.locator('#open-a').click();
+  await until(async () => await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+  await pageFrame(page).locator('#keys').click();
+  await page.keyboard.press('Control+Tab');
+  const fromFrame = await until(async () => !await pageShown(page) && page.url().includes(seeded.sessions[0]), 5_000);
+  check(`[${size}] R4 …and from a frame that forwards OpenChamber's keys`, Boolean(fromFrame) && (await text(pageFrame(page), '#key-result')) === 'forwarded switch_session_next', (await text(pageFrame(page), '#key-result')) ?? '');
+  await headerTab(page, 'a').click();
+  await until(() => pageShown(page));
+  await blur();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+w' : 'Control+w');
+  check(`[${size}] R4 …and Cmd/Ctrl+W closes OpenChamber's selected tab, an extension tab here`, await until(async () => (await headerTab(page, 'a').count()) === 0, 5_000));
+  await shot(page, `${size}-r4-app-window`);
+  await page.evaluate((key) => localStorage.removeItem(key), 'oc-forge:app-window');
+  await page.reload();
+  await onChat(0);
+  await listening();
+  if (!await right.locator('#open-a').isVisible({ timeout: 5_000 }).catch(() => false)) await page.locator(`[data-context-surface="plugin:${TEST}--alpha"]`).click();
+  await right.locator('#open-a').click();
+  await until(async () => await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+
   // R5: deep links.
   const href = await pageFrame(page).locator('#page-link').getAttribute('href');
   check(`[${size}] R5 the frame renders a real link to its page`, href === `${base}/?extension=${TEST}&route=%2Fitem%2F42`, href ?? '');

@@ -132,6 +132,19 @@ describe("OpenChamber's navigation shortcuts, as a frame sees them", () => {
     expect(matchHostShortcut(press("¡", "Digit1", { metaKey: true, altKey: true }), macBrowser)).toBe("switch_context_surface")
     expect(matchHostShortcut(press("b", "KeyB", { ctrlKey: true }), macBrowser)).toBe("toggle_sidebar")
   })
+  test("in an app window Chrome's tab keys are aliases, beside the bindings; elsewhere they are not", () => {
+    const appWindow: OcForgeShortcuts = { ...linux, aliases: { switch_session_next: ["ctrl+tab"], switch_session_previous: ["ctrl+shift+tab"], close_session_tab: ["mod+w"] } }
+    expect(matchHostShortcut(press("Tab", "Tab", { ctrlKey: true }), appWindow)).toBe("switch_session_next")
+    expect(matchHostShortcut(press("Tab", "Tab", { ctrlKey: true, shiftKey: true }), appWindow)).toBe("switch_session_previous")
+    expect(matchHostShortcut(press("w", "KeyW", { ctrlKey: true }), appWindow)).toBe("close_session_tab")
+    // The bindings still work, and the aliases are only where the host sent them.
+    expect(matchHostShortcut(press("ArrowRight", "ArrowRight", { ctrlKey: true, altKey: true }), appWindow)).toBe("switch_session_next")
+    expect(matchHostShortcut(press("Tab", "Tab", { ctrlKey: true }), linux)).toBeNull()
+    expect(matchHostShortcut(press("w", "KeyW", { ctrlKey: true }), linux)).toBeNull()
+    const macApp: OcForgeShortcuts = { ...macBrowser, aliases: { close_session_tab: ["mod+w"], switch_session_next: ["ctrl+tab"] } }
+    expect(matchHostShortcut(press("w", "KeyW", { metaKey: true }), macApp)).toBe("close_session_tab")
+    expect(matchHostShortcut(press("Tab", "Tab", { ctrlKey: true }), macApp)).toBe("switch_session_next")
+  })
   test("rebinding moves what a frame forwards", () => {
     const rebound = { ...linux, bindings: { ...linux.bindings, close_session_tab: "mod+w", switch_session_next: "ctrl+tab" } }
     expect(matchHostShortcut(press("w", "KeyW", { ctrlKey: true }), rebound)).toBe("close_session_tab")

@@ -148,6 +148,19 @@ host refuses a press bound to anything else, a press another (non-forwardable)
 action also takes, held-down repeats, and any press without a transient user
 activation (a key press or click in the frame gives one for about 5 s).
 
+**App windows.** In an installed app window (`display-mode: standalone` or
+`window-controls-overlay`) Chrome reserves none of its tab keys, and AGENTS.md
+asks for them only there. They act on OpenChamber's tabs beside the bindings:
+Ctrl+Tab and Ctrl+Shift+Tab move to the next and previous tab, and Cmd+W
+(Ctrl+W off macOS) closes the selected tab. Cmd+Option+←/→ is OpenChamber's
+own binding already. With focus in OpenChamber the host runs them, and
+`shortcuts.aliases` lists them, so a frame that forwards OpenChamber's keys
+forwards these too. Either way the host runs the action as a press of its
+current binding would. An action the user unassigned has no alias. In a
+normal tab Chrome keeps these keys, and nothing changes there. Headless
+Chromium has no app window: `on` under the window's localStorage key
+`oc-forge:app-window` makes a window count as one, for the end-to-end check.
+
 ### Behaviour in the host
 
 - **Header tabs.** The strip order is the session tabs, then the extension tabs
