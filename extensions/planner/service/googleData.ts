@@ -72,6 +72,10 @@ interface RawTask {
   webViewLink?: string;
   updated?: string;
   deleted?: boolean;
+  /** What it was made from elsewhere (an email in Gmail, a Keep note): Google's, read-only. */
+  links?: { type?: string; description?: string; link?: string }[];
+  /** A shared task assigned from Google Docs or a Chat space: Google's, read-only. */
+  assignmentInfo?: { linkToTask?: string; surfaceType?: string };
 }
 
 /** Google keeps a task's due date as midnight UTC of that day. */
@@ -92,7 +96,17 @@ export const toTaskItem = (raw: RawTask, account: string, listId: string): Googl
     position: raw.position ?? '',
     url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc(raw.id)}`,
     updated: raw.updated ?? '',
+    ...originsOf(raw),
   };
+};
+
+/** Where a task came from in another Google product (Gmail, Keep, a Doc, a Chat space), as Google says it: https links only. */
+const originsOf = (raw: RawTask): Pick<GoogleTaskItem, 'links' | 'assigned'> => {
+  const https = (value: unknown): value is string => typeof value === 'string' && value.length <= 2000 && /^https:\/\//.test(value);
+  const links = (raw.links ?? []).flatMap((link) => (https(link.link) ? [{ type: (link.type ?? '').slice(0, 40), description: (link.description ?? '').slice(0, 300), link: link.link }] : [])).slice(0, 10);
+  const info = raw.assignmentInfo;
+  const surface = info?.surfaceType === 'DOCUMENT' ? 'document' : info?.surfaceType === 'SPACE' ? 'space' : 'other';
+  return { ...(links.length ? { links } : {}), ...(info ? { assigned: { surface, link: https(info.linkToTask) ? info.linkToTask : null } } : {}) };
 };
 
 interface RawMessage {
@@ -587,12 +601,14 @@ export class GoogleData {
    * the account's other lists once and written there. Its answer says where
    * it is now.
    */
-  async updateTask(account: string, listId: string, id: string, patch: { completed?: boolean; due?: DateKey | null; title?: string; notes?: string }): Promise<GoogleTaskItem | null> {
+  async updateTask(account: string, listId: string, id: string, patch: { completed?: boolean; due?: DateKey | null; title?: string; notes?: string; deleted?: false }): Promise<GoogleTaskItem | null> {
     const body: Record<string, unknown> = {};
     if (patch.completed !== undefined) Object.assign(body, patch.completed ? { status: 'completed' } : { status: 'needsAction', completed: null });
     if (patch.due !== undefined) body.due = patch.due ? `${patch.due}T00:00:00.000Z` : null;
     if (patch.title !== undefined) body.title = patch.title;
     if (patch.notes !== undefined) body.notes = patch.notes;
+    // Google Tasks keeps a deleted task a while (deleted: true): writing false gives it back.
+    if (patch.deleted === false) body.deleted = false;
     const write = async (list: string) => {
       const raw = await this.accounts.request<RawTask>(account, 'PATCH', `${TASKS}/lists/${enc(list)}/tasks/${enc(id)}`, body);
       return raw ? toTaskItem(raw, account, list) : null;

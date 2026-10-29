@@ -110,6 +110,9 @@ export const REPEATING_NO_SUBTASKS = "A repeating task can't have subtasks, as i
 export const REPEATING_NOT_SUBTASK = "A repeating task can't be a subtask, as in Google Tasks";
 export const SUBTASKS_NO_REPEAT = "A task with subtasks can't repeat, as in Google Tasks";
 export const SUBTASK_NO_REPEAT = "A subtask can't repeat, as in Google Tasks";
+/** A shared task (assigned from a Doc or a Chat space) neither repeats nor takes subtasks, as in Google Tasks. */
+export const SHARED_NO_REPEAT = "A shared task can't repeat, as in Google Tasks";
+export const SHARED_NO_SUBTASKS = "A shared task can't have subtasks, as in Google Tasks";
 /** Why one upcoming task of a series keeps a date: deleting it is how it goes. */
 export const OCCURRENCE_KEEPS_DATE = 'A task of a repeating series keeps a date: delete it to skip that day';
 
@@ -908,6 +911,7 @@ export class GoogleStore {
     if (fields.parent && keptFor(this.client.getView().state, { account, id: fields.parent })?.repeat) throw new Error(REPEATING_NO_SUBTASKS);
     if (fields.parent && kept.rule) throw new Error(SUBTASK_NO_REPEAT);
     const key = listKey(account, listId);
+    if (fields.parent && this.view.board[key]?.items.find((item) => item.id === fields.parent)?.assigned) throw new Error(SHARED_NO_SUBTASKS);
     const temp: GoogleTaskItem = { account, listId, id: `new-${newId()}`, title: fields.title, notes: fields.notes ?? '', due: fields.due ?? null, completed: false, parent: fields.parent ?? null, position: '', url: 'https://tasks.google.com/', updated: new Date().toISOString() };
     const items = this.view.board[key]?.items ?? [];
     this.patchBoard(key, applyMove([...items, temp], temp.id, { parent: temp.parent, previous: fields.previous ?? null }));
@@ -966,6 +970,7 @@ export class GoogleStore {
     const rule = fields.kept.rule && fields.due ? fields.kept.rule : null;
     const moveTo = extra.listId && extra.listId !== item.listId ? extra.listId : null;
     if (rule && !repeat && item.parent) throw new Error(SUBTASK_NO_REPEAT);
+    if (rule && !repeat && item.assigned) throw new Error(SHARED_NO_REPEAT);
     if (moveTo && (repeat || rule)) throw new Error(REPEATING_STAYS);
     if (rule && !repeat && (await this.hasSubtasks(item))) throw new Error(SUBTASKS_NO_REPEAT);
     const state = this.client.getView().state;
@@ -1094,6 +1099,10 @@ export class GoogleStore {
       const from = scope === 'following' ? scheduledOn(kept, item) : null;
       return this.deleteSeries({ account: item.account, seriesId: kept.repeat.seriesId, from, task: item.id });
     }
+    // What Undo gives back: the task and its subtasks as Google had them, and what the Planner kept for them.
+    const subtree = [item, ...before.filter((other) => other.parent === item.id)];
+    const keptBefore = subtree.flatMap((one) => keptFor(this.client.getView().state, one) ?? []);
+    this.lastDeletion = null;
     const next = kept?.repeat && !kept.repeat.next ? nextOccurrence(item, kept) : null;
     this.patchBoard(key, before.filter((other) => other.id !== item.id && other.parent !== item.id));
     let made: GoogleTaskItem | null = null;
@@ -1118,6 +1127,21 @@ export class GoogleStore {
       this.afterTaskWrite(item.account, item.listId, true);
       // Read once this one is gone (a read before it could bring it back): Google may renumber the places around them.
       if (made && this.view.board[key]) void this.loadBoard(item.account, item.listId);
+      // Undo, as Google Tasks offers it: Google undeletes the task and its subtasks; a next occurrence this deletion
+      // made goes again; what the Planner kept comes back as it was.
+      const successor = made;
+      this.lastDeletion = {
+        undo: async () => {
+          if (successor) {
+            await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(successor.account)}&list=${encodeURIComponent(successor.listId)}&id=${encodeURIComponent(successor.id)}`);
+            if (keptFor(this.client.getView().state, successor)) await this.client.dispatch([{ type: 'gtask.dropped', account: successor.account, taskId: successor.id }], { origin: 'google' });
+          }
+          await this.undelete(subtree);
+          await this.restoreKept(keptBefore);
+          this.afterTaskWrite(item.account, item.listId, true);
+          if (this.view.board[key]) void this.loadBoard(item.account, item.listId);
+        },
+      };
     } catch (error) {
       this.patchBoard(key, before);
       if (made) this.remember(made, true);
@@ -1138,6 +1162,9 @@ export class GoogleStore {
    */
   async deleteSeries(target: { account: string; seriesId: string; from: DateKey | null; task?: string }): Promise<void> {
     const { remove } = seriesCut(this.client.getView().state.googleTasks, target.account, target.seriesId, target.from, target.task ?? null);
+    // What Undo gives back: the series' tasks as kept before, the ones that stay included (their repeat ends here).
+    const keptBefore = Object.values(this.client.getView().state.googleTasks).filter((entry) => entry.account === target.account && entry.repeat?.seriesId === target.seriesId);
+    this.lastDeletion = null;
     const boards = Object.entries(this.view.board).filter(([key]) => key.startsWith(`${target.account}\n`));
     const without = (ids: Iterable<string>) => {
       const gone = new Set(ids);
@@ -1161,6 +1188,78 @@ export class GoogleStore {
     without(deleted);
     for (const listId of new Set(remove.map((kept) => kept.listId))) this.afterTaskWrite(target.account, listId, false);
     calendarUi.refresh();
+    const listOf = (id: string) => keptBefore.find((entry) => entry.taskId === id)?.listId ?? remove.find((entry) => entry.taskId === id)?.listId ?? null;
+    this.lastDeletion = {
+      undo: async () => {
+        await this.undelete(deleted.flatMap((id) => (listOf(id) ? [{ account: target.account, listId: listOf(id)!, id }] : [])));
+        await this.restoreKept(keptBefore);
+        for (const listId of new Set(keptBefore.map((entry) => entry.listId))) this.afterTaskWrite(target.account, listId, true);
+        for (const listId of new Set(keptBefore.map((entry) => entry.listId))) if (this.view.board[listKey(target.account, listId)]) void this.loadBoard(target.account, listId);
+      },
+    };
+  }
+
+  /** The last deletion of tasks, until it is undone or another one comes. */
+  private lastDeletion: { undo: () => Promise<void> } | null = null;
+
+  /** Whether there is a deletion to undo. */
+  canUndoDelete(): boolean {
+    return Boolean(this.lastDeletion);
+  }
+
+  /**
+   * Google Tasks' "Undo" after Delete (and ⌘/Ctrl+Z): the tasks come back as Google had them (Google undeletes
+   * them) with what the Planner kept for them. Once; false when there is nothing to undo.
+   */
+  async undoDelete(): Promise<boolean> {
+    const last = this.lastDeletion;
+    this.lastDeletion = null;
+    if (!last) return false;
+    await last.undo();
+    return true;
+  }
+
+  /** Tasks Google deleted, undeleted (the task first, then its subtasks). */
+  private async undelete(items: readonly { account: string; listId: string; id: string }[]): Promise<void> {
+    for (const one of items) await this.client.call('PATCH', '/google/tasks', { account: one.account, listId: one.listId, id: one.id, deleted: false });
+  }
+
+  /** What the Planner kept for tasks, as it was (Undo). */
+  private async restoreKept(entries: readonly GoogleTaskKept[]): Promise<void> {
+    if (!entries.length) return;
+    await this.client.dispatch(
+      entries.map((entry) => ({
+        type: 'gtask.kept' as const,
+        account: entry.account,
+        listId: entry.listId,
+        taskId: entry.taskId,
+        patch: {
+          time: entry.time,
+          duration: entry.duration,
+          deadline: entry.deadline,
+          repeat: entry.repeat,
+          starred: Boolean(entry.starredAt),
+          busy: Boolean(entry.busy),
+          visibility: entry.visibility ?? 'default',
+          color: entry.color ?? null,
+          attachments: entry.attachments ?? [],
+          doNotDisturb: Boolean(entry.doNotDisturb),
+          decline: entry.decline ?? null,
+        },
+      })),
+    );
+  }
+
+  /**
+   * Gmail's "Add to Tasks": a task in the account's default list titled as the message, as Gmail adds one. Google's
+   * link back to the email is Gmail's own (its API lets no other app set one), so the message's address goes in
+   * the task's details.
+   */
+  async addMailToTasks(item: MailItem): Promise<GoogleTaskItem> {
+    const lists = this.view.lists.filter((list) => list.account === item.account);
+    const list = lists.find((one) => one.isDefault) ?? lists[0];
+    if (!list) throw new Error(`${item.account} has no task list (connect it with Tasks in Settings → Google)`);
+    return this.addListTask(item.account, list.id, { title: item.subject.slice(0, 1024), notes: `From Gmail: ${item.url}` });
   }
 
   /**

@@ -485,6 +485,20 @@ describe('the routes, against a fake Google (a work account without Drive yet)',
     expect(asked.query).toMatchObject({ q: "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'budget'", fields: 'files(id,name,mimeType,webViewLink,modifiedTime)' });
   });
 
+  test("Undo after Delete: Google undeletes a task it deleted a moment ago, with its subtasks; only deleted: false is taken", async () => {
+    const list = () => fake.tasks.get('L1')!.map((task: { id: string }) => task.id);
+    expect(list()).toContain('t-trip');
+    expect((await call('DELETE', `/google/tasks?account=${encodeURIComponent(account)}&list=L1&id=t-trip`)).status).toBe(200);
+    expect(list()).not.toContain('t-trip');
+    expect(list()).not.toContain('t-hotel');
+    expect((await call('PATCH', '/google/tasks', { account, listId: 'L1', id: 't-trip', deleted: true })).status).toBe(400);
+    const back = await call('PATCH', '/google/tasks', { account, listId: 'L1', id: 't-trip', deleted: false });
+    expect(back.status).toBe(200);
+    expect(back.body.task).toMatchObject({ id: 't-trip', title: 'Plan the trip' });
+    expect((await call('PATCH', '/google/tasks', { account, listId: 'L1', id: 't-hotel', deleted: false })).body.task).toMatchObject({ id: 't-hotel', parent: 't-trip' });
+    expect(list()).toEqual(expect.arrayContaining(['t-trip', 't-hotel']));
+  });
+
   test('Automatically decline meetings: the invitations overlapping a Busy task are declined with its message, which the organizer gets', async () => {
     const message = 'Declined: heads down on the Q4 plan';
     expect((await commands({ type: 'gtask.kept', account, listId: 'L1', taskId: 't-report', patch: { time: start, duration: 60, busy: true, decline: { mode: 'all', message } } })).status).toBe(200);

@@ -70,6 +70,33 @@ export const dateGroups = (items: readonly GoogleTaskItem[], today: string): Dat
   ];
 };
 
+/**
+ * Open tasks by deadline, as Google Tasks' "Sort by Deadline": the ones whose
+ * deadline has passed first ("Past"), then deadline by deadline, then the ones
+ * without one. Deadlines are the Planner's (`deadlineOf`), as Google Tasks'
+ * API has none.
+ */
+export const deadlineSections = (items: readonly GoogleTaskItem[], today: string, deadlineOf: (item: GoogleTaskItem) => string | null): DateGroup[] => {
+  const open = items.filter((item) => !item.completed);
+  const byDeadline = (a: GoogleTaskItem, b: GoogleTaskItem) => deadlineOf(a)!.localeCompare(deadlineOf(b)!) || byPosition(a, b);
+  const past = open.filter((item) => (deadlineOf(item) ?? today) < today).sort(byDeadline);
+  const days = new Map<string, GoogleTaskItem[]>();
+  for (const item of open) {
+    const deadline = deadlineOf(item);
+    if (deadline !== null && deadline >= today) days.set(deadline, [...(days.get(deadline) ?? []), item]);
+  }
+  const none = open.filter((item) => deadlineOf(item) === null).sort(byPosition);
+  return [
+    ...(past.length ? [{ kind: 'past' as const, date: null, items: past }] : []),
+    ...[...days.keys()].sort().map((date) => ({ kind: 'day' as const, date, items: days.get(date)!.sort(byPosition) })),
+    ...(none.length ? [{ kind: 'none' as const, date: null, items: none }] : []),
+  ];
+};
+
+/** Open tasks by title, as Google Tasks' "Sort by Title": A to Z, numbers in order, subtasks among them. */
+export const byTitle = (items: readonly GoogleTaskItem[]): GoogleTaskItem[] =>
+  items.filter((item) => !item.completed).sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }) || byPosition(a, b));
+
 /** The open subtasks of a task, in order. */
 export const subtasksOf = (items: readonly GoogleTaskItem[], id: string): GoogleTaskItem[] => items.filter((item) => item.parent === id && !item.completed).sort(byPosition);
 
@@ -135,6 +162,23 @@ export const moveDownTarget = (rows: readonly TaskRow[], id: string): MoveTarget
   const at = list.indexOf(row);
   if (at < 0 || at >= list.length - 1) return null;
   return { parent: row.depth === 1 ? row.item.parent : null, previous: list[at + 1]!.item.id };
+};
+
+/** First among its siblings (Google Tasks' "Move to top", Ctrl/⌘+Shift+Up); null when it is first already. */
+export const moveTopTarget = (rows: readonly TaskRow[], id: string): MoveTarget | null => {
+  const row = rows[rowIndex(rows, id)];
+  if (!row || siblings(rows, row).indexOf(row) < 1) return null;
+  return { parent: row.depth === 1 ? row.item.parent : null, previous: null };
+};
+
+/** Last among its siblings (Google Tasks' "Move to bottom", Ctrl/⌘+Shift+Down); null when it is last already. */
+export const moveBottomTarget = (rows: readonly TaskRow[], id: string): MoveTarget | null => {
+  const row = rows[rowIndex(rows, id)];
+  if (!row) return null;
+  const list = siblings(rows, row);
+  const at = list.indexOf(row);
+  if (at < 0 || at >= list.length - 1) return null;
+  return { parent: row.depth === 1 ? row.item.parent : null, previous: list.at(-1)!.item.id };
 };
 
 /** A position string that sorts between two others (Google's are 20-digit numbers); for showing a move before Google answers. */

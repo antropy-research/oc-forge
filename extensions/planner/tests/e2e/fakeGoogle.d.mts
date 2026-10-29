@@ -22,6 +22,8 @@ export interface FakeWorld {
   hostedDomain?: string;
   /** The account's Drive, by name, type and address. */
   driveFiles?: { id: string; name: string; mimeType: string; webViewLink: string; modifiedTime?: string; trashed?: boolean }[];
+  /** The account's Gmail messages. */
+  mail?: { id: string; threadId: string; subject: string; from: string; date: string; snippet: string; unread?: boolean }[];
 }
 
 export interface FakeGoogle {

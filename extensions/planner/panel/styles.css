@@ -1337,6 +1337,8 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gt-check:hover .gt-check-hover { opacity: 1; }
 .gt-check.is-checked { color: var(--oc-primary-text, var(--oc-primary)); }
 .gt-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 3px 0; border: 0; background: none; text-align: left; color: var(--oc-fg); cursor: text; }
+.gt-body-edit { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; text-align: left; color: inherit; font: inherit; cursor: text; }
+.gt-body-edit:focus-visible { outline: 2px solid var(--oc-primary); outline-offset: 2px; border-radius: 4px; }
 .gt-title { font-size: 14px; overflow-wrap: anywhere; }
 .gt-notes { font-size: 12.5px; color: var(--oc-muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .gt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
@@ -1583,7 +1585,8 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .gt-color-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; flex: none; }
 .gt-color-button { display: inline-flex; align-items: center; gap: 2px; border: 0; background: var(--pl-soft); border-radius: 12px; padding: 3px 4px 3px 8px; color: var(--oc-fg); }
 .gt-color-button:disabled { opacity: 0.6; cursor: not-allowed; }
-.gt-color-menu { min-width: 190px; padding: 4px 0; }
+.gt-color-menu { left: 0; right: auto; top: 28px; min-width: 190px; padding: 4px 0; }
+.gt-adv-name { font-size: 12px; color: var(--oc-muted); }
 .gt-color-menu .cal-palette { grid-template-columns: repeat(6, 22px); }
 .gt-color-menu .cal-swatch[aria-checked='true'] { outline: 2px solid var(--oc-fg); outline-offset: 2px; }
 .gt-color-list { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; padding: 6px 10px; text-align: left; font-size: 12.5px; color: var(--oc-fg); }
@@ -1615,7 +1618,8 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .drive-file-icon { grid-row: 1 / span 2; display: inline-flex; }
 .drive-file-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .drive-file-meta { grid-column: 3; font-size: 11.5px; }
-.drive-actions { align-items: center; gap: 8px; }
+.drive-actions { display: flex; align-items: center; gap: 12px; padding-top: 4px; }
+.drive-actions .muted { font-size: 12.5px; }
 .drive-actions .primary { border-radius: 16px; padding: 4px 16px; }
 .pop-attachments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .pop-attachments .link { display: inline-flex; align-items: center; gap: 6px; padding: 0; text-align: left; }
@@ -1623,3 +1627,18 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
 .pop-declined { list-style: none; margin: 2px 0 0; padding: 0; font-size: 12px; color: var(--oc-muted); }
 /* A task list under "My calendars", under Tasks. */
 .cal-row.is-nested { padding-left: 20px; }
+/* Where a task came from (Gmail, Keep, a shared Doc or Chat space); the lists dragged into their order; Starred's "Add". */
+.gt-origin { color: var(--oc-primary-text, var(--oc-primary)); }
+.tasks-lists li.is-dragging { opacity: 0.5; }
+.tasks-lists li[draggable='true'] { cursor: grab; }
+.tasks-shortcuts { margin-top: 8px; color: var(--oc-muted); }
+.gt-starred-add { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 0 46px; }
+.gt-starred-add .gt-form { padding-left: 0; }
+.gt-starred-list select { background: var(--pl-soft); border: 0; border-radius: 12px; padding: 2px 8px; font-size: 12px; color: var(--oc-fg); }
+.modal.gt-shortcuts { width: min(560px, 100%); padding: 10px 16px 16px; }
+.gt-shortcut-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.gt-shortcut-table td { padding: 5px 6px; border-top: 1px solid var(--pl-line); vertical-align: top; }
+.gt-shortcut-table td:first-child { width: 42%; white-space: nowrap; }
+.gt-shortcut-table kbd { font: inherit; font-size: 12px; background: var(--pl-soft); border-radius: 4px; padding: 1px 6px; }
+.gt-shortcut-table tr.is-unavailable td { color: var(--oc-muted); }
+.mail-to-tasks { padding: 0 4px; font-size: 12px; white-space: nowrap; }

@@ -64,6 +64,28 @@ export const moveList = (lists: readonly { account: string; id: string }[], from
   return keys;
 };
 
+// ── Where a task came from ──────────────────────────────────────────────────
+
+const PRODUCTS: readonly [RegExp, string][] = [
+  [/^https:\/\/mail\.google\.com\//, 'Gmail'],
+  [/^https:\/\/keep\.google\.com\//, 'Keep'],
+  [/^https:\/\/chat\.google\.com\//, 'Chat'],
+  [/^https:\/\/docs\.google\.com\//, 'Docs'],
+];
+
+/**
+ * Where a task came from in another Google product, to go back to it, as Google Tasks shows below a task: "From
+ * Gmail" (an email added to Tasks), "From Keep" (a Keep reminder), "Assigned in Google Docs" or "in Chat" (a shared
+ * task). Google keeps these; the Planner only shows them.
+ */
+export const taskOrigins = (item: Pick<GoogleTaskItem, 'links' | 'assigned'>): { label: string; detail: string; url: string | null }[] => [
+  ...(item.assigned ? [{ label: item.assigned.surface === 'document' ? 'Assigned in Google Docs' : item.assigned.surface === 'space' ? 'Assigned in a Chat space' : 'Assigned to you', detail: '', url: item.assigned.link }] : []),
+  ...(item.links ?? []).map((link) => {
+    const product = PRODUCTS.find(([pattern]) => pattern.test(link.link))?.[1] ?? (link.type === 'email' ? 'Gmail' : null);
+    return { label: product ? `From ${product}` : 'Link', detail: link.description, url: link.link };
+  }),
+];
+
 // ── Drive attachments ────────────────────────────────────────────────────────
 
 /** A Drive file as the Planner's Drive search finds it. */

@@ -43,6 +43,10 @@ export interface GoogleTaskItem {
   position: string;
   url: string;
   updated: string;
+  /** What it was made from in another Google product (an email in Gmail, a Keep note), to go back to: Google's, read-only. */
+  links?: { type: string; description: string; link: string }[];
+  /** A shared task assigned to the account from a Google Doc or a Chat space; it neither repeats nor takes subtasks. */
+  assigned?: { surface: 'document' | 'space' | 'other'; link: string | null };
 }
 
 /** A Gmail message, by its headers and snippet. */

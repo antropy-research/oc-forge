@@ -11,7 +11,7 @@ import { describeRecurrence } from '../../../src/domain/rrule.ts';
 import { descriptionText } from '../../../src/domain/gevents.ts';
 import { taskForGoogleTask, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google.ts';
 import { KEPT_HINT, advancedLabel, keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
-import { colorName, driveKind, quietLabel, type DeclinedMeeting } from '../../../src/domain/gtaskAdvanced.ts';
+import { colorName, driveKind, quietLabel, taskOrigins, type DeclinedMeeting } from '../../../src/domain/gtaskAdvanced.ts';
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
@@ -298,14 +298,15 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   const remove = async () => {
     // A repeating task asks, as Google Calendar does: this one (the series goes on), this and the following ones, or all of them.
     const scope = kept?.repeat ? await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: DELETE_CHOICES }) : 'this';
-    if (scope === 'this' || scope === 'following' || scope === 'all') run(() => google.deleteListTask(item, scope), scope === 'this' ? 'Task deleted' : 'Tasks deleted');
+    // Undo, as Google offers it after a deletion.
+    if (scope === 'this' || scope === 'following' || scope === 'all') run(() => google.deleteListTask(item, scope), scope === 'this' ? 'Task deleted' : 'Tasks deleted', () => google.undoDelete().then(() => {}));
   };
-  const run = (work: () => Promise<unknown>, done?: string) => {
+  const run = (work: () => Promise<unknown>, done?: string, undo: (() => Promise<void>) | null = null) => {
     setBusy(true);
     work()
       .then(() => {
         close();
-        if (done) calendarUi.snack(done);
+        if (done) calendarUi.snack(done, undo);
       })
       .catch((error) => client.notify(`Google Tasks did not take it: ${messageOf(error)}`))
       .finally(() => setBusy(false));
@@ -390,6 +391,15 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
           <div class="pop-main pop-description"><Linked text={item.notes} /></div>
         </div>
       )}
+      {taskOrigins(item).map((origin, index) => (
+        <div key={`origin-${index}`} class="pop-row">
+          <span class="pop-icon"><Icon name="link" /></span>
+          <div class="pop-main">
+            {origin.url ? <button class="link" onClick={() => void host.openUrl(origin.url!)}>{origin.label}</button> : origin.label}
+            {origin.detail && <div class="muted pop-small">{origin.detail}</div>}
+          </div>
+        </div>
+      ))}
       <div class="pop-row">
         <span class="pop-icon"><Icon name="task" /></span>
         <div class="pop-main">{list?.title ?? 'Google Tasks'}{new Set(gv.lists.map((other) => other.account)).size > 1 ? <span class="muted"> · {item.account}</span> : null}</div>

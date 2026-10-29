@@ -229,7 +229,7 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     return ok({ tasks, missing, errors });
   }
   if (path === '/google/tasks' && (req.method === 'PATCH' || req.method === 'POST')) {
-    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown; parent?: unknown; previous?: unknown };
+    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown; parent?: unknown; previous?: unknown; deleted?: unknown };
     if (!isEmail(body.account) || !isGoogleId(body.listId)) return { status: 400, body: { error: 'account and listId are required' } };
     if (body.due !== undefined && body.due !== null && !isDateKey(body.due)) return { status: 400, body: { error: 'due must be a date or null' } };
     if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8192)) return { status: 400, body: { error: 'notes must be text, at most 8192 characters (as Google Tasks keeps)' } };
@@ -237,7 +237,9 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     if (req.method === 'PATCH') {
       if (!isGoogleId(body.id)) return { status: 400, body: { error: 'id is required' } };
       if (body.completed !== undefined && typeof body.completed !== 'boolean') return { status: 400, body: { error: 'completed must be true or false' } };
-      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}), ...(body.title !== undefined ? { title: (body.title as string).trim() } : {}), ...(body.notes !== undefined ? { notes: body.notes as string } : {}) };
+      // Undo after Delete: Google undeletes a task it deleted a moment ago.
+      if (body.deleted !== undefined && body.deleted !== false) return { status: 400, body: { error: 'deleted can only be false (Undo); DELETE deletes' } };
+      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}), ...(body.title !== undefined ? { title: (body.title as string).trim() } : {}), ...(body.notes !== undefined ? { notes: body.notes as string } : {}), ...(body.deleted === false ? { deleted: false as const } : {}) };
       const task = await googleData.updateTask(body.account, body.listId, body.id, patch);
       // Due dates and completion show on the calendar: read them again next time.
       googleDueTasks.forget();

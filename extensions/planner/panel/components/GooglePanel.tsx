@@ -83,7 +83,7 @@ export const GoogleTasksItems = () => {
 const senderName = (from: string): string => /^\s*"?([^"<]+?)"?\s*</.exec(from)?.[1]?.trim() || from.replace(/[<>]/g, '').trim();
 
 const MailRow = ({ item }: { item: MailItem }) => {
-  const { google, host } = usePlanner();
+  const { google, host, client } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
   const linked = taskForMail(view.state, item);
@@ -104,6 +104,21 @@ const MailRow = ({ item }: { item: MailItem }) => {
         <button class="link issue-planned" onClick={() => setUi({ openTaskId: linked.id })} aria-label={`Open the task for ${item.subject} (${plannedLabel(linked, view.today)})`}>{plannedLabel(linked, view.today)}</button>
       ) : (
         <PlanActions label={item.subject} onPlan={(placement) => void google.planMail(item, placement)} />
+      )}
+      {google.allows(item.account, 'tasks') && (
+        <button
+          class="link mail-to-tasks"
+          aria-label={`Add "${item.subject}" to Google Tasks`}
+          title="Add to Tasks, as Gmail does: a task in your default list, with the email's link in its details"
+          onClick={() =>
+            void google
+              .addMailToTasks(item)
+              .then(() => client.notify(`Added to Google Tasks: ${item.subject}`))
+              .catch((error) => client.notify(`Google Tasks did not take it: ${error instanceof Error ? error.message : String(error)}`))
+          }
+        >
+          Add to Tasks
+        </button>
       )}
     </li>
   );

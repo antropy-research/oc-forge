@@ -131,6 +131,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
   // A world's task may say when it was last changed (`updated`); else now.
   const tasks = new Map(world.lists.map((list) => [list.id, (world.tasks[list.id] ?? []).map((task) => ({ updated: new Date().toISOString(), ...structuredClone(task) }))]));
   const fail = { next: null };
+  /** Tasks deleted, by id: their list, the task and where it was, for an undelete (PATCH deleted: false). */
+  const trash = new Map();
   /** Requests held a while before they are answered (and before what they change changes), as a slow Google holds them. */
   const slow = [];
 
@@ -215,6 +217,18 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
     if (path === '/token') return [200, { access_token: `fake-${next++}`, expires_in: 3600, token_type: 'Bearer' }];
     if (path === '/revoke') return [200, {}];
     if (path === '/oauth2/v3/userinfo' && method === 'GET') return [200, { sub: '1', email: world.account, email_verified: true, ...(world.hostedDomain ? { hd: world.hostedDomain } : {}) }];
+    // Gmail: a search's messages (words of the subject, sender or snippet; in: and is: pass), and each one's headers.
+    if (path === '/gmail/v1/users/me/messages' && method === 'GET') {
+      const words = (query.get('q') ?? '').toLowerCase().split(/\s+/).filter((word) => word && !/^(in|is):/.test(word));
+      const found = (world.mail ?? []).filter((message) => words.every((word) => `${message.subject} ${message.from} ${message.snippet}`.toLowerCase().includes(word)));
+      return [200, { messages: found.map((message) => ({ id: message.id, threadId: message.threadId })), resultSizeEstimate: found.length }];
+    }
+    const mailMatch = /^\/gmail\/v1\/users\/me\/messages\/([^/]+)$/.exec(path);
+    if (mailMatch && method === 'GET') {
+      const message = (world.mail ?? []).find((one) => one.id === decodeURIComponent(mailMatch[1]));
+      if (!message) return [404, { error: { message: 'Not Found' } }];
+      return [200, { id: message.id, threadId: message.threadId, snippet: message.snippet, internalDate: String(Date.parse(message.date)), labelIds: message.unread ? ['UNREAD', 'INBOX'] : ['INBOX'], payload: { headers: [{ name: 'Subject', value: message.subject }, { name: 'From', value: message.from }, { name: 'Date', value: message.date }] } }];
+    }
     // Google Drive: file names, types and addresses, by a part of the name (Drive's `name contains '…'`), newest first.
     if (path === '/drive/v3/files' && method === 'GET') {
       if (!(world.granted ?? DEFAULT_SCOPES).includes(DRIVE_SCOPE)) return [403, { error: { code: 403, message: 'Request had insufficient authentication scopes.' } }];
@@ -335,6 +349,18 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
         place(listId, task, query.get('parent'), query.get('previous'));
         return [200, publicTask(task)];
       }
+      // A task deleted a moment ago: Google keeps it (deleted), and writing deleted: false gives it back, in its place.
+      const gone = trash.get(taskId);
+      if (!all.find((item) => item.id === taskId) && gone && gone.listId === listId) {
+        if (method === 'GET') return [200, publicTask({ ...gone.task, deleted: true })];
+        if (method === 'PATCH' && body.deleted === false) {
+          trash.delete(taskId);
+          const restored = { ...gone.task, updated: new Date().toISOString() };
+          all.splice(Math.min(gone.index, all.length), 0, restored);
+          renumber(listId);
+          return [200, publicTask(restored)];
+        }
+      }
       const task = all.find((item) => item.id === taskId);
       if (!task) return [404, { error: { message: 'Not Found' } }];
       if (match[3] && method === 'POST') {
@@ -360,6 +386,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
         return [200, publicTask(task)];
       }
       if (method === 'DELETE') {
+        // Gone from the list; kept a while (with its subtasks) for an undelete.
+        for (const item of all) if (item === task || item.parent === task.id) trash.set(item.id, { listId, task: item, index: all.indexOf(item) });
         tasks.set(listId, all.filter((item) => item !== task && item.parent !== task.id));
         renumber(listId);
         return [204, null];

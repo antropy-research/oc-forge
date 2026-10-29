@@ -4263,8 +4263,16 @@ var toTaskItem = (raw, account, listId) => {
     parent: raw.parent ?? null,
     position: raw.position ?? "",
     url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc(raw.id)}`,
-    updated: raw.updated ?? ""
+    updated: raw.updated ?? "",
+    ...originsOf(raw)
   };
+};
+var originsOf = (raw) => {
+  const https = (value) => typeof value === "string" && value.length <= 2000 && /^https:\/\//.test(value);
+  const links = (raw.links ?? []).flatMap((link) => https(link.link) ? [{ type: (link.type ?? "").slice(0, 40), description: (link.description ?? "").slice(0, 300), link: link.link }] : []).slice(0, 10);
+  const info = raw.assignmentInfo;
+  const surface = info?.surfaceType === "DOCUMENT" ? "document" : info?.surfaceType === "SPACE" ? "space" : "other";
+  return { ...links.length ? { links } : {}, ...info ? { assigned: { surface, link: https(info.linkToTask) ? info.linkToTask : null } } : {} };
 };
 var plain = (text) => text.replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code))).replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 var toMailItem = (raw, account) => {
@@ -4644,6 +4652,8 @@ ${calendarId}`;
       body.title = patch.title;
     if (patch.notes !== undefined)
       body.notes = patch.notes;
+    if (patch.deleted === false)
+      body.deleted = false;
     const write = async (list) => {
       const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc(list)}/tasks/${enc(id)}`, body);
       return raw ? toTaskItem(raw, account, list) : null;
@@ -6258,7 +6268,9 @@ var googleRoute = async (req, url) => {
         return { status: 400, body: { error: "id is required" } };
       if (body.completed !== undefined && typeof body.completed !== "boolean")
         return { status: 400, body: { error: "completed must be true or false" } };
-      const patch = { ...body.completed !== undefined ? { completed: body.completed } : {}, ...body.due !== undefined ? { due: body.due } : {}, ...body.title !== undefined ? { title: body.title.trim() } : {}, ...body.notes !== undefined ? { notes: body.notes } : {} };
+      if (body.deleted !== undefined && body.deleted !== false)
+        return { status: 400, body: { error: "deleted can only be false (Undo); DELETE deletes" } };
+      const patch = { ...body.completed !== undefined ? { completed: body.completed } : {}, ...body.due !== undefined ? { due: body.due } : {}, ...body.title !== undefined ? { title: body.title.trim() } : {}, ...body.notes !== undefined ? { notes: body.notes } : {}, ...body.deleted === false ? { deleted: false } : {} };
       const task = await googleData.updateTask(body.account, body.listId, body.id, patch);
       googleDueTasks.forget();
       return ok({ task });
