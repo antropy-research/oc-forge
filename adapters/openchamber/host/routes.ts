@@ -25,6 +25,8 @@ const CATALOG_WAIT_MS = 20_000;
 const STARTUP_WAIT_MS = 15_000;
 /** That choice is settled once it hasn't changed for this long. */
 const STARTUP_QUIET_MS = 400;
+/** How long after a deep link opened its page the app's own late choices may not close it. */
+const STARTUP_GUARD_MS = 10_000;
 
 /** For the router: the URL names an extension page. */
 export const hasOcForgeRouteParams = (params: URLSearchParams): boolean => params.has(OC_FORGE_EXTENSION_PARAM);
@@ -110,6 +112,41 @@ const deliverRoute = (guestId: string, route: string, surface: 'page' | 'panel')
 
 let applying = 0;
 
+/**
+ * On a slow machine the app can still change its new-chat draft (the draft gets its folder) or select a chat (the
+ * last one, restored late) after the deep link's page opened, and MainLayout closes every page when it does. Until
+ * the user does something in the window (a key or pointer press; a key a frame forwards is a key press on the body),
+ * the page opens again, a few times at most.
+ */
+const keepPageThroughStartup = (guestId: string, attempt: number): void => {
+  let reopened = 0;
+  const stop = () => {
+    window.clearTimeout(timer);
+    window.removeEventListener('pointerdown', stop, true);
+    window.removeEventListener('keydown', stop, true);
+    unsubscribe();
+  };
+  const timer = window.setTimeout(stop, STARTUP_GUARD_MS);
+  window.addEventListener('pointerdown', stop, true);
+  window.addEventListener('keydown', stop, true);
+  const unsubscribe = useUIStore.subscribe((state, previous) => {
+    if (previous.openGuestPageId !== guestId || state.openGuestPageId !== null) return;
+    const guest = useGuestsStore.getState().guests.find((entry) => entry.id === guestId);
+    if (attempt !== applying || reopened >= 3 || !guest?.pageEntry || !isGuestActive(guest)) {
+      stop();
+      return;
+    }
+    reopened += 1;
+    // Once the close has run its course (the address bar has dropped the link).
+    queueMicrotask(() => {
+      if (attempt !== applying || useUIStore.getState().openGuestPageId !== null) return;
+      useOcForgeStore.setState({ linked: guestId });
+      useUIStore.getState().setOpenGuestPage(guestId);
+      syncOcForgeUrl();
+    });
+  });
+};
+
 const openDeepLink = async (link: { guestId: string; route: string }): Promise<void> => {
   const attempt = ++applying;
   if (!await waitForCatalog() || attempt !== applying) return;
@@ -122,6 +159,7 @@ const openDeepLink = async (link: { guestId: string; route: string }): Promise<v
     useOcForgeStore.setState({ linked: guest.id });
     useUIStore.getState().setOpenGuestPage(guest.id);
     syncOcForgeUrl();
+    keepPageThroughStartup(guest.id, attempt);
     return;
   }
   if (!guest.entry) return;

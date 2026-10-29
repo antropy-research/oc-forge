@@ -186,7 +186,13 @@ activation (a key press or click in the frame gives one for about 5 s).
   the chat column's height above it (edits/pages.ts, host/pages.ts).
 - **Deep links.** `?extension=<id>&route=<route>` opens the extension's page (or
   its rail panel when it has none) once the catalog has loaded, and hands the
-  frame the route in `hello`/`route`. The URL keeps the parameters while the
+  frame the route in `hello`/`route`. The page opens once the app's own choice
+  of a chat or a new-chat draft has held for 400 ms. OpenChamber closes every
+  page when a chat is selected or a draft changes. So for 10 s after that the
+  page opens again when the app changes its choice by itself: on a slow machine
+  the draft gets its folder late, or the last chat is restored late. That stops
+  at the user's first key or pointer press in the window (a key a frame
+  forwards counts), and after 3 reopens. The URL keeps the parameters while the
   page shows; leaving the page drops them. `links.page`/`links.session` are
   prefixes in the window's own origin, so modified clicks on real `<a href>`
   open new browser tabs even from the sandboxed frame (Chromium; see the study).
@@ -262,7 +268,10 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   extensions. `run.mjs` checks every API at 1440×900 and 1024×768, the release
   against the adapted build with no extension using the APIs (rail, header and
   an extension page, pixel by pixel), and that the Planner and VS Code work on
-  both. R6 holds eight service requests open (more than a browser's six
+  both. R5 also opens a deep link in a fresh window with the new-chat draft's
+  folder held 2.5 s, so the draft changes after the page opened. The page
+  stays; without the reopening it closed at 3.6 s. "Back to chat" still
+  closes it. R6 holds eight service requests open (more than a browser's six
   connections) and times a ninth: 3 ms on the adapted build, over the socket
   with no service HTTP request, against 11.5 s on the release. The instances start like fresh installs: their own HOME and data dir,
   and none of the `OPENCODE*`/`OPENCHAMBER*` variables or credentials of the

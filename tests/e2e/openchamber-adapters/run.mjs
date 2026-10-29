@@ -169,6 +169,8 @@ const openExtensionPage = async (page, title, timeout = 60_000) => {
   await menu.click();
   await page.getByRole('menuitem', { name: title }).click();
 };
+// Whether a round saw the new-chat draft get its folder late (R5).
+let lateDraftChecked = false;
 const pageShown = (page) => page.evaluate((id) => {
   const element = document.querySelector(`[data-oc-forge-page="${id}"]`);
   return Boolean(element) && getComputedStyle(element).visibility === 'visible';
@@ -384,6 +386,33 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   await direct.goto(`${base}/?extension=${TEST}&route=%2Fdeep`);
   check(`[${size}] R5 a deep link loads the page and hands the frame its route`, await until(async () => (await text(direct.frameLocator(`[data-oc-forge-page="${TEST}"] iframe`), '#route')) === '/deep', 60_000));
   await direct.close();
+  // On a slow machine the app changes its new-chat draft after the page opened (the draft gets its folder late),
+  // which closes every page: the deep link opens its page again. A fresh window lands on the draft; its folder waits.
+  // (A narrow window's draft makes no folder; the case runs where it does, at one size at least.)
+  const fresh = await context.browser().newContext({ viewport: page.viewportSize() });
+  await fresh.request.post(`${base}/auth/session`, { data: { password } });
+  let held = 0;
+  await fresh.route((url) => new URL(url).pathname.endsWith('/fs/mkdir'), async (route) => {
+    held += 1;
+    await wait(2_500);
+    await route.continue().catch(() => {});
+  });
+  const slow = await fresh.newPage();
+  await slow.goto(`${base}/?extension=${TEST}&route=%2Fslow`);
+  const slowRouted = await until(async () => (await text(slow.frameLocator(`[data-oc-forge-page="${TEST}"] iframe`), '#route')) === '/slow', 60_000);
+  await wait(5_000);
+  if (held > 0) {
+    lateDraftChecked = true;
+    check(`[${size}] R5 a deep link keeps its page when the app changes its new-chat draft late (a slow machine)`,
+      slowRouted && await pageShown(slow) && new URL(slow.url()).searchParams.get('extension') === TEST, `the draft's folder held 2.5 s; ${slow.url().replace(base, '')}`);
+  } else {
+    console.log(`INFO [${size}] R5 the new-chat draft made no folder at this size; its late change is checked where it does`);
+  }
+  // …and the user still leaves it at once: the app's own changes are undone only until the user does something.
+  await slow.getByRole('button', { name: 'Back to chat' }).click().catch(() => {});
+  await wait(2_000);
+  check(`[${size}] R5 …and Back to chat still leaves it for good`, !await pageShown(slow));
+  await fresh.close();
 
   // R6: guest service requests over the window's WebSocket. With eight held open (more than the browser's six HTTP
   // connections per host, which two windows of VS Code used to fill), a ninth answers at once, and none of them is an
@@ -536,6 +565,7 @@ const base = instances.adapted;
 await request.post(`${base}/auth/session`, { data: { password } });
 for (const id of [TEST, ZONE]) await setEnabled(request, base, id, true);
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await apiRound(browser, base, viewport, seeded.adapted, request);
+check('R5 the deep link\'s late new-chat draft ran at one size at least', lateDraftChecked);
 
 await browser.close();
 writeFileSync(join(out, 'results.json'), `${JSON.stringify({ results, restarts }, null, 2)}\n`);
