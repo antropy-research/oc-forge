@@ -50,6 +50,12 @@ export const rail: Adapter = {
       ),
     ],
     "packages/ui/src/components/layout/ContextPanelRail.tsx": [
+      // More icons than the column's height (an extension's many entries, a short window): the column scrolls, its
+      // scrollbar hidden, where the release cut the last icons off. While they fit nothing changes.
+      replace(
+        '      className="flex h-full w-11 flex-shrink-0 flex-col items-center gap-2 bg-background py-2"\n',
+        '      className="scrollbar-none flex h-full w-11 flex-shrink-0 flex-col items-center gap-2 overflow-y-auto bg-background py-2"\n',
+      ),
       insertAfter(
         "import { shownContextModes, zoneOfMode } from '@/lib/workspace/zones';",
         "\nimport { ocForgeRailSurfaceActive, ocForgeSelectRailSurface, useOcForgeRailRevision } from '@/oc-forge/rail';",

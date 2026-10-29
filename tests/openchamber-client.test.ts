@@ -79,7 +79,7 @@ describe("rail entries from a service", () => {
     expect(entries?.map((entry) => entry.id)).toEqual(["explorer", "scm", "search", "terminal"])
     expect(entries?.find((entry) => entry.id === "terminal")?.zone).toBe("bottom")
     expect(readOcForgeRailEntries({ items: [] })).toBeNull()
-    expect(readOcForgeRailEntries({ entries: Array.from({ length: 40 }, (_, i) => ({ id: `e${i}`, title: `E${i}`, icon: "apps" })) })).toHaveLength(32)
+    expect(readOcForgeRailEntries({ entries: Array.from({ length: 120 }, (_, i) => ({ id: `e${i}`, title: `E${i}`, icon: "apps" })) })).toHaveLength(100)
   })
 })
 

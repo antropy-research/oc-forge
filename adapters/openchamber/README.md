@@ -89,8 +89,10 @@ The server reads the block from the same `package.json` OpenChamber parsed
 | `order` | Optional number; ascending, then the order listed |
 | `zone` | Optional. Gives the entry **a panel of its own** (a second frame loading `panel.entry`, the surface `plugin:<extension>--<entry>`) that opens in this zone until the user moves it. Without it the entry is a **view** of the extension's one panel and follows its zone. |
 
-At most 32 entries; a malformed entry is dropped on its own. While the list is
-non-empty it replaces the extension's own rail icon. An unreachable service
+At most 100 entries; a malformed entry is dropped on its own. While the list is
+non-empty it replaces the extension's own rail icon. When the icons are more
+than the rail's height, the rail scrolls (its scrollbar hidden); the release cut
+the last ones off. An unreachable service
 keeps the last list (no flicker while it restarts); an extension that is
 disabled or removed loses its entries, and an entry's own panel closes when the
 entry leaves the list.

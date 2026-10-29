@@ -235,6 +235,22 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   }, 10_000);
   check(`[${size}] R1 entries come and go without a reload`, came, `${((Date.now() - started) / 1000).toFixed(1)} s after the service's list changed`);
   await shot(page, `${size}-r1-changed`);
+  // More entries than the rail's height (40 × 36 px): every one gets its icon, the rail scrolls to the last, and the
+  // last opens the panel on itself.
+  const many = Array.from({ length: 40 }, (_, i) => ({ id: `many-${i + 1}`, title: `Many ${i + 1}`, icon: 'apps', order: 100 + i }));
+  await setEntries(request, base, many);
+  const allThere = await until(async () => (await rail(page)).filter((entry) => entry.id.startsWith(`plugin:${TEST}--many-`)).length === 40, 10_000);
+  const last = page.locator(`[data-context-surface="plugin:${TEST}--many-40"]`);
+  const railNav = page.locator('nav').filter({ has: last });
+  const overflows = await railNav.evaluate((nav) => nav.scrollHeight > nav.clientHeight + 1).catch(() => false);
+  await last.click();
+  const lastOpens = await until(async () => (await text(right, '#entry')) === 'many-40');
+  const scrolled = await railNav.evaluate((nav) => nav.scrollTop > 0).catch(() => false);
+  check(`[${size}] R1 forty entries all get an icon; the rail scrolls to the last, which opens on itself`, allThere && overflows && scrolled && lastOpens,
+    `${(await rail(page)).filter((entry) => entry.id.startsWith(`plugin:${TEST}--many-`)).length} icons; overflows ${overflows}; scrolled ${scrolled}; opened ${lastOpens}`);
+  await shot(page, `${size}-r1-many`);
+  await last.click();
+  await until(async () => !(await pressed(page, `plugin:${TEST}--many-40`)));
   await setEntries(request, base, ENTRIES);
   await until(async () => (await rail(page)).some((entry) => entry.id === `plugin:${TEST}--beta`), 10_000);
 

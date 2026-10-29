@@ -38,7 +38,7 @@ export type OcForgeForwardableAction = (typeof OC_FORGE_FORWARDABLE_ACTIONS)[num
 export const OC_FORGE_DIGIT_ACTIONS = ['switch_context_surface', 'switch_session_tab'] as const;
 
 export const OC_FORGE_LIMITS = {
-  railEntries: 32,
+  railEntries: 100,
   entryId: 48,
   title: 80,
   svg: 16_384,
