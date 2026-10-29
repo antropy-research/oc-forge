@@ -48,16 +48,19 @@ import { newId } from '../../src/domain/ids.ts';
 import { addDays } from '../../src/domain/dates.ts';
 import { longDay } from '../../src/domain/gcalendar.ts';
 import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
-import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Task } from '../../src/domain/types.ts';
+import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Task, TaskVisibility } from '../../src/domain/types.ts';
 import type { Origin, PlannerClient } from './client.ts';
 import { calendarUi } from './gcal.ts';
 
-/** What a Google task's form sets: Google's own fields, and what the Planner keeps for it. */
+/**
+ * What a Google task's form sets: Google's own fields, and what the Planner keeps for it; Busy and a visibility
+ * only with a time (left out: as they are).
+ */
 export interface TaskFields {
   title: string;
   notes: string;
   due: DateKey | null;
-  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { rule: string | null };
+  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { rule: string | null; busy?: boolean; visibility?: TaskVisibility };
 }
 
 /** Why a repeating task cannot go to another list: Google Tasks keeps it in its own. */
@@ -828,9 +831,12 @@ export class GoogleStore {
     try {
       const answer = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account, listId, ...fields, ...(fields.notes ? {} : { notes: undefined }) });
       if (!answer.task) throw new Error('Google did not return the task');
-      const { rule, ...rest } = kept;
-      const template = fields.due ? templateOf({ title: fields.title, notes: fields.notes ?? '' }, { time: rest.time ?? null, duration: rest.duration ?? null, deadline: rest.deadline ?? null }, fields.due) : null;
-      const patch: GoogleTaskKeptPatch = { ...rest, ...(rule && fields.due && template ? { repeat: { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template } } : {}) };
+      const { rule, busy, visibility, ...rest } = kept;
+      // Availability and visibility come with a time; Free and the default visibility are kept as nothing.
+      const timed = (rest.time ?? null) !== null;
+      const advanced = { ...(timed && busy ? { busy: true } : {}), ...(timed && visibility && visibility !== 'default' ? { visibility } : {}) };
+      const template = fields.due ? templateOf({ title: fields.title, notes: fields.notes ?? '' }, { time: rest.time ?? null, duration: rest.duration ?? null, deadline: rest.deadline ?? null, ...advanced }, fields.due) : null;
+      const patch: GoogleTaskKeptPatch = { ...rest, ...advanced, ...(rule && fields.due && template ? { repeat: { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template } } : {}) };
       if (Object.values(patch).some((value) => value !== null && value !== undefined && value !== false)) await this.setKept(answer.task, patch);
       this.patchBoard(key, (this.view.board[key]?.items ?? []).map((item) => (item.id === temp.id ? answer.task! : item)));
       this.afterTaskWrite(account, listId, Boolean(fields.due));
@@ -876,11 +882,19 @@ export class GoogleStore {
     if ((kept?.time ?? null) !== fields.kept.time) patch.time = fields.kept.time;
     if ((kept?.duration ?? null) !== fields.kept.duration) patch.duration = fields.kept.duration;
     if ((kept?.deadline ?? null) !== fields.kept.deadline) patch.deadline = fields.kept.deadline;
-    const all = scope === 'all' || Boolean(repeat && rule && rule !== repeat.rule);
+    // Availability and visibility come with a time (left out of the fields: as they are), and are a series' own, as
+    // Google Calendar keeps one for a whole series: a change of them is for all its tasks.
+    const busy = fields.kept.time !== null && (fields.kept.busy ?? Boolean(kept?.busy));
+    const visibility = fields.kept.time !== null ? fields.kept.visibility ?? kept?.visibility ?? 'default' : 'default';
+    const advanced = busy !== Boolean(kept?.busy) || visibility !== (kept?.visibility ?? 'default');
+    if (busy !== Boolean(kept?.busy)) patch.busy = busy;
+    if (visibility !== (kept?.visibility ?? 'default')) patch.visibility = visibility;
+    const timing = { ...fields.kept, busy, visibility };
+    const all = scope === 'all' || Boolean(repeat && rule && (rule !== repeat.rule || advanced));
     if (!rule || !fields.due) {
       if (repeat) patch.repeat = null;
     } else if (!kept || !repeat) {
-      patch.repeat = { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template: templateOf(fields, fields.kept, fields.due) };
+      patch.repeat = { rule, seriesId: newId(), index: 1, next: null, on: fields.due, template: templateOf(fields, timing, fields.due) };
     } else {
       const on = scheduledOn(kept, item) ?? fields.due;
       const template = seriesTemplate(kept, item) ?? templateOf(item, kept, on);
@@ -890,7 +904,7 @@ export class GoogleStore {
         const index = ruleChanged ? 1 : repeat.index;
         // The occurrences changed on their own stay so; a new rule or start keeps those still on its schedule.
         const exceptions = moved ? exceptionsOnSchedule(repeat.exceptions, rule, fields.due, index) : repeat.exceptions;
-        patch.repeat = withExceptions({ ...repeat, rule, index, on: moved ? fields.due : on, template: templateOf(fields, fields.kept, fields.due, moved ? fields.due : template.start) }, exceptions);
+        patch.repeat = withExceptions({ ...repeat, rule, index, on: moved ? fields.due : on, template: templateOf(fields, timing, fields.due, moved ? fields.due : template.start) }, exceptions);
       } else if (!repeat.on || !repeat.template) {
         // First sight of a series kept before templates: kept as this occurrence was, before this one-off change.
         patch.repeat = { ...repeat, on, template };
@@ -906,7 +920,7 @@ export class GoogleStore {
       for (const other of Object.values(state.googleTasks)) {
         if (other.repeat?.seriesId !== repeat.seriesId || other.taskId === item.id || other.repeat.next) continue;
         const own = other.repeat;
-        const timing = template ? { time: template.time, duration: template.duration, deadline: own.on ? (template.deadline === null ? null : addDays(own.on, template.deadline)) : other.deadline } : {};
+        const timing = template ? { time: template.time, duration: template.duration, deadline: own.on ? (template.deadline === null ? null : addDays(own.on, template.deadline)) : other.deadline, busy: Boolean(template.busy), visibility: template.visibility ?? ('default' as const) } : {};
         others.push({ type: 'gtask.kept', account: other.account, listId: other.listId, taskId: other.taskId, patch: series ? { ...timing, repeat: withExceptions({ ...own, rule: series.rule, ...(template ? { template } : {}) }, series.exceptions) } : { repeat: null } });
       }
     }

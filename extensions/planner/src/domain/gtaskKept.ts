@@ -1,14 +1,15 @@
 // What the Planner keeps for Google tasks because Google Tasks' API does not
 // let other apps read or write it: a time on the task's date (and how long it
 // takes), a deadline, a repeat rule with its series' template and its upcoming
-// occurrences changed on their own, and a star, as Google Tasks and Google
-// Calendar have them. Where a kept time puts a task on the calendar, where its
-// deadline and a series' upcoming occurrences show, how a repeating task's
-// next occurrence is found (without making one Google's own repeat made
-// already), and the Starred view's order. Google keeps the rest: nothing kept
-// here is written into a task's title or details.
+// occurrences changed on their own, a star, and a timed task's availability
+// (Busy or Free) and visibility, as Google Tasks and Google Calendar have them.
+// Where a kept time puts a task on the calendar, where its deadline and a
+// series' upcoming occurrences show, which of them make the user busy, how a
+// repeating task's next occurrence is found (without making one Google's own
+// repeat made already), and the Starred view's order. Google keeps the rest:
+// nothing kept here is written into a task's title or details.
 import type { CalendarEvent } from './ics.ts';
-import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState } from './types.ts';
+import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState, type TaskVisibility } from './types.ts';
 import { addDays, daysBetween, instantAt, monthDay, weekday, weekdayName } from './dates.ts';
 import { addMonths, compactClock, compactRange, daysInMonth } from './gcalendar.ts';
 import { parseRRule, untilDate, WEEKDAY_CODES, type RRule } from './rrule.ts';
@@ -18,11 +19,21 @@ import type { EventBody, GoogleTaskKeptPatch } from './events.ts';
 /** Google's reference for what its Tasks API carries (a date without a time; no repeat, no star). */
 export const TASKS_API_REFERENCE = 'https://developers.google.com/workspace/tasks/reference/rest/v1/tasks';
 /** Said wherever a user sets something the Planner keeps. */
-export const KEPT_HINT = "Kept in the Planner: Google Tasks doesn't let other apps set times, deadlines, repeats or stars";
+export const KEPT_HINT = "Kept in the Planner: Google Tasks doesn't let other apps set times, deadlines, repeats, stars, availability or visibility";
 /** How long a timed task without an end time shows on the grid, as Google Calendar draws it. */
 export const TASK_MINUTES = 30;
 
 export const keptFor = (state: Pick<PlannerState, 'googleTasks'>, item: { account: string; id: string }): GoogleTaskKept | null => state.googleTasks?.[googleTaskKey(item.account, item.id)] ?? null;
+
+/** A task's visibility, its calendar's default when none is kept. */
+export const visibilityOf = (kept: Pick<GoogleTaskKept, 'visibility'> | null | undefined): TaskVisibility => kept?.visibility ?? 'default';
+
+/** Google Calendar's names for a task's availability and visibility. */
+export const VISIBILITY_LABELS: Record<TaskVisibility, string> = { default: 'Default visibility', public: 'Public', private: 'Private' };
+
+/** "Busy · Private": a timed task's advanced settings in its details, or null when they are Google Calendar's defaults (Free, default visibility). */
+export const advancedLabel = (kept: Pick<GoogleTaskKept, 'busy' | 'visibility' | 'time'> | null | undefined): string | null =>
+  kept && kept.time !== null && (kept.busy || kept.visibility) ? `${kept.busy ? 'Busy' : 'Free'} · ${VISIBILITY_LABELS[visibilityOf(kept)]}` : null;
 
 /** "2pm", or "2 – 3pm" when it has an end. */
 export const keptTimeLabel = (kept: Pick<GoogleTaskKept, 'time' | 'duration'> | null): string | null => {
@@ -32,7 +43,8 @@ export const keptTimeLabel = (kept: Pick<GoogleTaskKept, 'time' | 'duration'> | 
 
 /**
  * Google tasks at their kept time: timed on the grid instead of all day, as
- * Google Calendar shows a task with a time. A change of date in Google moves
+ * Google Calendar shows a task with a time, and busy then when set Busy (an
+ * open one: a task done takes no more time). A change of date in Google moves
  * the task and keeps its time.
  */
 export const withTaskTimes = (events: readonly CalendarEvent[], kept: Readonly<Record<string, GoogleTaskKept>> | undefined, zone: string): CalendarEvent[] => {
@@ -43,8 +55,23 @@ export const withTaskTimes = (events: readonly CalendarEvent[], kept: Readonly<R
     if (!item?.due || !found || found.time === null || event.taskDeadline) return event;
     const start = instantAt(item.due, found.time, zone);
     const end = instantAt(item.due, Math.min(24 * 60, found.time + (found.duration ?? TASK_MINUTES)), zone);
-    return { ...event, start, end, allDay: false };
+    return { ...event, start, end, allDay: false, busy: Boolean(found.busy) && !item.completed };
   });
+};
+
+/**
+ * What makes the user busy among Google tasks on the days `from` to `to`, for
+ * planning around them (auto-schedule, playlist times), as Google Calendar
+ * counts a task set Busy: open timed tasks set Busy at their kept time
+ * (`events`: a calendar read of those days, its Google tasks as read), and
+ * the upcoming occurrences of a Busy series there.
+ */
+export const busyTaskEvents = (events: readonly CalendarEvent[], kept: Readonly<Record<string, GoogleTaskKept>> | undefined, from: DateKey, to: DateKey, today: DateKey, zone: string): CalendarEvent[] => {
+  if (!kept || !Object.keys(kept).length) return [];
+  const timed = withTaskTimes(events.filter((event) => event.googleTask && !event.taskDeadline), kept, zone);
+  const shown = timed.flatMap((event) => (event.googleTask ? [event.googleTask] : []));
+  const upcoming = upcomingTasks(kept, shown, from, to, today).map((task) => upcomingEvent(task, zone));
+  return [...timed, ...upcoming].filter((event) => event.busy);
 };
 
 /** Google Tasks' repeat menu for a task on `date`: its presets, then Custom… (the same rule builder as events). */
@@ -134,14 +161,25 @@ const STEPS_MAX = 4000;
 /** The date the series put an occurrence on: kept since templates (a one-off change of its date leaves it), else its date. */
 export const scheduledOn = (kept: GoogleTaskKept, item: Pick<GoogleTaskItem, 'due'>): DateKey | null => kept.repeat?.on ?? item.due;
 
-/** A series' template from a task's values: what it says, its time, and its deadline as days after `date`; its schedule counts from `start`. */
-export const templateOf = (task: { title: string; notes: string }, kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'>, date: DateKey, start: DateKey = date): GoogleTaskTemplate => ({
+/**
+ * A series' template from a task's values: what it says, its time, its
+ * deadline as days after `date`, and (with a time) its availability and
+ * visibility, the series' own; its schedule counts from `start`.
+ */
+export const templateOf = (
+  task: { title: string; notes: string },
+  kept: Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline'> & { busy?: boolean; visibility?: TaskVisibility },
+  date: DateKey,
+  start: DateKey = date,
+): GoogleTaskTemplate => ({
   title: task.title,
   notes: task.notes,
   time: kept.time,
   duration: kept.duration,
   deadline: kept.deadline ? daysBetween(date, kept.deadline) : null,
   start,
+  ...(kept.time !== null && kept.busy ? { busy: true as const } : {}),
+  ...(kept.time !== null && kept.visibility && kept.visibility !== 'default' ? { visibility: kept.visibility } : {}),
 });
 
 /**
@@ -231,7 +269,8 @@ export const exceptionsOnSchedule = (exceptions: Exceptions | undefined, rule: s
  * The task a series makes for its `index`th occurrence, on `date`: Google's
  * title, details and date, and what is kept for it (its time and deadline,
  * and the series, with the exceptions still ahead), each as that occurrence
- * was changed on its own, else from the template.
+ * was changed on its own, else from the template; its availability and
+ * visibility are the series'.
  */
 export const occurrenceTask = (repeat: Repeat, template: GoogleTaskTemplate, date: DateKey, index: number): { title: string; notes: string; due: DateKey; kept: GoogleTaskKeptPatch } => {
   const values = occurrenceValues(template, date, repeat.exceptions?.[date]);
@@ -245,6 +284,8 @@ export const occurrenceTask = (repeat: Repeat, template: GoogleTaskTemplate, dat
       duration: values.duration,
       deadline: values.deadline,
       repeat: { rule: repeat.rule, seriesId: repeat.seriesId, index, next: null, on: date, template, ...(ahead.length ? { exceptions: Object.fromEntries(ahead) } : {}) },
+      ...(values.time !== null && template.busy ? { busy: true } : {}),
+      ...(values.time !== null && template.visibility ? { visibility: template.visibility } : {}),
     },
   };
 };
@@ -393,7 +434,7 @@ export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, sh
   return out;
 };
 
-/** An upcoming occurrence as the calendar draws it: at its time on its date (the template's, or its own), or all day. */
+/** An upcoming occurrence as the calendar draws it: at its time on its date (the template's, or its own), or all day; busy at its time when its series is Busy. */
 export const upcomingEvent = (task: UpcomingTask, zone: string): CalendarEvent => {
   const { title, due, time, duration } = upcomingValues(task);
   return {
@@ -404,7 +445,7 @@ export const upcomingEvent = (task: UpcomingTask, zone: string): CalendarEvent =
     start: instantAt(due, time ?? 0, zone),
     end: time === null ? instantAt(addDays(due, 1), 0, zone) : instantAt(due, Math.min(24 * 60, time + (duration ?? TASK_MINUTES)), zone),
     allDay: time === null,
-    busy: false,
+    busy: time !== null && Boolean(task.template.busy),
     upcoming: task,
   };
 };

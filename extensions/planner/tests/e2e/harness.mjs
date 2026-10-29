@@ -12,6 +12,8 @@
 // - The Small Model (`/generate`) answers from `generate` (default: an empty JSON array).
 // - Google: start tests/e2e/fakeGoogle.mjs and pass `serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base }` and
 //   `homeFiles: { 'google-accounts.json': fake.accountsFile() }`; your service then signs in to the fake (see calendar.mjs).
+// - Task notifications (OpenChamber toasts that stay until dismissed) are off in the private plan unless you pass
+//   `taskNotifications: true` (tasks-calendar.mjs): a journey that does not look for them never has one cover its page.
 //
 // Usage (node >= 22, run on the host, from any checkout of this repository):
 //   import { startHarness } from './harness.mjs';
@@ -148,6 +150,8 @@ export async function startHarness({
   serviceEnv = {},
   /** Files written into the private service's temporary HOME before it starts, by path under HOME (e.g. 'google-accounts.json'). */
   homeFiles = {},
+  /** Google Calendar's task notifications in the private plan (off: none covers a journey that does not look for them). */
+  taskNotifications = false,
 } = {}) {
   const planner = join(worktree, 'extensions/planner');
   for (const file of ['panel/main.js', 'service/main.js']) if (!existsSync(join(planner, file))) throw new Error(`build first: ${file} is missing`);
@@ -185,6 +189,10 @@ export async function startHarness({
     try { const r = await call('GET', '/health'); if (r.status < 500) break; } catch {}
     if (i > 100) throw new Error(`service did not start:\n${serviceLog.join('')}`);
     await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!taskNotifications) {
+    const off = await call('POST', '/commands', { commands: [{ cmd: `harness-${randomBytes(6).toString('hex')}`, type: 'settings.updated', patch: { googleTaskNotifications: false } }] });
+    if (off.status !== 200) throw new Error(`could not turn task notifications off: ${off.text}`);
   }
 
   const secrets = readFileSync(join(homedir(), '.local/share/oc-forge-openchamber-dev/secrets.env'), 'utf8');

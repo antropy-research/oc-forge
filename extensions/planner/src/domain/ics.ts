@@ -45,6 +45,8 @@ export interface CalendarEvent {
   taskDeadline?: boolean;
   /** An upcoming occurrence of a repeating Google task, which Google Tasks makes once the one before it is done. */
   upcoming?: UpcomingTask;
+  /** Google Calendar's "Pending tasks" entry on today: the open tasks of the past 365 days, latest first. */
+  pendingTasks?: GoogleTaskItem[];
   /** A Google Calendar event: where it lives, and what may be done with it. */
   google?: GoogleEventRef;
 }

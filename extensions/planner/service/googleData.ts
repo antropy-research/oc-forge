@@ -23,7 +23,7 @@ import {
 import { checkEventInput, eventBody, planDelete, planEdit, planRsvp, type EditScope, type EventInput, type EventOp, type EventPlan } from '../src/domain/gevents.ts';
 import { isDateKey } from '../src/domain/dates.ts';
 import { newId } from '../src/domain/ids.ts';
-import type { DateKey } from '../src/domain/types.ts';
+import type { DateKey, TaskVisibility } from '../src/domain/types.ts';
 import { GoogleError, type GoogleAccounts } from './google.ts';
 
 const CALENDAR = 'https://www.googleapis.com/calendar/v3';
@@ -128,6 +128,8 @@ export interface TimeboxEvent {
   title: string;
   start: string;
   end: string;
+  /** The visibility of the Google task the session's task plans (kept in the Planner); absent for any other task. */
+  visibility?: TaskVisibility;
 }
 
 /** Who hears about a change to an event with guests: Google Calendar asks before sending. */
@@ -233,6 +235,8 @@ export class GoogleData {
       start: { dateTime: timebox.start },
       end: { dateTime: timebox.end },
       transparency: 'opaque',
+      // A private task's sessions show to others as busy, without their title, as Google Calendar shows a private event.
+      ...(timebox.visibility ? { visibility: timebox.visibility } : {}),
       extendedProperties: { private: { [PLANNER_BLOCK_KEY]: timebox.blockId, plannerTaskId: timebox.taskId } },
     };
     const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
@@ -479,11 +483,14 @@ export class GoogleData {
     return { tasks: tasks.sort((a, b) => a.position.localeCompare(b.position)), complete };
   }
 
-  /** Tasks due between two days (inclusive) in all of an account's lists, completed ones too, as Google Calendar shows them. */
-  async dueTasks(account: string, from: DateKey, to: DateKey): Promise<GoogleTaskItem[]> {
+  /**
+   * Tasks due between two days (inclusive) in all of an account's lists, completed ones too, as Google Calendar shows
+   * them; with `open`, only the ones not done (Pending tasks: a year of completed ones would be read for nothing).
+   */
+  async dueTasks(account: string, from: DateKey, to: DateKey, open = false): Promise<GoogleTaskItem[]> {
     const lists = await this.taskLists(account);
     // Google keeps a due date as midnight UTC of that day.
-    const range = { showCompleted: 'true', showHidden: 'true', maxResults: '100', dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` };
+    const range = { showCompleted: open ? 'false' : 'true', showHidden: open ? 'false' : 'true', maxResults: '100', dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` };
     const perList = await mapLimited(lists, 4, async (list) => {
       const { items, complete } = await this.pages<RawTask>(account, (token) => `${TASKS}/lists/${enc(list.id)}/tasks?${new URLSearchParams({ ...range, ...(token ? { pageToken: token } : {}) })}`, LIMITS.due);
       if (!complete) throw new GoogleError(502, `"${list.title}" has more than ${LIMITS.due * 100} tasks due in these days; the Planner reads at most that many`);

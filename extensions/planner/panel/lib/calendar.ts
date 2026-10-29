@@ -4,8 +4,10 @@ import type { GoogleTaskItem } from '../../src/domain/google.ts';
 import type { DateKey } from '../../src/domain/types.ts';
 import { addDays, instantAt } from '../../src/domain/dates.ts';
 import { deadlineEvents, upcomingEvent, upcomingTasks, withTaskTimes } from '../../src/domain/gtaskKept.ts';
+import { pendingEvent } from '../../src/domain/gtaskPending.ts';
 import { useGoogle, usePlanner, useView } from './context.ts';
 import { calendarUi, useCalendarUi, withPending } from './gcal.ts';
+import { usePendingTasks } from './pendingTasks.ts';
 
 export interface CalendarFeedState {
   events: CalendarEvent[];
@@ -23,8 +25,9 @@ const REFRESH_MS = 10 * 60_000;
  * something in Google. Changes on their way to Google show at once. Events I
  * declined are left out unless asked for (the calendar views show them). With
  * `tasks`, the calendar's own views also get Google tasks as Google Calendar
- * shows them beside their date: deadlines on their day, and the upcoming
- * occurrences of repeating tasks, from what the Planner keeps now.
+ * shows them beside their date: deadlines on their day, the upcoming
+ * occurrences of repeating tasks, from what the Planner keeps now, and on
+ * today, its "N pending tasks" entry (the open tasks of the past 365 days).
  */
 export const useCalendarEvents = (from: DateKey, to: DateKey, options: { declined?: boolean; tasks?: boolean } = {}): CalendarFeedState => {
   const { client, google } = usePlanner();
@@ -65,10 +68,12 @@ export const useCalendarEvents = (from: DateKey, to: DateKey, options: { decline
 
   const zone = view.state.settings.timezone ?? 'UTC';
   const kept = view.state.googleTasks;
+  const pending = usePendingTasks(Boolean(options.tasks && tasks) && from <= view.today && view.today <= to);
   // A Google task with a time kept in the Planner shows at that time, as Google Calendar shows timed tasks.
   const timed = withTaskTimes(feed.events, kept, zone);
   const shown = timed.flatMap((event) => (event.googleTask ? [event.googleTask] : []));
-  const beside = options.tasks && tasks ? [...deadlineEvents([...shown, ...(feed.deadlineTasks ?? [])], kept ?? {}, from, to, zone), ...upcomingTasks(kept ?? {}, shown, from, to, view.today).map((task) => upcomingEvent(task, zone))] : [];
+  const pendingEntry = pendingEvent(pending, view.today, zone);
+  const beside = options.tasks && tasks ? [...deadlineEvents([...shown, ...(feed.deadlineTasks ?? [])], kept ?? {}, from, to, zone), ...upcomingTasks(kept ?? {}, shown, from, to, view.today).map((task) => upcomingEvent(task, zone)), ...(pendingEntry ? [pendingEntry] : [])] : [];
   const events = withPending([...timed, ...beside], ui.pending, ui.added, instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone));
   return { ...feed, events: options.declined ? events : events.filter((event) => event.google?.response !== 'declined') };
 };

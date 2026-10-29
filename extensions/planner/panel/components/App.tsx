@@ -27,6 +27,7 @@ import { AssistantModal } from './Assistant.tsx';
 import { hoveredTask } from '../lib/hover.ts';
 import { moveTo } from '../lib/commands.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
+import { startTaskNotifications } from '../lib/notifications.ts';
 import { parseRoute, routeOf } from '../lib/deepLink.ts';
 import { openInNewTab, placeUrl, plannerKeeps, useForge, watchNewTabClicks } from '../lib/forge.ts';
 
@@ -98,13 +99,21 @@ export const App = ({ surface }: { surface: string }) => {
 
   useEffect(() => {
     // Linear starts after the first snapshot, so its first sync sees the real tasks.
+    let live = true;
+    let stopNotifications = () => {};
     void client.load().then(() => {
       client.startPolling();
       linear.start();
       void agents.start();
       void github.start();
       void google.start();
+      // Google Calendar's task notifications, which the Planner gives while one of its surfaces is open.
+      if (live) stopNotifications = startTaskNotifications(host, client, surface);
     });
+    return () => {
+      live = false;
+      stopNotifications();
+    };
   }, [client, linear, agents, github, google]);
 
   // Clicking a task's chip in a chat opens that task here.

@@ -5,7 +5,7 @@
 // is next read, an event moved or deleted in Google moves or deletes its session.
 import type { CalendarEvent } from '../src/domain/ics.ts';
 import type { EventBody } from '../src/domain/events.ts';
-import type { CalendarSubscription, DateKey, GoogleEventLink, PlannerState } from '../src/domain/types.ts';
+import { googleTaskKey, type CalendarSubscription, type DateKey, type GoogleEventLink, type PlannerState, type TaskVisibility } from '../src/domain/types.ts';
 import type { GoogleTaskItem } from '../src/domain/google.ts';
 import { newId } from '../src/domain/ids.ts';
 import { GoogleError } from './google.ts';
@@ -30,6 +30,18 @@ export const calendarKey = (account: string, calendarId: string): string => `${a
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const isGone = (error: unknown): boolean => error instanceof GoogleError && error.status === 404;
+
+/**
+ * The visibility a task's sessions are written with: that of the Google task
+ * it plans (kept in the Planner, the calendar's default when none is), since
+ * the sessions are where Google Calendar shows others that task's time;
+ * undefined for a task that plans no Google task.
+ */
+export const sessionVisibility = (state: PlannerState, taskId: string): TaskVisibility | undefined => {
+  const source = state.tasks[taskId]?.source;
+  if (source?.kind !== 'gtask' || !source.account) return undefined;
+  return state.googleTasks?.[googleTaskKey(source.account, source.id)]?.visibility ?? 'default';
+};
 
 /** The host restarts a service that takes 20 seconds to answer; a slow calendar gives up first. */
 const READ_DEADLINE_MS = 14_000;
@@ -148,17 +160,18 @@ export class GoogleDueTasks {
     return { items, errors };
   }
 
-  async read(accounts: readonly string[], from: DateKey, to: DateKey, refresh: boolean): Promise<{ items: GoogleTaskItem[]; errors: string[] }> {
+  /** Tasks due between two days; with `open`, only the ones not done (Pending tasks). */
+  async read(accounts: readonly string[], from: DateKey, to: DateKey, refresh: boolean, open = false): Promise<{ items: GoogleTaskItem[]; errors: string[] }> {
     const items: GoogleTaskItem[] = [];
     const errors: string[] = [];
     await Promise.all(
       accounts.map(async (account) => {
-        const key = `${account}\n${from}\n${to}`;
+        const key = `${account}\n${from}\n${to}${open ? '\nopen' : ''}`;
         let hit = this.cache.get(key);
         if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
           try {
             const before = this.writes;
-            hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to), READ_DEADLINE_MS, 'Google Tasks') };
+            hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to, open), READ_DEADLINE_MS, 'Google Tasks') };
             if (this.writes === before) this.cache.set(key, hit);
           } catch (error) {
             errors.push(`${account}: ${messageOf(error)}`);
@@ -279,7 +292,8 @@ export class GoogleTimeboxes {
 
   private observe(before: PlannerState, after: PlannerState): void {
     const target = after.settings.googleTimebox;
-    const renamed = new Set(Object.values(after.tasks).filter((task) => before.tasks[task.id] && before.tasks[task.id]!.title !== task.title).map((task) => task.id));
+    // Renamed, or planning a Google task whose visibility changed: its sessions are written again.
+    const renamed = new Set(Object.values(after.tasks).filter((task) => before.tasks[task.id] && (before.tasks[task.id]!.title !== task.title || sessionVisibility(before, task.id) !== sessionVisibility(after, task.id))).map((task) => task.id));
     for (const block of Object.values(after.blocks)) {
       const previous = before.blocks[block.id];
       const moved = !previous || previous.start !== block.start || previous.end !== block.end;
@@ -316,7 +330,8 @@ export class GoogleTimeboxes {
     const link = block.google ?? this.created.get(blockId) ?? null;
     const target = link ?? state.settings.googleTimebox;
     if (!target) return;
-    const timebox: TimeboxEvent = { blockId, taskId: block.taskId, title: state.tasks[block.taskId]?.title ?? 'Planner', start: block.start, end: block.end };
+    const visibility = sessionVisibility(state, block.taskId);
+    const timebox: TimeboxEvent = { blockId, taskId: block.taskId, title: state.tasks[block.taskId]?.title ?? 'Planner', start: block.start, end: block.end, ...(visibility ? { visibility } : {}) };
     let eventId: string;
     try {
       eventId = await this.data.putTimebox(target.account, target.calendarId, timebox, link?.eventId ?? null);

@@ -1,7 +1,7 @@
 // service/main.ts
 import http2 from "node:http";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { dirname as dirname4, join as join4 } from "node:path";
 
 // service/store.ts
 import { execFile } from "node:child_process";
@@ -49,6 +49,7 @@ var DEFAULT_SETTINGS = {
   googleTasksImportCompletion: true,
   googleTasksDueFromPlan: true,
   googleTasksOnCalendar: true,
+  googleTaskNotifications: true,
   googleCalendarsIntroduced: [],
   agentPresets: []
 };
@@ -522,10 +523,26 @@ var applyInto = (state, event) => {
       return;
     case "gtask.kept": {
       const key = googleTaskKey(event.account, event.taskId);
-      const { starred, ...patch } = event.patch;
+      const { starred, busy, visibility, ...patch } = event.patch;
       const before = state.googleTasks[key] ?? { account: event.account, listId: event.listId, taskId: event.taskId, time: null, duration: null, deadline: null, repeat: null, starredAt: null, updatedAt: event.at };
       const starredAt = starred === undefined ? before.starredAt : starred ? before.starredAt ?? event.at : null;
       const next = { ...before, ...patch, listId: event.listId, starredAt, updatedAt: event.at };
+      if (busy !== undefined) {
+        if (busy)
+          next.busy = true;
+        else
+          delete next.busy;
+      }
+      if (visibility !== undefined) {
+        if (visibility === "default")
+          delete next.visibility;
+        else
+          next.visibility = visibility;
+      }
+      if (next.time === null) {
+        delete next.busy;
+        delete next.visibility;
+      }
       if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null)
         delete state.googleTasks[key];
       else
@@ -889,6 +906,15 @@ var weekdayOrdinal = (date) => {
   const day = Number(date.slice(8));
   return { nth: Math.ceil(day / 7), last: day + 7 > daysInMonth(date) };
 };
+var untilDate = (until, zone) => {
+  const date = `${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}`;
+  if (!isDateKey(date))
+    return null;
+  if (until.length === 8)
+    return date;
+  const instant = Date.parse(`${date}T${until.slice(9, 11)}:${until.slice(11, 13)}:${until.slice(13, 15)}Z`);
+  return Number.isNaN(instant) ? null : zonedDateMinutes(instant, zone).date;
+};
 var utcStamp = (instant) => new Date(instant).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 var untilBefore = (occurrence) => {
   if (occurrence.date && isDateKey(occurrence.date))
@@ -1026,7 +1052,7 @@ var isShortText = (value, max) => typeof value === "string" && value.length <= m
 var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due));
 var GOOGLE_NOTES_MAX = 8192;
 var isGoogleTaskId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
-var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start"];
+var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start", "busy", "visibility"];
 var validateGtaskTemplate = (value) => {
   if (!isRecord2(value))
     return "repeat template must be an object";
@@ -1042,6 +1068,10 @@ var validateGtaskTemplate = (value) => {
     return "template deadline must be days from the date, or null";
   if (!isDateKey(value.start))
     return "template start must be a date";
+  if (value.busy !== undefined && value.busy !== true)
+    return "template busy is true, or left out (free)";
+  if (value.visibility !== undefined && value.visibility !== "public" && value.visibility !== "private")
+    return "template visibility is public or private, or left out (the default)";
   return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? "template has an unknown field" : null;
 };
 var GTASK_EXCEPTION_FIELDS = ["skip", "title", "notes", "date", "time", "duration", "deadline"];
@@ -1080,8 +1110,10 @@ var validateKeptPatch = (patch) => {
       return "duration must be 5 to 1440 minutes, or null";
     else if (key === "deadline" && !(value === null || isDateKey(value)))
       return "deadline must be a date or null";
-    else if (key === "starred" && typeof value !== "boolean")
-      return "starred must be true or false";
+    else if ((key === "starred" || key === "busy") && typeof value !== "boolean")
+      return `${key} must be true or false`;
+    else if (key === "visibility" && value !== "default" && value !== "public" && value !== "private")
+      return "visibility must be default, public or private";
     else if (key === "repeat") {
       if (value === null)
         continue;
@@ -1113,7 +1145,7 @@ var validateKeptPatch = (patch) => {
       }
       if (Object.keys(value).some((field) => !["rule", "seriesId", "index", "next", "on", "template", "exceptions"].includes(field)))
         return "repeat has an unknown field";
-    } else if (!["time", "duration", "deadline", "starred", "repeat"].includes(key))
+    } else if (!["time", "duration", "deadline", "starred", "repeat", "busy", "visibility"].includes(key))
       return `unknown field ${key}`;
   }
   return null;
@@ -1209,7 +1241,7 @@ var validateSettingsPatch = (patch) => {
       return "googleTimebox must be a Google account and calendar, or null";
     else if (key === "googleTasksOnComplete" && !["ask", "complete", "nothing"].includes(value))
       return "googleTasksOnComplete must be ask, complete or nothing";
-    else if ((key === "googleTasksImportCompletion" || key === "googleTasksDueFromPlan" || key === "googleTasksOnCalendar") && typeof value !== "boolean")
+    else if ((key === "googleTasksImportCompletion" || key === "googleTasksDueFromPlan" || key === "googleTasksOnCalendar" || key === "googleTaskNotifications") && typeof value !== "boolean")
       return `${key} must be true or false`;
     else if (key === "googleCalendarsIntroduced" && !(Array.isArray(value) && value.length <= 50 && value.every((email) => typeof email === "string" && email.length <= 254 && email.includes("@"))))
       return "googleCalendarsIntroduced must be at most 50 email addresses";
@@ -1217,7 +1249,7 @@ var validateSettingsPatch = (patch) => {
       return "agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null";
     else if (key === "agentPresets")
       continue;
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar", "googleCalendarsIntroduced"].includes(key))
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar", "googleTaskNotifications", "googleCalendarsIntroduced"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
@@ -3889,6 +3921,7 @@ ${calendarId}`);
       start: { dateTime: timebox.start },
       end: { dateTime: timebox.end },
       transparency: "opaque",
+      ...timebox.visibility ? { visibility: timebox.visibility } : {},
       extendedProperties: { private: { [PLANNER_BLOCK_KEY]: timebox.blockId, plannerTaskId: timebox.taskId } }
     };
     const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
@@ -4100,9 +4133,9 @@ ${calendarId}`;
     const tasks = items.map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item));
     return { tasks: tasks.sort((a, b) => a.position.localeCompare(b.position)), complete };
   }
-  async dueTasks(account, from, to) {
+  async dueTasks(account, from, to, open = false) {
     const lists = await this.taskLists(account);
-    const range = { showCompleted: "true", showHidden: "true", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` };
+    const range = { showCompleted: open ? "false" : "true", showHidden: open ? "false" : "true", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` };
     const perList = await mapLimited(lists, 4, async (list) => {
       const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(list.id)}/tasks?${new URLSearchParams({ ...range, ...token ? { pageToken: token } : {} })}`, LIMITS.due);
       if (!complete)
@@ -4206,6 +4239,12 @@ var calendarKey = (account, calendarId) => `${account}
 ${calendarId}`;
 var messageOf = (error) => error instanceof Error ? error.message : String(error);
 var isGone2 = (error) => error instanceof GoogleError && error.status === 404;
+var sessionVisibility = (state, taskId) => {
+  const source = state.tasks[taskId]?.source;
+  if (source?.kind !== "gtask" || !source.account)
+    return;
+  return state.googleTasks?.[googleTaskKey(source.account, source.id)]?.visibility ?? "default";
+};
 var READ_DEADLINE_MS = 14000;
 var SLACK_MS = 1e4;
 var MAX_LOOKUPS = 10;
@@ -4308,18 +4347,19 @@ ${[...group.ids].sort().join(",")}`;
     }));
     return { items, errors };
   }
-  async read(accounts, from, to, refresh) {
+  async read(accounts, from, to, refresh, open = false) {
     const items = [];
     const errors = [];
     await Promise.all(accounts.map(async (account) => {
       const key = `${account}
 ${from}
-${to}`;
+${to}${open ? `
+open` : ""}`;
       let hit = this.cache.get(key);
       if (!hit || refresh || Date.now() - hit.at > this.ttlMs) {
         try {
           const before = this.writes;
-          hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to), READ_DEADLINE_MS, "Google Tasks") };
+          hit = { at: Date.now(), items: await withDeadline(this.data.dueTasks(account, from, to, open), READ_DEADLINE_MS, "Google Tasks") };
           if (this.writes === before)
             this.cache.set(key, hit);
         } catch (error) {
@@ -4422,7 +4462,7 @@ class GoogleTimeboxes {
   }
   observe(before, after) {
     const target = after.settings.googleTimebox;
-    const renamed = new Set(Object.values(after.tasks).filter((task) => before.tasks[task.id] && before.tasks[task.id].title !== task.title).map((task) => task.id));
+    const renamed = new Set(Object.values(after.tasks).filter((task) => before.tasks[task.id] && (before.tasks[task.id].title !== task.title || sessionVisibility(before, task.id) !== sessionVisibility(after, task.id))).map((task) => task.id));
     for (const block of Object.values(after.blocks)) {
       const previous = before.blocks[block.id];
       const moved = !previous || previous.start !== block.start || previous.end !== block.end;
@@ -4459,7 +4499,8 @@ class GoogleTimeboxes {
     const target = link ?? state.settings.googleTimebox;
     if (!target)
       return;
-    const timebox = { blockId, taskId: block.taskId, title: state.tasks[block.taskId]?.title ?? "Planner", start: block.start, end: block.end };
+    const visibility = sessionVisibility(state, block.taskId);
+    const timebox = { blockId, taskId: block.taskId, title: state.tasks[block.taskId]?.title ?? "Planner", start: block.start, end: block.end, ...visibility ? { visibility } : {} };
     let eventId;
     try {
       eventId = await this.data.putTimebox(target.account, target.calendarId, timebox, link?.eventId ?? null);
@@ -4642,11 +4683,142 @@ var googleWriteRoute = async (req, url, ctx) => {
   return null;
 };
 
+// service/taskNotifications.ts
+import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
+import { dirname as dirname3 } from "node:path";
+
 // src/domain/gcalendar.ts
 var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 var SHORT = MONTHS.map((month) => month.slice(0, 3));
+var parts2 = (key) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
+var keyOf2 = (year, month, day) => `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+var daysInMonth4 = (key) => {
+  const { year, month } = parts2(key);
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+};
+var addMonths = (key, n) => {
+  const { year, month, day } = parts2(key);
+  const index = year * 12 + (month - 1) + n;
+  const first = keyOf2(Math.floor(index / 12), index % 12 + 1, 1);
+  return keyOf2(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth4(first)));
+};
 
 // src/domain/gtaskKept.ts
+var keptFor = (state, item) => state.googleTasks?.[googleTaskKey(item.account, item.id)] ?? null;
+var nthWeekday = (monthKey, code) => {
+  const match = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/.exec(code);
+  if (!match)
+    return null;
+  const nth = Number(match[1] ?? "1");
+  const day = WEEKDAY_CODES.indexOf(match[2]);
+  const first = `${monthKey.slice(0, 8)}01`;
+  const length = daysInMonth4(first);
+  const offset = (day - weekday(first) + 7) % 7;
+  const dates = Array.from({ length: 5 }, (_, index) => 1 + offset + index * 7).filter((value) => value <= length);
+  const chosen = nth > 0 ? dates[nth - 1] : dates[dates.length + nth];
+  return chosen ? `${first.slice(0, 8)}${String(chosen).padStart(2, "0")}` : null;
+};
+var stepRule = (rule, date) => {
+  const every = rule.interval;
+  switch (rule.freq) {
+    case "DAILY":
+      return addDays(date, every);
+    case "WEEKLY": {
+      const days = [...new Set(rule.byDay.map((code) => WEEKDAY_CODES.indexOf(code.slice(-2))).filter((day) => day >= 0))];
+      if (!days.length)
+        return addDays(date, 7 * every);
+      const start = WEEKDAY_CODES.indexOf(rule.other.find(([key]) => key === "WKST")?.[1] ?? "MO");
+      const place = (day) => (day - Math.max(0, start) + 7) % 7;
+      const sorted = days.sort((a, b) => place(a) - place(b));
+      const here = place(weekday(date));
+      const later = sorted.find((day) => place(day) > here);
+      return later !== undefined ? addDays(date, place(later) - here) : addDays(date, 7 * every - here + place(sorted[0]));
+    }
+    case "MONTHLY":
+      for (let step = 1;step <= 48; step++) {
+        const month = addMonths(`${date.slice(0, 8)}01`, step * every);
+        let candidate;
+        if (rule.byDay.length === 1)
+          candidate = nthWeekday(month, rule.byDay[0]);
+        else {
+          const wanted = rule.byMonthDay[0] ?? Number(date.slice(8));
+          const length = daysInMonth4(month);
+          const day = wanted < 0 ? length + wanted + 1 : wanted;
+          candidate = day >= 1 && day <= length ? `${month.slice(0, 8)}${String(day).padStart(2, "0")}` : null;
+        }
+        if (candidate && candidate > date)
+          return candidate;
+      }
+      return null;
+    case "YEARLY":
+      for (let step = 1;step <= 8; step++) {
+        const year = Number(date.slice(0, 4)) + step * every;
+        const month = rule.byMonth[0] ?? Number(date.slice(5, 7));
+        const day = rule.byMonthDay[0] ?? Number(date.slice(8));
+        const first = `${year}-${String(month).padStart(2, "0")}-01`;
+        if (day >= 1 && day <= daysInMonth4(first))
+          return `${first.slice(0, 8)}${String(day).padStart(2, "0")}`;
+      }
+      return null;
+  }
+};
+var UPCOMING_MAX = 62;
+var STEPS_MAX = 4000;
+var occurrenceValues = (template, on, change) => ({
+  title: change?.title ?? template.title,
+  notes: change?.notes ?? template.notes,
+  due: change?.date ?? on,
+  time: change?.time !== undefined ? change.time : template.time,
+  duration: change?.time !== undefined ? change.duration ?? null : template.duration,
+  deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline)
+});
+var upcomingValues = (task) => occurrenceValues(task.template, task.on, task.change);
+var upcomingTasks = (kept, shown, from, to, today) => {
+  const taken = new Set;
+  for (const item of shown) {
+    if (!item.due)
+      continue;
+    const series = kept[googleTaskKey(item.account, item.id)]?.repeat?.seriesId;
+    if (series)
+      taken.add(`${series}
+${item.due}`);
+  }
+  const projected = new Set;
+  const out = [];
+  for (const source of Object.values(kept)) {
+    const repeat = source.repeat;
+    const rule = repeat && !repeat.next && repeat.on && repeat.template ? parseRRule(repeat.rule) : null;
+    if (!repeat?.on || !repeat.template || !rule)
+      continue;
+    const until = rule.until ? untilDate(rule.until, "UTC") : null;
+    const changes = repeat.exceptions ?? {};
+    const last = Object.entries(changes).reduce((latest, [on, change]) => change.date && change.date >= from && change.date <= to && on > latest ? on : latest, to);
+    let date = repeat.on;
+    let index = repeat.index;
+    for (let step = 0, made = 0;step < STEPS_MAX && made < UPCOMING_MAX; step++) {
+      if (rule.count !== null && index >= rule.count)
+        break;
+      const next = stepRule(rule, date);
+      if (!next || until && next > until || next > last)
+        break;
+      date = next;
+      index += 1;
+      const change = changes[next];
+      const on = change?.date ?? next;
+      if (change?.skip || on < from || on > to || on < today)
+        continue;
+      const own = `${repeat.seriesId}
+${next}`;
+      if (projected.has(own) || taken.has(`${repeat.seriesId}
+${on}`))
+        continue;
+      projected.add(own);
+      out.push({ account: source.account, listId: source.listId, taskId: source.taskId, seriesId: repeat.seriesId, rule: repeat.rule, index, on: next, date: on, template: repeat.template, ...change ? { change } : {} });
+      made++;
+    }
+  }
+  return out;
+};
 var deadlineGroups = (kept, accounts, from, to) => {
   const groups = new Map;
   for (const entry of Object.values(kept)) {
@@ -4659,6 +4831,144 @@ ${entry.listId}`;
     groups.set(key, group);
   }
   return [...groups.values()];
+};
+
+// src/domain/gtaskNotify.ts
+var TASK_NOTIFY_MINUTES = 9 * 60;
+var taskNotifications = (dueToday, deadlineTasks, kept, today, zone) => {
+  const out = [];
+  const state = { googleTasks: kept };
+  const nine = instantAt(today, TASK_NOTIFY_MINUTES, zone);
+  const add = (notification, setAt) => {
+    if (!setAt || !(Date.parse(setAt) > Date.parse(notification.at)))
+      out.push(notification);
+  };
+  const seen = new Set;
+  for (const item of [...dueToday, ...deadlineTasks]) {
+    const own = `${item.account}
+${item.id}`;
+    if (item.completed || seen.has(own))
+      continue;
+    seen.add(own);
+    const found = keptFor(state, item);
+    const base = { title: item.title, account: item.account, listId: item.listId, taskId: item.id, date: today };
+    const deadline = found?.deadline === today;
+    if (item.due === today) {
+      const time = found?.time ?? null;
+      if (time !== null)
+        add({ ...base, key: `time:${item.account}:${item.id}:${today}:${time}`, kind: "time", at: instantAt(today, time, zone), time, duration: found?.duration ?? null }, found?.updatedAt);
+      else if (!deadline)
+        add({ ...base, key: `day:${item.account}:${item.id}:${today}`, kind: "day", at: nine, time: null, duration: null }, item.updated);
+    }
+    if (deadline)
+      add({ ...base, key: `deadline:${item.account}:${item.id}:${today}`, kind: "deadline", at: nine, time: null, duration: null }, found?.updatedAt);
+  }
+  for (const upcoming of upcomingTasks(kept, dueToday, today, today, today)) {
+    const values = upcomingValues(upcoming);
+    if (values.due !== today)
+      continue;
+    const base = { title: values.title, account: upcoming.account, listId: upcoming.listId, taskId: upcoming.taskId, date: today };
+    const id = `upcoming:${upcoming.seriesId}:${upcoming.on}`;
+    const setAt = keptFor(state, { account: upcoming.account, id: upcoming.taskId })?.updatedAt;
+    const deadline = values.deadline === today;
+    if (values.time !== null)
+      add({ ...base, key: `time:${id}:${today}:${values.time}`, kind: "time", at: instantAt(today, values.time, zone), time: values.time, duration: values.duration }, setAt);
+    else if (!deadline)
+      add({ ...base, key: `day:${id}:${today}`, kind: "day", at: nine, time: null, duration: null }, setAt);
+    if (deadline)
+      add({ ...base, key: `deadline:${id}:${today}`, kind: "deadline", at: nine, time: null, duration: null }, setAt);
+  }
+  return out.sort((a, b) => a.at.localeCompare(b.at) || a.key.localeCompare(b.key));
+};
+var dueNotifications = (all, now, given) => all.filter((item) => Date.parse(item.at) <= now && !given.has(item.key));
+var nextNotificationAt = (all, now, given) => all.find((item) => Date.parse(item.at) > now && !given.has(item.key))?.at ?? null;
+
+// service/taskNotifications.ts
+var KEEP_MS = 3 * 24 * 60 * 60000;
+
+class TaskNotifications {
+  file;
+  state;
+  reads;
+  now;
+  given = null;
+  queue = Promise.resolve();
+  constructor(file, state, reads, now = Date.now) {
+    this.file = file;
+    this.state = state;
+    this.reads = reads;
+    this.now = now;
+  }
+  take() {
+    const next = this.queue.then(() => this.takeNow());
+    this.queue = next.catch(() => {});
+    return next;
+  }
+  async takeNow() {
+    const state = this.state();
+    const none = { notifications: [], next: null, nextIn: null, errors: [] };
+    if (!state.settings.googleTaskNotifications)
+      return none;
+    const accounts = await this.reads.accounts();
+    if (!accounts.length)
+      return none;
+    const zone = state.settings.timezone ?? "UTC";
+    const today = todayIn(zone, new Date(this.now()));
+    const [due, deadlines] = await Promise.all([this.reads.due(accounts, today), this.reads.byIds(deadlineGroups(state.googleTasks, accounts, today, today))]);
+    const all = taskNotifications(due.items, deadlines.items, this.state().googleTasks, today, zone);
+    const given = await this.load();
+    const now = this.now();
+    const keys = new Set(given.keys());
+    const fresh = dueNotifications(all, now, keys);
+    if (fresh.length) {
+      for (const item of fresh)
+        given.set(item.key, now);
+      await this.save(given, now);
+    }
+    const next = nextNotificationAt(all, now, keys);
+    return { notifications: fresh, next, nextIn: next ? Date.parse(next) - now : null, errors: [...due.errors, ...deadlines.errors] };
+  }
+  async load() {
+    if (this.given)
+      return this.given;
+    const given = new Map;
+    try {
+      const parsed = JSON.parse(await readFile3(this.file, "utf8"));
+      for (const [key, at] of Object.entries(parsed.given ?? {}))
+        if (typeof at === "number")
+          given.set(key, at);
+    } catch {}
+    this.given = given;
+    return given;
+  }
+  async save(given, now) {
+    for (const [key, at] of given)
+      if (now - at > KEEP_MS)
+        given.delete(key);
+    await mkdir3(dirname3(this.file), { recursive: true, mode: 448 });
+    const temp = `${this.file}.${process.pid}.tmp`;
+    await writeFile3(temp, `${JSON.stringify({ version: 1, given: Object.fromEntries(given) })}
+`, { mode: 384 });
+    await rename3(temp, this.file);
+  }
+}
+
+// src/domain/gtaskPending.ts
+var PENDING_DAYS = 365;
+var pendingRange = (today) => ({ from: addDays(today, -PENDING_DAYS), to: addDays(today, -1) });
+var pendingTasks = (items, today) => {
+  const { from, to } = pendingRange(today);
+  const seen = new Set;
+  const out = [];
+  for (const item of items) {
+    const key = `${item.account}
+${item.id}`;
+    if (item.completed || !item.due || item.due < from || item.due > to || seen.has(key))
+      continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out.sort((a, b) => (b.due ?? "").localeCompare(a.due ?? "") || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
 };
 
 // service/agents.ts
@@ -5169,13 +5479,19 @@ sync = new SyncManager(store, planner, log);
 await sync.init();
 var snapshot = () => ({ ...planner.snapshot(), sync: sync.status() });
 var github = new GitHubSource;
-var feeds = new CalendarFeeds(join4(dirname3(dir), "cache"));
-var linearWorkspaces = new LinearWorkspaces(join4(dirname3(dir), "linear-workspaces.json"), undefined, log);
-var google = new GoogleAccounts(join4(dirname3(dir), "google-accounts.json"), undefined, undefined, log);
+var feeds = new CalendarFeeds(join4(dirname4(dir), "cache"));
+var linearWorkspaces = new LinearWorkspaces(join4(dirname4(dir), "linear-workspaces.json"), undefined, log);
+var google = new GoogleAccounts(join4(dirname4(dir), "google-accounts.json"), undefined, undefined, log);
 var googleData = new GoogleData(google);
 var googleCalendars = new GoogleCalendars(googleData);
 var googleDueTasks = new GoogleDueTasks(googleData);
 var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
+var taskAccounts = async () => (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email);
+var taskNotifications2 = new TaskNotifications(join4(dirname4(dir), "task-notifications.json"), () => planner.state, {
+  accounts: taskAccounts,
+  due: (accounts, date) => googleDueTasks.read(accounts, date, date, false),
+  byIds: (groups) => googleDueTasks.byIds(groups, false)
+});
 var opencodeConfig = opencodeConfigDir();
 var opencodeInfo = new OpenCodeInfo;
 var agentCommands = new CommandFiles(opencodeConfig, log);
@@ -5264,6 +5580,15 @@ var googleRoute = async (req, url) => {
     if (!isEmail2(email) || !isGoogleId(list))
       return { status: 400, body: { error: "account and list are required" } };
     return ok({ tasks: await googleData.tasks(email, list) });
+  }
+  if (path === "/google/tasks/pending" && req.method === "GET") {
+    const today = todayIn(planner.state.settings.timezone ?? "UTC");
+    const { from, to } = pendingRange(today);
+    const read = await googleDueTasks.read(await taskAccounts(), from, to, url.searchParams.get("refresh") === "1", true);
+    return ok({ tasks: pendingTasks(read.items, today), today, from, to, errors: read.errors });
+  }
+  if (path === "/google/tasks/notifications" && req.method === "POST") {
+    return ok(await taskNotifications2.take());
   }
   if (path === "/google/tasks/linked" && req.method === "POST") {
     const body = await readJson(req);
@@ -5496,12 +5821,12 @@ var server = http2.createServer(async (req, res) => {
       const calendars = Object.values(planner.state.calendars);
       const timeMin = instantAt(from, 0, zone);
       const timeMax = instantAt(addDays(to, 1), 0, zone);
-      const taskAccounts = planner.state.settings.googleTasksOnCalendar ? (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email) : [];
+      const shownAccounts = planner.state.settings.googleTasksOnCalendar ? await taskAccounts() : [];
       const [feed, fromGoogle, due, deadlines] = await Promise.all([
         feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
         googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
-        googleDueTasks.read(taskAccounts, from, to, refresh),
-        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, taskAccounts, from, to), refresh)
+        googleDueTasks.read(shownAccounts, from, to, refresh),
+        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, shownAccounts, from, to), refresh)
       ]);
       const dueEvents = due.items.flatMap((item) => item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
       json(res, 200, {

@@ -176,6 +176,7 @@ export const MonthView = ({ anchor, events, onDay }: { anchor: DateKey; events: 
         {movable && <span class="task-box" aria-hidden="true">{task!.completed ? '☑' : '☐'}</span>}
         {event.taskDeadline && <span class="task-flag" aria-hidden="true">⚑</span>}
         {event.upcoming && <span class="task-repeat" aria-hidden="true"><Icon name="repeat" size={12} /></span>}
+        {event.pendingTasks && <span class="task-pending" aria-hidden="true"><Icon name="taskAlt" size={14} /></span>}
         <span class="chip-title">{event.title}</span>
         {deadline && <span class={`task-deadline${deadline.overdue ? ' is-overdue' : ''}`} aria-hidden="true">⚑ {deadline.label}</span>}
         {planned && <span class="bar-badge" aria-hidden="true">✓</span>}

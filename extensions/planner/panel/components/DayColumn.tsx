@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { DateKey, Task } from '../../src/domain/types.ts';
 import { playlistTimes } from '../../src/domain/schedule.ts';
+import { busyTaskEvents } from '../../src/domain/gtaskKept.ts';
 import { useCalendarEvents } from '../lib/calendar.ts';
 import { useNow } from '../lib/time.ts';
 import { addDays, formatMinutes, monthDay, weekdayName } from '../../src/domain/dates.ts';
@@ -109,9 +110,10 @@ const PlaylistList = ({ date, tasks }: { date: DateKey; tasks: Task[] }) => {
   const now = useNow(true, 60_000);
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const blocks = blocksOnDay(view.state, date);
+  // Around sessions, busy events and Google tasks set Busy (an upcoming occurrence of a Busy series too).
   const busy = [
     ...blocks.map((block) => ({ start: Date.parse(block.start), end: Date.parse(block.end) })),
-    ...feed.events.filter((event) => event.busy).map((event) => ({ start: Date.parse(event.start), end: Date.parse(event.end) })),
+    ...[...feed.events.filter((event) => event.busy && !event.googleTask), ...busyTaskEvents(feed.events, view.state.googleTasks, date, date, view.today, zone)].map((event) => ({ start: Date.parse(event.start), end: Date.parse(event.end) })),
   ];
   const boxed = new Set(blocks.map((block) => block.taskId));
   const entries = playlistTimes(
