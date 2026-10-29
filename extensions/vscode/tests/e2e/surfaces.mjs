@@ -1126,7 +1126,7 @@ const savedTabsOf = (folder) => {
 
 // ── 13. The page alone (what a new browser tab from Cmd/Ctrl+click loads: no rail view, no terminal). The last tab
 // closed, OpenChamber keeps the page a few seconds, hidden, and the page keeps the folder's tabs and VS Code's state ──
-const pageAlone = async () => {
+const pageAlone = async (chat) => {
   const size = '1440x900, the page alone';
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   await context.request.post(`${base}/auth/session`, { data: { password } });
@@ -1134,9 +1134,12 @@ const pageAlone = async () => {
   const roles = () => Promise.all(page.frames().filter((frame) => frame.url().includes('/workbench/index.html'))
     .map((frame) => frame.evaluate(() => document.documentElement.dataset.ocVscodeRole).catch(() => null))).then((list) => list.filter(Boolean));
   try {
-    // The address a Cmd/Ctrl+click on a link to linked.md opens (`links.page` + the editor's route).
+    // The address a Cmd/Ctrl+click on a link to linked.md opens (`links.page` + the editor's route), on a chat: a new
+    // browser tab of a window starts on the window's chat, and this context has none, so the link names it. On
+    // OpenChamber's new-chat draft the host's deep link can lose the page: the draft changes again as it gets its
+    // folder (or as a chat is restored), which closes pages, and on a slow machine that comes after the page opened.
     const key = `vscode-remote://${new URL(vscodeUrl).host}${join(project, 'linked.md')}`;
-    await page.goto(`${base}/?extension=${VSCODE}&route=${encodeURIComponent(`/editor?key=${encodeURIComponent(key)}`)}`);
+    await page.goto(`${base}/?session=${chat}&extension=${VSCODE}&route=${encodeURIComponent(`/editor?key=${encodeURIComponent(key)}`)}`);
     const linkedShown = await until(async () => await pageShown(page) && await pageFrame(page).locator('.monaco-editor[data-uri$="/linked.md"] .view-line').first().isVisible(), 180_000);
     await pageStarted(page);
     const alone = await roles();
@@ -1346,7 +1349,7 @@ try {
   await journey({ width: 1024, height: 768 }, seeded.chats, false);
   await openInVscode(seeded.chats, seeded.chatB);
   await withoutStrip(seeded.chats);
-  await pageAlone();
+  await pageAlone(seeded.chats[0]);
   await twoTabs(seeded.chats[0]);
   await terminalAfterSessions(seeded.chats[0]);
 } catch (error) {
