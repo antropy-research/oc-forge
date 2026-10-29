@@ -178,3 +178,22 @@ export const railEntries = (installed: readonly InstalledContainers[], max = ENT
 /** The entry that shows a view container, or null (`workbench.view.scm` → `scm`; one past the rail's room → its overflow entry). */
 export const entryOfView = (entries: readonly RailEntry[], view: string): string | null =>
   entries.find((entry) => entry.view === view || entry.more?.some((item) => item.view === view))?.id ?? null;
+
+/**
+ * What a rail view makes of the container VS Code shows (`view`) once it has read the rail again (`now`; `before`, the
+ * read before): the entry to light, its own or "Additional Views", as containers come and go. With none, its extension
+ * was uninstalled and VS Code keeps the container until a reload (the extension ran), while the host lights the first
+ * view: left out by two reads in a row (`missing`, what the last call answered; not one read that failed), that first
+ * view is the one to show. A container opened later without an entry stays.
+ */
+export const followView = (before: readonly RailEntry[], now: readonly RailEntry[], view: string, missing: string | null): {
+  light: string | null;
+  show: string | null;
+  missing: string | null;
+} => {
+  const entry = entryOfView(now, view);
+  if (entry) return { light: entry, show: null, missing: null };
+  const first = now.find((item) => !item.zone && item.view);
+  if (missing === view && first) return { light: null, show: first.id, missing: null };
+  return { light: null, show: null, missing: entryOfView(before, view) ? view : null };
+};

@@ -715,7 +715,8 @@ var installedFolders = (listing, obsolete, extensionsPath) => {
       continue;
     if (gone.has(`${id}-${version}`.toLowerCase()) || relative && gone.has(relative.toLowerCase()))
       continue;
-    folders.push({ key: `${id}@${version}:${folder}`, folder });
+    const installed = isRecord(item.metadata) && typeof item.metadata.installedTimestamp === "number" ? item.metadata.installedTimestamp : "";
+    folders.push({ key: `${id}@${version}:${folder}:${installed}`, folder });
   }
   return folders;
 };

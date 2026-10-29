@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readOcForgeRailEntries } from '../../../adapters/openchamber/client/index.ts';
-import { BUILT_IN_ENTRIES, codiconIcon, declaredContainers, ENTRIES_MAX, entryIdOf, entryOfView, MORE_ENTRY_ID, railEntries, railSvg, TERMINAL_ENTRY } from '../src/rail.ts';
+import { BUILT_IN_ENTRIES, codiconIcon, declaredContainers, ENTRIES_MAX, entryIdOf, entryOfView, followView, MORE_ENTRY_ID, type RailEntry, railEntries, railSvg, TERMINAL_ENTRY } from '../src/rail.ts';
 import { installedFolders, Rail } from '../service/rail.ts';
 import type { VscodeServer } from '../service/server.ts';
 
@@ -55,6 +55,53 @@ describe('VS Code\'s activity bar as rail entries', () => {
     expect(fewer.find((entry) => entry.id === MORE_ENTRY_ID)!.more).toHaveLength(15);
     expect(covered(fewer, 40)).toBe(true);
     expect(entries.slice(0, 32).map((entry) => entry.id)).toEqual(expect.arrayContaining(['explorer', 'extensions', 'terminal', MORE_ENTRY_ID]));
+  });
+
+  test('as extensions come and go, "Additional Views" holds the containers left then, and a container moves between its own entry and it', () => {
+    const extension = (prefix: string, count: number) => ({ extension: prefix, containers: Array.from({ length: count }, (_, index) => ({ id: `${prefix}${index + 1}`, title: `${prefix} ${index + 1}`, icon: '$(beaker)' })) });
+    const view = (id: string) => `workbench.view.extension.${id}`;
+    const more = (entries: ReturnType<typeof railEntries>) => entries.find((entry) => entry.id === MORE_ENTRY_ID);
+    // 96 containers: 93 entries, 94-96 behind "Additional Views".
+    const before = railEntries([extension('a', 96)]);
+    expect(more(before)!.more!.map((item) => item.view)).toEqual(['a94', 'a95', 'a96'].map(view));
+    // Another extension's container, installed later (listed after the first): behind it too, the title counting it.
+    const after = railEntries([extension('a', 96), extension('b', 1)]);
+    expect(more(after)).toMatchObject({ title: 'Additional Views (4)' });
+    expect(more(after)!.more!.map((item) => item.view)).toEqual(['a94', 'a95', 'a96', 'b1'].map(view));
+    expect(entryOfView(after, view('b1'))).toBe(MORE_ENTRY_ID);
+    // Uninstalled again: as before.
+    expect(railEntries([extension('a', 96)])).toEqual(before);
+    // 94 containers fill the rail; one more moves the 94th behind "Additional Views", and its removal brings it back.
+    expect(entryOfView(railEntries([extension('a', 94)]), view('a94'))).toBe('a94');
+    expect(entryOfView(railEntries([extension('a', 94), extension('b', 1)]), view('a94'))).toBe(MORE_ENTRY_ID);
+    expect(railEntries([extension('a', 94), extension('b', 1)]).some((entry) => entry.id === 'a94')).toBe(false);
+  });
+
+  test('a rail view lights the entry of the container shown as containers come and go, and shows the first view once it has none', () => {
+    const extension = (prefix: string, count: number) => ({ extension: prefix, containers: Array.from({ length: count }, (_, index) => ({ id: `${prefix}${index + 1}`, title: `${prefix} ${index + 1}`, icon: '$(beaker)' })) });
+    const view = (id: string) => `workbench.view.extension.${id}`;
+    const filled = railEntries([extension('a', 94)]);
+    const crowded = railEntries([extension('a', 94), extension('b', 1)]);
+    const lit = (before: RailEntry[], now: RailEntry[], shown: string) => followView(before, now, shown, null).light;
+    // Its own entry, a built-in's too.
+    expect(lit(filled, filled, view('a94'))).toBe('a94');
+    expect(lit(filled, filled, 'workbench.view.scm')).toBe('scm');
+    // One more installed moves it behind "Additional Views", and that entry is lit; uninstalled, its own again.
+    expect(lit(filled, crowded, view('a94'))).toBe(MORE_ENTRY_ID);
+    expect(lit(crowded, filled, view('a94'))).toBe('a94');
+    // Uninstalled while it shows (VS Code keeps it until a reload): after two reads without it, the first view.
+    const first = followView(crowded, filled, view('b1'), null);
+    expect(first).toEqual({ light: null, show: null, missing: view('b1') });
+    expect(followView(filled, filled, view('b1'), first.missing)).toEqual({ light: null, show: 'explorer', missing: null });
+    // Behind "Additional Views", which stays for the others: the same.
+    const overflow = railEntries([extension('a', 96), extension('b', 1)]);
+    const fewer = railEntries([extension('a', 96)]);
+    expect(followView(fewer, fewer, view('b1'), followView(overflow, fewer, view('b1'), null).missing).show).toBe('explorer');
+    // One read that missed it (a manifest it failed to read): the next one lists it again, and nothing changes.
+    expect(followView(filled, crowded, view('b1'), first.missing)).toEqual({ light: MORE_ENTRY_ID, show: null, missing: null });
+    // A container the rail never listed, or opened again after that (the command palette): it stays, nothing lit.
+    expect(followView(filled, filled, view('b1'), null)).toEqual({ light: null, show: null, missing: null });
+    expect(followView(filled, filled, 'workbench.view.testing', null)).toEqual({ light: null, show: null, missing: null });
   });
 
   test('entry ids are kebab-case, unique, and never a built-in\'s', () => {
@@ -112,6 +159,10 @@ describe('the service reads the installed extensions from the VS Code Server', (
       '/elsewhere/pub.beta',
     ]);
     expect(installedFolders('nope', null, '/x')).toEqual([]);
+    // Reinstalled, the same version: another key, so its manifest (its containers' titles and icons) is read again.
+    const at = (installedTimestamp: number) => installedFolders([{ ...listing[0], metadata: { installedTimestamp } }], null, '/x')[0]!.key;
+    expect(at(1)).not.toBe(at(2));
+    expect(at(1)).toBe(at(1));
   });
 
   test('entries from the server\'s files, kept when it is gone, and its address kept privately', async () => {
@@ -157,8 +208,11 @@ describe('the service reads the installed extensions from the VS Code Server', (
     files['/ext/extensions.json'] = '[]';
     now += 5_000;
     expect((await rail.entries()).some((entry) => entry.id === 'alpha-view')).toBe(false);
-    // After a restart the service still knows where to look.
+    // Installed again while the service runs: back with the next read.
     files['/ext/extensions.json'] = JSON.stringify(listing.slice(0, 1));
+    now += 5_000;
+    expect((await rail.entries()).some((entry) => entry.id === 'alpha-view')).toBe(true);
+    // After a restart the service still knows where to look.
     const again = new Rail(saved, () => server, () => {}, () => now);
     expect((await again.entries()).some((entry) => entry.id === 'alpha-view')).toBe(true);
   });

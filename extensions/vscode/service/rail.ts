@@ -38,7 +38,9 @@ export const installedFolders = (listing: unknown, obsolete: unknown, extensions
     const folder = relative ? `${extensionsPath.replace(/\/+$/, '')}/${relative}` : location;
     if (!id || !folder || !folder.startsWith('/')) continue;
     if (gone.has(`${id}-${version}`.toLowerCase()) || (relative && gone.has(relative.toLowerCase()))) continue;
-    folders.push({ key: `${id}@${version}:${folder}`, folder });
+    // Its manifest is read once per key: the install's time too, so a reinstall of the same version is read again.
+    const installed = isRecord(item.metadata) && typeof item.metadata.installedTimestamp === 'number' ? item.metadata.installedTimestamp : '';
+    folders.push({ key: `${id}@${version}:${folder}:${installed}`, folder });
   }
   return folders;
 };

@@ -8,7 +8,7 @@
 // view or the terminal becomes a header tab, which shows the page, which opens
 // the editor; what to open waits in the extension's service.
 import type { OcForgeClient, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
-import { entryOfView, type RailEntry } from '../src/rail.ts';
+import { followView, type RailEntry } from '../src/rail.ts';
 import {
   editorKeyOf,
   editorRoute,
@@ -70,6 +70,9 @@ export interface SurfaceContext {
 
 const log = (message: string, error?: unknown): void => console.warn(`[OpenChamber VS Code] ${message}`, error ?? '');
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** How often a rail view reads the rail again while it shows (the host polls it every 2 s). */
+const RAIL_FOLLOW_MS = 3_000;
 
 // ── Layout ──────────────────────────────────────────────────────────────
 
@@ -370,7 +373,18 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   const { forge, services } = context;
   const views = services.get<ViewsService>('viewsService');
   const panes = services.get<PaneCompositePartService>('paneCompositePartService');
+  // The rail as the service lists it. Extensions come and go while this frame runs, and with them an entry's title,
+  // the containers behind "Additional Views" and the entry that shows a container: the list is read again when an
+  // entry is chosen, when VS Code opens a container, and every few seconds while the frame shows (the host polls its
+  // own copy and tells frames nothing). Only the newest read is kept.
   let entries = await context.railEntries().catch(() => [] as RailEntry[]);
+  let reads = 0;
+  const refresh = async (): Promise<RailEntry[]> => {
+    const read = ++reads;
+    const next = await context.railEntries().catch(() => null);
+    if (next && read === reads) entries = next;
+    return entries;
+  };
   let showing: string | null = null;
   /** The container behind "Additional Views" shown last. */
   let lastMore: string | null = null;
@@ -396,29 +410,59 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
     lastMore = picked.view;
     await open(entry.id, picked.view, picked.label);
   };
+  /** Entries being opened (their container, VS Code's quick pick): until they are, the rail lights the one chosen. */
+  let opening = 0;
+  /** The container shown that the last read left out, when the read before listed it (`followView`). */
+  let missing: string | null = null;
   const showEntry = async (entry: string): Promise<void> => {
     showing = entry;
-    let target = entries.find((item) => item.id === entry);
-    if (!target) {
-      entries = await context.railEntries().catch(() => entries);
-      target = entries.find((item) => item.id === entry);
+    missing = null;
+    opening++;
+    try {
+      const target = (await refresh()).find((item) => item.id === entry);
+      if (showing !== entry) return;
+      if (target?.more) await openMore(target);
+      else if (target?.view) await open(entry, target.view, target.title);
+    } finally {
+      opening--;
     }
-    if (target?.more) await openMore(target);
-    else if (target?.view) await open(entry, target.view, target.title);
   };
   forge.rail.onEntry((entry) => void showEntry(entry));
-  // VS Code switched view containers by itself (Ctrl+Shift+F, "Reveal in Explorer"): the rail follows.
+  // The rail lights the entry that shows the container VS Code shows: after VS Code switched by itself (Ctrl+Shift+F,
+  // "Reveal in Explorer", the default container when the one shown was uninstalled), and when that container moved
+  // behind "Additional Views" or out from it, or got an entry, as others came and went. An entry chosen meanwhile wins.
+  let following = false;
+  const follow = async (view: string): Promise<void> => {
+    if (!following || opening) return;
+    const [lit, shown, before] = [forge.rail.entry(), showing, entries];
+    const now = await refresh();
+    if (opening || forge.rail.entry() !== lit || showing !== shown || panes.getActivePaneComposite(SIDEBAR)?.getId() !== view) return;
+    const next = followView(before, now, view, missing);
+    missing = next.missing;
+    if (next.show) {
+      // Its container uninstalled, the panel shows what the rail lights, as VS Code does when it can drop a container.
+      if (forge.rail.entry() !== next.show) await forge.rail.setActive(next.show).catch(() => undefined);
+      await showEntry(next.show);
+      return;
+    }
+    if (!next.light) return;
+    if (now.find((item) => item.id === next.light)?.more) lastMore = view;
+    if (next.light === lit) return;
+    showing = next.light;
+    await forge.rail.setActive(next.light).catch(() => undefined);
+  };
   panes.onDidPaneCompositeOpen(({ composite, viewContainerLocation }) => {
-    if (viewContainerLocation !== SIDEBAR) return;
-    const entry = entryOfView(entries, composite.getId());
-    if (entry && entries.find((item) => item.id === entry)?.more) lastMore = composite.getId();
-    if (!entry || entry === forge.rail.entry()) return;
-    showing = entry;
-    void forge.rail.setActive(entry).catch(() => undefined);
+    if (viewContainerLocation === SIDEBAR) void follow(composite.getId());
   });
+  setInterval(() => {
+    const view = panes.getActivePaneComposite(SIDEBAR)?.getId();
+    if (view && document.visibilityState === 'visible' && innerWidth > 0) void follow(view);
+  }, RAIL_FOLLOW_MS);
   await services.get<EditorGroupsService>('editorGroupsService').whenRestored;
   const entry = forge.rail.entry();
   if (entry) await showEntry(entry);
+  // From here on: before, VS Code restoring its last container would light it over the entry chosen to open the panel.
+  following = true;
   // After OpenChamber reloads, the page's tabs come back with the rail view, which starts the page behind them.
   if (forge.has('tabs') && forge.tabs.state().list.length === 0) {
     const saved = await context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: context.folder }).catch(() => ({ tabs: [] }));
