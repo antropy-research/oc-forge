@@ -122,12 +122,20 @@ const up = async () => {
     ], { cwd: join(work, 'vscode', 'home'), env: { ...instanceEnv(), HOME: join(work, 'vscode', 'home') } });
   }
 
-  // The extensions under test, as copies: some write into their own folder.
+  // The extensions under test, as copies (some write into their own folder) of this checkout's own files: tracked,
+  // or new and not ignored. What the checkout ignores is not theirs to start from: node_modules, and the workbench
+  // VS Code's extension prepares (`vscode-web/`), which an earlier run there may have left incomplete.
   const extensions = join(work, 'extensions');
   rmSync(extensions, { recursive: true, force: true });
   mkdirSync(extensions, { recursive: true });
   for (const name of ['planner', 'vscode']) {
-    cpSync(join(repo, 'extensions', name), join(extensions, name), { recursive: true, filter: (path) => !path.includes('/node_modules') });
+    const files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', `extensions/${name}`], { cwd: repo }).toString().split('\0').filter(Boolean);
+    for (const file of files) {
+      if (!existsSync(join(repo, file))) continue;
+      const target = join(extensions, file.slice('extensions/'.length));
+      mkdirSync(dirname(target), { recursive: true });
+      cpSync(join(repo, file), target);
+    }
   }
   execFileSync('bun', [join(here, 'build-fixture.ts'), extensions, join(work, 'deps/node_modules/@openchamber/sdk')], { stdio: 'inherit', env: env() });
 
