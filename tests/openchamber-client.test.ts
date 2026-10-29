@@ -14,6 +14,7 @@ import {
 } from "../adapters/openchamber/client/index"
 import { parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
 import { ocForgeCommandsOnceLoaded } from "../adapters/openchamber/host/commands.ts"
+import { createOcForgeServiceSocket, type OcForgeSocketLike } from "../adapters/openchamber/host/service-socket.ts"
 
 const linux: OcForgeShortcuts = {
   mod: ["ctrl"],
@@ -274,5 +275,117 @@ describe("a folder's commands, once OpenCode 2.2 has loaded them", () => {
     const started = Date.now()
     expect(await ocForgeCommandsOnceLoaded(async () => [], 60, 10)).toEqual([])
     expect(Date.now() - started).toBeGreaterThanOrEqual(55)
+  })
+})
+
+describe("guest service requests over the window's socket", () => {
+  type Fake = OcForgeSocketLike & { sent: string[]; closed: boolean; fire: (type: string, data?: string) => void }
+  const fakeSocket = (): Fake => {
+    const listeners = new Map<string, ((event: { data?: unknown }) => void)[]>()
+    const socket: Fake = {
+      readyState: 0,
+      sent: [],
+      closed: false,
+      send(data) {
+        if (socket.readyState !== 1) throw new Error("not open")
+        socket.sent.push(data)
+      },
+      close() {
+        socket.closed = true
+        ;(socket as { readyState: number }).readyState = 3
+      },
+      addEventListener(type, listener) {
+        listeners.set(type, [...(listeners.get(type) ?? []), listener])
+      },
+      fire(type, data) {
+        if (type === "open") (socket as { readyState: number }).readyState = 1
+        if (type === "close") (socket as { readyState: number }).readyState = 3
+        for (const listener of listeners.get(type) ?? []) listener({ data })
+      },
+    }
+    return socket
+  }
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  test("requests share one socket and are answered by id, in any order", async () => {
+    const sockets: Fake[] = []
+    const transport = createOcForgeServiceSocket(() => {
+      const socket = fakeSocket()
+      sockets.push(socket)
+      return socket
+    })
+    const recv = transport.request("oc-forge-vscode", { method: "POST", path: "/tunnel/recv", body: "{}" })
+    const health = transport.request("oc-forge-vscode", { method: "GET", path: "/health" })
+    expect(sockets).toHaveLength(1)
+    sockets[0]!.fire("open")
+    await tick()
+    expect(sockets[0]!.sent).toEqual([
+      '1 oc-forge-vscode\n{"method":"POST","path":"/tunnel/recv","body":"{}"}',
+      '2 oc-forge-vscode\n{"method":"GET","path":"/health"}',
+    ])
+    sockets[0]!.fire("message", '2 200\n{"status":200,"body":"ok"}')
+    expect(await health).toEqual({ status: 200, text: '{"status":200,"body":"ok"}' })
+    sockets[0]!.fire("message", '1 400\n{"error":"invalid-request"}')
+    expect(await recv).toEqual({ status: 400, text: '{"error":"invalid-request"}' })
+    // An answer nobody waits for is dropped.
+    sockets[0]!.fire("message", "9 200\nnull")
+  })
+
+  test("what was not sent is left to fetch: no socket, an id the server would refuse", async () => {
+    let opened = 0
+    const none = createOcForgeServiceSocket(() => {
+      opened += 1
+      return null
+    })
+    expect(await none.request("oc-forge-vscode", {})).toBeNull()
+    expect(await none.request("Not An Id", {})).toBeNull()
+    expect(opened).toBe(1)
+  })
+
+  test("a socket that will not open sends everything over fetch for a while, then is tried again", async () => {
+    let clock = 0
+    const sockets: Fake[] = []
+    const transport = createOcForgeServiceSocket(() => {
+      const socket = fakeSocket()
+      sockets.push(socket)
+      return socket
+    }, () => clock)
+    const first = transport.request("ocforge-test", {})
+    sockets[0]!.fire("error")
+    sockets[0]!.fire("close")
+    expect(await first).toBeNull()
+    expect(sockets[0]!.closed).toBe(true)
+    clock = 29_000
+    expect(await transport.request("ocforge-test", {})).toBeNull()
+    expect(sockets).toHaveLength(1)
+    clock = 31_000
+    const later = transport.request("ocforge-test", {})
+    expect(sockets).toHaveLength(2)
+    sockets[1]!.fire("open")
+    await tick()
+    sockets[1]!.fire("message", "1 200\n{}")
+    expect(await later).toEqual({ status: 200, text: "{}" })
+  })
+
+  test("a socket that goes fails its requests in flight without sending them again, and the next request opens another", async () => {
+    const sockets: Fake[] = []
+    const transport = createOcForgeServiceSocket(() => {
+      const socket = fakeSocket()
+      sockets.push(socket)
+      return socket
+    })
+    const inFlight = transport.request("oc-forge-vscode", { method: "POST", path: "/tunnel/send" })
+    sockets[0]!.fire("open")
+    await tick()
+    sockets[0]!.fire("close")
+    expect(await inFlight).toEqual({ status: 502, text: "null" })
+    expect(sockets[0]!.sent).toHaveLength(1)
+    const next = transport.request("oc-forge-vscode", { method: "GET", path: "/health" })
+    expect(sockets).toHaveLength(2)
+    sockets[1]!.fire("open")
+    await tick()
+    expect(sockets[1]!.sent).toEqual(['2 oc-forge-vscode\n{"method":"GET","path":"/health"}'])
+    sockets[1]!.fire("message", '2 200\n{"status":200,"body":"ok"}')
+    expect((await next)?.status).toBe(200)
   })
 })

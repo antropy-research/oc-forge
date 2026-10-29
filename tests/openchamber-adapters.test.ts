@@ -4,7 +4,7 @@
 // OPENCHAMBER_SOURCE points at another checkout (default: vendors/openchamber).
 import { describe, expect, test } from "bun:test"
 import { existsSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { adaptSource, adaptedFiles, AdapterMismatchError, editsFor } from "../adapters/openchamber/apply"
 import { adapters, addedFiles, isServerFile } from "../adapters/openchamber/index"
 import { ocForgeAdapters } from "../adapters/openchamber/vite-plugin"
@@ -32,7 +32,12 @@ describe("openchamber adapters", () => {
       for (const [, module] of output.matchAll(/from '@\/oc-forge\/([a-z-]+)'/g)) {
         expect([`packages/ui/src/oc-forge/${module}.ts`, `packages/ui/src/oc-forge/${module}.tsx`].some((path) => added.has(path))).toBe(true)
       }
-      if (isServerFile(file)) expect(output).toContain("from '../oc-forge/manifest.js'")
+      if (isServerFile(file)) {
+        // Each adapted server file imports oc-forge's server modules, and each resolves to a file the build adds.
+        const imports = [...output.matchAll(/from '(\.{1,2}\/[a-z/.-]*oc-forge\/[a-z-]+\.js)'/g)].map(([, path]) => join(dirname(file), path!))
+        expect(imports.length).toBeGreaterThan(0)
+        for (const path of imports) expect(added.has(path)).toBe(true)
+      }
     }
     for (const path of Object.values(addedFiles)) expect(existsSync(join(import.meta.dir, "../adapters/openchamber", path))).toBe(true)
   })

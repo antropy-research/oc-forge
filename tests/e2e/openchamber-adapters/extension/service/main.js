@@ -1,5 +1,6 @@
 // The test extension's service: answers the rail entries the host polls
-// (GET /rail) and lets the end-to-end check change them (PUT /rail).
+// (GET /rail) and lets the end-to-end check change them (PUT /rail); /hold
+// answers late, as a long-poll does, and /ping at once (the transport check).
 import http from 'node:http';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
@@ -28,6 +29,15 @@ http.createServer((req, res) => {
   if (pathname === '/health') {
     res.writeHead(200);
     res.end('ok');
+    return;
+  }
+  if (pathname === '/hold' && req.method === 'GET') {
+    const ms = Math.min(30_000, Number(new URL(req.url ?? '/', 'http://service').searchParams.get('ms')) || 10_000);
+    setTimeout(() => json(res, 200, { held: ms }), ms);
+    return;
+  }
+  if (pathname === '/ping' && req.method === 'GET') {
+    json(res, 200, { pong: Date.now() });
     return;
   }
   if (pathname === '/rail' && req.method === 'GET') {

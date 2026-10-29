@@ -23,6 +23,22 @@ const applyTheme = (context: HostReadyContext) => {
   session = context.session?.id ?? null;
 };
 host.onReady(applyTheme);
+
+// Eight service requests held open, more than a browser's six HTTP connections per host, then a ninth: over HTTP
+// requests the ninth waits for a held one to end; over the window's service socket it answers at once.
+$('hold-many').onclick = () => {
+  $('ping-ms').textContent = '…';
+  for (let i = 0; i < 8; i += 1) {
+    void host.serviceRequest({ method: 'GET', path: '/hold?ms=12000' }).then(() => log(`hold ${i} answered`), () => log(`hold ${i} failed`));
+  }
+  setTimeout(() => {
+    const started = performance.now();
+    void host.serviceRequest({ method: 'GET', path: '/ping' }).then(
+      () => { $('ping-ms').textContent = String(Math.round(performance.now() - started)); },
+      (error: Error) => { $('ping-ms').textContent = `failed: ${error.message}`; },
+    );
+  }, 1_000);
+};
 host.onSession((snapshot) => { session = snapshot?.id ?? null; });
 
 const start = async () => {

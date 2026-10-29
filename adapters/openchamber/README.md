@@ -19,6 +19,10 @@ end-to-end check compares screenshots: 0.00% of pixels differ).
 The study behind this (what 2.5.2 can and cannot do, and the smallest host
 change for each) is zmemory `02-draft/syncopation/2026-10-27-openchamber-extension-surfaces-feasibility.md`.
 
+Beside the APIs, the adapted host sends every extension's service requests over
+one WebSocket per window ("Behaviour in the host", Transport): with VS Code's
+long-polls, two windows over plain HTTP used to stall each other.
+
 ## Using it from an extension
 
 Bundle `client/index.ts` (no dependencies) into the frame next to
@@ -186,6 +190,25 @@ activation (a key press or click in the frame gives one for about 5 s).
   page shows; leaving the page drops them. `links.page`/`links.session` are
   prefixes in the window's own origin, so modified clicks on real `<a href>`
   open new browser tabs even from the sandboxed frame (Chromium; see the study).
+- **Transport.** Over plain HTTP/1.1 a browser keeps six connections per host,
+  shared by all of a site's tabs, and each guest service request (`serviceRequest`)
+  was an HTTP request of its own. An extension whose frames long-poll their
+  service held all six once two windows were open (VS Code: a poll per frame,
+  three frames per window), and every other request of both windows waited:
+  the second window's VS Code stayed empty, the first stopped answering. The
+  adapted host sends service requests over one WebSocket per window
+  (`/api/oc-forge/service-socket`, which a browser pools apart from those six;
+  host/service-socket.ts, host/service-transport.ts). The server runs each one
+  as the release's `POST /api/guests/:id/service/request` on its own address,
+  with the window's cookie and host (server/service-socket.js), so the route's
+  checks, limits and answers are the release's, and a long-poll waits on the
+  server. The socket opens on the web runtime only (the page's own origin, no
+  relay or realtime proxy), behind the gate of OpenChamber's own guest
+  sockets; anywhere else, before it opens, and for 30 s after it fails to,
+  requests go over HTTP as in the release. A request whose answer is lost with
+  the socket fails, as a fetch that is cut off does: it is never sent twice.
+  Frames and services see no difference. Over HTTPS (HTTP/2, one connection
+  for everything) the limit does not exist.
 
 ## How it is applied
 
@@ -235,7 +258,9 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   extensions. `run.mjs` checks every API at 1440×900 and 1024×768, the release
   against the adapted build with no extension using the APIs (rail, header and
   an extension page, pixel by pixel), and that the Planner and VS Code work on
-  both. The instances start like fresh installs: their own HOME and data dir,
+  both. R6 holds eight service requests open (more than a browser's six
+  connections) and times a ninth: 3 ms on the adapted build, over the socket
+  with no service HTTP request, against 11.5 s on the release. The instances start like fresh installs: their own HOME and data dir,
   and none of the `OPENCODE*`/`OPENCHAMBER*` variables or credentials of the
   session that runs the check, so they cannot load its config or reach its
   services.

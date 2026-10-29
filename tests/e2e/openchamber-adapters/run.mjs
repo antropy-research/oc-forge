@@ -385,6 +385,25 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   check(`[${size}] R5 a deep link loads the page and hands the frame its route`, await until(async () => (await text(direct.frameLocator(`[data-oc-forge-page="${TEST}"] iframe`), '#route')) === '/deep', 60_000));
   await direct.close();
 
+  // R6: guest service requests over the window's WebSocket. With eight held open (more than the browser's six HTTP
+  // connections per host, which two windows of VS Code used to fill), a ninth answers at once, and none of them is an
+  // HTTP request of its own.
+  const serviceHttp = [];
+  const onRequest = (request) => {
+    if (/^\/api\/guests\/[^/]+\/service\/request$/.test(new URL(request.url()).pathname)) serviceHttp.push(request.url());
+  };
+  page.on('request', onRequest);
+  await right.locator('#hold-many').click();
+  const pingMs = await until(async () => {
+    const shown = await text(right, '#ping-ms');
+    return shown && /^\d+$/.test(shown) ? Number(shown) : null;
+  }, 25_000);
+  check(`[${size}] R6 with eight service requests held open, a ninth answers at once`, pingMs !== null && pingMs < 2_500, pingMs === null ? (await text(right, '#ping-ms')) ?? 'no answer' : `${pingMs} ms`);
+  check(`[${size}] R6 …all of them over the window's WebSocket, none an HTTP request of its own`, serviceHttp.length === 0, `${serviceHttp.length} HTTP requests`);
+  page.off('request', onRequest);
+  // The held ones end before the next round.
+  await until(async () => ((await text(right, '#log')) ?? '').split('\n').filter((line) => / hold \d (answered|failed)$/.test(line)).length >= 8, 20_000);
+
   await reset(page);
 };
 
