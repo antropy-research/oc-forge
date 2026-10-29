@@ -7,7 +7,8 @@
 //     "apiVersion": 1,
 //     "zone": "bottom",                                  // the panel's zone until the user moves it
 //     "rail": { "path": "/rail", "interval": 3000 },     // the service path polled for rail entries
-//     "page": { "keepBottomZone": true }                 // the bottom zone stays shown under its page
+//     "page": { "keepBottomZone": true },                // the bottom zone stays shown under its page
+//     "modals": true                                     // its frames may open the browser's print dialog
 //   }
 
 const ZONES = new Set(['left', 'right', 'bottom']);
@@ -21,6 +22,13 @@ const isRequestPath = (value) => (
   typeof value === 'string' && value.startsWith('/') && value.length <= 512 && !value.includes('\0')
   && !value.includes('\\') && !value.includes('://') && !value.split('/').some((segment) => segment === '.' || segment === '..')
 );
+
+/**
+ * The `sandbox` directive of the CSP the server sends with a guest's documents: the release's `allow-scripts`, and
+ * `allow-modals` for an extension that asks (`ocForge.modals`). The browser applies it and the frame's own sandbox
+ * attribute both, so the host widens both.
+ */
+export const ocForgeDocumentSandbox = (guest) => (guest?.ocForge?.modals === true ? 'sandbox allow-scripts allow-modals' : 'sandbox allow-scripts');
 
 /**
  * The block as the catalog publishes it, or null. `raw` is the package.json
@@ -47,5 +55,6 @@ export const parseOcForgeManifest = (raw, manifest) => {
     result.rail = { path: block.rail.path, interval };
   }
   if (contributes.page?.entry && isObject(block.page) && block.page.keepBottomZone === true) result.page = { keepBottomZone: true };
-  return result.zone || result.rail || result.page ? result : null;
+  if (block.modals === true) result.modals = true;
+  return result.zone || result.rail || result.page || result.modals ? result : null;
 };

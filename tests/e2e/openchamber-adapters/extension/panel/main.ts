@@ -10,6 +10,17 @@ const log = (line: string) => {
 };
 $('loaded').textContent = String(Date.now());
 
+// print() opens the print dialog only where the host sandboxes this frame with allow-modals (ocForge.modals); in an
+// allow-scripts frame Chrome ignores it, and no print event comes.
+let printing = false;
+addEventListener('beforeprint', () => { printing = true; log('beforeprint'); });
+addEventListener('afterprint', () => log('afterprint'));
+$('print').onclick = () => {
+  printing = false;
+  print();
+  $('printed').textContent = printing ? 'printed' : 'ignored';
+};
+
 const host = connectHost();
 let session: string | null = null;
 const applyTheme = (context: HostReadyContext) => {

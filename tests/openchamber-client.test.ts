@@ -12,7 +12,7 @@ import {
   type OcForgeKey,
   type OcForgeShortcuts,
 } from "../adapters/openchamber/client/index"
-import { parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
+import { ocForgeDocumentSandbox, parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
 import { ocForgeCommandsOnceLoaded } from "../adapters/openchamber/host/commands.ts"
 import { createOcForgeServiceSocket, type OcForgeSocketLike } from "../adapters/openchamber/host/service-socket.ts"
 
@@ -105,6 +105,18 @@ describe("the ocForge manifest block", () => {
     expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, page: { keepBottomZone: "yes" } } }), withPage)).toBeNull()
     expect(readOcForgeManifest({ apiVersion: 1, page: { keepBottomZone: true } })).toEqual({ apiVersion: 1, page: { keepBottomZone: true } })
     expect(readOcForgeManifest({ apiVersion: 1, page: { keepBottomZone: 1 } })).toEqual({ apiVersion: 1 })
+  })
+  test("frames may ask for allow-modals (print); that needs only a panel page, and only `true` counts", () => {
+    const panelOnly = { contributes: { panel: { entry: "panel/index.html" } } }
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, modals: true } }), panelOnly)).toEqual({ apiVersion: 1, modals: true })
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, modals: "yes" } }), manifest)).toBeNull()
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, zone: "left", modals: 1 } }), manifest)).toEqual({ apiVersion: 1, zone: "left" })
+    expect(readOcForgeManifest({ apiVersion: 1, modals: true })).toEqual({ apiVersion: 1, modals: true })
+    expect(readOcForgeManifest({ apiVersion: 1, modals: "true" })).toEqual({ apiVersion: 1 })
+    // The server's CSP sandboxes the document as well: it widens only for the extension that asks.
+    expect(ocForgeDocumentSandbox({ ocForge: { apiVersion: 1, modals: true } })).toBe("sandbox allow-scripts allow-modals")
+    expect(ocForgeDocumentSandbox({ ocForge: { apiVersion: 1, zone: "left" } })).toBe("sandbox allow-scripts")
+    expect(ocForgeDocumentSandbox({})).toBe("sandbox allow-scripts")
   })
   test("the UI reads the catalog row's field the same way", () => {
     expect(readOcForgeManifest({ apiVersion: 1, rail: { path: "/rail" } })).toEqual({ apiVersion: 1, rail: { path: "/rail", interval: 3000 } })
