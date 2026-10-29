@@ -15,6 +15,7 @@ import { isLinearIssue } from '../../src/domain/linear.ts';
 import { useUi } from '../lib/ui.ts';
 import { useNow } from '../lib/time.ts';
 import { useCalendarEvents } from '../lib/calendar.ts';
+import { completeWithUndo } from '../lib/google.ts';
 import { anchorOf, boxAnchor, calendarUi, changeEventTimes, popoverKind, useCalendarUi, type Anchor } from '../lib/gcal.ts';
 import { answerClass, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, plannedTask, taskClass, taskEventLabel } from './calendar/items.ts';
 import { CalendarOverlays } from './calendar/Overlays.tsx';
@@ -572,7 +573,8 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                             onPointerDown={(pointer) => pointer.stopPropagation()}
                             onClick={(click) => {
                               click.stopPropagation();
-                              void google.completeListTask(task, !task.completed).catch((error) => client.notify(`Google Tasks did not take it: ${error instanceof Error ? error.message : String(error)}`));
+                              // Completed with "Task completed · Undo", as Google Calendar's check circle does.
+                              void (task.completed ? google.completeListTask(task, false) : completeWithUndo(google, client.notify, task)).catch((error) => client.notify(`Google Tasks did not take it: ${error instanceof Error ? error.message : String(error)}`));
                             }}
                           >
                             <Icon name={task.completed ? 'done' : 'circle'} size={13} />

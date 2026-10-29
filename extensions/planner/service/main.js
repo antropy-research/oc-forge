@@ -1139,7 +1139,7 @@ var validateGtaskTemplate = (value) => {
     return `template: ${problem}`;
   return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? "template has an unknown field" : null;
 };
-var GTASK_EXCEPTION_FIELDS = ["skip", "title", "notes", "date", "time", "duration", "deadline"];
+var GTASK_EXCEPTION_FIELDS = ["skip", "title", "notes", "date", "time", "duration", "deadline", "attachments"];
 var GTASK_EXCEPTIONS_MAX = 200;
 var validateGtaskException = (value) => {
   if (!isRecord2(value))
@@ -1163,7 +1163,8 @@ var validateGtaskException = (value) => {
     return "an occurrence duration must be 5 to 1440 minutes, or null";
   if (value.deadline !== undefined && !(value.deadline === null || isDateKey(value.deadline)))
     return "an occurrence deadline must be a date or null";
-  return null;
+  const files = value.attachments !== undefined ? attachmentsProblem(value.attachments) : null;
+  return files ? `an occurrence's ${files}` : null;
 };
 var validateKeptPatch = (patch) => {
   if (!isRecord2(patch))
@@ -4005,13 +4006,17 @@ var seriesTemplate = (kept, item) => {
   const on = scheduledOn(kept, item);
   return on ? templateOf(item, kept, on) : null;
 };
+var sameFiles = (a, b) => (a ?? []).map((file) => file.id).join(`
+`) === (b ?? []).map((file) => file.id).join(`
+`);
 var occurrenceValues = (template, on, change) => ({
   title: change?.title ?? template.title,
   notes: change?.notes ?? template.notes,
   due: change?.date ?? on,
   time: change?.time !== undefined ? change.time : template.time,
   duration: change?.time !== undefined ? change.duration ?? null : template.duration,
-  deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline)
+  deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline),
+  attachments: change?.attachments ?? template.attachments ?? []
 });
 var occurrenceChange = (template, on, values) => {
   const series = occurrenceValues(template, on);
@@ -4020,7 +4025,8 @@ var occurrenceChange = (template, on, values) => {
     ...values.notes !== series.notes ? { notes: values.notes } : {},
     ...values.due !== on ? { date: values.due } : {},
     ...values.time !== series.time || values.duration !== series.duration ? { time: values.time, duration: values.duration } : {},
-    ...values.deadline !== series.deadline ? { deadline: values.deadline } : {}
+    ...values.deadline !== series.deadline ? { deadline: values.deadline } : {},
+    ...values.attachments && !sameFiles(values.attachments, series.attachments) ? { attachments: values.attachments } : {}
   };
   return Object.keys(change).length ? change : null;
 };
@@ -4065,7 +4071,7 @@ var occurrenceTask = (repeat, template, date, index) => {
       ...values.time !== null && template.busy ? { busy: true } : {},
       ...values.time !== null && template.visibility ? { visibility: template.visibility } : {},
       ...template.color ? { color: template.color } : {},
-      ...template.attachments?.length ? { attachments: template.attachments } : {},
+      ...values.attachments?.length ? { attachments: values.attachments } : {},
       ...values.time !== null && template.doNotDisturb ? { doNotDisturb: true } : {},
       ...values.time !== null && template.busy && template.decline ? { decline: template.decline } : {}
     }
@@ -4198,9 +4204,25 @@ var occurrenceIndex = (repeat, on) => {
 var mergeOccurrence = (latest, before, after) => {
   const pick = (key) => after[key] !== before[key] ? after[key] : latest[key];
   const timed = after.time !== before.time || after.duration !== before.duration;
-  return { title: pick("title"), notes: pick("notes"), due: pick("due"), time: timed ? after.time : latest.time, duration: timed ? after.duration : latest.duration, deadline: pick("deadline") };
+  const files = after.attachments !== undefined && !sameFiles(after.attachments, before.attachments);
+  return {
+    title: pick("title"),
+    notes: pick("notes"),
+    due: pick("due"),
+    time: timed ? after.time : latest.time,
+    duration: timed ? after.duration : latest.duration,
+    deadline: pick("deadline"),
+    ...files ? { attachments: after.attachments } : latest.attachments !== undefined ? { attachments: latest.attachments } : {}
+  };
 };
-var TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "busy", "visibility"];
+var TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "busy", "visibility", "color", "doNotDisturb", "decline", "attachments"];
+var sameField = (field, a, b) => {
+  if (field === "attachments")
+    return sameFiles(a.attachments, b.attachments);
+  if (field === "decline")
+    return (a.decline?.mode ?? null) === (b.decline?.mode ?? null) && (a.decline?.message ?? null) === (b.decline?.message ?? null);
+  return a[field] === b[field];
+};
 var seriesEdit = (state, account, seriesId, taskId, own, before, after) => {
   const entry = keptFor(state, { account, id: taskId });
   const mine = entry?.repeat?.seriesId === seriesId ? entry : null;
@@ -4216,7 +4238,7 @@ var seriesEdit = (state, account, seriesId, taskId, own, before, after) => {
   const latest = base.repeat;
   const rule = after.rule !== before.rule ? after.rule : latest.rule;
   const ruleChanged = rule !== latest.rule;
-  const changed = TEMPLATE_FIELDS.filter((field) => after.template[field] !== before.template[field]);
+  const changed = TEMPLATE_FIELDS.filter((field) => !sameField(field, after.template, before.template));
   const fields = { ...latest.template ?? before.template };
   for (const field of changed) {
     if (after.template[field] === undefined)
@@ -4225,12 +4247,16 @@ var seriesEdit = (state, account, seriesId, taskId, own, before, after) => {
       fields[field] = after.template[field];
   }
   const template = fields;
+  const has = (...names) => names.some((name) => changed.includes(name));
   const timing = (head, made) => ({
-    time: made.time,
-    duration: made.duration,
-    deadline: head.repeat?.on ? made.deadline === null ? null : addDays(head.repeat.on, made.deadline) : head.deadline,
-    busy: Boolean(made.busy),
-    visibility: made.visibility ?? "default"
+    ...has("time", "duration") ? { time: made.time, duration: made.duration } : {},
+    ...has("deadline") ? { deadline: head.repeat?.on ? made.deadline === null ? null : addDays(head.repeat.on, made.deadline) : head.deadline } : {},
+    ...has("busy") ? { busy: Boolean(made.busy) } : {},
+    ...has("visibility") ? { visibility: made.visibility ?? "default" } : {},
+    ...has("color") ? { color: made.color ?? null } : {},
+    ...has("doNotDisturb") ? { doNotDisturb: Boolean(made.doNotDisturb) } : {},
+    ...has("decline") ? { decline: made.decline ?? null } : {},
+    ...has("attachments") ? { attachments: made.attachments ?? [] } : {}
   });
   const google = changed.some((field) => field === "title" || field === "notes") ? others.map((head) => ({ listId: head.listId, taskId: head.taskId, ...changed.includes("title") ? { title: template.title } : {}, ...changed.includes("notes") ? { notes: template.notes } : {} })) : [];
   if (open) {
@@ -5132,9 +5158,12 @@ var RESPONSES2 = ["accepted", "declined", "tentative"];
 var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isDay = (value) => typeof value === "string" && isDateKey(value);
 var isMinutes2 = (value, low, high) => value === null || Number.isInteger(value) && value >= low && value <= high;
-var isOccurrence = (value) => isRecord4(value) && typeof value.title === "string" && value.title.length <= 1024 && typeof value.notes === "string" && value.notes.length <= GOOGLE_NOTES_MAX && isDay(value.due) && isMinutes2(value.time, 0, 24 * 60 - 1) && isMinutes2(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline));
+var isOccurrence = (value) => isRecord4(value) && typeof value.title === "string" && value.title.length <= 1024 && typeof value.notes === "string" && value.notes.length <= GOOGLE_NOTES_MAX && isDay(value.due) && isMinutes2(value.time, 0, 24 * 60 - 1) && isMinutes2(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline)) && (value.attachments === undefined || isFiles(value.attachments));
+var isFiles = (value) => Array.isArray(value) && value.length <= ATTACHMENTS_MAX && value.every((file) => isRecord4(file) && typeof file.id === "string");
+var isKeptEntry = (value) => isRecord4(value) && isEmail(value.account) && isId2(value.listId) && isId2(value.taskId) && typeof value.updatedAt === "string" && (value.repeat === null || isRecord4(value.repeat));
+var isMade = (value) => isRecord4(value) && isId2(value.listId) && isId2(value.id) && typeof value.title === "string" && typeof value.notes === "string" && (value.due === null || isDay(value.due)) && typeof value.updatedAt === "string";
 var isSeriesSide = (value) => isRecord4(value) && (value.rule === null || typeof value.rule === "string" && value.rule.length <= 500) && (value.due === null || isDay(value.due)) && isRecord4(value.template) && typeof value.template.title === "string" && typeof value.template.notes === "string" && isDay(value.template.start);
-var OWN_FIELDS = ["time", "duration", "deadline", "starred", "busy", "visibility"];
+var OWN_FIELDS = ["time", "duration", "deadline", "starred", "busy", "visibility", "color", "attachments", "doNotDisturb", "decline"];
 var occurrenceEditOf = (input) => {
   if (input.skip === true)
     return { skip: true };
@@ -5296,6 +5325,35 @@ var googleWriteRoute = async (req, url, ctx) => {
     try {
       await ctx.series.edit(input.account, input.listId, input.taskId, input.seriesId, input.own, input.before, input.after);
       return ok({ changed: true, ...ctx.snapshot() });
+    } finally {
+      ctx.changed("tasks");
+    }
+  }
+  if (path === "/google/tasks/series/undo" && method === "POST") {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.seriesId))
+      return bad("account and seriesId are required");
+    let undo;
+    if (input.kind === "one" && isKeptEntry(input.task) && (input.made === null || isMade(input.made)))
+      undo = { kind: "one", task: input.task, made: input.made };
+    else if (input.kind === "cut" && (input.from === null || isDay(input.from)) && Array.isArray(input.deleted) && input.deleted.length <= 5000 && input.deleted.every((task) => isRecord4(task) && isId2(task.listId) && isId2(task.id)) && Array.isArray(input.before) && input.before.length <= 5000 && input.before.every(isKeptEntry)) {
+      undo = { kind: "cut", from: input.from, deleted: input.deleted, before: input.before };
+    } else
+      return bad("kind one (task, made) or cut (from, deleted, before) is required");
+    try {
+      return ok({ ...await ctx.series.undo(input.account, input.seriesId, undo), ...ctx.snapshot() });
+    } finally {
+      ctx.changed("tasks");
+    }
+  }
+  if (path === "/google/tasks/uncomplete" && method === "POST") {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
+      return bad("account, listId and id are required");
+    if (!(input.before === null || isKeptEntry(input.before)) || !(input.made === null || isMade(input.made)))
+      return bad("before (what was kept for it) and made (its next task) are required, or null");
+    try {
+      return ok({ ...await ctx.series.uncomplete(input.account, input.listId, input.id, { before: input.before, made: input.made }), ...ctx.snapshot() });
     } finally {
       ctx.changed("tasks");
     }
@@ -5466,6 +5524,19 @@ class TaskNotifications {
 }
 
 // service/googleSeries.ts
+var keptPatch = (entry) => ({
+  time: entry.time,
+  duration: entry.duration,
+  deadline: entry.deadline,
+  repeat: entry.repeat,
+  starred: Boolean(entry.starredAt),
+  busy: Boolean(entry.busy),
+  visibility: entry.visibility ?? "default",
+  color: entry.color ?? null,
+  attachments: entry.attachments ?? [],
+  doNotDisturb: Boolean(entry.doNotDisturb),
+  decline: entry.decline ?? null
+});
 var messageOf2 = (error) => error instanceof Error ? error.message : String(error);
 var isGone3 = (error) => error instanceof GoogleError && error.status === 404;
 var DONE_IN_ANSWER_MS = 5000;
@@ -5633,7 +5704,7 @@ class GoogleSeries {
       this.write([{ type: "gtask.dropped", account, taskId }]);
       return;
     }
-    const latest = { title: google.title, notes: google.notes, due: google.due ?? real.repeat.on, time: real.time, duration: real.duration, deadline: real.deadline };
+    const latest = { title: google.title, notes: google.notes, due: google.due ?? real.repeat.on, time: real.time, duration: real.duration, deadline: real.deadline, attachments: real.attachments ?? [] };
     const merged = mergeOccurrence(latest, edit.before, edit.after);
     const fix = { ...merged.title !== latest.title ? { title: merged.title } : {}, ...merged.notes !== latest.notes ? { notes: merged.notes } : {}, ...merged.due !== latest.due ? { due: merged.due } : {} };
     if (Object.keys(fix).length) {
@@ -5642,7 +5713,8 @@ class GoogleSeries {
     }
     const patch = {
       ...merged.time !== real.time || merged.duration !== real.duration ? { time: merged.time, duration: merged.time === null ? null : merged.duration } : {},
-      ...merged.deadline !== real.deadline ? { deadline: merged.deadline } : {}
+      ...merged.deadline !== real.deadline ? { deadline: merged.deadline } : {},
+      ...merged.attachments && !sameFiles(merged.attachments, real.attachments) ? { attachments: merged.attachments } : {}
     };
     if (Object.keys(patch).length || Object.keys(fix).length)
       this.write([{ type: "gtask.kept", account, listId, taskId, patch: Object.keys(patch).length ? patch : { time: real.time } }]);
@@ -5715,14 +5787,114 @@ class GoogleSeries {
       }
       const removed = new Set(remove.map((kept) => kept.taskId));
       const kept = from === null ? keep : seriesCut(this.planner.state.googleTasks, account, seriesId, from, chosen).keep.filter((body) => !removed.has(body.taskId));
+      const before = this.seriesTasks(account, seriesId);
       this.write([...remove.map((entry) => ({ type: "gtask.dropped", account, taskId: entry.taskId })), ...kept]);
       const left = await this.deleteDone(account, remove.filter((entry) => !first.includes(entry)), until);
       if (left.length)
         this.cleanup = this.cleanup.then(() => this.deleteDone(account, left, Infinity)).then(() => {
           return;
         });
-      return { deleted: remove.map((entry) => entry.taskId) };
+      return { deleted: remove.map((entry) => entry.taskId), before };
     });
+  }
+  undo(account, seriesId, undo) {
+    return this.one(account, seriesId, async () => {
+      await this.cleanup;
+      if (undo.kind === "cut")
+        return this.undoCut(account, seriesId, undo);
+      const task = undo.task;
+      if (task.account !== account || task.repeat?.seriesId !== seriesId)
+        throw new GoogleError(400, "That task is of another series");
+      if (keptFor(this.planner.state, { account, id: task.taskId }))
+        throw new GoogleError(409, "This task is back already");
+      const made = undo.made && task.repeat.next === undo.made.id ? undo.made : null;
+      const goes = made ? await this.untouched(account, made) : false;
+      await this.data.updateTask(account, task.listId, task.taskId, { deleted: false });
+      this.options.onWrite?.();
+      this.write([{ type: "gtask.kept", account, listId: task.listId, taskId: task.taskId, patch: keptPatch(task) }]);
+      if (!goes || !await this.dropMade(account, made))
+        return { nextKept: Boolean(task.repeat.next), failed: 0 };
+      this.write([{ type: "gtask.kept", account, listId: task.listId, taskId: task.taskId, patch: { repeat: { ...task.repeat, next: null } } }]);
+      return { nextKept: false, failed: 0 };
+    });
+  }
+  async undoCut(account, seriesId, undo) {
+    const back = new Set;
+    let failed = 0;
+    for (const task of undo.deleted) {
+      try {
+        await this.data.updateTask(account, task.listId, task.id, { deleted: false });
+        back.add(task.id);
+      } catch (error) {
+        failed += 1;
+        this.options.log?.(`Google Tasks did not undelete a task of a series: ${messageOf2(error)}`);
+      }
+    }
+    if (back.size)
+      this.options.onWrite?.();
+    const ours = undo.before.filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
+    const bodies = ours.filter((entry) => back.has(entry.taskId) && !keptFor(this.planner.state, { account, id: entry.taskId })).map((entry) => ({ type: "gtask.kept", account, listId: entry.listId, taskId: entry.taskId, patch: keptPatch(entry) }));
+    if (undo.from) {
+      const from = undo.from;
+      const rules = new Map(ours.map((entry) => [endedBefore(entry.repeat, from).rule, entry.repeat.rule]));
+      const dropped = Object.fromEntries(ours.filter((entry) => !entry.repeat.next).flatMap((entry) => Object.entries(entry.repeat.exceptions ?? {}).filter(([on]) => on >= from)));
+      const gone = new Set(undo.deleted.map((task) => task.id));
+      for (const now of this.seriesTasks(account, seriesId)) {
+        const rule = rules.get(now.repeat.rule);
+        if (gone.has(now.taskId) || !rule)
+          continue;
+        const ahead = Object.entries(dropped).filter(([on]) => !now.repeat.on || on > now.repeat.on);
+        const exceptions = { ...Object.fromEntries(ahead), ...now.repeat.exceptions };
+        bodies.push({ type: "gtask.kept", account, listId: now.listId, taskId: now.taskId, patch: { repeat: withExceptions({ ...now.repeat, rule }, Object.keys(exceptions).length ? exceptions : undefined) } });
+      }
+    }
+    this.write(bodies);
+    return { nextKept: false, failed };
+  }
+  uncomplete(account, listId, taskId, undo) {
+    const seriesId = keptFor(this.planner.state, { account, id: taskId })?.repeat?.seriesId ?? undo.before?.repeat?.seriesId;
+    if (!seriesId)
+      throw new GoogleError(404, "This task is in no series");
+    return this.one(account, seriesId, async () => {
+      const kept = keptFor(this.planner.state, { account, id: taskId });
+      const made = undo.made && kept?.repeat?.next === undo.made.id ? undo.made : null;
+      const goes = made ? await this.untouched(account, made) : false;
+      await this.data.updateTask(account, kept?.listId ?? listId, taskId, { completed: false });
+      this.options.onWrite?.();
+      if (goes && await this.dropMade(account, made)) {
+        this.write([{ type: "gtask.kept", account, listId: kept.listId, taskId, patch: { repeat: { ...kept.repeat, next: null } } }]);
+        return { nextKept: false };
+      }
+      const before = undo.before;
+      if (!kept?.repeat && before?.repeat && before.account === account && before.taskId === taskId && !this.seriesTasks(account, seriesId).length) {
+        this.write([{ type: "gtask.kept", account, listId: kept?.listId ?? before.listId, taskId, patch: { repeat: { ...before.repeat, next: null } } }]);
+      }
+      return { nextKept: Boolean(kept?.repeat?.next) };
+    });
+  }
+  async untouched(account, made) {
+    const kept = keptFor(this.planner.state, { account, id: made.id });
+    if (!kept?.repeat || kept.repeat.next || kept.updatedAt !== made.updatedAt)
+      return false;
+    const google = (await this.data.allTasks(account, kept.listId)).tasks.find((task) => task.id === made.id);
+    return Boolean(google && !google.completed && google.title === made.title && google.notes === made.notes && google.due === made.due);
+  }
+  async dropMade(account, made) {
+    const listId = keptFor(this.planner.state, { account, id: made.id })?.listId ?? made.listId;
+    try {
+      await this.data.deleteTask(account, listId, made.id);
+    } catch (error) {
+      if (!isGone3(error)) {
+        this.options.log?.(`Google Tasks kept a next task Undo took back: ${messageOf2(error)}`);
+        return false;
+      }
+    }
+    this.options.onWrite?.();
+    this.write([{ type: "gtask.dropped", account, taskId: made.id }]);
+    return true;
+  }
+  seriesTasks(account, seriesId) {
+    return Object.values(this.planner.state.googleTasks).filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
   }
   async deleteDone(account, tasks, until) {
     const failed = [];

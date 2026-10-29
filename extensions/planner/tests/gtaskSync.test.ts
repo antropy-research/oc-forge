@@ -1050,7 +1050,7 @@ describe('one upcoming task of a series changed or deleted on its own, as in Goo
 
   test('an occurrence edited alone keeps only what differs from its series there', () => {
     const own = occurrenceValues(template, '2026-10-29');
-    expect(own).toEqual({ title: 'Daily standup', notes: 'Agenda', due: '2026-10-29', time: 660, duration: null, deadline: '2026-10-29' });
+    expect(own).toEqual({ title: 'Daily standup', notes: 'Agenda', due: '2026-10-29', time: 660, duration: null, deadline: '2026-10-29', attachments: [] });
     expect(occurrenceChange(template, '2026-10-29', own)).toBeNull();
     expect(occurrenceChange(template, '2026-10-29', { ...own, title: 'Standup with Ann', time: 900 })).toEqual({ title: 'Standup with Ann', time: 900, duration: null });
     expect(occurrenceChange(template, '2026-10-29', { ...own, due: '2026-10-31', deadline: null })).toEqual({ date: '2026-10-31', deadline: null });

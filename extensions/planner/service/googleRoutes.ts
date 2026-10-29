@@ -5,19 +5,19 @@
 // completed ones, moved, nested and deleted; and a repeating task's series,
 // one change of it at a time (`GoogleSeries`): its next occurrence made once,
 // one upcoming occurrence changed or deleted on its own, an edit of all its
-// tasks, its open task gone from Google, and its deletion from one of its
-// tasks on ("This and following tasks") or whole ("All tasks"), each answered
-// with the plan as it is then. Each write makes the next calendar read ask
-// Google again.
+// tasks, its open task gone from Google, its deletion from one of its tasks
+// on ("This and following tasks") or whole ("All tasks"), and Google Tasks'
+// Undo after deleting or completing its tasks, each answered with the plan as
+// it is then. Each write makes the next calendar read ask Google again.
 import type http from 'node:http';
 import { isDateKey } from '../src/domain/dates.ts';
-import { GOOGLE_NOTES_MAX } from '../src/domain/events.ts';
+import { ATTACHMENTS_MAX, GOOGLE_NOTES_MAX } from '../src/domain/events.ts';
 import { EDIT_SCOPES, type EditScope, type EventInput } from '../src/domain/gevents.ts';
 import type { GoogleResponse } from '../src/domain/google.ts';
-import type { OccurrenceValues, SeriesSide } from '../src/domain/gtaskKept.ts';
-import type { GoogleTaskException } from '../src/domain/types.ts';
+import type { MadeTask, OccurrenceValues, SeriesSide } from '../src/domain/gtaskKept.ts';
+import type { GoogleTaskException, GoogleTaskKept } from '../src/domain/types.ts';
 import type { GoogleData, SendUpdates } from './googleData.ts';
-import type { GoogleSeries, OccurrenceEdit } from './googleSeries.ts';
+import type { GoogleSeries, OccurrenceEdit, SeriesUndo } from './googleSeries.ts';
 
 export interface GoogleRouteContext {
   data: GoogleData;
@@ -48,12 +48,21 @@ const isMinutes = (value: unknown, low: number, high: number): boolean => value 
 /** An occurrence as a window showed it, or as its form left it. */
 const isOccurrence = (value: unknown): value is OccurrenceValues =>
   isRecord(value) && typeof value.title === 'string' && value.title.length <= 1024 && typeof value.notes === 'string' && value.notes.length <= GOOGLE_NOTES_MAX
-  && isDay(value.due) && isMinutes(value.time, 0, 24 * 60 - 1) && isMinutes(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline));
+  && isDay(value.due) && isMinutes(value.time, 0, 24 * 60 - 1) && isMinutes(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline))
+  && (value.attachments === undefined || isFiles(value.attachments));
+/** Drive files as a window sends them; each is checked again when it is kept. */
+const isFiles = (value: unknown): boolean => Array.isArray(value) && value.length <= ATTACHMENTS_MAX && value.every((file) => isRecord(file) && typeof file.id === 'string');
+/** What a window kept for a task, as Undo sends it back; checked again, field by field, when it is kept. */
+const isKeptEntry = (value: unknown): value is GoogleTaskKept =>
+  isRecord(value) && isEmail(value.account) && isId(value.listId) && isId(value.taskId) && typeof value.updatedAt === 'string' && (value.repeat === null || isRecord(value.repeat));
+/** A next task a series made, as its window got it (Undo takes it back while it is still so). */
+const isMade = (value: unknown): value is MadeTask =>
+  isRecord(value) && isId(value.listId) && isId(value.id) && typeof value.title === 'string' && typeof value.notes === 'string' && (value.due === null || isDay(value.due)) && typeof value.updatedAt === 'string';
 /** One side of an edit of all tasks of a series; the template's every field is checked again when it is kept. */
 const isSeriesSide = (value: unknown): value is SeriesSide =>
   isRecord(value) && (value.rule === null || (typeof value.rule === 'string' && value.rule.length <= 500)) && (value.due === null || isDay(value.due))
   && isRecord(value.template) && typeof value.template.title === 'string' && typeof value.template.notes === 'string' && isDay(value.template.start);
-const OWN_FIELDS = ['time', 'duration', 'deadline', 'starred', 'busy', 'visibility'];
+const OWN_FIELDS = ['time', 'duration', 'deadline', 'starred', 'busy', 'visibility', 'color', 'attachments', 'doNotDisturb', 'decline'];
 const occurrenceEditOf = (input: Record<string, unknown>): OccurrenceEdit | null => {
   if (input.skip === true) return { skip: true };
   // What it had (its change is checked again when it is kept), or null: as its series has it.
@@ -197,6 +206,32 @@ export const googleWriteRoute = async (req: http.IncomingMessage, url: URL, ctx:
     try {
       await ctx.series.edit(input.account, input.listId, input.taskId, input.seriesId, input.own, input.before, input.after);
       return ok({ changed: true, ...ctx.snapshot() });
+    } finally {
+      ctx.changed('tasks');
+    }
+  }
+  if (path === '/google/tasks/series/undo' && method === 'POST') {
+    // Google Tasks' Undo after deleting tasks of a series: "This task" (one), "This and following" or "All tasks" (cut).
+    const input = await body();
+    if (!isEmail(input.account) || !isId(input.seriesId)) return bad('account and seriesId are required');
+    let undo: SeriesUndo;
+    if (input.kind === 'one' && isKeptEntry(input.task) && (input.made === null || isMade(input.made))) undo = { kind: 'one', task: input.task, made: input.made };
+    else if (input.kind === 'cut' && (input.from === null || isDay(input.from)) && Array.isArray(input.deleted) && input.deleted.length <= 5000 && input.deleted.every((task) => isRecord(task) && isId(task.listId) && isId(task.id)) && Array.isArray(input.before) && input.before.length <= 5000 && input.before.every(isKeptEntry)) {
+      undo = { kind: 'cut', from: input.from, deleted: input.deleted as { listId: string; id: string }[], before: input.before };
+    } else return bad('kind one (task, made) or cut (from, deleted, before) is required');
+    try {
+      return ok({ ...(await ctx.series.undo(input.account, input.seriesId, undo)), ...ctx.snapshot() });
+    } finally {
+      ctx.changed('tasks');
+    }
+  }
+  if (path === '/google/tasks/uncomplete' && method === 'POST') {
+    // Google Tasks' Undo after completing a task of a series: open again, and the next one it made gone again.
+    const input = await body();
+    if (!isEmail(input.account) || !isId(input.listId) || !isId(input.id)) return bad('account, listId and id are required');
+    if (!(input.before === null || isKeptEntry(input.before)) || !(input.made === null || isMade(input.made))) return bad('before (what was kept for it) and made (its next task) are required, or null');
+    try {
+      return ok({ ...(await ctx.series.uncomplete(input.account, input.listId, input.id, { before: input.before, made: input.made })), ...ctx.snapshot() });
     } finally {
       ctx.changed('tasks');
     }

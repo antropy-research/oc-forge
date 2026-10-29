@@ -170,6 +170,8 @@ export interface GoogleTaskException {
   time?: number | null;
   duration?: number | null;
   deadline?: DateKey | null;
+  /** Its own Drive attachments in place of its series' ([]: none), as Google Calendar's This task changes them. */
+  attachments?: TaskAttachment[];
 }
 
 /** How the Linear page groups and orders issues. */

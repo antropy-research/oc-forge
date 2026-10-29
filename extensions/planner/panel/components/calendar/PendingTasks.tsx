@@ -16,6 +16,7 @@ import { keptFor, keptTimeLabel } from '../../../src/domain/gtaskKept.ts';
 import { dateBlock, PENDING_DAYS } from '../../../src/domain/gtaskPending.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
 import { calendarUi, type Anchor } from '../../lib/gcal.ts';
+import { undoAction } from '../../lib/google.ts';
 import { pendingStore, usePendingTasks } from '../../lib/pendingTasks.ts';
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
@@ -41,19 +42,19 @@ export const PendingPopover = ({ anchor }: { event: CalendarEvent; anchor: Ancho
   const listOf = (item: GoogleTaskItem) => gv.lists.find((list) => list.account === item.account && list.id === item.listId);
 
   /** Shown at once; Google's refusal puts it back and says why. */
-  const change = (item: GoogleTaskItem, now: GoogleTaskItem | null, work: () => Promise<unknown>, done: string) => {
+  const change = (item: GoogleTaskItem, now: GoogleTaskItem | null, work: () => Promise<unknown>, done: string, undo: (() => Promise<void>) | null = null) => {
     setMenu(null);
     setBusy(keyOf(item));
     pendingStore.change(item, now);
     work()
-      .then(() => calendarUi.snack(done))
+      .then(() => calendarUi.snack(done, undo))
       .catch((error) => {
         pendingStore.forget(item);
         client.notify(`Google Tasks did not take it: ${messageOf(error)}`);
       })
       .finally(() => setBusy(null));
   };
-  const complete = (item: GoogleTaskItem) => change(item, null, () => google.completeListTask(item, true), 'Task completed');
+  const complete = (item: GoogleTaskItem) => change(item, null, () => google.completeListTask(item, true), 'Task completed', undoAction(google, client.notify));
   const reschedule = (item: GoogleTaskItem, date: DateKey) => {
     if (date === item.due) return setMenu(null);
     change(item, { ...item, due: date }, () => google.setTaskDue(item, date), `Task rescheduled to ${dayName(date, view.today)}`);

@@ -46,6 +46,7 @@ import {
 } from '../src/domain/gtaskAdvanced.ts';
 import { emptyState, type GoogleTaskKept, type PlannerState, type TaskAttachment } from '../src/domain/types.ts';
 import { DEFAULT_SCOPES, DRIVE_SCOPE, defaultFakeWorld, fakeAuthCode, startFakeGoogle, type FakeGoogle } from './e2e/fakeGoogle.mjs';
+import { seriesRoutes } from './seriesRoutes.ts';
 
 const ME = 'me@example.com';
 const ZONE = 'America/Los_Angeles';
@@ -283,12 +284,17 @@ describe('saved from the form', () => {
     let state = start;
     let n = 0;
     const calls: { method: string; path: string; body?: any }[] = [];
+    // A repeating task's series changes in the service: its routes run the service's own code here (`seriesRoutes`).
+    const { handle } = seriesRoutes({ state: () => state, apply: (bodies) => (state = applyEvents(state, bodies.map(ev))) }, async (method, path, body) => answer(method, path, body));
     const client = {
       getView: () => ({ state, today: TODAY }),
       call: async (method: string, path: string, body?: unknown) => {
+        const answered = await handle(path, body);
+        if (answered) return answered;
         calls.push({ method, path, ...(body === undefined ? {} : { body }) });
         return answer(method, path, body);
       },
+      adopt: async () => {},
       dispatch: async (bodies: EventBody[]) => {
         for (const body of bodies) expect(validateCommand({ cmd: `c${n}`, ...body }, state)).toBeNull();
         n += bodies.length;

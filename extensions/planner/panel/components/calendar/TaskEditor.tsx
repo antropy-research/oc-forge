@@ -54,7 +54,7 @@ export const TaskEditor = ({ target }: { target: TaskEditorTarget }) => {
     attachments: from.attachments,
   });
   const shown = values && kept
-    ? { item: { ...item, title: values.title, notes: values.notes, due: values.due }, kept: { ...kept, time: values.time, duration: values.duration, deadline: values.deadline, ...advanced(occurrence!.template) } }
+    ? { item: { ...item, title: values.title, notes: values.notes, due: values.due }, kept: { ...kept, time: values.time, duration: values.duration, deadline: values.deadline, ...advanced(occurrence!.template), attachments: values.attachments } }
     : template && kept
       ? { item: { ...item, title: template.title, notes: template.notes }, kept: { ...kept, time: template.time, duration: template.duration, deadline: template.deadline !== null && item.due ? addDays(item.due, template.deadline) : null, ...advanced(template) } }
       : { item, kept };

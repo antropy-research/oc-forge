@@ -35,6 +35,7 @@ import {
   seriesTemplate,
   templateOf,
   upcomingValues,
+  type MadeTask,
   type SeriesSide,
   type UpcomingTask,
 } from '../../src/domain/gtaskKept.ts';
@@ -202,6 +203,28 @@ const SYNC_IDS = 50;
 const SIGN_IN_POLL_MS = 1500;
 const SIGN_IN_MAX_MS = 10 * 60_000;
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** What Google Tasks' Undo does, once: what to say then, and (`note`) anything that stayed as it is. */
+type UndoEntry = () => Promise<{ done: string; note: string | null }>;
+
+/**
+ * Complete a task with Google Tasks' and Google Calendar's "Task completed · Undo" in the snackbar (and Ctrl/⌘+Z in
+ * the Tasks view).
+ */
+export const completeWithUndo = async (google: Pick<GoogleStore, 'completeListTask' | 'undoLast'>, notify: (message: string) => void, item: GoogleTaskItem): Promise<void> => {
+  await google.completeListTask(item, true);
+  calendarUi.snack('Task completed', undoAction(google, notify));
+};
+
+/** The snackbar's "Undo" (after Delete, or after completing): the last of those taken back; what stayed, or a refusal, said. */
+export const undoAction = (google: Pick<GoogleStore, 'undoLast'>, notify: (message: string) => void) => async (): Promise<void> => {
+  try {
+    const done = await google.undoLast();
+    if (done?.note) notify(done.note);
+  } catch (error) {
+    notify(`Google Tasks did not undo it: ${messageOf(error)}`);
+  }
+};
 
 /** Where a Google calendar opens on the web; the Planner reads it through the account, not from here. */
 export const calendarWebUrl = (calendarId: string): string => `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(calendarId)}`;
@@ -646,7 +669,9 @@ export class GoogleStore {
    * occurrence keeps its series (template, schedule and exceptions) as it
    * was: the next read makes it (`dueOccurrences`).
    */
-  async makeNextOccurrences(items: readonly GoogleTaskItem[]): Promise<void> {
+  async makeNextOccurrences(items: readonly GoogleTaskItem[]): Promise<Map<string, MadeTask | null>> {
+    // For each task, the next one this call made (Undo after completing takes that one back).
+    const out = new Map<string, MadeTask | null>();
     for (const next of dueOccurrences(this.client.getView().state, items)) {
       const { item, kept } = next;
       const key = `${item.account}\n${item.id}`;
@@ -654,15 +679,17 @@ export class GoogleStore {
       this.making.add(key);
       try {
         // The service also ends a series that ends here, by the series as it is now (another window may have changed its rule).
-        const made = await this.makeSuccessor(item);
+        const { task, made } = await this.makeSuccessor(item);
+        out.set(item.id, made);
         // Google may renumber the other tasks' places: read the list as Google has it now.
-        if (made && this.view.board[listKey(made.account, made.listId)]) void this.loadBoard(made.account, made.listId);
+        if (task && this.view.board[listKey(task.account, task.listId)]) void this.loadBoard(task.account, task.listId);
       } catch (error) {
         this.client.notify(`Google Tasks did not take the next "${item.title}": ${messageOf(error)}`);
       } finally {
         this.making.delete(key);
       }
     }
+    return out;
   }
 
   /**
@@ -675,15 +702,17 @@ export class GoogleStore {
    * gets the one this one made, and one made already (kept as this series'
    * later occurrence) is taken, never a second; a task that only shares the
    * title and the date is never taken for it. A refusal throws before
-   * anything changed. The task made or taken; null when the series has none
-   * after `item`.
+   * anything changed. The task made or taken (null when the series has none
+   * after `item`), and (`made`) the one this call made, as it was made.
    */
-  private async makeSuccessor(item: GoogleTaskItem): Promise<GoogleTaskItem | null> {
-    const answer = await this.client.call<Snapshot & { task: GoogleTaskItem | null }>('POST', '/google/tasks/next', { account: item.account, listId: item.listId, id: item.id, completed: item.completed, due: item.due });
+  private async makeSuccessor(item: GoogleTaskItem): Promise<{ task: GoogleTaskItem | null; made: MadeTask | null }> {
+    const answer = await this.client.call<Snapshot & { task: GoogleTaskItem | null; made?: boolean }>('POST', '/google/tasks/next', { account: item.account, listId: item.listId, id: item.id, completed: item.completed, due: item.due });
     await this.client.adopt(answer);
-    if (answer.task) this.remember(answer.task, true);
+    const task = answer.task;
+    if (task) this.remember(task, true);
     calendarUi.refresh();
-    return answer.task;
+    const kept = task && answer.made && answer.state ? keptFor(answer.state, task) : null;
+    return { task, made: task && kept ? { listId: task.listId, id: task.id, title: task.title, notes: task.notes, due: task.due, updatedAt: kept.updatedAt } : null };
   }
 
   answerPrompt(answer: 'yes' | 'no' | 'always'): void {
@@ -1076,12 +1105,46 @@ export class GoogleStore {
    * Google when its list is not loaded (`relatives`). Those are written
    * first, so Google never has an open subtask under a completed task, even
    * when a write fails half way. A repeating task's next occurrence appears.
+   * A completion can be undone, as Google Tasks and Google Calendar offer it
+   * ("Task completed · Undo", and Ctrl/⌘+Z): `undoLast`.
    */
   async completeListTask(item: GoogleTaskItem, completed: boolean): Promise<void> {
     const related = await this.relatives(item, completed);
+    // What Undo takes back: the tasks this completes, and what was kept for it before (a series that ends with it).
+    const opened = [...related, item].filter((one) => !one.completed);
+    const before = keptFor(this.client.getView().state, item);
+    // A task opened again by hand is what an earlier Undo would have done: that Undo goes.
+    this.lastUndo = null;
     const answers = await this.writeListTask([...related, item], () => ({ completed }), true);
-    if (completed) await this.makeNextOccurrences(answers);
+    if (completed) {
+      const made = await this.makeNextOccurrences(answers);
+      this.lastUndo = this.completionUndo(item, opened, before, made.get(item.id) ?? null);
+    }
     void this.sync();
+  }
+
+  /**
+   * Undo after completing: the tasks it completed open again, the task before
+   * its subtasks. A task of a series is the service's (`GoogleSeries.uncomplete`):
+   * the next one its completion made goes again while it is still as it was
+   * made; one changed or completed since stays, and Undo says so.
+   */
+  private completionUndo(item: GoogleTaskItem, opened: readonly GoogleTaskItem[], before: GoogleTaskKept | null, made: MadeTask | null): UndoEntry {
+    return async () => {
+      let note: string | null = null;
+      if (before?.repeat) {
+        const answer = await this.client.call<Snapshot & { nextKept: boolean }>('POST', '/google/tasks/uncomplete', { account: item.account, listId: item.listId, id: item.id, before, made });
+        await this.client.adopt(answer);
+        if (answer.nextKept) note = `"${item.title}" is open again; its next task${made?.due ? `, ${longDay(made.due)},` : ''} stays, as it was changed or completed since`;
+      } else {
+        // The task first: Google never has an open subtask under a completed task.
+        await this.writeListTask([...opened].sort((a, b) => Number(Boolean(a.parent)) - Number(Boolean(b.parent))), () => ({ completed: false }), true);
+      }
+      this.afterTaskWrite(item.account, item.listId, true);
+      if (this.view.board[listKey(item.account, item.listId)]) void this.loadBoard(item.account, item.listId);
+      void this.sync();
+      return { done: 'Completion undone', note };
+    };
   }
 
   /**
@@ -1107,18 +1170,21 @@ export class GoogleStore {
     // What Undo gives back: the task and its subtasks as Google had them, and what the Planner kept for them.
     const subtree = [item, ...before.filter((other) => other.parent === item.id)];
     const keptBefore = subtree.flatMap((one) => keptFor(this.client.getView().state, one) ?? []);
-    this.lastDeletion = null;
+    this.lastUndo = null;
     const next = kept?.repeat && !kept.repeat.next ? nextOccurrence(item, kept) : null;
     this.patchBoard(key, before.filter((other) => other.id !== item.id && other.parent !== item.id));
     let made: GoogleTaskItem | null = null;
+    let madeNow: MadeTask | null = null;
     try {
       if (next?.date && next.template) {
         try {
-          made = await this.makeSuccessor(item);
+          ({ task: made, made: madeNow } = await this.makeSuccessor(item));
         } catch (error) {
           throw new Error(`the next "${item.title}" couldn't be made, so this one stays (${messageOf(error)})`);
         }
       }
+      // A task of a series as kept now, linked to its next one: what the series' Undo gives back.
+      const inSeries = keptFor(this.client.getView().state, item);
       try {
         await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}&id=${encodeURIComponent(item.id)}`);
       } catch (error) {
@@ -1132,21 +1198,18 @@ export class GoogleStore {
       this.afterTaskWrite(item.account, item.listId, true);
       // Read once this one is gone (a read before it could bring it back): Google may renumber the places around them.
       if (made && this.view.board[key]) void this.loadBoard(item.account, item.listId);
-      // Undo, as Google Tasks offers it: Google undeletes the task and its subtasks; a next occurrence this deletion
-      // made goes again; what the Planner kept comes back as it was.
-      const successor = made;
-      this.lastDeletion = {
-        undo: async () => {
-          if (successor) {
-            await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(successor.account)}&list=${encodeURIComponent(successor.listId)}&id=${encodeURIComponent(successor.id)}`);
-            if (keptFor(this.client.getView().state, successor)) await this.client.dispatch([{ type: 'gtask.dropped', account: successor.account, taskId: successor.id }], { origin: 'google' });
-          }
-          await this.undelete(subtree);
-          await this.restoreKept(keptBefore);
-          this.afterTaskWrite(item.account, item.listId, true);
-          if (this.view.board[key]) void this.loadBoard(item.account, item.listId);
-        },
-      };
+      // Undo, as Google Tasks offers it: Google undeletes the task (and its subtasks) and what the Planner kept for it
+      // comes back. A task of a series is the service's, one change of the series at a time (`GoogleSeries.undo`): the
+      // next one this deletion made goes again while it is still as it was made.
+      this.lastUndo = inSeries?.repeat
+        ? this.seriesUndo({ account: item.account, seriesId: inSeries.repeat.seriesId, kind: 'one', task: inSeries, made: madeNow }, [item.listId, ...(made ? [made.listId] : [])])
+        : async () => {
+            await this.undelete(subtree);
+            await this.restoreKept(keptBefore);
+            this.afterTaskWrite(item.account, item.listId, true);
+            if (this.view.board[key]) void this.loadBoard(item.account, item.listId);
+            return { done: 'Deletion undone', note: null };
+          };
     } catch (error) {
       this.patchBoard(key, before);
       if (made) this.remember(made, true);
@@ -1167,9 +1230,9 @@ export class GoogleStore {
    */
   async deleteSeries(target: { account: string; seriesId: string; from: DateKey | null; task?: string }): Promise<void> {
     const { remove } = seriesCut(this.client.getView().state.googleTasks, target.account, target.seriesId, target.from, target.task ?? null);
-    // What Undo gives back: the series' tasks as kept before, the ones that stay included (their repeat ends here).
-    const keptBefore = Object.values(this.client.getView().state.googleTasks).filter((entry) => entry.account === target.account && entry.repeat?.seriesId === target.seriesId);
-    this.lastDeletion = null;
+    // What Undo gives back, as this window has it (the service answers with the series as it was just before).
+    let keptBefore = Object.values(this.client.getView().state.googleTasks).filter((entry) => entry.account === target.account && entry.repeat?.seriesId === target.seriesId);
+    this.lastUndo = null;
     const boards = Object.entries(this.view.board).filter(([key]) => key.startsWith(`${target.account}\n`));
     const without = (ids: Iterable<string>) => {
       const gone = new Set(ids);
@@ -1182,9 +1245,10 @@ export class GoogleStore {
     let deleted: string[];
     try {
       const query = new URLSearchParams({ account: target.account, series: target.seriesId, ...(target.from ? { from: target.from } : {}), ...(target.task ? { task: target.task } : {}) });
-      const answer = await this.client.call<Snapshot & { deleted: string[] }>('DELETE', `/google/tasks/series?${query}`);
+      const answer = await this.client.call<Snapshot & { deleted: string[]; before?: GoogleTaskKept[] }>('DELETE', `/google/tasks/series?${query}`);
       await this.client.adopt(answer);
       deleted = answer.deleted ?? [];
+      keptBefore = answer.before ?? keptBefore;
     } catch (error) {
       for (const [key, list] of boards) this.patchBoard(key, list.items);
       throw error;
@@ -1194,34 +1258,47 @@ export class GoogleStore {
     for (const listId of new Set(remove.map((kept) => kept.listId))) this.afterTaskWrite(target.account, listId, false);
     calendarUi.refresh();
     const listOf = (id: string) => keptBefore.find((entry) => entry.taskId === id)?.listId ?? remove.find((entry) => entry.taskId === id)?.listId ?? null;
-    this.lastDeletion = {
-      undo: async () => {
-        await this.undelete(deleted.flatMap((id) => (listOf(id) ? [{ account: target.account, listId: listOf(id)!, id }] : [])));
-        await this.restoreKept(keptBefore);
-        for (const listId of new Set(keptBefore.map((entry) => entry.listId))) this.afterTaskWrite(target.account, listId, true);
-        for (const listId of new Set(keptBefore.map((entry) => entry.listId))) if (this.view.board[listKey(target.account, listId)]) void this.loadBoard(target.account, listId);
-      },
-    };
-  }
-
-  /** The last deletion of tasks, until it is undone or another one comes. */
-  private lastDeletion: { undo: () => Promise<void> } | null = null;
-
-  /** Whether there is a deletion to undo. */
-  canUndoDelete(): boolean {
-    return Boolean(this.lastDeletion);
+    const gone = deleted.flatMap((id) => (listOf(id) ? [{ listId: listOf(id)!, id }] : []));
+    this.lastUndo = this.seriesUndo({ account: target.account, seriesId: target.seriesId, kind: 'cut', from: target.from, deleted: gone, before: keptBefore }, keptBefore.map((entry) => entry.listId));
   }
 
   /**
-   * Google Tasks' "Undo" after Delete (and ⌘/Ctrl+Z): the tasks come back as Google had them (Google undeletes
-   * them) with what the Planner kept for them. Once; false when there is nothing to undo.
+   * Undo after deleting tasks of a series, which the service takes back, one
+   * change of the series at a time and against the series as it is then
+   * (`GoogleSeries.undo`); the lists it touches read again.
    */
-  async undoDelete(): Promise<boolean> {
-    const last = this.lastDeletion;
-    this.lastDeletion = null;
-    if (!last) return false;
-    await last.undo();
-    return true;
+  private seriesUndo(body: { account: string; seriesId: string } & Record<string, unknown>, lists: readonly string[]): UndoEntry {
+    return async () => {
+      const answer = await this.client.call<Snapshot & { nextKept: boolean; failed: number }>('POST', '/google/tasks/series/undo', body);
+      await this.client.adopt(answer);
+      for (const listId of new Set(lists)) {
+        this.afterTaskWrite(body.account, listId, true);
+        if (this.view.board[listKey(body.account, listId)]) void this.loadBoard(body.account, listId);
+      }
+      calendarUi.refresh();
+      const note = answer.failed ? `Google Tasks did not give back ${answer.failed} of the tasks` : answer.nextKept ? 'Its next task stays, as it was changed or completed since' : null;
+      return { done: 'Deletion undone', note };
+    };
+  }
+
+  /** The last deletion or completion of tasks, until it is undone or another one comes. */
+  private lastUndo: UndoEntry | null = null;
+
+  /** Whether there is a deletion or a completion to undo. */
+  canUndo(): boolean {
+    return Boolean(this.lastUndo);
+  }
+
+  /**
+   * Google Tasks' "Undo" after Delete or after completing (and Ctrl/⌘+Z):
+   * the tasks come back as they were (Google undeletes them, or they are open
+   * again) with what the Planner kept for them. Once; null when there is
+   * nothing to undo. What to say once done, and (`note`) what stayed as it is.
+   */
+  async undoLast(): Promise<{ done: string; note: string | null } | null> {
+    const last = this.lastUndo;
+    this.lastUndo = null;
+    return last ? last() : null;
   }
 
   /** Tasks Google deleted, undeleted (the task first, then its subtasks). */
@@ -1291,7 +1368,8 @@ export class GoogleStore {
   editOccurrence(upcoming: UpcomingTask, fields: TaskFields): Promise<void> {
     if (!fields.due) return Promise.reject(new Error(OCCURRENCE_KEEPS_DATE));
     if (fields.title.length > 1024 || fields.notes.length > GOOGLE_NOTES_MAX) return Promise.reject(new Error(`Google Tasks takes a title of at most 1024 characters and details of at most ${GOOGLE_NOTES_MAX}`));
-    const after = { title: fields.title, notes: fields.notes, due: fields.due, time: fields.kept.time, duration: fields.kept.duration, deadline: fields.kept.deadline };
+    // Its attachments too: This task attaches files to this occurrence alone, as Google Calendar does.
+    const after = { title: fields.title, notes: fields.notes, due: fields.due, time: fields.kept.time, duration: fields.kept.duration, deadline: fields.kept.deadline, ...(fields.kept.attachments ? { attachments: fields.kept.attachments } : {}) };
     return this.changeOccurrence(upcoming, { before: upcomingValues(upcoming), after });
   }
 

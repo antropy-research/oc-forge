@@ -208,7 +208,13 @@ export interface OccurrenceValues {
   time: number | null;
   duration: number | null;
   deadline: DateKey | null;
+  /** Its Drive attachments; left out by a window that does not send them, where they stay as they are. */
+  attachments?: TaskAttachment[];
 }
+
+/** Whether two lists of attachments are the same files, in the same order. */
+export const sameFiles = (a: readonly TaskAttachment[] | undefined, b: readonly TaskAttachment[] | undefined): boolean =>
+  (a ?? []).map((file) => file.id).join('\n') === (b ?? []).map((file) => file.id).join('\n');
 
 /** The occurrence a series puts on `on`: the template there (its deadline as many days after `on`), with `change` over it. */
 export const occurrenceValues = (template: GoogleTaskTemplate, on: DateKey, change?: GoogleTaskException): OccurrenceValues => ({
@@ -218,12 +224,14 @@ export const occurrenceValues = (template: GoogleTaskTemplate, on: DateKey, chan
   time: change?.time !== undefined ? change.time : template.time,
   duration: change?.time !== undefined ? change.duration ?? null : template.duration,
   deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline),
+  attachments: change?.attachments ?? template.attachments ?? [],
 });
 
 /**
  * What makes the occurrence the series puts on `on` read as `values`: only
  * what differs from its template there, so an "All tasks" change of anything
- * else reaches it too; null when nothing does.
+ * else reaches it too; null when nothing does. Attachments of its own stand
+ * in for the series' ones, none ([]) included.
  */
 export const occurrenceChange = (template: GoogleTaskTemplate, on: DateKey, values: OccurrenceValues): GoogleTaskException | null => {
   const series = occurrenceValues(template, on);
@@ -233,6 +241,7 @@ export const occurrenceChange = (template: GoogleTaskTemplate, on: DateKey, valu
     ...(values.due !== on ? { date: values.due } : {}),
     ...(values.time !== series.time || values.duration !== series.duration ? { time: values.time, duration: values.duration } : {}),
     ...(values.deadline !== series.deadline ? { deadline: values.deadline } : {}),
+    ...(values.attachments && !sameFiles(values.attachments, series.attachments) ? { attachments: values.attachments } : {}),
   };
   return Object.keys(change).length ? change : null;
 };
@@ -273,10 +282,11 @@ export const exceptionsOnSchedule = (exceptions: Exceptions | undefined, rule: s
 
 /**
  * The task a series makes for its `index`th occurrence, on `date`: Google's
- * title, details and date, and what is kept for it (its time and deadline,
- * and the series, with the exceptions still ahead), each as that occurrence
- * was changed on its own, else from the template; its availability and
- * visibility are the series'.
+ * title, details and date, and what is kept for it (its time, deadline and
+ * attachments, and the series, with the exceptions still ahead), each as that
+ * occurrence was changed on its own, else from the template; its
+ * availability, visibility, color, Do not disturb and declining are the
+ * series'.
  */
 export const occurrenceTask = (repeat: Repeat, template: GoogleTaskTemplate, date: DateKey, index: number): { title: string; notes: string; due: DateKey; kept: GoogleTaskKeptPatch } => {
   const values = occurrenceValues(template, date, repeat.exceptions?.[date]);
@@ -293,7 +303,7 @@ export const occurrenceTask = (repeat: Repeat, template: GoogleTaskTemplate, dat
       ...(values.time !== null && template.busy ? { busy: true } : {}),
       ...(values.time !== null && template.visibility ? { visibility: template.visibility } : {}),
       ...(template.color ? { color: template.color } : {}),
-      ...(template.attachments?.length ? { attachments: template.attachments } : {}),
+      ...(values.attachments?.length ? { attachments: values.attachments } : {}),
       ...(values.time !== null && template.doNotDisturb ? { doNotDisturb: true } : {}),
       ...(values.time !== null && template.busy && template.decline ? { decline: template.decline } : {}),
     },
@@ -586,13 +596,34 @@ export const occurrenceIndex = (repeat: Repeat, on: DateKey): number | null => {
  * there) to `after` (its form), over the occurrence as it is now (`latest`):
  * each field the edit changed takes its value, the others keep theirs, so a
  * change made meanwhile (in another window, or of the series) stays. A time
- * and its length go together.
+ * and its length go together; so do the attachments, which a window that
+ * does not send them leaves as they are.
  */
 export const mergeOccurrence = (latest: OccurrenceValues, before: OccurrenceValues, after: OccurrenceValues): OccurrenceValues => {
   const pick = <K extends 'title' | 'notes' | 'due' | 'deadline'>(key: K): OccurrenceValues[K] => (after[key] !== before[key] ? after[key] : latest[key]);
   const timed = after.time !== before.time || after.duration !== before.duration;
-  return { title: pick('title'), notes: pick('notes'), due: pick('due'), time: timed ? after.time : latest.time, duration: timed ? after.duration : latest.duration, deadline: pick('deadline') };
+  const files = after.attachments !== undefined && !sameFiles(after.attachments, before.attachments);
+  return {
+    title: pick('title'),
+    notes: pick('notes'),
+    due: pick('due'),
+    time: timed ? after.time : latest.time,
+    duration: timed ? after.duration : latest.duration,
+    deadline: pick('deadline'),
+    ...(files ? { attachments: after.attachments } : latest.attachments !== undefined ? { attachments: latest.attachments } : {}),
+  };
 };
+
+/** A next task the series made, as its window got it: Undo takes it back only while it is still so. */
+export interface MadeTask {
+  listId: string;
+  id: string;
+  title: string;
+  notes: string;
+  due: DateKey | null;
+  /** When the Planner kept it (its kept entry's `updatedAt` then). */
+  updatedAt: string;
+}
 
 /** One side of an edit of all tasks of a series: its rule (null: no repeat any more), its template, and the date of the task it was made from. */
 export interface SeriesSide {
@@ -601,7 +632,15 @@ export interface SeriesSide {
   due: DateKey | null;
 }
 
-const TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'busy', 'visibility'] as const;
+const TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'busy', 'visibility', 'color', 'doNotDisturb', 'decline', 'attachments'] as const;
+type TemplateField = (typeof TEMPLATE_FIELDS)[number];
+
+/** Whether an edit left a template field as it was: attachments by their files, declining by its mode and message (not since when). */
+const sameField = (field: TemplateField, a: GoogleTaskTemplate, b: GoogleTaskTemplate): boolean => {
+  if (field === 'attachments') return sameFiles(a.attachments, b.attachments);
+  if (field === 'decline') return (a.decline?.mode ?? null) === (b.decline?.mode ?? null) && (a.decline?.message ?? null) === (b.decline?.message ?? null);
+  return a[field] === b[field];
+};
 
 /**
  * An edit of all tasks of a series (Edit → All tasks, a new rule, no repeat
@@ -617,10 +656,12 @@ const TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'busy
  * the edit had them before (a new rule or date starts the schedule there).
  * Once it was completed meanwhile, the edit is for the series from its open
  * task on: that one takes the new rule (counted from its own date) and
- * template. Each open task other than `taskId` takes its time, deadline and
- * availability from the new template, and its title and details too when
- * the edit changed them (`google`, for Google). No repeat any more ends the
- * series with that task and each open one. Null when the series is gone.
+ * template. Each open task other than `taskId` takes from the new template
+ * what the edit changed of its time, deadline, availability, visibility,
+ * color, Do not disturb, declining and attachments, the rest staying as it
+ * is, and its title and details too when the edit changed them (`google`,
+ * for Google). No repeat any more ends the series with that task and each
+ * open one. Null when the series is gone.
  */
 export const seriesEdit = (
   state: Pick<PlannerState, 'googleTasks'>,
@@ -643,19 +684,24 @@ export const seriesEdit = (
   const latest = base.repeat;
   const rule = after.rule !== before.rule ? after.rule : latest.rule;
   const ruleChanged = rule !== latest.rule;
-  const changed = TEMPLATE_FIELDS.filter((field) => after.template[field] !== before.template[field]);
+  const changed = TEMPLATE_FIELDS.filter((field) => !sameField(field, after.template, before.template));
   const fields: Record<string, unknown> = { ...(latest.template ?? before.template) };
   for (const field of changed) {
     if (after.template[field] === undefined) delete fields[field];
     else fields[field] = after.template[field];
   }
   const template = fields as unknown as GoogleTaskTemplate;
+  const has = (...names: TemplateField[]) => names.some((name) => changed.includes(name));
+  // What an open task takes from the template: what the edit changed, the rest as it is.
   const timing = (head: GoogleTaskKept, made: GoogleTaskTemplate): GoogleTaskKeptPatch => ({
-    time: made.time,
-    duration: made.duration,
-    deadline: head.repeat?.on ? (made.deadline === null ? null : addDays(head.repeat.on, made.deadline)) : head.deadline,
-    busy: Boolean(made.busy),
-    visibility: made.visibility ?? 'default',
+    ...(has('time', 'duration') ? { time: made.time, duration: made.duration } : {}),
+    ...(has('deadline') ? { deadline: head.repeat?.on ? (made.deadline === null ? null : addDays(head.repeat.on, made.deadline)) : head.deadline } : {}),
+    ...(has('busy') ? { busy: Boolean(made.busy) } : {}),
+    ...(has('visibility') ? { visibility: made.visibility ?? 'default' } : {}),
+    ...(has('color') ? { color: made.color ?? null } : {}),
+    ...(has('doNotDisturb') ? { doNotDisturb: Boolean(made.doNotDisturb) } : {}),
+    ...(has('decline') ? { decline: made.decline ?? null } : {}),
+    ...(has('attachments') ? { attachments: made.attachments ?? [] } : {}),
   });
   const google = changed.some((field) => field === 'title' || field === 'notes')
     ? others.map((head) => ({ listId: head.listId, taskId: head.taskId, ...(changed.includes('title') ? { title: template.title } : {}), ...(changed.includes('notes') ? { notes: template.notes } : {}) }))

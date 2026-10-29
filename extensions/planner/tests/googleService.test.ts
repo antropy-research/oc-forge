@@ -401,3 +401,61 @@ describe('a series changed while Google makes its next task, through the service
     expect((await call('POST', '/google/tasks/series/edit', { account: ME, listId: 'L1', taskId: 'x', seriesId, own: { repeat: null }, before: { rule: null, template, due: today }, after: { rule: null, template, due: today } })).status).toBe(400);
   });
 });
+
+describe("round 10's fields and Undo through the service (merge)", () => {
+  const DAILY = 'RRULE:FREQ=DAILY';
+  const doc = { id: 'harnessDoc1', title: 'Plan', mimeType: 'application/vnd.google-apps.document', url: 'https://docs.google.com/document/d/harnessDoc1/edit' };
+  const advanced = { busy: true, color: '#d50000', doNotDisturb: true, decline: { mode: 'new', message: 'Heads down' }, attachments: [doc] };
+
+  test('All tasks with a color, Do not disturb, declining and attachments: the route takes them; the series and its open task keep them, and the next task has them', async () => {
+    const { id, seriesId, template } = await daily('Harness advanced');
+    const edited = await call('POST', '/google/tasks/series/edit', { account: ME, listId: 'L1', taskId: id, seriesId, own: advanced, before: { rule: DAILY, template, due: today }, after: { rule: DAILY, template: { ...template, ...advanced }, due: today } });
+    expect(edited.status).toBe(200);
+    const head = edited.body.state.googleTasks[`${ME}\n${id}`];
+    expect(head).toMatchObject({ busy: true, color: '#d50000', doNotDisturb: true, decline: { mode: 'new', message: 'Heads down' }, attachments: [doc] });
+    expect(head.repeat.template).toMatchObject(advanced);
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    const next = (await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: today })).body;
+    expect(next.state.googleTasks[`${ME}\n${next.task.id}`]).toMatchObject({ time: 540, busy: true, color: '#d50000', doNotDisturb: true, decline: { mode: 'new' }, attachments: [doc] });
+  });
+
+  test('Undo after "This task": Google undeletes the task, the next one its deletion made goes again, and the series goes on from the task as kept before', async () => {
+    const { id, seriesId } = await daily('Harness undo one');
+    // As the panel deletes "This task": its next one first, then the task in Google and here.
+    const made = (await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: false, due: today })).body;
+    const task = made.state.googleTasks[`${ME}\n${id}`];
+    const fingerprint = { listId: 'L1', id: made.task.id, title: made.task.title, notes: made.task.notes, due: made.task.due, updatedAt: made.state.googleTasks[`${ME}\n${made.task.id}`].updatedAt };
+    expect((await call('DELETE', `/google/tasks?${q({ account: ME, list: 'L1', id })}`)).status).toBe(200);
+    await commands({ type: 'gtask.dropped', account: ME, taskId: id });
+    const undone = await call('POST', '/google/tasks/series/undo', { account: ME, seriesId, kind: 'one', task, made: fingerprint });
+    expect(undone.status).toBe(200);
+    expect(undone.body.nextKept).toBe(false);
+    expect(open('Harness undo one').map((one) => one.id)).toEqual([id]);
+    expect(undone.body.state.googleTasks[`${ME}\n${made.task.id}`]).toBeUndefined();
+    expect(heads(undone.body.state.googleTasks, seriesId)).toEqual([id]);
+    // Again: nothing to give back.
+    expect((await call('POST', '/google/tasks/series/undo', { account: ME, seriesId, kind: 'one', task, made: fingerprint })).status).toBe(409);
+  });
+
+  test('Undo after completing: open again in Google, the next task gone again; once that next task was edited, it stays and the answer says so', async () => {
+    const { id, seriesId } = await daily('Harness undo done');
+    const before = (await kept())[`${ME}\n${id}`];
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    const made = (await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: today })).body;
+    const fingerprint = { listId: 'L1', id: made.task.id, title: made.task.title, notes: made.task.notes, due: made.task.due, updatedAt: made.state.googleTasks[`${ME}\n${made.task.id}`].updatedAt };
+    const undone = await call('POST', '/google/tasks/uncomplete', { account: ME, listId: 'L1', id, before, made: fingerprint });
+    expect(undone.body).toMatchObject({ nextKept: false });
+    expect(fake.tasks.get('L1')!.find((one) => one.id === id)!.status).toBe('needsAction');
+    expect(fake.tasks.get('L1')!.some((one) => one.id === made.task.id)).toBe(false);
+    expect(heads(undone.body.state.googleTasks, seriesId)).toEqual([id]);
+    // Completed again, its next task edited in Google: Undo keeps that one.
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    const again = (await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: today })).body;
+    const print = { listId: 'L1', id: again.task.id, title: again.task.title, notes: again.task.notes, due: again.task.due, updatedAt: again.state.googleTasks[`${ME}\n${again.task.id}`].updatedAt };
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id: again.task.id, title: 'Harness undo done, edited' });
+    const kept2 = await call('POST', '/google/tasks/uncomplete', { account: ME, listId: 'L1', id, before, made: print });
+    expect(kept2.body).toMatchObject({ nextKept: true });
+    expect(fake.tasks.get('L1')!.find((one) => one.id === again.task.id)).toMatchObject({ title: 'Harness undo done, edited', status: 'needsAction' });
+    expect(heads(kept2.body.state.googleTasks, seriesId)).toEqual([again.task.id]);
+  });
+});

@@ -6,18 +6,18 @@
 // they were.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, listKey } from '../panel/lib/google.ts';
+import { GoogleStore, listKey, type TaskFields } from '../panel/lib/google.ts';
 import type { PlannerClient, Snapshot } from '../panel/lib/client.ts';
 import { GoogleError } from '../service/google.ts';
 import { GoogleSeries, type SeriesData } from '../service/googleSeries.ts';
 import type { ExecuteResult } from '../service/planner.ts';
 import { commandBody, validateCommand, type Command, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import type { GoogleTaskItem } from '../src/domain/google.ts';
-import { endedBefore, keptFor, mergeOccurrence, nextRepeatDate, occurrenceIndex, ruleEndingBefore, seriesCut, seriesHeads, seriesNextIn, upcomingTasks } from '../src/domain/gtaskKept.ts';
+import { endedBefore, keptFor, mergeOccurrence, nextRepeatDate, occurrenceIndex, ruleEndingBefore, seriesCut, seriesHeads, seriesNextIn, upcomingTasks, upcomingValues } from '../src/domain/gtaskKept.ts';
 import { newId } from '../src/domain/ids.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { describeRecurrence } from '../src/domain/rrule.ts';
-import { emptyState, type GoogleTaskKept, type PlannerState } from '../src/domain/types.ts';
+import { emptyState, type GoogleTaskKept, type PlannerState, type TaskAttachment } from '../src/domain/types.ts';
 
 const ME = 'me@example.com';
 const host = { storage: { get: async () => undefined, set: async () => {}, delete: async () => {}, keys: async () => [] } } as unknown as HostClient;
@@ -30,6 +30,8 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 20));
  */
 const service = () => {
   const google = new Map<string, GoogleTaskItem>();
+  // What Google deleted lately, which it gives back on "deleted: false" (Undo).
+  const trash = new Map<string, GoogleTaskItem>();
   const asked: { what: 'read' | 'create' | 'update' | 'delete'; id?: string; due?: string | null }[] = [];
   let made = 0;
   let clock = Date.parse('2026-10-29T16:00:00Z');
@@ -61,14 +63,22 @@ const service = () => {
     deleteTask: async (_account, _listId, id) => {
       asked.push({ what: 'delete', id });
       await wait('delete');
+      const task = google.get(id);
+      if (!task) throw new GoogleError(404, 'This task is no longer in Google Tasks');
+      trash.set(id, task);
       google.delete(id);
     },
     updateTask: async (_account, _listId, id, patch) => {
       asked.push({ what: 'update', id, ...(patch.due !== undefined ? { due: patch.due } : {}) });
       await wait('update');
+      const { deleted, ...fields } = patch;
+      if (deleted === false && trash.has(id)) {
+        google.set(id, trash.get(id)!);
+        trash.delete(id);
+      }
       const task = google.get(id);
       if (!task) throw new GoogleError(404, 'This task is no longer in Google Tasks');
-      const next = { ...task, ...patch };
+      const next = { ...task, ...fields };
       google.set(id, next);
       return { ...next };
     },
@@ -107,9 +117,11 @@ const service = () => {
   const window = () => {
     let view = state;
     const notes: string[] = [];
+    const calls: { method: string; path: string; body?: any }[] = [];
     const client = {
       getView: () => ({ state: view, today: '2026-10-29' }),
       call: async (method: string, path: string, body?: any) => {
+        calls.push({ method, path, ...(body === undefined ? {} : { body }) });
         if (path === '/google/tasks/next') return { ...(await series.next(body.account, body.listId, body.id, { completed: body.completed, due: body.due })), ...snapshot() };
         if (path.startsWith('/google/tasks/series?')) return { ...(await series.remove(query(path).get('account')!, query(path).get('series')!, query(path).get('from'), query(path).get('task'))), ...snapshot() };
         if (path === '/google/tasks/occurrence') {
@@ -124,9 +136,14 @@ const service = () => {
           await series.gone(body.account, body.listId, body.id);
           return snapshot();
         }
+        if (path === '/google/tasks/series/undo') return { ...(await series.undo(body.account, body.seriesId, body.kind === 'one' ? { kind: 'one', task: body.task, made: body.made } : { kind: 'cut', from: body.from, deleted: body.deleted, before: body.before })), ...snapshot() };
+        if (path === '/google/tasks/uncomplete') return { ...(await series.uncomplete(body.account, body.listId, body.id, { before: body.before, made: body.made })), ...snapshot() };
         if (method === 'GET' && path.startsWith('/google/tasks/all')) return data.allTasks(ME, query(path).get('list')!);
         if (method === 'POST' && path === '/google/tasks') return { task: await data.createTask(body.account, body.listId, body) };
-        if (method === 'PATCH' && path === '/google/tasks') return { task: await data.updateTask(body.account, body.listId, body.id, body) };
+        if (method === 'PATCH' && path === '/google/tasks') {
+          const { account: _account, listId: _list, id: _id, ...patch } = body;
+          return { task: await data.updateTask(body.account, body.listId, body.id, patch) };
+        }
         if (method === 'DELETE' && path.startsWith('/google/tasks?')) {
           await data.deleteTask(ME, query(path).get('list')!, query(path).get('id')!);
           return { deleted: true };
@@ -146,11 +163,12 @@ const service = () => {
       notify: (message: string) => notes.push(message),
       onCommitted: () => () => {},
     } as unknown as PlannerClient;
-    return { store: new GoogleStore(host, client, 'page'), notes, view: () => view, dispatch: (bodies: EventBody[]) => client.dispatch(bodies) };
+    return { store: new GoogleStore(host, client, 'page'), notes, calls, view: () => view, dispatch: (bodies: EventBody[]) => client.dispatch(bodies) };
   };
 
   return {
     google,
+    trash,
     asked,
     series,
     log,
@@ -580,6 +598,247 @@ describe('an occurrence moved onto another one, and its task gone from Google (r
     await world.series.settled();
     expect(keptFor(world.state(), next)).toMatchObject({ listId: 'L2', repeat: { seriesId, next: null } });
     expect(world.creates()).toHaveLength(2);
+  });
+});
+
+
+const RED = '#d50000';
+const doc = (id: string, title: string): TaskAttachment => ({ id, title, mimeType: 'application/vnd.google-apps.document', url: `https://docs.google.com/document/d/${id}/edit` });
+/** A task form's values with the advanced settings given (left out: as they are), repeating daily. */
+const formWith = (title: string, due: string, time: number | null, extra: Partial<TaskFields['kept']> = {}): TaskFields => ({
+  title,
+  notes: 'Series notes',
+  due,
+  kept: { time, duration: null, deadline: null, rule: 'RRULE:FREQ=DAILY', ...extra },
+});
+const ADVANCED = { busy: true, color: RED, doNotDisturb: true, decline: { mode: 'new' as const, message: 'Heads down' }, attachments: [doc('a1', 'Plan')] };
+
+describe("round 10's fields through the series (merge)", () => {
+  test('All tasks: color, Do not disturb, declining and attachments go to the series and its open task; a window that never saw them, saving All tasks, leaves them; the next task has them', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Focus');
+    const b = world.window();
+    await a.store.saveListTask(first, formWith('Focus', '2026-10-29', 540, ADVANCED), 'all');
+    const head = keptFor(world.state(), first)!;
+    expect(head).toMatchObject({ busy: true, color: RED, doNotDisturb: true, decline: { mode: 'new', message: 'Heads down' }, attachments: [doc('a1', 'Plan')] });
+    expect(head.repeat!.template).toMatchObject({ busy: true, color: RED, doNotDisturb: true, decline: { mode: 'new', message: 'Heads down' }, attachments: [doc('a1', 'Plan')] });
+    // B's view is from before: its form has none of them, and it changes the title alone.
+    await b.store.saveListTask(first, formWith('Focus time', '2026-10-29', 540, { busy: false, color: null, doNotDisturb: false, decline: null, attachments: [] }), 'all');
+    expect(keptFor(world.state(), first)!.repeat!.template).toMatchObject({ title: 'Focus time', busy: true, color: RED, doNotDisturb: true, decline: { mode: 'new' }, attachments: [doc('a1', 'Plan')] });
+    expect(keptFor(world.state(), first)).toMatchObject({ busy: true, color: RED, doNotDisturb: true, attachments: [doc('a1', 'Plan')] });
+    await a.store.completeListTask(world.google.get(first.id)!, true);
+    const next = openTask(world)[0]!;
+    expect(next.title).toBe('Focus time');
+    expect(keptFor(world.state(), next)).toMatchObject({ time: 540, busy: true, color: RED, doNotDisturb: true, decline: { mode: 'new', message: 'Heads down' }, attachments: [doc('a1', 'Plan')], repeat: { seriesId, on: '2026-10-30' } });
+  });
+
+  test('All tasks with a color and an attachment saved while another window completes the task and Google is slow to make the next: the next task takes them', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Sync');
+    const b = world.window();
+    const release = world.hold('create', 1);
+    const completing = a.store.completeListTask(first, true);
+    await flush();
+    const editing = b.store.saveListTask(first, formWith('Sync', '2026-10-29', 540, { color: RED, attachments: [doc('a2', 'Agenda')] }), 'all');
+    await flush();
+    release();
+    await Promise.all([completing, editing]);
+    const next = openTask(world)[0]!;
+    expect(keptFor(world.state(), next)).toMatchObject({ color: RED, attachments: [doc('a2', 'Agenda')], repeat: { template: { color: RED, attachments: [doc('a2', 'Agenda')] } } });
+    expect(world.creates()).toHaveLength(2);
+  });
+
+  test('This task on an upcoming task attaches files to it alone, merged over another window\'s change of its title; the series makes it with them, and the next ones with the series\' own; none ([]) is kept as none', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Review');
+    await a.store.saveListTask(first, formWith('Review', '2026-10-29', 540, { attachments: [doc('s1', 'Series doc')] }), 'all');
+    const b = world.window();
+    const shownA = upcomingOn(a.view(), '2026-10-30');
+    const shownB = upcomingOn(b.view(), '2026-10-30');
+    expect(upcomingValues(shownA).attachments).toEqual([doc('s1', 'Series doc')]);
+    await b.store.editOccurrence(shownB, { ...form('Review with Ann', '2026-10-30', 540), kept: { ...form('Review with Ann', '2026-10-30', 540).kept, attachments: [doc('s1', 'Series doc')] } });
+    await a.store.editOccurrence(shownA, { ...form('Review', '2026-10-30', 540), kept: { ...form('Review', '2026-10-30', 540).kept, attachments: [doc('s1', 'Series doc'), doc('o1', 'Notes for Ann')] } });
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-30']).toEqual({ title: 'Review with Ann', attachments: [doc('s1', 'Series doc'), doc('o1', 'Notes for Ann')] });
+    // The day after: no attachments at all, on its own.
+    await a.store.editOccurrence(upcomingOn(a.view(), '2026-10-31'), { ...form('Review', '2026-10-31', 540), kept: { ...form('Review', '2026-10-31', 540).kept, attachments: [] } });
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-31']).toEqual({ attachments: [] });
+    await a.store.completeListTask(world.google.get(first.id)!, true);
+    const second = openTask(world)[0]!;
+    expect(second.title).toBe('Review with Ann');
+    expect(keptFor(world.state(), second)!.attachments).toEqual([doc('s1', 'Series doc'), doc('o1', 'Notes for Ann')]);
+    await a.store.completeListTask(second, true);
+    const third = openTask(world)[0]!;
+    expect(third.due).toBe('2026-10-31');
+    expect(keptFor(world.state(), third)!.attachments).toBeUndefined();
+    expect(upcomingValues(upcomingOn(world.state(), '2026-11-01')).attachments).toEqual([doc('s1', 'Series doc')]);
+  });
+
+  test('an upcoming task the series has made meanwhile, its attachments edited alone: the task takes them', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Made');
+    const b = world.window();
+    const shown = upcomingOn(b.view(), '2026-10-30');
+    await a.store.completeListTask(first, true);
+    const made = openTask(world)[0]!;
+    await b.store.editOccurrence(shown, { ...form('Made', '2026-10-30', 540), kept: { ...form('Made', '2026-10-30', 540).kept, attachments: [doc('m1', 'Minutes')] } });
+    expect(keptFor(world.state(), made)).toMatchObject({ attachments: [doc('m1', 'Minutes')], repeat: { on: '2026-10-30', next: null } });
+  });
+
+  test('an upcoming task with attachments of its own deleted alone loses them; Undo gives them back; its open task deleted in Google\'s own apps: the next one has the series\' fields, and nothing of the old one stays', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Plan');
+    await a.store.saveListTask(first, formWith('Plan', '2026-10-29', 540, { color: RED, attachments: [doc('s1', 'Series doc')] }), 'all');
+    await a.store.editOccurrence(upcomingOn(a.view(), '2026-10-31'), { ...form('Plan', '2026-10-31', 540), kept: { ...form('Plan', '2026-10-31', 540).kept, attachments: [doc('o1', 'Own')] } });
+    const before = keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-31']!;
+    await a.store.setOccurrence(upcomingOn(a.view(), '2026-10-31'), { skip: true });
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-31']).toEqual({ skip: true });
+    await a.store.setOccurrence({ account: ME, listId: 'L1', seriesId, on: '2026-10-31' }, before);
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-31']).toEqual({ attachments: [doc('o1', 'Own')] });
+    world.google.delete(first.id);
+    await a.store.loadBoard(ME, 'L1');
+    await world.series.settled();
+    const next = openTask(world)[0]!;
+    expect(keptFor(world.state(), first)).toBeNull();
+    expect(keptFor(world.state(), next)).toMatchObject({ color: RED, attachments: [doc('s1', 'Series doc')], repeat: { on: '2026-10-30', exceptions: { '2026-10-31': { attachments: [doc('o1', 'Own')] } } } });
+  });
+
+  test('a color or declining set with This task goes to the series (All tasks), through the series route, and the meetings it overlaps are declined at once', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Deep');
+    await a.store.saveListTask(first, formWith('Deep', '2026-10-29', 540, { busy: true, color: RED, decline: { mode: 'all', message: 'Busy' } }), 'this');
+    expect(a.calls.filter((call) => call.path === '/google/tasks/series/edit')).toHaveLength(1);
+    expect(keptFor(world.state(), first)!.repeat!.template).toMatchObject({ busy: true, color: RED, decline: { mode: 'all', message: 'Busy' } });
+    await flush();
+    expect(a.calls.some((call) => call.path === '/google/tasks/decline')).toBe(true);
+  });
+});
+
+describe('Undo after Delete, through the series (merge)', () => {
+  test('This task: the next one its deletion made goes again, the task comes back as it was kept, color and attachments included, and the series goes on from it', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Water');
+    await a.store.saveListTask(first, formWith('Water', '2026-10-29', 540, { color: RED, attachments: [doc('a1', 'Plan')] }), 'all');
+    await a.store.deleteListTask(world.google.get(first.id)!, 'this');
+    const made = openTask(world)[0]!;
+    expect(world.google.has(first.id)).toBe(false);
+    expect(await a.store.undoLast()).toEqual({ done: 'Deletion undone', note: null });
+    expect(world.google.has(first.id)).toBe(true);
+    expect(world.google.has(made.id)).toBe(false);
+    expect(keptFor(world.state(), first)).toMatchObject({ color: RED, attachments: [doc('a1', 'Plan')], repeat: { seriesId, on: '2026-10-29', next: null } });
+    expect(world.heads(seriesId).map((kept) => kept.taskId)).toEqual([first.id]);
+    expect(await a.store.undoLast()).toBeNull();
+    // It goes on from it: completing it makes one next task.
+    await a.store.completeListTask(world.google.get(first.id)!, true);
+    expect(openTask(world).map((task) => task.due)).toEqual(['2026-10-30']);
+  });
+
+  test('This task, its next task changed in another window meanwhile: Undo brings the task back beside it, linked, and says so', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Water');
+    await a.store.deleteListTask(world.google.get(first.id)!, 'this');
+    const made = openTask(world)[0]!;
+    const b = world.window();
+    await b.store.saveListTask(made, form('Water the ferns', '2026-10-30', 540, { rule: 'RRULE:FREQ=DAILY' }), 'this');
+    const undone = await a.store.undoLast();
+    expect(undone?.note).toContain('stays');
+    expect(world.google.get(made.id)).toMatchObject({ title: 'Water the ferns' });
+    expect(world.google.has(first.id)).toBe(true);
+    expect(keptFor(world.state(), first)!.repeat!.next).toBe(made.id);
+    expect(world.heads(seriesId).map((kept) => kept.taskId)).toEqual([made.id]);
+  });
+
+  test('This and following tasks: Undo gives the series its rule and the changes it dropped back; one made meanwhile before the cut stays', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Cut');
+    await a.store.editOccurrence(upcomingOn(a.view(), '2026-11-01'), form('Cut late', '2026-11-01', 900));
+    await a.store.deleteSeries({ account: ME, seriesId, from: '2026-10-31' });
+    expect(keptFor(world.state(), first)!.repeat).toMatchObject({ rule: 'RRULE:FREQ=DAILY;UNTIL=20261030' });
+    const b = world.window();
+    await b.store.editOccurrence(upcomingOn(b.view(), '2026-10-30'), form('Cut early', '2026-10-30', 600));
+    expect(await a.store.undoLast()).toEqual({ done: 'Deletion undone', note: null });
+    expect(keptFor(world.state(), first)!.repeat).toMatchObject({ rule: 'RRULE:FREQ=DAILY', exceptions: { '2026-10-30': { title: 'Cut early' }, '2026-11-01': { title: 'Cut late' } } });
+    expect(upcomingTasks(world.state().googleTasks, [], '2026-10-30', '2026-11-02', '2026-10-29').map((task) => task.on)).toEqual(['2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02']);
+  });
+
+  test('All tasks, a completed task among them: Undo gives every task back in Google, as it was kept', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'All');
+    await a.store.completeListTask(first, true);
+    const second = openTask(world)[0]!;
+    await a.store.deleteSeries({ account: ME, seriesId, from: null });
+    await world.series.settled();
+    expect([world.google.has(first.id), world.google.has(second.id)]).toEqual([false, false]);
+    await a.store.undoLast();
+    expect([world.google.has(first.id), world.google.has(second.id)]).toEqual([true, true]);
+    expect(keptFor(world.state(), first)!.repeat!.next).toBe(second.id);
+    expect(world.heads(seriesId).map((kept) => kept.taskId)).toEqual([second.id]);
+  });
+});
+
+describe('Undo after completing (merge)', () => {
+  test('a task of a series: the next one its completion made goes again, the task is open and the series goes on from it; Undo once', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Run');
+    await a.store.completeListTask(first, true);
+    const made = openTask(world)[0]!;
+    expect(a.store.canUndo()).toBe(true);
+    expect(await a.store.undoLast()).toEqual({ done: 'Completion undone', note: null });
+    expect(world.google.get(first.id)!.completed).toBe(false);
+    expect(world.google.has(made.id)).toBe(false);
+    expect(keptFor(world.state(), made)).toBeNull();
+    expect(keptFor(world.state(), first)!.repeat).toMatchObject({ next: null, on: '2026-10-29' });
+    expect(world.heads(seriesId).map((kept) => kept.taskId)).toEqual([first.id]);
+    expect(a.store.canUndo()).toBe(false);
+    await a.store.completeListTask(world.google.get(first.id)!, true);
+    expect(openTask(world).map((task) => task.due)).toEqual(['2026-10-30']);
+  });
+
+  test('its next task completed in another window meanwhile: Undo opens the task again beside it and says so; the series goes on from that one', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Run');
+    await a.store.completeListTask(first, true);
+    const made = openTask(world)[0]!;
+    const b = world.window();
+    await b.store.completeListTask(made, true);
+    const undone = await a.store.undoLast();
+    expect(undone?.note).toContain('stays');
+    expect(world.google.get(first.id)!.completed).toBe(false);
+    expect(world.google.get(made.id)!.completed).toBe(true);
+    expect(world.heads(seriesId)).toHaveLength(1);
+    expect(world.heads(seriesId)[0]!.taskId).not.toBe(first.id);
+  });
+
+  test('a task opened again by hand leaves nothing to undo', async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Run');
+    await a.store.completeListTask(first, true);
+    await a.store.completeListTask(world.google.get(first.id)!, false);
+    expect(a.store.canUndo()).toBe(false);
+    expect(openTask(world)).toHaveLength(2);
+  });
+
+  test('the last task of a series that ends with it: open again, and it repeats again', async () => {
+    const world = service();
+    const a = world.window();
+    const first = await a.store.addListTask(ME, 'L1', { title: 'Last', notes: '', due: '2026-10-29' }, { time: 540, rule: 'RRULE:FREQ=DAILY;COUNT=1' });
+    await a.store.completeListTask(first, true);
+    expect(keptFor(world.state(), first)?.repeat ?? null).toBeNull();
+    await a.store.undoLast();
+    expect(world.google.get(first.id)!.completed).toBe(false);
+    expect(keptFor(world.state(), first)!.repeat).toMatchObject({ rule: 'RRULE:FREQ=DAILY;COUNT=1', next: null });
   });
 });
 

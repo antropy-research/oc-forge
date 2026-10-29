@@ -15,7 +15,7 @@ import { colorName, driveKind, quietLabel, taskOrigins, type DeclinedMeeting } f
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
-import { DELETE_CHOICES } from '../../lib/google.ts';
+import { DELETE_CHOICES, undoAction } from '../../lib/google.ts';
 import { useUi } from '../../lib/ui.ts';
 import { anchorOf, calendarUi, eventDetail, popoverKind, removeEvent, respond, type Anchor } from '../../lib/gcal.ts';
 import { plannedLabel } from '../GitHubPanel.tsx';
@@ -299,7 +299,7 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
     // A repeating task asks, as Google Calendar does: this one (the series goes on), this and the following ones, or all of them.
     const scope = kept?.repeat ? await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: DELETE_CHOICES }) : 'this';
     // Undo, as Google offers it after a deletion.
-    if (scope === 'this' || scope === 'following' || scope === 'all') run(() => google.deleteListTask(item, scope), scope === 'this' ? 'Task deleted' : 'Tasks deleted', () => google.undoDelete().then(() => {}));
+    if (scope === 'this' || scope === 'following' || scope === 'all') run(() => google.deleteListTask(item, scope), scope === 'this' ? 'Task deleted' : 'Tasks deleted', undoAction(google, client.notify));
   };
   const run = (work: () => Promise<unknown>, done?: string, undo: (() => Promise<void>) | null = null) => {
     setBusy(true);
@@ -420,7 +420,7 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
         </div>
       </div>
       <div class="pop-footer">
-        <button class="primary" disabled={busy} onClick={() => run(() => google.completeListTask(item, !item.completed), item.completed ? 'Task marked not done' : 'Task completed')}>
+        <button class="primary" disabled={busy} onClick={() => run(() => google.completeListTask(item, !item.completed), item.completed ? 'Task marked not done' : 'Task completed', item.completed ? null : undoAction(google, client.notify))}>
           {item.completed ? 'Mark uncompleted' : 'Mark completed'}
         </button>
       </div>

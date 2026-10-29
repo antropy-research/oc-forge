@@ -201,7 +201,7 @@ const validateGtaskTemplate = (value: unknown): string | null => {
   return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? 'template has an unknown field' : null;
 };
 
-const GTASK_EXCEPTION_FIELDS = ['skip', 'title', 'notes', 'date', 'time', 'duration', 'deadline'];
+const GTASK_EXCEPTION_FIELDS = ['skip', 'title', 'notes', 'date', 'time', 'duration', 'deadline', 'attachments'];
 /** A series keeps at most this many of its occurrences changed on their own. */
 export const GTASK_EXCEPTIONS_MAX = 200;
 
@@ -218,7 +218,8 @@ const validateGtaskException = (value: unknown): string | null => {
   if (value.time !== undefined && !(value.time === null || (Number.isInteger(value.time) && (value.time as number) >= 0 && (value.time as number) < 24 * 60))) return 'an occurrence time must be minutes after midnight, or null';
   if (value.duration !== undefined && !(value.duration === null || (Number.isInteger(value.duration) && (value.duration as number) >= 5 && (value.duration as number) <= 24 * 60))) return 'an occurrence duration must be 5 to 1440 minutes, or null';
   if (value.deadline !== undefined && !(value.deadline === null || isDateKey(value.deadline))) return 'an occurrence deadline must be a date or null';
-  return null;
+  const files = value.attachments !== undefined ? attachmentsProblem(value.attachments) : null;
+  return files ? `an occurrence's ${files}` : null;
 };
 
 /**

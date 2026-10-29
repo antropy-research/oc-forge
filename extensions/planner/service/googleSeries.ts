@@ -7,11 +7,13 @@
 // next occurrence, found or made and linked in one step (a second window gets
 // the first one's); one upcoming occurrence changed or deleted on its own;
 // an edit of all its tasks, or no repeat any more; "This and following tasks"
-// and "All tasks", as Google Calendar deletes them; and its open task deleted
-// or moved in Google's own apps.
+// and "All tasks", as Google Calendar deletes them; its open task deleted or
+// moved in Google's own apps; and Google Tasks' Undo after deleting or
+// completing its tasks.
 import type { EventBody } from '../src/domain/events.ts';
 import { TASK_GONE, type GoogleTaskItem } from '../src/domain/google.ts';
 import {
+  endedBefore,
   keptFor,
   mergeOccurrence,
   nextOccurrence,
@@ -19,11 +21,13 @@ import {
   occurrenceIndex,
   occurrenceTask,
   occurrenceValues,
+  sameFiles,
   seriesCut,
   seriesEdit,
   seriesNextIn,
   withException,
   withExceptions,
+  type MadeTask,
   type OccurrenceValues,
   type SeriesSide,
 } from '../src/domain/gtaskKept.ts';
@@ -50,6 +54,30 @@ export interface NextHint {
 
 /** One upcoming occurrence changed on its own: deleted, put back as it was (Undo), or edited from what a window showed to its form. */
 export type OccurrenceEdit = { skip: true } | { restore: GoogleTaskException | null } | { before: OccurrenceValues; after: OccurrenceValues };
+
+/**
+ * What Undo after deleting tasks of a series takes back: "This task" (`one`: the task as kept just before, and the
+ * next one its deletion made) or "This and following tasks" and "All tasks" (`cut`: from when, the tasks Google
+ * deleted, and what was kept for the series' tasks just before).
+ */
+export type SeriesUndo =
+  | { kind: 'one'; task: GoogleTaskKept; made: MadeTask | null }
+  | { kind: 'cut'; from: DateKey | null; deleted: { listId: string; id: string }[]; before: GoogleTaskKept[] };
+
+/** Everything kept for a task, as a patch that puts it back. */
+const keptPatch = (entry: GoogleTaskKept): GoogleTaskKeptPatch => ({
+  time: entry.time,
+  duration: entry.duration,
+  deadline: entry.deadline,
+  repeat: entry.repeat,
+  starred: Boolean(entry.starredAt),
+  busy: Boolean(entry.busy),
+  visibility: entry.visibility ?? 'default',
+  color: entry.color ?? null,
+  attachments: entry.attachments ?? [],
+  doNotDisturb: Boolean(entry.doNotDisturb),
+  decline: entry.decline ?? null,
+});
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const isGone = (error: unknown): boolean => error instanceof GoogleError && error.status === 404;
@@ -242,7 +270,7 @@ export class GoogleSeries {
       this.write([{ type: 'gtask.dropped', account, taskId }]);
       return;
     }
-    const latest: OccurrenceValues = { title: google.title, notes: google.notes, due: google.due ?? real.repeat!.on!, time: real.time, duration: real.duration, deadline: real.deadline };
+    const latest: OccurrenceValues = { title: google.title, notes: google.notes, due: google.due ?? real.repeat!.on!, time: real.time, duration: real.duration, deadline: real.deadline, attachments: real.attachments ?? [] };
     const merged = mergeOccurrence(latest, edit.before, edit.after);
     const fix = { ...(merged.title !== latest.title ? { title: merged.title } : {}), ...(merged.notes !== latest.notes ? { notes: merged.notes } : {}), ...(merged.due !== latest.due ? { due: merged.due } : {}) };
     if (Object.keys(fix).length) {
@@ -252,6 +280,7 @@ export class GoogleSeries {
     const patch: GoogleTaskKeptPatch = {
       ...(merged.time !== real.time || merged.duration !== real.duration ? { time: merged.time, duration: merged.time === null ? null : merged.duration } : {}),
       ...(merged.deadline !== real.deadline ? { deadline: merged.deadline } : {}),
+      ...(merged.attachments && !sameFiles(merged.attachments, real.attachments) ? { attachments: merged.attachments } : {}),
     };
     // Kept as changed now even when Google alone has the change (its title), so every window reads it again.
     if (Object.keys(patch).length || Object.keys(fix).length) this.write([{ type: 'gtask.kept', account, listId, taskId, patch: Object.keys(patch).length ? patch : { time: real.time } }]);
@@ -323,9 +352,10 @@ export class GoogleSeries {
    * changes nothing more than what Google had deleted by then. Its completed
    * tasks from `from` on go from Google next, those left after a few seconds
    * once the answer is on its way, as a long series has many. The ids of the
-   * tasks deleted.
+   * tasks deleted, and what was kept for the series' tasks just before, for
+   * Undo (`undo`).
    */
-  remove(account: string, seriesId: string, from: DateKey | null, chosen: string | null): Promise<{ deleted: string[] }> {
+  remove(account: string, seriesId: string, from: DateKey | null, chosen: string | null): Promise<{ deleted: string[]; before: GoogleTaskKept[] }> {
     const until = Date.now() + DONE_IN_ANSWER_MS;
     return this.one(account, seriesId, async () => {
       const { remove, keep } = seriesCut(this.planner.state.googleTasks, account, seriesId, from, chosen);
@@ -345,11 +375,137 @@ export class GoogleSeries {
       }
       const removed = new Set(remove.map((kept) => kept.taskId));
       const kept = from === null ? keep : seriesCut(this.planner.state.googleTasks, account, seriesId, from, chosen).keep.filter((body) => !removed.has((body as { taskId: string }).taskId));
+      const before = this.seriesTasks(account, seriesId);
       this.write([...remove.map((entry): EventBody => ({ type: 'gtask.dropped', account, taskId: entry.taskId })), ...kept]);
       const left = await this.deleteDone(account, remove.filter((entry) => !first.includes(entry)), until);
       if (left.length) this.cleanup = this.cleanup.then(() => this.deleteDone(account, left, Infinity)).then(() => undefined);
-      return { deleted: remove.map((entry) => entry.taskId) };
+      return { deleted: remove.map((entry) => entry.taskId), before };
     });
+  }
+
+  /**
+   * Google Tasks' Undo after deleting tasks of a series, against the series
+   * as it is now. "This task" (`one`): Google undeletes the task and what
+   * was kept for it then comes back; the next one its deletion made (`made`)
+   * goes again when it is still as it was made, and the series goes on from
+   * this one as before, while one edited or completed since stays and this
+   * one comes back beside it, the series going on from that one
+   * (`nextKept`). "This and following tasks" and "All tasks" (`cut`): Google
+   * undeletes the tasks it deleted (`failed` says how many it refused), each
+   * kept as before; the tasks it ended repeat again by their rule, with the
+   * changes it dropped from `from` on, unless their rule changed since;
+   * anything else changed since stays.
+   */
+  undo(account: string, seriesId: string, undo: SeriesUndo): Promise<{ nextKept: boolean; failed: number }> {
+    return this.one(account, seriesId, async () => {
+      // A cut's completed tasks still being deleted: done first, so none goes again once it is back.
+      await this.cleanup;
+      if (undo.kind === 'cut') return this.undoCut(account, seriesId, undo);
+      const task = undo.task;
+      if (task.account !== account || task.repeat?.seriesId !== seriesId) throw new GoogleError(400, 'That task is of another series');
+      if (keptFor(this.planner.state, { account, id: task.taskId })) throw new GoogleError(409, 'This task is back already');
+      const made = undo.made && task.repeat.next === undo.made.id ? undo.made : null;
+      const goes = made ? await this.untouched(account, made) : false;
+      await this.data.updateTask(account, task.listId, task.taskId, { deleted: false });
+      this.options.onWrite?.();
+      // Back as it was, linked to its next one until that one goes: a refused delete leaves both, the series whole.
+      this.write([{ type: 'gtask.kept', account, listId: task.listId, taskId: task.taskId, patch: keptPatch(task) }]);
+      if (!goes || !(await this.dropMade(account, made!))) return { nextKept: Boolean(task.repeat.next), failed: 0 };
+      this.write([{ type: 'gtask.kept', account, listId: task.listId, taskId: task.taskId, patch: { repeat: { ...task.repeat, next: null } } }]);
+      return { nextKept: false, failed: 0 };
+    });
+  }
+
+  private async undoCut(account: string, seriesId: string, undo: Extract<SeriesUndo, { kind: 'cut' }>): Promise<{ nextKept: boolean; failed: number }> {
+    const back = new Set<string>();
+    let failed = 0;
+    for (const task of undo.deleted) {
+      try {
+        await this.data.updateTask(account, task.listId, task.id, { deleted: false });
+        back.add(task.id);
+      } catch (error) {
+        failed += 1;
+        this.options.log?.(`Google Tasks did not undelete a task of a series: ${messageOf(error)}`);
+      }
+    }
+    if (back.size) this.options.onWrite?.();
+    const ours = undo.before.filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
+    const bodies: EventBody[] = ours.filter((entry) => back.has(entry.taskId) && !keptFor(this.planner.state, { account, id: entry.taskId })).map((entry) => ({ type: 'gtask.kept', account, listId: entry.listId, taskId: entry.taskId, patch: keptPatch(entry) }));
+    if (undo.from) {
+      const from = undo.from;
+      // Each rule the cut ended, and the rule it was; the changes the open tasks kept from `from` on, which it dropped.
+      const rules = new Map(ours.map((entry) => [endedBefore(entry.repeat!, from).rule, entry.repeat!.rule]));
+      const dropped = Object.fromEntries(ours.filter((entry) => !entry.repeat!.next).flatMap((entry) => Object.entries(entry.repeat!.exceptions ?? {}).filter(([on]) => on >= from)));
+      const gone = new Set(undo.deleted.map((task) => task.id));
+      for (const now of this.seriesTasks(account, seriesId)) {
+        const rule = rules.get(now.repeat!.rule);
+        if (gone.has(now.taskId) || !rule) continue;
+        const ahead = Object.entries(dropped).filter(([on]) => !now.repeat!.on || on > now.repeat!.on);
+        const exceptions = { ...Object.fromEntries(ahead), ...now.repeat!.exceptions };
+        bodies.push({ type: 'gtask.kept', account, listId: now.listId, taskId: now.taskId, patch: { repeat: withExceptions({ ...now.repeat!, rule }, Object.keys(exceptions).length ? exceptions : undefined) } });
+      }
+    }
+    this.write(bodies);
+    return { nextKept: false, failed };
+  }
+
+  /**
+   * Google Tasks' Undo after completing a task of a series: open again in
+   * Google; the next one its completion made (`made`) goes again when it is
+   * still as it was made, and the series goes on from this one as before.
+   * One edited or completed since stays, and this one is open beside it, the
+   * series going on from that one (`nextKept`). A series that ended with it
+   * repeats again, as was kept for it then (`before`).
+   */
+  uncomplete(account: string, listId: string, taskId: string, undo: { before: GoogleTaskKept | null; made: MadeTask | null }): Promise<{ nextKept: boolean }> {
+    const seriesId = keptFor(this.planner.state, { account, id: taskId })?.repeat?.seriesId ?? undo.before?.repeat?.seriesId;
+    if (!seriesId) throw new GoogleError(404, 'This task is in no series');
+    return this.one(account, seriesId, async () => {
+      const kept = keptFor(this.planner.state, { account, id: taskId });
+      const made = undo.made && kept?.repeat?.next === undo.made.id ? undo.made : null;
+      const goes = made ? await this.untouched(account, made) : false;
+      await this.data.updateTask(account, kept?.listId ?? listId, taskId, { completed: false });
+      this.options.onWrite?.();
+      if (goes && (await this.dropMade(account, made!))) {
+        this.write([{ type: 'gtask.kept', account, listId: kept!.listId, taskId, patch: { repeat: { ...kept!.repeat!, next: null } } }]);
+        return { nextKept: false };
+      }
+      // Its series ended with it: it repeats again, unless the series has gone on meanwhile.
+      const before = undo.before;
+      if (!kept?.repeat && before?.repeat && before.account === account && before.taskId === taskId && !this.seriesTasks(account, seriesId).length) {
+        this.write([{ type: 'gtask.kept', account, listId: kept?.listId ?? before.listId, taskId, patch: { repeat: { ...before.repeat, next: null } } }]);
+      }
+      return { nextKept: Boolean(kept?.repeat?.next) };
+    });
+  }
+
+  /** Whether a task the series made is still as it was made: kept as then, and open in Google with its title, details and date. */
+  private async untouched(account: string, made: MadeTask): Promise<boolean> {
+    const kept = keptFor(this.planner.state, { account, id: made.id });
+    if (!kept?.repeat || kept.repeat.next || kept.updatedAt !== made.updatedAt) return false;
+    const google = (await this.data.allTasks(account, kept.listId)).tasks.find((task) => task.id === made.id);
+    return Boolean(google && !google.completed && google.title === made.title && google.notes === made.notes && google.due === made.due);
+  }
+
+  /** A task the series made, deleted again in Google and dropped here; false when Google refused (it stays). */
+  private async dropMade(account: string, made: MadeTask): Promise<boolean> {
+    const listId = keptFor(this.planner.state, { account, id: made.id })?.listId ?? made.listId;
+    try {
+      await this.data.deleteTask(account, listId, made.id);
+    } catch (error) {
+      if (!isGone(error)) {
+        this.options.log?.(`Google Tasks kept a next task Undo took back: ${messageOf(error)}`);
+        return false;
+      }
+    }
+    this.options.onWrite?.();
+    this.write([{ type: 'gtask.dropped', account, taskId: made.id }]);
+    return true;
+  }
+
+  /** What is kept for a series' tasks now. */
+  private seriesTasks(account: string, seriesId: string): GoogleTaskKept[] {
+    return Object.values(this.planner.state.googleTasks).filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
   }
 
   /**

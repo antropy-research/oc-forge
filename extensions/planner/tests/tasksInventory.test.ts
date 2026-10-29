@@ -124,11 +124,11 @@ describe('Undo after Delete', () => {
     const fake = fakeClient(start, (method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [parent, kid], complete: true } : method === 'PATCH' ? { task: parent } : { deleted: true }));
     const store = new GoogleStore(host, fake.client, 'page');
     await store.loadBoard(ME, 'L1');
-    expect(store.canUndoDelete()).toBe(false);
+    expect(store.canUndo()).toBe(false);
     await store.deleteListTask(parent);
     expect(keptFor(fake.state(), parent)).toBeNull();
-    expect(store.canUndoDelete()).toBe(true);
-    expect(await store.undoDelete()).toBe(true);
+    expect(store.canUndo()).toBe(true);
+    expect(await store.undoLast()).toEqual({ done: 'Deletion undone', note: null });
     expect(fake.calls.filter((call) => call.method === 'PATCH').map((call) => call.body)).toEqual([
       { account: ME, listId: 'L1', id: 'p', deleted: false },
       { account: ME, listId: 'L1', id: 'k', deleted: false },
@@ -136,37 +136,24 @@ describe('Undo after Delete', () => {
     expect(keptFor(fake.state(), parent)).toMatchObject({ time: 600, deadline: '2026-11-02', color: '#d50000' });
     expect(keptFor(fake.state(), parent)!.starredAt).toBeTruthy();
     // Once.
-    expect(await store.undoDelete()).toBe(false);
+    expect(await store.undoLast()).toBeNull();
   });
 
-  test('a repeating task deleted alone ("This task"): Undo deletes the next one its deletion made and gives this one back as it was', async () => {
-    const template = templateOf({ title: 'Standup', notes: '' }, { time: 570, duration: null, deadline: null }, TODAY);
-    const repeat = { rule: 'RRULE:FREQ=DAILY', seriesId: 'series', index: 1, next: null, on: TODAY, template };
-    const today = item({ id: 's1', title: 'Standup', due: TODAY });
-    const next = item({ id: 's2', title: 'Standup', due: '2026-10-30' });
-    let state = stateWith(keep('s1', { time: 570, repeat }));
-    const fake = fakeClient(state, (method, path, body) => {
-      if (path === '/google/tasks/next') return { task: next, state: undefined };
-      if (path.startsWith('/google/tasks/all')) return { tasks: [today], complete: true };
-      if (method === 'PATCH') return { task: today };
-      return { deleted: true, body };
-    });
-    // The service makes the next one (GoogleSeries) and answers with the plan: here, kept as the panel would adopt it.
-    (fake.client as unknown as { adopt: () => Promise<void> }).adopt = async () => {};
+  test('a plain task completed with its subtasks: Undo opens them again, the task before its subtasks', async () => {
+    const parent = item({ id: 'p', title: 'Trip' });
+    const kid = item({ id: 'k', title: 'Hotel', parent: 'p' });
+    const fake = fakeClient(stateWith(), (method, path, body) => (path.startsWith('/google/tasks/all') ? { tasks: [parent, kid], complete: true } : method === 'PATCH' ? { task: { ...(body.id === 'p' ? parent : kid), completed: body.completed } } : {}));
     const store = new GoogleStore(host, fake.client, 'page');
-    (store as unknown as { makeSuccessor: (one: GoogleTaskItem) => Promise<GoogleTaskItem> }).makeSuccessor = async () => {
-      await fake.client.dispatch([keep('s1', { repeat: { ...repeat, next: 's2' } }), keep('s2', { time: 570, repeat: { ...repeat, index: 2, on: '2026-10-30' } })]);
-      return next;
-    };
-    await store.deleteListTask(today, 'this');
-    state = fake.state();
-    expect(keptFor(state, next)).toBeTruthy();
-    await store.undoDelete();
-    const deletes = fake.calls.filter((call) => call.method === 'DELETE').map((call) => call.path);
-    expect(deletes).toEqual([`/google/tasks?account=${encodeURIComponent(ME)}&list=L1&id=s1`, `/google/tasks?account=${encodeURIComponent(ME)}&list=L1&id=s2`]);
-    expect(keptFor(fake.state(), next)).toBeNull();
-    expect(keptFor(fake.state(), today)!.repeat).toMatchObject({ next: null, index: 1, on: TODAY });
+    await store.loadBoard(ME, 'L1');
+    await store.completeListTask(parent, true);
+    const patches = () => fake.calls.filter((call) => call.method === 'PATCH').map((call) => [call.body.id, call.body.completed]);
+    expect(patches()).toEqual([['k', true], ['p', true]]);
+    expect(await store.undoLast()).toEqual({ done: 'Completion undone', note: null });
+    expect(patches().slice(2)).toEqual([['p', false], ['k', false]]);
+    expect(store.canUndo()).toBe(false);
   });
+
+  // A repeating task's Undo is its series', in the service: tests/gtaskSeries.test.ts, "Undo after Delete, through the series".
 });
 
 describe("Gmail's Add to Tasks", () => {

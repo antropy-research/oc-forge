@@ -23,7 +23,7 @@ import { KEPT_HINT, TASKS_API_REFERENCE, VISIBILITY_LABELS, keptFor, keptTimeLab
 import { byTitle, completedItems, dateGroups, deadlineSections, dropTarget, indentTarget, moveBottomTarget, moveDownTarget, moveTopTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
-import { DELETE_CHOICES, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, advancedChanged, attachmentsChanged, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { DELETE_CHOICES, completeWithUndo, undoAction, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, advancedChanged, attachmentsChanged, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
 import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
@@ -123,8 +123,6 @@ export const DECLINE_NOTE = 'The Planner answers the invitations on your calenda
 export const DECLINE_FREE = 'Unavailable for "Free" time entries';
 /** Why a personal account's task has no Do not disturb or declining. */
 export const WORKSPACE_ONLY = 'Do not disturb and Automatically decline meetings are for work and school accounts, as in Google Calendar';
-/** Why one upcoming task of a series does not change its attachments here. */
-export const SERIES_ATTACHMENTS = "Its series' attachments (Edit → All tasks changes them)";
 
 /**
  * Title, details, Drive attachments, date and time (or all day), deadline,
@@ -266,7 +264,8 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
     <div class={`gt-form depth-${depth}`} role="group" aria-label={item.id ? `Edit ${item.title}` : 'New task'} onKeyDown={(event) => event.key === 'Escape' && !custom && onCancel()}>
       <input ref={titleRef} class="gt-form-title" aria-label="Title" placeholder="Title" value={title} onInput={(event) => setTitle(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && save(true)} />
       <textarea class="gt-form-notes" aria-label="Details" placeholder="Details" rows={2} value={notes} onInput={(event) => setNotes(event.currentTarget.value)} />
-      <TaskAttachments account={account} files={attachments} note={advancedNote ? SERIES_ATTACHMENTS : null} onChange={setAttachments} />
+      {/* One task of a series attaches files to itself alone (This task), as Google Calendar does; All tasks to the series. */}
+      <TaskAttachments account={account} files={attachments} note={null} onChange={setAttachments} />
       <div class="gt-form-row" role="group" aria-label="Date and time">
         <Icon name="calendar" size={16} />
         <input type="date" aria-label="Date" value={due ?? ''} onChange={(event) => setDue(isDateKey(event.currentTarget.value) ? event.currentTarget.value : null)} />
@@ -634,11 +633,9 @@ const ShortcutsDialog = ({ onClose }: { onClose: () => void }) => (
 );
 
 /** Delete, with Google Tasks' "Undo" in the snackbar (and on Ctrl/⌘+Z). */
-const deleteWithUndo = async (google: ReturnType<typeof usePlanner>['google'], item: GoogleTaskItem, scope: DeleteScope) => {
+const deleteWithUndo = async (google: ReturnType<typeof usePlanner>['google'], notify: (message: string) => void, item: GoogleTaskItem, scope: DeleteScope) => {
   await google.deleteListTask(item, scope);
-  calendarUi.snack(scope === 'this' ? 'Task deleted' : 'Tasks deleted', async () => {
-    await google.undoDelete();
-  });
+  calendarUi.snack(scope === 'this' ? 'Task deleted' : 'Tasks deleted', undoAction(google, notify));
 };
 
 /** Why a task cannot be indented under the task above, as Google Tasks has it: a repeating or shared task is no subtask and takes none. */
@@ -670,7 +667,7 @@ const RowMenu = ({ row, rows, list, lists, ordered, place, onClose, onEdit, onSu
   const indentBlock = indentProblem(view.state, rows, item, indent);
   const remove = async () => {
     const scope = keptFor(view.state, item)?.repeat ? await askDelete() : 'this';
-    if (scope) await deleteWithUndo(google, item, scope);
+    if (scope) await deleteWithUndo(google, client.notify, item, scope);
   };
   return (
     <div class="menu gt-menu" ref={ref} role="menu" aria-label={`Actions for ${item.title}`} style={placed(place)}>
@@ -809,7 +806,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
       take();
       // The selection goes on to the next task, as the completed one leaves the list.
       select(shown[at + 1] ?? shown[at - 1]);
-      return void run(() => google.completeListTask(item, true));
+      return void run(() => completeWithUndo(google, client.notify, item));
     }
     if (mod && alt && key === 'Enter') {
       take();
@@ -921,7 +918,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
         }}
       >
         <span class="gt-handle" aria-hidden="true"><Icon name="drag" size={16} /></span>
-        <button class="gt-check" role="checkbox" aria-checked="false" aria-label={`Mark ${item.title} complete`} onClick={() => void run(() => google.completeListTask(item, true))}>
+        <button class="gt-check" role="checkbox" aria-checked="false" aria-label={`Mark ${item.title} complete`} onClick={() => void run(() => completeWithUndo(google, client.notify, item))}>
           <Icon name="circle" size={20} />
           <span class="gt-check-hover"><Icon name="check" size={14} /></span>
         </button>
@@ -1165,7 +1162,7 @@ const ListColumn = ({ list, lists, several }: { list: GoogleTaskList; lists: Goo
                     <span class="gt-title">{item.title}</span>
                     {item.completedAt && <span class="gt-notes">Completed: {dueChip(item.completedAt.slice(0, 10), view.today)}</span>}
                   </span>
-                  <button class="icon-button gt-delete" aria-label={`Delete ${item.title}`} title="Delete" onClick={() => void run(() => deleteWithUndo(google, item, 'this'))}><Icon name="delete" size={18} /></button>
+                  <button class="icon-button gt-delete" aria-label={`Delete ${item.title}`} title="Delete" onClick={() => void run(() => deleteWithUndo(google, client.notify, item, 'this'))}><Icon name="delete" size={18} /></button>
                 </li>
               ))}
             </ul>
@@ -1285,7 +1282,7 @@ const StarredColumn = ({ lists }: { lists: GoogleTaskList[] }) => {
           ) : (
             <li key={item.id} class="gt-row depth-0 is-starred-row" aria-label={item.title}>
               <span class="gt-handle" aria-hidden="true" />
-              <button class="gt-check" role="checkbox" aria-checked="false" aria-label={`Mark ${item.title} complete`} onClick={() => void google.completeListTask(item, true).catch((error) => client.notify(`Google Tasks did not take it: ${messageOf(error)}`))}>
+              <button class="gt-check" role="checkbox" aria-checked="false" aria-label={`Mark ${item.title} complete`} onClick={() => void completeWithUndo(google, client.notify, item).catch((error) => client.notify(`Google Tasks did not take it: ${messageOf(error)}`))}>
                 <Icon name="circle" size={20} />
                 <span class="gt-check-hover"><Icon name="check" size={14} /></span>
               </button>
@@ -1318,8 +1315,8 @@ export const TasksView = () => {
     if (focus) setTimeout(() => document.querySelector<HTMLElement>(`.tasks-lists li[data-list="${CSS.escape(order[to]!)}"] .tasks-nav`)?.focus(), 0);
   };
   /**
-   * Ctrl/⌘+/: the shortcuts; Ctrl/⌘+Z: Undo the last deletion (a text field keeps its own undo). From the Tasks view,
-   * or with nothing focused while it is shown.
+   * Ctrl/⌘+/: the shortcuts; Ctrl/⌘+Z: Undo the last deletion or completion (a text field keeps its own undo). From
+   * the Tasks view, or with nothing focused while it is shown.
    */
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1331,9 +1328,15 @@ export const TasksView = () => {
         setShortcuts(true);
         return;
       }
-      if (event.key.toLowerCase() === 'z' && !event.shiftKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) && !target.isContentEditable && google.canUndoDelete()) {
+      if (event.key.toLowerCase() === 'z' && !event.shiftKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) && !target.isContentEditable && google.canUndo()) {
         event.preventDefault();
-        void google.undoDelete().then(() => calendarUi.snack('Deletion undone')).catch((error) => client.notify(`Google Tasks did not undo it: ${messageOf(error)}`));
+        void google
+          .undoLast()
+          .then((done) => {
+            if (done) calendarUi.snack(done.done);
+            if (done?.note) client.notify(done.note);
+          })
+          .catch((error: unknown) => client.notify(`Google Tasks did not undo it: ${messageOf(error)}`));
       }
     };
     document.addEventListener('keydown', onKey);
