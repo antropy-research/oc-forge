@@ -111,6 +111,9 @@ try {
   check("…and VS Code works over them: its Explorer lists the project's files", listed);
   const held = await until(() => connections() >= before + 2, 30_000);
   check('the workbench holds its connections to the VS Code Server (management, extension host)', held, `${connections() - before} open`);
+  // This run's management connections, as the server names them in its log.
+  const runLog = () => serverLog().slice(logBefore);
+  const managements = [...new Set([...runLog().matchAll(/\]\[([0-9a-f]+)\]\[ManagementConnection\] New connection established/g)].map((match) => match[1]))];
   const live = await health();
   check("the service's /health counts them", live.tunnels >= 2 && live.sockets === live.tunnels, JSON.stringify(live));
   await page.screenshot({ path: join(out, '01-workbench.png') });
@@ -122,8 +125,15 @@ try {
   check('with the browser gone, every connection to the VS Code Server ends (tunnels nobody polls are closed after 45 s)', ended, `${connections() - before} left after ${((Date.now() - closedAt) / 1000).toFixed(0)} s`);
   const after = await health();
   check("the service's /health shows no tunnel and no open socket left", after.tunnels === 0 && after.sockets === 0, JSON.stringify(after));
-  const graced = await until(() => /The client has disconnected, will wait for reconnection/.test(serverLog().slice(logBefore)), 15_000);
-  check("the VS Code Server sees the client gone and starts the grace after which it frees the workbench's extension host", graced);
+  // The server notices a closed connection late: after the client's end it waits up to 30 s for the socket to close
+  // (VS Code's socketEndTimeoutMs) before it logs the disconnect and starts the grace. Each of this run's management
+  // connections must get there.
+  const endedAt = Date.now();
+  const gone = (id) => new RegExp(`\\]\\[${id}\\]\\[ManagementConnection\\] The client has disconnected(, will wait for reconnection| gracefully)`).test(runLog());
+  const graced = managements.length > 0 && await until(() => managements.every(gone), 150_000);
+  check("the VS Code Server sees the client gone and starts the grace after which it frees the workbench's extension host", graced,
+    managements.length === 0 ? 'no management connection of this run in the server log'
+      : `${managements.length} management connection${managements.length === 1 ? '' : 's'}: ${graced ? `the grace logged ${((Date.now() - endedAt) / 1000).toFixed(0)} s after the connections ended` : `still none for ${managements.filter((id) => !gone(id)).join(', ')} after 150 s`}`);
 } catch (error) {
   check('journey completed', false, String(error).split('\n')[0]);
 } finally {

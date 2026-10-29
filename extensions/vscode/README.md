@@ -198,7 +198,8 @@ node tests/e2e/surfaces.mjs                  # against the adapters' scratch sta
 ```
 
 `tunnel-leak.mjs` opens a workbench in a scratch OpenChamber, closes the browser, and checks that every
-connection to the VS Code Server ends and that the server starts the grace after which it frees the extension host.
+connection to the VS Code Server ends and that the server starts the grace after which it frees the extension host,
+for each of the run's management connections (the server notices a closed one up to 30 s late).
 
 `surfaces.mjs` checks OpenChamber's own surfaces at 1440×900 and 1024×768, with screenshots: the five built-ins
 as rail icons, each opening its view alone; an extension it builds and installs with the server's CLI getting
