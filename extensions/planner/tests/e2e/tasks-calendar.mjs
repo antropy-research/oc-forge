@@ -707,10 +707,12 @@ const inventoryJourney = async (viewport) => {
   const due = (days) => `${addDays(today, days)}T00:00:00.000Z`;
   const yesterday = new Date(Date.now() - 86_400_000).toISOString();
   const world = defaultFakeWorld({ account: ME, today, zone: ZONE });
-  world.tasks.L1[0].due = due(1);
+  // Send the report and the done Water the plants are today's, on the calendar's day whatever the week.
+  world.tasks.L1[0].due = due(0);
   world.tasks.L1.push(
     { id: 't-shared', title: 'Review the draft', notes: '', status: 'needsAction', updated: yesterday, assignmentInfo: { surfaceType: 'DOCUMENT', linkToTask: 'https://docs.google.com/document/d/doc-1/edit' } },
     { id: 't-mailed', title: 'Reply to Ann', notes: '', status: 'needsAction', updated: yesterday, links: [{ type: 'email', description: 'Quarterly numbers', link: 'https://mail.google.com/mail/u/0/#all/thread-1' }] },
+    { id: 't-watered', title: 'Water the plants', notes: '', due: due(0), status: 'completed', completed: yesterday, updated: yesterday },
   );
   world.mail = [{ id: 'msg-1', threadId: 'thread-9', subject: 'Budget review', from: 'Lead <lead@example.com>', date: new Date(Date.now() - 3_600_000).toUTCString(), snippet: 'Can you look at the numbers', unread: true }];
   const fake = await startFakeGoogle(world);
@@ -779,6 +781,10 @@ const inventoryJourney = async (viewport) => {
     check(`${size}: s stars the selected task`, await until(async () => Boolean((await state()).googleTasks?.[`${ME}\nt-trip`]?.starredAt), 10_000));
     await page.keyboard.press('Control+Shift+ArrowDown');
     check(`${size}: Ctrl+Shift+Down moves it to the bottom of the list, in Google`, await until(() => order('L1').at(-1) === 't-trip', 10_000), JSON.stringify(order('L1')));
+    await sortBy('Starred recently');
+    const starredFirst = await myTasks.getByRole('list', { name: 'My Tasks tasks, starred recently' }).getByRole('listitem').evaluateAll((rows) => rows.map((one) => one.getAttribute('aria-label')));
+    check(`${size}: Sort by Starred recently puts the starred one first`, starredFirst[0] === 'Plan the trip', JSON.stringify(starredFirst));
+    await sortBy('My order');
     await row('Reply to Ann').locator('.gt-body-edit').focus();
     await page.keyboard.press(' ');
     check(`${size}: Space completes the selected task, in Google`, await until(() => googleTask('L1', 't-mailed')?.status === 'completed', 10_000));
@@ -835,6 +841,35 @@ const inventoryJourney = async (viewport) => {
     await milkForm.getByRole('button', { name: 'Done' }).click();
     check(`${size}: a starred task's list is changed from Starred, in Google`, await until(() => (fake.tasks.get('L1') ?? []).some((task) => task.title === 'Buy milk') && !(fake.tasks.get('L2') ?? []).some((task) => task.title === 'Buy milk'), 10_000));
     await shot('tc-35-starred');
+
+    // ── On the calendar: Show completed tasks off hides a done one; Tasks unchecked hides them all (Google Calendar's own).
+    await go('Calendar');
+    await f.getByRole('radio', { name: 'Calendar' }).click();
+    await f.getByRole('button', { name: /^View:/ }).waitFor();
+    const doneChip = f.getByRole('button', { name: /^Google task Water the plants, due/ });
+    const openChip = f.getByRole('button', { name: /^Google task Send the report, due/ });
+    const showAll = async () => {
+      const toggle = f.getByRole('button', { name: 'Show all all-day events' });
+      if (await toggle.count()) await toggle.first().click();
+    };
+    await until(async () => (await doneChip.count()) > 0 || (await f.getByRole('button', { name: 'Show all all-day events' }).count()) > 0, 15_000);
+    await showAll();
+    const viewOption = async (name) => {
+      await f.getByRole('button', { name: /^View:/ }).click();
+      await f.getByRole('menuitemcheckbox', { name }).click();
+    };
+    const doneBefore = await until(async () => (await doneChip.count()) > 0, 10_000);
+    await viewOption('Show completed tasks');
+    check(`${size}: the view's "Show completed tasks" off hides a completed task; open ones stay`, doneBefore && (await until(async () => (await doneChip.count()) === 0, 10_000)) && (await openChip.count()) > 0);
+    await viewOption('Show completed tasks');
+    await until(async () => (await doneChip.count()) > 0, 10_000);
+    const rail = f.getByRole('list', { name: 'My calendars' });
+    if (!(await rail.isVisible().catch(() => false))) await f.getByRole('button', { name: 'Main menu' }).click();
+    await rail.locator('li', { hasText: /^Tasks$/ }).getByRole('checkbox').uncheck();
+    check(`${size}: unchecking Tasks under My calendars hides every task on the calendar`, await until(async () => (await openChip.count()) === 0 && (await doneChip.count()) === 0, 10_000));
+    await shot('tc-37-tasks-hidden');
+    await rail.locator('li', { hasText: /^Tasks$/ }).getByRole('checkbox').check();
+    check(`${size}: checking it shows them again`, await until(async () => (await openChip.count()) > 0, 15_000));
 
     // ── Gmail's "Add to Tasks".
     await go('Google');
