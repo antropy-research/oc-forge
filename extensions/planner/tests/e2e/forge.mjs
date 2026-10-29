@@ -78,8 +78,12 @@ try {
     await request.delete(`${base}/api/session/${chatId}?directory=${encodeURIComponent(project)}`);
     await request.delete(`${base}/api/session/${otherId}?directory=${encodeURIComponent(project)}`);
   };
+  // A plan no Planner window has opened yet knows no "today": its zone is the one the panel sets on its first load,
+  // the browser's, here this machine's (a fresh stack's WORK).
+  if (!(await service('GET', '/state')).today) await service('POST', '/commands', { commands: [{ cmd: `${run}-zone`, type: 'settings.updated', patch: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } }] });
   const today = (await service('GET', '/state')).today;
-  await service('POST', '/commands', { commands: [{ cmd: `${run}-c1`, type: 'task.created', task: { id: taskId, title: `${run} write the brief`, placement: { kind: 'day', date: today }, position: 1024, sessionRef: { sessionId: chatId, title: `${run} chat`, directory: project } } }] });
+  const seeded = await service('POST', '/commands', { commands: [{ cmd: `${run}-c1`, type: 'task.created', task: { id: taskId, title: `${run} write the brief`, placement: { kind: 'day', date: today }, position: 1024, sessionRef: { sessionId: chatId, title: `${run} chat`, directory: project } } }] });
+  if (!seeded.applied) throw new Error(`the Planner did not take the journey's task: ${JSON.stringify(seeded)}`);
 
   // The chats are the header's first two tabs; the Planner page opens beside them.
   await context.addInitScript((ids) => {
