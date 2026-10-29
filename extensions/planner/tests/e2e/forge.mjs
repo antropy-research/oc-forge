@@ -58,6 +58,9 @@ try {
   await request.put(`${base}/api/config/settings`, { data: { sessionTabsEnabled: true, ...(projects.some((entry) => entry.path === project) ? {} : { projects: [...projects, { id: 'demo', path: project, label: 'demo', addedAt: Date.now() }] }) } });
   const chat = await (await request.post(`${base}/api/session?directory=${encodeURIComponent(project)}`, { data: { title: `${run} chat`, location: { directory: project } } })).json();
   const chatId = (chat.data ?? chat).id;
+  // A second chat, the header's second tab: Ctrl/Cmd+1 from a page over it must show the first.
+  const other = await (await request.post(`${base}/api/session?directory=${encodeURIComponent(project)}`, { data: { title: `${run} other chat`, location: { directory: project } } })).json();
+  const otherId = (other.data ?? other).id;
   const catalog = await (await request.get(`${base}/api/guests`)).json();
   if (!catalog.guests.some((guest) => guest.id === PLANNER)) await request.post(`${base}/api/guests`, { data: { path: join(work, 'extensions', 'planner') } });
   for (const guest of (await (await request.get(`${base}/api/guests`)).json()).guests) {
@@ -73,18 +76,19 @@ try {
   cleanup = async () => {
     await service('POST', '/commands', { commands: [{ cmd: `${run}-cleanup`, type: 'task.deleted', taskId }] });
     await request.delete(`${base}/api/session/${chatId}?directory=${encodeURIComponent(project)}`);
+    await request.delete(`${base}/api/session/${otherId}?directory=${encodeURIComponent(project)}`);
   };
   const today = (await service('GET', '/state')).today;
   await service('POST', '/commands', { commands: [{ cmd: `${run}-c1`, type: 'task.created', task: { id: taskId, title: `${run} write the brief`, placement: { kind: 'day', date: today }, position: 1024, sessionRef: { sessionId: chatId, title: `${run} chat`, directory: project } } }] });
 
-  // The chat is the header's first tab; the Planner page opens beside it.
+  // The chats are the header's first two tabs; the Planner page opens beside them.
   await context.addInitScript((ids) => {
     if (window.top !== window) return;
     if (!localStorage.getItem('oc-forge-planner-forge-seeded')) {
       localStorage.setItem('session-tabs-store', JSON.stringify({ state: { tabIds: ids, previewTabId: null }, version: 0 }));
       localStorage.setItem('oc-forge-planner-forge-seeded', '1');
     }
-  }, [chatId]);
+  }, [chatId, otherId]);
   const page = await context.newPage();
   const problems = [];
   page.on('pageerror', (error) => problems.push(error.message));
@@ -190,19 +194,23 @@ try {
   await page.keyboard.press(`${modifier}+b`);
   await until(async () => (await sidebarShown()) === before, 5000);
   await page.screenshot({ path: join(out, '06-keys.png') });
-  await frame.locator('main.main').click({ position: { x: 5, y: 5 } });
-  await page.keyboard.press(`${modifier}+1`);
-  const switched = await until(async () => new URL(page.url()).searchParams.get('session') === chatId || (await page.locator('[role="tab"][aria-selected="true"]').first().innerText().catch(() => '')).includes(`${run} chat`), 8000);
-  check("Ctrl/Cmd+1 in the Planner switches OpenChamber's header to its first tab (the chat), not Chrome's", Boolean(switched), page.url().replace(base, ''));
-  await page.screenshot({ path: join(out, '07-ctrl-1-chat.png') });
-  // From a field too: the field keeps what editing uses (Cmd/Ctrl+B is bold in the notes), and OpenChamber's
-  // navigation keys go to OpenChamber, not to Chrome.
-  await openPlanner(page, `${base}/?session=${chatId}&extension=${PLANNER}&route=${encodeURIComponent('/today')}`);
-  frame = plannerFrame(page);
+  // Ctrl/Cmd+1 shows the header's first tab, the first chat, where the page was over the second.
   const plannerShown = () => page.evaluate((id) => {
     const element = document.querySelector(`[data-oc-forge-page="${id}"]`);
     return Boolean(element) && getComputedStyle(element).visibility === 'visible';
   }, PLANNER);
+  const overSecondChat = `${base}/?session=${otherId}&extension=${PLANNER}&route=${encodeURIComponent('/today')}`;
+  await openPlanner(page, overSecondChat);
+  frame = plannerFrame(page);
+  await frame.locator('main.main').click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press(`${modifier}+1`);
+  const switched = await until(async () => !await plannerShown() && new URL(page.url()).searchParams.get('session') === chatId, 5000);
+  check("Ctrl/Cmd+1 in the Planner switches OpenChamber's header to its first tab (the chat), not Chrome's", Boolean(switched) && context.pages().length === 1, page.url().replace(base, ''));
+  await page.screenshot({ path: join(out, '07-ctrl-1-chat.png') });
+  // From a field too: the field keeps what editing uses (Cmd/Ctrl+B is bold in the notes), and OpenChamber's
+  // navigation keys go to OpenChamber, not to Chrome.
+  await openPlanner(page, overSecondChat);
+  frame = plannerFrame(page);
   await frame.getByRole('button', { name: /Add task/ }).first().click();
   const field = frame.getByRole('textbox', { name: 'New task' }).first();
   await field.waitFor({ timeout: 10_000 });
