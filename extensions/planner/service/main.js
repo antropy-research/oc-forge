@@ -4666,6 +4666,28 @@ var googleWriteRoute = async (req, url, ctx) => {
       ctx.changed("tasks");
     }
   }
+  if (path === "/google/tasks/next" && method === "POST") {
+    const input = await body();
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
+      return bad("account, listId and id are required");
+    try {
+      return ok({ ...await ctx.series.next(input.account, input.listId, input.id), ...ctx.snapshot() });
+    } finally {
+      ctx.changed("tasks");
+    }
+  }
+  if (path === "/google/tasks/series" && method === "DELETE") {
+    const [account, series, from, task] = [query("account"), query("series"), query("from"), query("task")];
+    if (!isEmail(account) || !isId2(series))
+      return bad("account and series are required");
+    if (from !== null && !isDateKey(from) || task !== null && !isId2(task))
+      return bad("from must be a date, task a task id");
+    try {
+      return ok({ ...await ctx.series.remove(account, series, from, task), ...ctx.snapshot() });
+    } finally {
+      ctx.changed("tasks");
+    }
+  }
   if (path === "/google/tasks/move" && method === "POST") {
     const input = await body();
     if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
@@ -4762,8 +4784,37 @@ var stepRule = (rule, date) => {
       return null;
   }
 };
+var nextRepeatDate = (line, date, index) => {
+  const rule = parseRRule(line);
+  if (!rule)
+    return null;
+  if (rule.count !== null && index >= rule.count)
+    return null;
+  const next = stepRule(rule, date);
+  if (!next)
+    return null;
+  const until = rule.until ? untilDate(rule.until, "UTC") : null;
+  return until && next > until ? null : next;
+};
 var UPCOMING_MAX = 62;
 var STEPS_MAX = 4000;
+var scheduledOn = (kept, item) => kept.repeat?.on ?? item.due;
+var templateOf = (task, kept, date, start = date) => ({
+  title: task.title,
+  notes: task.notes,
+  time: kept.time,
+  duration: kept.duration,
+  deadline: kept.deadline ? daysBetween(date, kept.deadline) : null,
+  start,
+  ...kept.time !== null && kept.busy ? { busy: true } : {},
+  ...kept.time !== null && kept.visibility && kept.visibility !== "default" ? { visibility: kept.visibility } : {}
+});
+var seriesTemplate = (kept, item) => {
+  if (kept.repeat?.template)
+    return kept.repeat.template;
+  const on = scheduledOn(kept, item);
+  return on ? templateOf(item, kept, on) : null;
+};
 var occurrenceValues = (template, on, change) => ({
   title: change?.title ?? template.title,
   notes: change?.notes ?? template.notes,
@@ -4772,6 +4823,42 @@ var occurrenceValues = (template, on, change) => ({
   duration: change?.time !== undefined ? change.duration ?? null : template.duration,
   deadline: change?.deadline !== undefined ? change.deadline : template.deadline === null ? null : addDays(on, template.deadline)
 });
+var withExceptions = (repeat, exceptions) => {
+  const { exceptions: _old, ...rest } = repeat;
+  return exceptions ? { ...rest, exceptions } : rest;
+};
+var occurrenceTask = (repeat, template, date, index) => {
+  const values = occurrenceValues(template, date, repeat.exceptions?.[date]);
+  const ahead = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on > date);
+  return {
+    title: values.title,
+    notes: values.notes,
+    due: values.due,
+    kept: {
+      time: values.time,
+      duration: values.duration,
+      deadline: values.deadline,
+      repeat: { rule: repeat.rule, seriesId: repeat.seriesId, index, next: null, on: date, template, ...ahead.length ? { exceptions: Object.fromEntries(ahead) } : {} },
+      ...values.time !== null && template.busy ? { busy: true } : {},
+      ...values.time !== null && template.visibility ? { visibility: template.visibility } : {}
+    }
+  };
+};
+var nextOccurrence = (item, kept) => {
+  const repeat = kept.repeat;
+  let date = scheduledOn(kept, item);
+  let index = repeat?.index ?? 0;
+  let found = null;
+  for (let step = 0;repeat && date && !found && step < STEPS_MAX; step++) {
+    date = nextRepeatDate(repeat.rule, date, index);
+    if (!date)
+      break;
+    index += 1;
+    if (!repeat.exceptions?.[date]?.skip)
+      found = date;
+  }
+  return { item, kept, template: seriesTemplate(kept, item), date: found, index };
+};
 var upcomingValues = (task) => occurrenceValues(task.template, task.on, task.change);
 var upcomingTasks = (kept, shown, from, to, today) => {
   const taken = new Set;
@@ -4831,6 +4918,44 @@ ${entry.listId}`;
     groups.set(key, group);
   }
   return [...groups.values()];
+};
+var seriesNextIn = (state, items, repeat, except) => {
+  const later = items.flatMap((item) => {
+    const theirs = item.id === except ? null : keptFor(state, item)?.repeat;
+    if (!theirs || theirs.seriesId !== repeat.seriesId)
+      return [];
+    return (theirs.on && repeat.on ? theirs.on > repeat.on : theirs.index > repeat.index) ? [{ item, on: theirs.on ?? "", index: theirs.index }] : [];
+  });
+  later.sort((a, b) => a.on.localeCompare(b.on) || a.index - b.index);
+  return later[0]?.item ?? null;
+};
+var ruleEndingBefore = (line, from, on, index = 1) => {
+  const rule = parseRRule(line);
+  if (!rule)
+    return line;
+  const last = addDays(from, -1);
+  const until = rule.until ? untilDate(rule.until, "UTC") : null;
+  if (until && until <= last)
+    return line;
+  if (rule.count !== null && on) {
+    let date = on;
+    for (let step = 0, at = index;date && date < from && step < STEPS_MAX; step++)
+      date = nextRepeatDate(line, date, at++);
+    if (!date)
+      return line;
+  }
+  return formatRRule({ ...rule, count: null, until: last.replace(/-/g, "") });
+};
+var endedBefore = (repeat, from) => {
+  const before = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on < from);
+  return withExceptions({ ...repeat, rule: ruleEndingBefore(repeat.rule, from, repeat.on, repeat.index) }, before.length ? Object.fromEntries(before) : undefined);
+};
+var seriesCut = (kept, account, seriesId, from, chosen = null) => {
+  const tasks = Object.values(kept).filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
+  const goes = (entry) => from === null || entry.taskId === chosen || Boolean(entry.repeat.on && entry.repeat.on >= from);
+  const remove = tasks.filter(goes).sort((a, b) => Number(Boolean(a.repeat.next)) - Number(Boolean(b.repeat.next)) || (b.repeat.on ?? "").localeCompare(a.repeat.on ?? "") || b.repeat.index - a.repeat.index);
+  const keep = from === null ? [] : tasks.filter((entry) => !goes(entry)).map((entry) => ({ type: "gtask.kept", account, listId: entry.listId, taskId: entry.taskId, patch: { repeat: endedBefore(entry.repeat, from) } }));
+  return { remove, keep };
 };
 
 // src/domain/gtaskNotify.ts
@@ -4950,6 +5075,143 @@ class TaskNotifications {
     await writeFile3(temp, `${JSON.stringify({ version: 1, given: Object.fromEntries(given) })}
 `, { mode: 384 });
     await rename3(temp, this.file);
+  }
+}
+
+// service/googleSeries.ts
+var messageOf2 = (error) => error instanceof Error ? error.message : String(error);
+var DONE_IN_ANSWER_MS = 5000;
+
+class GoogleSeries {
+  planner;
+  data;
+  options;
+  changing = new Map;
+  cleanup = Promise.resolve();
+  constructor(planner, data, options = {}) {
+    this.planner = planner;
+    this.data = data;
+    this.options = options;
+  }
+  async settled() {
+    while (this.changing.size)
+      await Promise.all([...this.changing.values()]);
+    await this.cleanup;
+  }
+  next(account, listId, taskId) {
+    const seriesId = keptFor(this.planner.state, { account, id: taskId })?.repeat?.seriesId;
+    if (!seriesId)
+      return Promise.resolve({ task: null, made: false });
+    return this.one(account, seriesId, async () => {
+      const state = this.planner.state;
+      const kept = keptFor(state, { account, id: taskId });
+      const repeat = kept?.repeat;
+      if (!kept || !repeat)
+        return { task: null, made: false };
+      const tasks = (await this.data.allTasks(account, listId)).tasks;
+      if (repeat.next) {
+        const linked = keptFor(state, { account, id: repeat.next });
+        const there = linked && linked.listId !== listId ? (await this.data.allTasks(account, linked.listId)).tasks : tasks;
+        return { task: there.find((task) => task.id === repeat.next) ?? null, made: false };
+      }
+      const item = tasks.find((task) => task.id === taskId) ?? (repeat.on && repeat.template ? { account, listId, id: taskId, title: repeat.template.title, notes: repeat.template.notes, due: repeat.on, completed: false, parent: null, position: "", url: "", updated: "" } : null);
+      if (!item)
+        throw new GoogleError(404, TASK_GONE);
+      const next = nextOccurrence(item, kept);
+      if (!next.date || !next.template) {
+        if (item.completed)
+          this.write([{ type: "gtask.kept", account, listId: kept.listId, taskId, patch: { repeat: null } }]);
+        return { task: null, made: false };
+      }
+      const link = (id) => ({ type: "gtask.kept", account, listId: kept.listId, taskId, patch: { repeat: { ...repeat, next: id } } });
+      const found = seriesNextIn(state, tasks, repeat, taskId);
+      if (found) {
+        this.write([link(found.id)]);
+        return { task: found, made: false };
+      }
+      const task = occurrenceTask(repeat, next.template, next.date, next.index);
+      const made = await this.data.createTask(account, listId, { title: task.title.trim() || item.title, ...task.notes ? { notes: task.notes } : {}, due: task.due });
+      if (!made)
+        throw new GoogleError(502, "Google did not return the task");
+      this.options.onWrite?.();
+      try {
+        this.write([link(made.id), { type: "gtask.kept", account: made.account, listId: made.listId, taskId: made.id, patch: task.kept }]);
+      } catch (error) {
+        await this.data.deleteTask(account, made.listId, made.id).catch(() => {});
+        throw error;
+      }
+      return { task: made, made: true };
+    });
+  }
+  remove(account, seriesId, from, chosen) {
+    const until = Date.now() + DONE_IN_ANSWER_MS;
+    return this.one(account, seriesId, async () => {
+      const { remove, keep } = seriesCut(this.planner.state.googleTasks, account, seriesId, from, chosen);
+      if (!remove.length && !keep.length)
+        throw new GoogleError(404, "Google Tasks no longer has this series");
+      const first = remove.filter((kept) => !kept.repeat?.next || kept.taskId === chosen);
+      const gone = [];
+      try {
+        for (const kept of first) {
+          await this.data.deleteTask(account, kept.listId, kept.taskId);
+          gone.push(kept.taskId);
+        }
+      } catch (error) {
+        if (gone.length)
+          this.write(gone.map((taskId) => ({ type: "gtask.dropped", account, taskId })));
+        throw error;
+      } finally {
+        if (gone.length)
+          this.options.onWrite?.();
+      }
+      this.write([...remove.map((kept) => ({ type: "gtask.dropped", account, taskId: kept.taskId })), ...keep]);
+      const left = await this.deleteDone(account, remove.filter((kept) => !first.includes(kept)), until);
+      if (left.length)
+        this.cleanup = this.cleanup.then(() => this.deleteDone(account, left, Infinity)).then(() => {
+          return;
+        });
+      return { deleted: remove.map((kept) => kept.taskId) };
+    });
+  }
+  async deleteDone(account, tasks, until) {
+    const failed = [];
+    let done = 0;
+    for (;done < tasks.length && Date.now() < until; done++) {
+      try {
+        await this.data.deleteTask(account, tasks[done].listId, tasks[done].taskId);
+      } catch (error) {
+        failed.push(messageOf2(error));
+      }
+    }
+    if (done)
+      this.options.onWrite?.();
+    if (failed.length)
+      this.options.log?.(`Google Tasks kept ${failed.length} completed tasks of a deleted series: ${failed[0]}`);
+    return tasks.slice(done);
+  }
+  one(account, seriesId, work) {
+    const key = `${account}
+${seriesId}`;
+    const run = (this.changing.get(key) ?? Promise.resolve()).then(async () => {
+      await this.options.idle?.();
+      return work();
+    });
+    const done = run.then(() => {
+      return;
+    }, () => {
+      return;
+    });
+    this.changing.set(key, done);
+    done.then(() => {
+      if (this.changing.get(key) === done)
+        this.changing.delete(key);
+    });
+    return run;
+  }
+  write(bodies) {
+    const result = this.planner.execute(bodies.map((body) => ({ cmd: newId(), ...body })));
+    if (!result.ok)
+      throw new GoogleError(500, `The Planner did not keep it: ${result.error}`);
   }
 }
 
@@ -5243,7 +5505,7 @@ var MODELS_WAIT_MS = 3000;
 var LISTED_WAIT_MS = 6000;
 var LISTED_POLL_MS = 300;
 var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-var messageOf2 = (error) => {
+var messageOf3 = (error) => {
   const failure = error;
   if (failure.code === "ENOENT")
     return "The OpenCode CLI (opencode) is not on the PATH where OpenChamber runs.";
@@ -5301,7 +5563,7 @@ class OpenCodeInfo {
       const details = running ? await this.api(`/api/model?${locationQuery(cwd ?? homedir())}`).then(parseModelDetails).catch(() => new Map) : new Map;
       this.models = { at: this.now(), list: ids.map((id) => ({ id, name: details.get(id)?.name ?? null, variants: details.get(id)?.variants ?? [] })), error: ids.length ? null : "OpenCode lists no models; connect a provider in OpenChamber." };
     } catch (error) {
-      this.models = { at: this.now(), list: this.models?.list ?? [], error: messageOf2(error) };
+      this.models = { at: this.now(), list: this.models?.list ?? [], error: messageOf3(error) };
     }
   }
   async liveAgents(directory) {
@@ -5492,6 +5754,7 @@ var taskNotifications2 = new TaskNotifications(join4(dirname4(dir), "task-notifi
   due: (accounts, date) => googleDueTasks.read(accounts, date, date, false),
   byIds: (groups) => googleDueTasks.byIds(groups, false)
 });
+var series = new GoogleSeries(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleDueTasks.forget() });
 var opencodeConfig = opencodeConfigDir();
 var opencodeInfo = new OpenCodeInfo;
 var agentCommands = new CommandFiles(opencodeConfig, log);
@@ -5536,7 +5799,7 @@ var perAccount = async (feature, ask) => {
 var googleRoute = async (req, url) => {
   const path = url.pathname;
   const ok = (body) => ({ status: 200, body });
-  const written = await googleWriteRoute(req, url, { data: googleData, readJson, zone: () => planner.state.settings.timezone ?? "UTC", changed: (what) => (what === "calendar" ? googleCalendars : googleDueTasks).forget() });
+  const written = await googleWriteRoute(req, url, { data: googleData, series, snapshot, readJson, zone: () => planner.state.settings.timezone ?? "UTC", changed: (what) => (what === "calendar" ? googleCalendars : googleDueTasks).forget() });
   if (written)
     return written;
   if (path === "/google/status" && req.method === "GET")
@@ -5897,7 +6160,7 @@ ${event.location}`.toLocaleLowerCase().includes(needle));
 });
 var shutdown = async () => {
   server.close();
-  await Promise.race([timeboxes.settled(), new Promise((resolve) => setTimeout(resolve, 3000))]);
+  await Promise.race([Promise.all([timeboxes.settled(), series.settled()]), new Promise((resolve) => setTimeout(resolve, 3000))]);
   await store.flush();
   process.exit(0);
 };

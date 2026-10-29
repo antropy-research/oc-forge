@@ -122,6 +122,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
   // A world's task may say when it was last changed (`updated`); else now.
   const tasks = new Map(world.lists.map((list) => [list.id, (world.tasks[list.id] ?? []).map((task) => ({ updated: new Date().toISOString(), ...structuredClone(task) }))]));
   const fail = { next: null };
+  /** Requests held a while before they are answered (and before what they change changes), as a slow Google holds them. */
+  const slow = [];
 
   // Google keeps an order among siblings; positions are 20-digit numbers, rewritten here on each change.
   const renumber = (listId) => {
@@ -336,7 +338,7 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
       const url = new URL(req.url ?? '/', 'http://fake');
       const text = Buffer.concat(chunks).toString('utf8');
       let body = {};
@@ -349,6 +351,11 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       }
       const path = decodeURIComponent(url.pathname);
       requests.push({ method: req.method, path, query: Object.fromEntries(url.searchParams), body: text ? body : undefined, at: Date.now() });
+      const held = slow.find((entry) => entry.times > 0 && entry.method === req.method && path.includes(entry.path));
+      if (held) {
+        held.times -= 1;
+        await new Promise((resolve) => setTimeout(resolve, held.ms));
+      }
       const [status, payload] = answer(req.method, path, url.searchParams, body);
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(payload === null ? '' : JSON.stringify(payload));
@@ -365,6 +372,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
     lists,
     /** Make the next matching request fail with this status. */
     failNext: (method, path, status, message) => (fail.next = { method, path, status, message }),
+    /** Hold the next `times` matching requests `ms` before answering them (and before they change anything). */
+    delayNext: (method, path, ms, times = 1) => slow.push({ method, path, ms, times }),
     /** The google-accounts.json a service needs to use this fake as `world.account`. */
     accountsFile: () =>
       JSON.stringify({

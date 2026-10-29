@@ -6,13 +6,14 @@
 // Where a kept time puts a task on the calendar, where its deadline and a
 // series' upcoming occurrences show, which of them make the user busy, how a
 // repeating task's next occurrence is found (without making one Google's own
-// repeat made already), and the Starred view's order. Google keeps the rest:
-// nothing kept here is written into a task's title or details.
+// repeat made already), what deleting "This and following tasks" or "All
+// tasks" of a series takes, and the Starred view's order. Google keeps the
+// rest: nothing kept here is written into a task's title or details.
 import type { CalendarEvent } from './ics.ts';
 import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState, type TaskVisibility } from './types.ts';
 import { addDays, daysBetween, instantAt, monthDay, weekday, weekdayName } from './dates.ts';
 import { addMonths, compactClock, compactRange, daysInMonth } from './gcalendar.ts';
-import { parseRRule, untilDate, WEEKDAY_CODES, type RRule } from './rrule.ts';
+import { formatRRule, parseRRule, untilDate, WEEKDAY_CODES, type RRule } from './rrule.ts';
 import { GOOGLE_TASKS_CALENDAR, type GoogleTaskItem } from './google.ts';
 import type { EventBody, GoogleTaskKeptPatch } from './events.ts';
 
@@ -488,17 +489,68 @@ export const deadlineGroups = (kept: Readonly<Record<string, GoogleTaskKept>>, a
 };
 
 /**
- * The next occurrence a series has already (another Planner window made it): a
- * task in the list whose kept repeat is a later occurrence of this series (the
- * next one, or one past dates deleted on their own). Never a task that only
- * shares the title and the date: an unrelated task can have both.
+ * The next occurrence a series has already (made by another Planner, or by
+ * this one before its link was kept): a task in the list whose kept repeat is
+ * a later occurrence of this series (the next one, or one past dates deleted
+ * on their own), the earliest such. Later by the date the series put each on;
+ * by number only for one kept before those dates were, as a new rule numbers
+ * the open task from 1 again while the completed ones before it keep theirs.
+ * Never a task that only shares the title and the date: an unrelated task can
+ * have both.
  */
-export const seriesNextIn = (state: Pick<PlannerState, 'googleTasks'>, items: readonly GoogleTaskItem[], repeat: { seriesId: string; index: number }, except: string): GoogleTaskItem | null =>
-  items.find((item) => {
-    if (item.id === except) return false;
-    const theirs = keptFor(state, item)?.repeat;
-    return Boolean(theirs && theirs.seriesId === repeat.seriesId && theirs.index > repeat.index);
-  }) ?? null;
+export const seriesNextIn = (state: Pick<PlannerState, 'googleTasks'>, items: readonly GoogleTaskItem[], repeat: { seriesId: string; index: number; on?: DateKey }, except: string): GoogleTaskItem | null => {
+  const later = items.flatMap((item) => {
+    const theirs = item.id === except ? null : keptFor(state, item)?.repeat;
+    if (!theirs || theirs.seriesId !== repeat.seriesId) return [];
+    return (theirs.on && repeat.on ? theirs.on > repeat.on : theirs.index > repeat.index) ? [{ item, on: theirs.on ?? '', index: theirs.index }] : [];
+  });
+  later.sort((a, b) => a.on.localeCompare(b.on) || a.index - b.index);
+  return later[0]?.item ?? null;
+};
+
+/**
+ * A series' rule ended on the day before `from`, as "This and following
+ * tasks" ends it there: an UNTIL that day in place of its COUNT or a later
+ * UNTIL. Unchanged when it makes nothing from `from` on anyway: its UNTIL or
+ * its COUNT (stepped from `on`, the `index`th occurrence) ends it sooner.
+ */
+export const ruleEndingBefore = (line: string, from: DateKey, on?: DateKey, index = 1): string => {
+  const rule = parseRRule(line);
+  if (!rule) return line;
+  const last = addDays(from, -1);
+  const until = rule.until ? untilDate(rule.until, 'UTC') : null;
+  if (until && until <= last) return line;
+  if (rule.count !== null && on) {
+    let date: DateKey | null = on;
+    for (let step = 0, at = index; date && date < from && step < STEPS_MAX; step++) date = nextRepeatDate(line, date, at++);
+    if (!date) return line;
+  }
+  return formatRRule({ ...rule, count: null, until: last.replace(/-/g, '') });
+};
+
+/** A repeat ended the day before `from` (`ruleEndingBefore`), keeping only the changes for occurrences the series puts before it. */
+export const endedBefore = (repeat: Repeat, from: DateKey): Repeat => {
+  const before = Object.entries(repeat.exceptions ?? {}).filter(([on]) => on < from);
+  return withExceptions({ ...repeat, rule: ruleEndingBefore(repeat.rule, from, repeat.on, repeat.index) }, before.length ? Object.fromEntries(before) : undefined);
+};
+
+/**
+ * Google Calendar's "This and following tasks" and "All tasks" for a series,
+ * from its kept tasks. All tasks (`from` null): every task of the series goes,
+ * completed ones too. This and following tasks: the tasks the series put on
+ * `from` or later go (open or completed), and `chosen` (the task asked from)
+ * with them; the ones before stay, with the series ended the day before
+ * (`endedBefore`), so its upcoming occurrences stop there and its open task's
+ * next one is never made past it. `remove` lists its open tasks first, then
+ * the completed ones, the latest first; `keep` what the rest keep.
+ */
+export const seriesCut = (kept: Readonly<Record<string, GoogleTaskKept>>, account: string, seriesId: string, from: DateKey | null, chosen: string | null = null): { remove: GoogleTaskKept[]; keep: EventBody[] } => {
+  const tasks = Object.values(kept).filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
+  const goes = (entry: GoogleTaskKept): boolean => from === null || entry.taskId === chosen || Boolean(entry.repeat!.on && entry.repeat!.on >= from);
+  const remove = tasks.filter(goes).sort((a, b) => Number(Boolean(a.repeat!.next)) - Number(Boolean(b.repeat!.next)) || (b.repeat!.on ?? '').localeCompare(a.repeat!.on ?? '') || b.repeat!.index - a.repeat!.index);
+  const keep: EventBody[] = from === null ? [] : tasks.filter((entry) => !goes(entry)).map((entry) => ({ type: 'gtask.kept', account, listId: entry.listId, taskId: entry.taskId, patch: { repeat: endedBefore(entry.repeat!, from) } }));
+  return { remove, keep };
+};
 
 /** Starred tasks, the newest star first, as Google Tasks' Starred view lists them. */
 export const starredKept = (state: Pick<PlannerState, 'googleTasks'>): GoogleTaskKept[] =>

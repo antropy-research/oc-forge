@@ -14,6 +14,7 @@ import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
 import { googleWriteRoute } from './googleRoutes.ts';
 import { TaskNotifications } from './taskNotifications.ts';
+import { GoogleSeries } from './googleSeries.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { deadlineGroups } from '../src/domain/gtaskKept.ts';
 import { pendingRange, pendingTasks } from '../src/domain/gtaskPending.ts';
@@ -57,6 +58,8 @@ const taskNotifications = new TaskNotifications(join(dirname(dir), 'task-notific
   due: (accounts, date) => googleDueTasks.read(accounts, date, date, false),
   byIds: (groups) => googleDueTasks.byIds(groups, false),
 });
+// Repeating Google tasks: one change of a series at a time, whichever window asks.
+const series = new GoogleSeries(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleDueTasks.forget() });
 // Agents to assign tasks to: one OpenCode command per preset, in OpenCode's own config folder.
 const opencodeConfig = opencodeConfigDir();
 const opencodeInfo = new OpenCodeInfo();
@@ -123,7 +126,7 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
   const path = url.pathname;
   const ok = (body: unknown) => ({ status: 200, body });
   // Google Calendar events and Google Tasks lists, as the calendar and Tasks views change them.
-  const written = await googleWriteRoute(req, url, { data: googleData, readJson, zone: () => planner.state.settings.timezone ?? 'UTC', changed: (what) => (what === 'calendar' ? googleCalendars : googleDueTasks).forget() });
+  const written = await googleWriteRoute(req, url, { data: googleData, series, snapshot, readJson, zone: () => planner.state.settings.timezone ?? 'UTC', changed: (what) => (what === 'calendar' ? googleCalendars : googleDueTasks).forget() });
   if (written) return written;
   if (path === '/google/status' && req.method === 'GET') return ok({ ...(await google.status()), timeboxError: timeboxes.lastError });
   if (path === '/google/client' && req.method === 'PUT') {
@@ -489,7 +492,7 @@ const server = http.createServer(async (req, res) => {
 
 const shutdown = async (): Promise<void> => {
   server.close();
-  await Promise.race([timeboxes.settled(), new Promise((resolve) => setTimeout(resolve, 3000))]);
+  await Promise.race([Promise.all([timeboxes.settled(), series.settled()]), new Promise((resolve) => setTimeout(resolve, 3000))]);
   await store.flush();
   process.exit(0);
 };

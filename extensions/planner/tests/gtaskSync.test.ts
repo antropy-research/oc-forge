@@ -18,7 +18,9 @@ import { dropTarget } from '../src/domain/gtasks.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { GoogleData, toTaskItem } from '../service/googleData.ts';
 import { GoogleError, type GoogleAccounts } from '../service/google.ts';
-import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
+import { GoogleSeries } from '../service/googleSeries.ts';
+import type { ExecuteResult } from '../service/planner.ts';
+import { commandBody, validateCommand, type Command, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { emptyState, googleTaskKey, type GoogleTaskException, type PlannerState } from '../src/domain/types.ts';
 import { findMovedTask, GONE_STATUS, gtaskSource, linkedGoogleTasks, mergeGoogleTask, planGoogleTaskSync, plannerEditTimes, TASK_GONE, taskFromGoogleTask, type GoogleTaskItem } from '../src/domain/google.ts';
@@ -54,33 +56,81 @@ const item = (patch: Partial<GoogleTaskItem> = {}): GoogleTaskItem => ({
 });
 const planned = (google = item()) => foldEvents([ev({ type: 'task.created', task: taskFromGoogleTask(google, 't1', { kind: 'day', date: '2026-10-26' }, 1) })]);
 
-/** A Planner client whose dispatch applies (and checks) the events; Google answers through `answer`. */
+/**
+ * A Planner client whose dispatch applies (and checks) the events; Google answers through `answer`. The service's
+ * series routes (`/google/tasks/next`, `/google/tasks/series`) run the service's own `GoogleSeries` here, its Google
+ * calls answered by `answer` too (and listed in `calls`, as the panel's own) and its writes going into the same plan;
+ * the routes asked for are in `routes`.
+ */
 const fakeClient = (start: PlannerState, answer: (method: string, path: string, body: any) => unknown = () => ({})) => {
   let state = start;
   let n = 0;
   const calls: { method: string; path: string; body?: any }[] = [];
+  const routes: { method: string; path: string; body?: any }[] = [];
   const notes: string[] = [];
   const dispatched: EventBody[] = [];
   const log: PlannerEvent[] = [];
+  const google = async (method: string, path: string, body?: unknown) => {
+    calls.push({ method, path, ...(body === undefined ? {} : { body }) });
+    return answer(method, path, body);
+  };
+  const apply = (bodies: EventBody[]) => {
+    dispatched.push(...bodies);
+    const events = bodies.map((body) => ev(body));
+    log.push(...events);
+    n += bodies.length;
+    state = applyEvents(state, events);
+  };
+  const enc = encodeURIComponent;
+  const series = new GoogleSeries(
+    {
+      get state() {
+        return state;
+      },
+      execute: (commands: readonly unknown[]): ExecuteResult => {
+        let working = state;
+        for (const [index, command] of commands.entries()) {
+          const error = validateCommand(command, working);
+          if (error) return { ok: false, error, index };
+          working = applyEvents(working, [ev(command as EventBody)]);
+        }
+        apply(commands.map((command) => commandBody(command as Command)));
+        return { ok: true, applied: commands.length };
+      },
+    },
+    {
+      allTasks: async (account, listId) => {
+        const read = (await google('GET', `/google/tasks/all?account=${enc(account)}&list=${enc(listId)}`)) as { tasks?: GoogleTaskItem[]; complete?: boolean };
+        return { tasks: read?.tasks ?? [], complete: read?.complete ?? true };
+      },
+      createTask: async (account, listId, task) => ((await google('POST', '/google/tasks', { account, listId, ...task })) as { task?: GoogleTaskItem | null })?.task ?? null,
+      deleteTask: async (account, listId, id) => {
+        await google('DELETE', `/google/tasks?account=${enc(account)}&list=${enc(listId)}&id=${enc(id)}`);
+      },
+    },
+  );
   const client = {
     getView: () => ({ state, today: '2026-10-26' }),
-    call: async (method: string, path: string, body?: unknown) => {
-      calls.push({ method, path, ...(body === undefined ? {} : { body }) });
-      return answer(method, path, body);
+    call: async (method: string, path: string, body?: any) => {
+      if (path === '/google/tasks/next' || path.startsWith('/google/tasks/series?')) {
+        routes.push({ method, path, ...(body === undefined ? {} : { body }) });
+        const query = new URLSearchParams(path.split('?')[1] ?? '');
+        const done = path === '/google/tasks/next' ? await series.next(body.account, body.listId, body.id) : await series.remove(query.get('account')!, query.get('series')!, query.get('from'), query.get('task'));
+        return { ...done, state };
+      }
+      return google(method, path, body);
     },
+    // The routes above wrote into this plan already.
+    adopt: async () => {},
     dispatch: async (bodies: EventBody[]) => {
       for (const body of bodies) expect(validateCommand({ cmd: `c${n}`, ...body }, state)).toBeNull();
-      dispatched.push(...bodies);
-      const events = bodies.map((body) => ev(body));
-      log.push(...events);
-      n += bodies.length;
-      state = applyEvents(state, events);
+      apply(bodies);
     },
     activity: async (taskId: string) => log.filter((event) => 'taskId' in event && event.taskId === taskId),
     notify: (message: string) => notes.push(message),
     onCommitted: () => () => {},
   } as unknown as PlannerClient;
-  return { client, calls, notes, dispatched, log, state: () => state, setState: (next: PlannerState) => (state = next) };
+  return { client, calls, routes, series, notes, dispatched, log, state: () => state, setState: (next: PlannerState) => (state = next) };
 };
 const host = { storage: { get: async () => undefined, set: async () => {}, delete: async () => {}, keys: async () => [] } } as unknown as HostClient;
 
