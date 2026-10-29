@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyOps, readOps, WorkbenchState, type Parts, type StateSnapshot } from '../service/state.ts';
-import { batchOps, decodeValue, encodeValue, persistentIndexedDB, type StateOp } from '../workbench/storage.ts';
+import { batchOps, decodeValue, encodeValue, persistentIndexedDB, saveThroughService, type StateOp } from '../workbench/storage.ts';
 
 describe('the service keeps the workbench storage', () => {
   test('ops are checked; malformed ones are dropped', () => {
@@ -130,5 +130,37 @@ describe('the frame runs an IndexedDB that persists through the service', () => 
     expect(ops).toContainEqual({ op: 'put', db: 'vscode-web-state-db-global', store: 'ItemTable', key: 'workbench.colorTheme', value: { s: 'Light 2026' } });
     expect(ops).toContainEqual({ op: 'delete', db: 'vscode-web-state-db-global', store: 'ItemTable', key: 'gone' });
     expect(ops).toContainEqual({ op: 'db', db: 'vscode-web-state-db-global', version: 1, stores: ['ItemTable'] });
+  });
+
+  test("VS Code's save before a reload waits for the service; its periodic saves don't", async () => {
+    const order: string[] = [];
+    const storageService = {
+      flush: async (reason?: number) => {
+        order.push(`vscode ${reason ?? 0}`);
+      },
+    };
+    let delivered: () => void = () => {};
+    const service = () => new Promise<void>((resolve) => {
+      order.push('service');
+      delivered = () => {
+        order.push('delivered');
+        resolve();
+      };
+    });
+    const saveBeforeReload = saveThroughService(storageService, service);
+    await storageService.flush(0);
+    expect(order).toEqual(['vscode 0']);
+    const shutdown = storageService.flush(1).then(() => order.push('reload'));
+    await Bun.sleep(5);
+    expect(order).toEqual(['vscode 0', 'vscode 1', 'service']);
+    delivered();
+    await shutdown;
+    expect(order.slice(-2)).toEqual(['delivered', 'reload']);
+    order.length = 0;
+    const own = saveBeforeReload();
+    await Bun.sleep(5);
+    delivered();
+    await own;
+    expect(order).toEqual(['vscode 1', 'service', 'delivered']);
   });
 });

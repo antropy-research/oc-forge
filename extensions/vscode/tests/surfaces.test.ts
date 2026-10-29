@@ -141,5 +141,10 @@ describe('the service hands editors from frame to frame', () => {
     expect(statSync(join(dir, 'k.tabs.json')).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(join(dir, 'k.tabs.json'), 'utf8'))).toHaveLength(2);
     expect(await tabs.load('other')).toEqual([]);
+    // One list per server and folder.
+    expect(SavedTabs.keyOf('srv', '/p/a')).not.toBe(SavedTabs.keyOf('srv', '/p/b'));
+    expect(SavedTabs.keyOf('srv', '/p/a')).toBe(SavedTabs.keyOf('srv', '/p/a'));
+    expect(SavedTabs.keyOf('srv', 'relative')).toBe(SavedTabs.keyOf('srv', null));
+    expect(SavedTabs.keyOf('srv', '/p/a')).toMatch(/^srv\.[0-9a-f]{16}$/);
   });
 });

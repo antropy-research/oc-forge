@@ -27,6 +27,7 @@ import {
 import {
   isEditorInput,
   MEMORY_TARGET,
+  NO_MATCHING_KB,
   PARTS,
   SIDEBAR,
   type CommandService,
@@ -36,11 +37,13 @@ import {
   type EditorInput,
   type EditorService,
   type FileService,
+  type KeybindingService,
   type LayoutService,
   type PaneCompositePartService,
   type Part,
   type RemoteAgentService,
   type ViewsService,
+  type VscodeKeyboardEvent,
   type VscodeServices,
 } from './vscode.ts';
 
@@ -50,6 +53,8 @@ export interface SurfaceContext {
   role: SurfaceRole;
   forge: OcForgeClient;
   services: VscodeServices;
+  /** The folder this workbench shows (the page's tabs are kept per folder). */
+  folder: string | null;
   /** A POST to this extension's service, the server named. */
   call: <T>(path: string, body?: Record<string, unknown>) => Promise<T>;
   /** The service's rail entries (`GET /rail`), with the view container each shows. */
@@ -122,13 +127,50 @@ const keepLayout = (role: SurfaceRole, services: VscodeServices, hasEditors: () 
 
 // ── Keys ────────────────────────────────────────────────────────────────
 
+/** OpenChamber's rail digits (Cmd/Ctrl+Alt+digit), which VS Code binds to nothing. */
+const RAIL_DIGITS = 'switch_context_surface';
+
+/** Whether VS Code binds this digit press where it happened (VS Code's `KeyCode.Digit0` is 21). */
+const vscodeBindsDigit = (services: VscodeServices, event: KeyboardEvent): boolean => {
+  const digit = /^Digit([0-9])$/.exec(event.code)?.[1];
+  if (digit === undefined) return false;
+  const vscodeEvent: VscodeKeyboardEvent = {
+    _standardKeyboardEventBrand: true,
+    browserEvent: event,
+    target: event.target,
+    ctrlKey: event.ctrlKey,
+    shiftKey: event.shiftKey,
+    altKey: event.altKey,
+    metaKey: event.metaKey,
+    altGraphKey: event.getModifierState('AltGraph'),
+    keyCode: 21 + Number(digit),
+    code: event.code,
+    equals: () => false,
+    preventDefault: () => event.preventDefault(),
+    stopPropagation: () => event.stopPropagation(),
+  };
+  try {
+    return services.get<KeybindingService>('keybindingService').softDispatch(vscodeEvent, event.target).kind !== NO_MATCHING_KB;
+  } catch {
+    // Its keybinding service changed: by default VS Code binds no rail digit.
+    return false;
+  }
+};
+
 /**
  * VS Code takes the keys while it has focus. A press it has no binding for
  * (it didn't prevent its default) that OpenChamber binds to navigation (its
  * close-tab key, its rail digits) goes to OpenChamber: those tabs and that
  * rail are OpenChamber's.
+ *
+ * A terminal is the exception: xterm makes presses the shell's input and stops
+ * them before VS Code or this sees them (Ctrl+Alt+digit becomes Esc and the
+ * digit on Linux and Windows). OpenChamber's rail digits skip the shell, as VS
+ * Code's own navigation keys do (`terminal.integrated.commandsToSkipShell`),
+ * unless VS Code binds them; its other keys stay the shell's: Ctrl+[ is Esc,
+ * Ctrl+B and Alt+W are readline's, tmux's and Emacs's.
  */
-const forwardUnhandledKeys = (forge: OcForgeClient): void => {
+const forwardUnhandledKeys = (forge: OcForgeClient, services: VscodeServices): void => {
   window.addEventListener('keydown', (event) => {
     if (event.defaultPrevented || event.isComposing || !forge.has('keys')) return;
     const action = forge.keys.match(event);
@@ -136,6 +178,14 @@ const forwardUnhandledKeys = (forge: OcForgeClient): void => {
     event.preventDefault();
     void forge.keys.forward(event).catch(() => undefined);
   });
+  window.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented || event.isComposing || !forge.has('keys')) return;
+    if (!(event.target instanceof Element) || !event.target.closest('.xterm')) return;
+    if (forge.keys.match(event) !== RAIL_DIGITS || vscodeBindsDigit(services, event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void forge.keys.forward(event).catch(() => undefined);
+  }, true);
 };
 
 // ── Handing editors to the page ─────────────────────────────────────────
@@ -272,9 +322,17 @@ const handEditorsToPage = (context: SurfaceContext): void => {
 
 const editorsOf = (services: VscodeServices): readonly EditorIdentifier[] => services.get<EditorService>('editorService').getEditors(1);
 
+/** What the frame's boot can ask of its part once it runs. */
+export interface SurfaceController {
+  /** A rail view: show this entry's view container, and light it on the rail. */
+  showEntry?(entry: string): Promise<void>;
+  /** About to reload on another folder: the page closes its tabs, which are the old folder's editors. */
+  beforeFolderChange?(): Promise<void>;
+}
+
 // ── The rail view ───────────────────────────────────────────────────────
 
-const startView = async (context: SurfaceContext): Promise<void> => {
+const startView = async (context: SurfaceContext): Promise<SurfaceController> => {
   const { forge, services } = context;
   const views = services.get<ViewsService>('viewsService');
   const panes = services.get<PaneCompositePartService>('paneCompositePartService');
@@ -310,9 +368,15 @@ const startView = async (context: SurfaceContext): Promise<void> => {
   if (entry) await showEntry(entry);
   // After OpenChamber reloads, the page's tabs come back with the rail view, which starts the page behind them.
   if (forge.has('tabs') && forge.tabs.state().list.length === 0) {
-    const saved = await context.call<{ tabs?: OcForgeTab[] }>('/tabs/load').catch(() => ({ tabs: [] }));
+    const saved = await context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: context.folder }).catch(() => ({ tabs: [] }));
     for (const tab of saved.tabs ?? []) await forge.tabs.open(tab).catch(() => undefined);
   }
+  return {
+    showEntry: async (next) => {
+      if (forge.rail.entry() !== next) await forge.rail.setActive(next).catch(() => undefined);
+      await showEntry(next);
+    },
+  };
 };
 
 // ── The bottom terminal ─────────────────────────────────────────────────
@@ -344,6 +408,10 @@ class EditorArea {
   private lastActive: string | null = null;
   /** A tab OpenChamber is showing: its editor is on its way, the header is right already. */
   private showing = 0;
+  /** About to reload on another folder: the header no longer follows these editors. */
+  private leaving = false;
+  /** Until VS Code has restored its editors, the header doesn't follow them: what it restored is no choice made in it. */
+  private started = false;
 
   constructor(private readonly context: SurfaceContext) {
     this.editorService = context.services.get<EditorService>('editorService');
@@ -382,10 +450,18 @@ class EditorArea {
     await this.ready;
     this.editorService.onDidEditorsChange(() => this.schedule());
     this.editorService.onDidActiveEditorChange(() => this.schedule());
+    // The editor VS Code restored as active is no change made in VS Code: the header's selection stands.
+    this.lastActive = this.activeKey();
+    // A link to an editor (a new browser tab from Cmd/Ctrl+click, a reload) shows that editor, before the header
+    // follows VS Code (the address bar would name VS Code's editor then). Otherwise the header's selection: a tab
+    // chosen while the page started behind the tabs the rail view brought back.
+    const route = forge.links.route();
+    const linked = readEditorRoute(route) !== null;
+    if (linked) await this.openRoute(route);
+    this.started = true;
     await this.sync();
     const state = forge.tabs.state();
-    if (state.active && (state.shown || !this.strip)) await this.show(state.active);
-    else if (forge.links.route()) await this.openRoute(forge.links.route());
+    if (!linked && state.active && (state.shown || !this.strip)) await this.show(state.active);
   }
 
   private current(): Map<string, { identifier: EditorIdentifier; title: string; dirty: boolean }> {
@@ -403,7 +479,7 @@ class EditorArea {
   }
 
   private schedule(): void {
-    if (this.timer) return;
+    if (this.timer || this.leaving || !this.started) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.sync().catch((error) => log('could not update the header tabs', error));
@@ -421,6 +497,7 @@ class EditorArea {
     try {
       const current = this.current();
       for (const [key, item] of current) {
+        if (this.leaving) return;
         this.adopted.add(key);
         const tab: OcForgeTab = { id: key, title: item.title, icon: tabIcon(key), dirty: item.dirty };
         const host = this.hostTabs.get(key);
@@ -448,7 +525,7 @@ class EditorArea {
       const saved = JSON.stringify([...current].map(([id, item]) => ({ id, title: item.title, icon: tabIcon(id) })));
       if (saved !== this.saved) {
         this.saved = saved;
-        void this.context.call('/tabs/save', { tabs: JSON.parse(saved) }).catch(() => undefined);
+        void this.context.call('/tabs/save', { folder: this.context.folder, tabs: JSON.parse(saved) }).catch(() => undefined);
       }
     } finally {
       this.syncing = false;
@@ -522,8 +599,27 @@ class EditorArea {
     if (!target) return;
     await this.ready;
     const found = this.current().get(target.key);
-    if (found) await this.openEditor(found.identifier.editor, { preserveFocus: false }, found.identifier.groupId);
+    const selection = target.line ? { selection: { startLineNumber: target.line, startColumn: 1 } } : {};
+    if (found) await this.openEditor(found.identifier.editor, { preserveFocus: false, ...selection }, found.identifier.groupId);
     else await this.openKey(target.key, target.line).catch((error) => log('could not open the linked editor', error));
+    // A link names what the page shows: its tab is the selected one, not the tab the header had selected meanwhile.
+    const opened = this.current().get(target.key);
+    if (!opened || this.context.forge.tabs.state().active === target.key) return;
+    const tab: OcForgeTab = { id: target.key, title: opened.title, icon: tabIcon(target.key), dirty: opened.dirty };
+    this.adopted.add(target.key);
+    this.hostTabs.set(target.key, tab);
+    this.lastActive = target.key;
+    await this.context.forge.tabs.open(tab, { activate: true }).catch(() => undefined);
+  }
+
+  /** Another folder is coming: its editors are not these, so neither are the header's tabs. */
+  async closeAllTabs(): Promise<void> {
+    this.leaving = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    for (const id of [...this.hostTabs.keys()]) await this.context.forge.tabs.close(id).catch(() => undefined);
+    this.hostTabs.clear();
+    this.adopted.clear();
   }
 
   /** The user closed the tab in the header: close its editors (one per group), asking to save as VS Code does. A cancel brings the tab back. */
@@ -547,11 +643,11 @@ export const prepareSurface = (role: SurfaceRole, services: VscodeServices): voi
 };
 
 /** Called once the workbench runs. */
-export const startSurface = async (context: SurfaceContext): Promise<void> => {
+export const startSurface = async (context: SurfaceContext): Promise<SurfaceController> => {
   const { role, services } = context;
   // The page's depend on the header's strip, and follow it (EditorArea).
   if (role !== 'editor') await applySettings(services, roleSettings(role));
-  forwardUnhandledKeys(context.forge);
+  forwardUnhandledKeys(context.forge, services);
   // Restoring the last view container shows the side bar again: the role's layout once more, after.
   void services.get<LayoutService>('layoutService').whenRestored.then(() => {
     try {
@@ -561,13 +657,15 @@ export const startSurface = async (context: SurfaceContext): Promise<void> => {
     }
   });
   if (role === 'editor') {
-    await new EditorArea(context).start();
-    return;
+    const area = new EditorArea(context);
+    await area.start();
+    return { beforeFolderChange: () => area.closeAllTabs() };
   }
   handEditorsToPage(context);
   keepLayout(role, services, () => role === 'view' && editorsOf(services).length > 0);
-  if (role === 'view') await startView(context);
-  else await startTerminal(context);
+  if (role === 'view') return startView(context);
+  await startTerminal(context);
+  return {};
 };
 
 /** Where the server keeps its extensions, for the rail: any workbench can tell (its default profile's extensions.json is there). */

@@ -8,7 +8,8 @@ server's extensions), Search, Source Control with its diff editor, the integrate
 extensions, webviews such as the Markdown preview, and the command palette are VS Code itself, running on the
 server's files.
 
-- **Open in VS Code** in a chat's menu shows that chat's folder (or worktree) in the VS Code panel.
+- **Open in VS Code** in a chat's menu shows that chat's folder (or worktree) in the VS Code panel (with oc-forge's
+  adapters: in VS Code's Explorer, in the rail panel).
 - VS Code follows OpenChamber's light or dark look when it starts, and switches when OpenChamber's does.
 - When OpenChamber moves to another folder, VS Code offers to open it; *OpenChamber: Open OpenChamber's Folder* and
   *OpenChamber: VS Code Server Connection…* are in VS Code's command palette.
@@ -33,10 +34,10 @@ its server's origin. The extension's intermediate components close that gap:
 | vsda to sign the handshake | Needs `crypto.subtle`, which plain HTTP lacks | The client sends its connection token, which the VS Code Server accepts in place of the signature |
 | Remote resources (themes, grammars, icon fonts, extension icons) and the gallery | Blocked by the CSP | `fetch`, `<img>`, `<style>` and CSSOM rules that name the server or the gallery are fetched by the service (`workbench/shims.ts`) |
 | Module workers from `blob:` URLs | An opaque origin cannot start them | The bootstrap's text starts the worker from a `data:` URL |
-| IndexedDB, localStorage, cookies | They throw | An in-memory IndexedDB (`fake-indexeddb`) filled from, and saved to, the service (`~/.local/share/openchamber-vscode/state/`, one file per server, mode 0600); memory storage for the rest |
+| IndexedDB, localStorage, cookies | They throw | An in-memory IndexedDB (`fake-indexeddb`) filled from, and saved to, the service (`~/.local/share/openchamber-vscode/state/`, one file per server, mode 0600); memory storage for the rest. What a frame sends as it unloads never reaches the service, so VS Code's save before it reloads the window (Reload Window, a folder switch) waits for the service before the reload; otherwise a Markdown preview opened just before came back without its state and its extension threw restoring it |
 | Codicon font | Fonts are not served to the frame | Inlined into the stylesheet |
 
-| Webviews (Markdown preview, extension pages, Mermaid) | VS Code's webview host needs a service worker, `crypto.subtle` and same-origin access to the frame it writes into | `webview/` replaces it in the prepared workbench: the same protocol with the workbench, the content in a srcdoc frame run by an agent over a MessagePort, its files read through the workbench's `load-resource` channel and put inline (module imports through an import map of `blob:` URLs); the webview's own CSP keeps its nonce |
+| Webviews (Markdown preview, extension pages, Mermaid) | VS Code's webview host needs a service worker, `crypto.subtle` and same-origin access to the frame it writes into | `webview/` replaces it in the prepared workbench: the same protocol with the workbench, the content in a srcdoc frame run by an agent over a MessagePort, its files read through the workbench's `load-resource` channel and put inline (module imports through an import map of `blob:` URLs); the webview's own CSP keeps its nonce. VS Code 1.143 takes `webview-ready` only with the mount id from the host page's URL and a key-event token, and runs the webview's keys only when they carry that token (`webview/protocol.ts`); the agent keeps the native `MessagePort.postMessage` before the content runs, so the content can't send keys of its own. A workbench prepared earlier gets the current host page when the service next reports it ready |
 
 Limits: images a webview loads from the internet (badges in an extension's README) are blocked, as the frame
 connects nowhere but its package. VS Code's chat and its GitHub sign-in are turned off (`chat.disableAIFeatures`):
@@ -87,12 +88,16 @@ message:
   gets `tab-activated`, takes the request (`/editors/take`) and opens it. An extension's details page goes as
   `extension.open`. What can't be handed over (a webview of that frame's extension host, a terminal or output
   editor) opens in that frame.
-- The page keeps its tabs in the service (`/tabs/save`); after OpenChamber reloads, the rail view opens them again
-  (`/tabs/load`), which mounts the page behind them, and the page's VS Code restores the same editors.
-- The page and the terminal follow the folder the rail view shows (host storage `folder`); "Open in VS Code" is
-  answered by the rail view, which hands a file to the page.
+- The page keeps its tabs in the service, per server and folder (`/tabs/save`); after OpenChamber reloads, the rail
+  view opens that folder's again (`/tabs/load`), which mounts the page behind them, and the page's VS Code restores
+  the same editors.
+- The page and the terminal follow the folder the rail view shows (host storage `folder`); the page closes its tabs
+  first, as they are the other folder's editors. "Open in VS Code" on a chat is answered by the rail view: it shows
+  the chat's folder in the Explorer (lit on the rail), and hands a file to the page.
 - The page names its editor in the address bar (`?extension=oc-forge-vscode&route=/editor?key=…`), so a reload or a
-  copied link opens it again. A Cmd/Ctrl+click in a view or the terminal that opens a file opens it in a new browser
+  copied link opens it again, and selects its tab, though the rail view may have brought the folder's saved tabs back
+  (and OpenChamber selected the first) while the page started; until VS Code has restored its editors the header
+  doesn't follow them. A Cmd/Ctrl+click in a view or the terminal that opens a file opens it in a new browser
   tab on that link instead of over the current view; Cmd/Ctrl+click in VS Code's lists (multi-select) and in the
   page's editor (Go to Definition) keeps its VS Code meaning. Web links open in a new tab as before.
 
@@ -106,9 +111,14 @@ saved `settings.json`) still keep the later one, as two windows of the whole wor
 **Keys.** VS Code takes the keys while it has focus, in every frame: with the keyboard patch it keeps Cmd/Ctrl+1–9
 and Cmd/Ctrl+Alt+←/→ too, as VS Code's own default keybindings (not user keybindings, so `keybindings.json` stays
 the user's). OpenChamber's tab keys are not forwarded. The exception is a press VS Code has no binding for
-(it didn't prevent its default) that OpenChamber binds to navigation, such as its close-tab key (Alt+W) or its
-rail digits: it goes to OpenChamber, since those tabs and that rail are OpenChamber's now. Keys Chrome keeps in a
-normal tab (Ctrl+Tab, Cmd+W, Cmd+Option+←/→) reach VS Code only in an installed app window.
+(it didn't prevent its default) that OpenChamber binds to navigation: it goes to OpenChamber, since those tabs and
+that rail are OpenChamber's now. Which presses those are depends on the frame. OpenChamber's rail digits
+(Cmd/Ctrl+Alt+1–9) are in every frame. Its close-tab key (Alt+W) is in a view, but VS Code's editor binds it
+(Toggle Find: Match Whole Word). A terminal gives the shell every press VS Code doesn't run, and xterm stops it
+before any listener of the frame sees it (Ctrl+Alt+digit becomes Esc and the digit): there the rail digits skip
+the shell, as VS Code's own navigation keys do (`terminal.integrated.commandsToSkipShell`), unless VS Code binds
+them, and the rest stay the shell's (Alt+W is Esc w for Emacs, Ctrl+[ is Esc, Ctrl+B is readline's and tmux's).
+Keys Chrome keeps in a normal tab (Ctrl+Tab, Cmd+W, Cmd+Option+←/→) reach VS Code only in an installed app window.
 
 **Tunnels.** Each workbench holds 2 of the service's tunnels (its management connection and its extension host's).
 A browser window runs up to 3 workbenches, so 6, and 12 for the 45 s a reloaded frame's old tunnels linger; past
@@ -171,8 +181,14 @@ as rail icons, each opening its view alone; an extension it builds and installs 
 its icon, opening its view, and losing the icon when uninstalled; files from the Explorer as header tabs (the
 editor in the main area, kept across a chat, the unsaved dot, closing asks to save, no VS Code tab bar); the
 terminal at the bottom (a command, a second terminal, a split, the shell picker, kept while a page covers it);
-Ctrl+Alt+→ and Ctrl+1 acting in VS Code; nothing opening another page; the page with session tabs off keeping
-VS Code's tab bar. It writes each size's start times and memory to `<size>-frames.json`. Run the stack's
+Ctrl+Alt+→ and Ctrl+1 acting in VS Code; nothing opening another page but the Ctrl+click tabs; the page with
+session tabs off keeping VS Code's tab bar. At 1440×900 also: Markdown's preview in the stock instance's whole
+workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a rail
+view; Ctrl+click on a link in a rail view (the probe extension's welcome view) and on a file link in the terminal
+opening a new browser tab on that file's editor while this tab stays as it was, a plain click opening it here;
+OpenChamber's rail digits (Ctrl+Alt+digit) reaching it from the rail view, the page and the terminal, Alt+W from
+a rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; "Open in VS Code" on a chat in
+a second project and back. It writes each size's start times and memory to `<size>-frames.json`. Run the stack's
 `prepare` outside a private network namespace (it downloads), then `up`, the check and `down` inside one.
 
 The E2E check connects the panel to the dev container's VS Code Server, checks the Explorer, file icons, the

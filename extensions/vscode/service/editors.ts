@@ -5,6 +5,7 @@
 // editor, its selection) waits here until the page takes it. The page's tabs
 // are kept too, so a frame can bring them back after OpenChamber reloads,
 // before the page has started again.
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -62,6 +63,12 @@ export class SavedTabs {
   private readonly tabs = new Map<string, SavedTab[]>();
 
   constructor(private readonly dir: string, private readonly log: (message: string) => void) {}
+
+  /** One list per server and folder: a folder's editors are its own. */
+  static keyOf(serverKey: string, folder: unknown): string {
+    const name = typeof folder === 'string' && folder.startsWith('/') ? folder : '';
+    return `${serverKey}.${createHash('sha256').update(name).digest('hex').slice(0, 16)}`;
+  }
 
   private file(key: string): string {
     return join(this.dir, `${key}.tabs.json`);

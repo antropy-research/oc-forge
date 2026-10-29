@@ -65,7 +65,7 @@ var readServerPage = (html) => {
 var commitOfBase = (base) => /\/(?:stable|insider|exploration)-([0-9a-f]{40})\/static\/?$/.exec(base)?.[1] ?? null;
 
 // service/assets.ts
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -221,6 +221,8 @@ var CACHE_FORMAT = 3;
 var MARKER = "ready.json";
 var KEEP = 2;
 var DOWNLOADS_AT_ONCE = 8;
+var WEBVIEW_PRE = "out/vs/workbench/contrib/webview/browser/pre";
+var WEBVIEW_FILES = ["index.html", "host.js"];
 var localInstallCandidates = (commit, home = homedir()) => [
   "/opt/vscode-server",
   join(home, ".vscode-server", "cli", "servers", `Stable-${commit}`, "server"),
@@ -271,12 +273,32 @@ class WorkbenchAssets {
       try {
         const ready = JSON.parse(readFileSync(marker, "utf8"));
         if (ready.format === CACHE_FORMAT) {
+          this.refreshWebviewHost(commit);
           const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
           return { state: "ready", path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? "local", surfaces };
         }
       } catch {}
     }
     return { state: "idle" };
+  }
+  refreshWebviewHost(commit) {
+    if (!this.webviewHost)
+      return;
+    const pre = join(this.cacheRoot, commit, WEBVIEW_PRE);
+    for (const name of WEBVIEW_FILES) {
+      try {
+        const wanted = readFileSync(join(this.webviewHost, name));
+        const target = join(pre, name);
+        if (existsSync(target) && readFileSync(target).equals(wanted))
+          continue;
+        mkdirSync(pre, { recursive: true });
+        writeFileSync(`${target}.tmp-${process.pid}`, wanted);
+        renameSync(`${target}.tmp-${process.pid}`, target);
+        this.log(`VS Code ${commit.slice(0, 8)}: webview host ${name} updated`);
+      } catch (error) {
+        this.log(`could not update the webview host's ${name}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
   prepare(server, page) {
     const current = this.status(page.commit);
@@ -340,9 +362,9 @@ class WorkbenchAssets {
       };
       await Promise.all(Array.from({ length: local ? 1 : DOWNLOADS_AT_ONCE }, worker));
       if (this.webviewHost) {
-        const pre = join(tmp, "out/vs/workbench/contrib/webview/browser/pre");
+        const pre = join(tmp, WEBVIEW_PRE);
         await mkdir(pre, { recursive: true });
-        for (const name of ["index.html", "host.js"])
+        for (const name of WEBVIEW_FILES)
           await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
       }
       for (const file of ["out/vs/code/browser/workbench/workbench.js", "out/vs/code/browser/workbench/workbench.css", "out/nls.messages.js"]) {
@@ -399,6 +421,7 @@ var transform = (path, body, codicon, missing = []) => {
 };
 
 // service/editors.ts
+import { createHash } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join2 } from "node:path";
 var REQUEST_TTL_MS = 60000;
@@ -454,6 +477,10 @@ class SavedTabs {
   constructor(dir, log) {
     this.dir = dir;
     this.log = log;
+  }
+  static keyOf(serverKey, folder) {
+    const name = typeof folder === "string" && folder.startsWith("/") ? folder : "";
+    return `${serverKey}.${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
   }
   file(key) {
     return join2(this.dir, `${key}.tabs.json`);
@@ -859,7 +886,7 @@ class VscodeServer {
 }
 
 // service/state.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir4, readFile as readFile4, rename as rename4, stat as stat2, writeFile as writeFile4 } from "node:fs/promises";
 import { join as join3 } from "node:path";
 var LOAD_MAX = 7000000;
@@ -952,7 +979,7 @@ class WorkbenchState {
     this.log = log;
   }
   static keyOf(serverUrl, folder) {
-    return createHash("sha256").update(serverUrl).digest("hex").slice(0, 32);
+    return createHash2("sha256").update(serverUrl).digest("hex").slice(0, 32);
   }
   static roleKeyOf(key, role) {
     return `${key}.${role}`;
@@ -1358,12 +1385,12 @@ var routes = {
   },
   "/tabs/save": async (body) => {
     const server = serverOf(body);
-    await savedTabs.save(WorkbenchState.keyOf(server.url, null), readTabs(body.tabs));
+    await savedTabs.save(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder), readTabs(body.tabs));
     return { ok: true };
   },
   "/tabs/load": async (body) => {
     const server = serverOf(body);
-    return { tabs: await savedTabs.load(WorkbenchState.keyOf(server.url, null)) };
+    return { tabs: await savedTabs.load(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder)) };
   },
   "/assets/prepare": async (body) => {
     const server = serverOf(body);

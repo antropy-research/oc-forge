@@ -95,6 +95,24 @@ describe('preparing the workbench of a VS Code Server', () => {
     expect(new WorkbenchAssets(cache, async () => [], () => {}).status(commit).state).toBe('ready');
   });
 
+  test('a newer webview host replaces the one a prepared workbench carries, without preparing it again', async () => {
+    const install = fakeInstall();
+    const cache = mkdtempSync(join(tmpdir(), 'vscode-cache-'));
+    const webview = mkdtempSync(join(tmpdir(), 'vscode-webview-'));
+    writeFileSync(join(webview, 'index.html'), '<script src="./host.js"></script>');
+    writeFileSync(join(webview, 'host.js'), 'old();');
+    const assets = new WorkbenchAssets(cache, async () => [], () => {}, () => [install], webview);
+    assets.prepare({ staticFile: async () => null } as unknown as VscodeServer, page);
+    expect(await settle(assets)).toMatchObject({ state: 'ready' });
+    const host = join(cache, commit, 'out/vs/workbench/contrib/webview/browser/pre/host.js');
+    expect(readFileSync(host, 'utf8')).toBe('old();');
+    writeFileSync(join(webview, 'host.js'), 'handshake(mountId, keyEventToken);');
+    const marker = readFileSync(join(cache, commit, 'ready.json'), 'utf8');
+    expect(new WorkbenchAssets(cache, async () => [], () => {}, () => [], webview).status(commit).state).toBe('ready');
+    expect(readFileSync(host, 'utf8')).toBe('handshake(mountId, keyEventToken);');
+    expect(readFileSync(join(cache, commit, 'ready.json'), 'utf8')).toBe(marker);
+  });
+
   test("over HTTP from the server's static files, by the shipped list", async () => {
     // A release that moved the surface patches' code: ready all the same, as the whole workbench per frame.
     const install = fakeInstall(false);

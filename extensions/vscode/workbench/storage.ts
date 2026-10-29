@@ -3,6 +3,7 @@
 // This is fake-indexeddb (an in-memory IndexedDB) filled from the snapshot the
 // service keeps, and every change goes back to the service.
 import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb';
+import { SHUTDOWN, type StorageService } from './vscode.ts';
 
 export type StoredValue = { s: string } | { b: string } | { j: unknown };
 export type StateOp =
@@ -190,6 +191,21 @@ export const persistentIndexedDB = (snapshot: StateSnapshot, send: (ops: StateOp
     restoring = false;
   });
   return { factory, ready, flush };
+};
+
+/**
+ * VS Code saves its state before it reloads the window (Reload Window, a
+ * folder switch) and reloads once its databases have it. Here they are memory,
+ * and what a frame sends as it unloads never reaches the service: that save
+ * waits for the service too. Returns the same save, for this frame's own reloads.
+ */
+export const saveThroughService = (storageService: StorageService, flush: () => Promise<void>): (() => Promise<void>) => {
+  const save = storageService.flush.bind(storageService);
+  storageService.flush = async (reason?: number) => {
+    await save(reason);
+    if (reason === SHUTDOWN) await flush();
+  };
+  return () => storageService.flush(SHUTDOWN);
 };
 
 export { IDBKeyRange };

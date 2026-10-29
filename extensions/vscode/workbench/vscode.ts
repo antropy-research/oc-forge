@@ -116,6 +116,39 @@ export interface TerminalService {
   readonly instances: readonly unknown[];
 }
 
+/** `WillSaveStateReason.SHUTDOWN`: the window is about to reload or close. */
+export const SHUTDOWN = 1;
+
+export interface StorageService {
+  /** Saves VS Code's state to its databases (IndexedDB); VS Code reloads the window once this resolves. */
+  flush(reason?: number): Promise<void>;
+}
+
+/** `ResultKind.NoMatchingKb`: VS Code binds nothing to the press. */
+export const NO_MATCHING_KB = 0;
+
+/** VS Code's own keyboard event (`IKeyboardEvent`): `keyCode` is VS Code's `KeyCode`. */
+export interface VscodeKeyboardEvent {
+  readonly _standardKeyboardEventBrand: true;
+  readonly browserEvent: KeyboardEvent;
+  readonly target: EventTarget | null;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly altGraphKey: boolean;
+  readonly keyCode: number;
+  readonly code: string;
+  equals(keybinding: number): boolean;
+  preventDefault(): void;
+  stopPropagation(): void;
+}
+
+export interface KeybindingService {
+  /** What VS Code would run for the press where `target` is, without running it. */
+  softDispatch(event: VscodeKeyboardEvent, target: EventTarget | null): { kind: number };
+}
+
 type Accessor = { get(id: unknown): unknown };
 export type InstantiationService = { invokeFunction<R>(fn: (accessor: Accessor) => R): R };
 

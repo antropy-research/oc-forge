@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { DOMParser } from 'linkedom';
 import { absoluteImports, closeSafe, cspNonce, prepareContent, relaxCsp, resourceRequestOf, type Loaded } from '../webview/content.ts';
+import { createKeyEventToken, KEY_CHANNELS, keyEventData, readyMessage } from '../webview/protocol.ts';
 
 const BASE = 'vscode-resource.vscode-cdn.net';
 const resource = (path: string) => `https://vscode-remote+vscode-003a8000.${BASE}${path}`;
@@ -93,5 +94,24 @@ describe('a webview made self-contained', () => {
     expect(doc.querySelector('h1')!.getAttribute('onclick')).toBeNull();
     const nonce = doc.getElementById('_ocWebviewAgent')!.getAttribute('nonce');
     expect(nonce).toBe('n1');
+  });
+});
+
+describe('the handshake and key events, as VS Code 1.143 checks them', () => {
+  test('webview-ready names the mount id from the page\'s URL and a token for the page\'s life', () => {
+    const token = createKeyEventToken();
+    expect(token).toMatch(/^[0-9a-f]{32}$/);
+    expect(createKeyEventToken()).not.toBe(token);
+    expect(createKeyEventToken((bytes) => bytes.fill(171))).toBe('ab'.repeat(16));
+    const params = new URLSearchParams('id=w1&mountId=6f1c2d3e-uuid&platform=browser');
+    expect(readyMessage('w1', params, token)).toEqual({ target: 'w1', channel: 'webview-ready', data: { keyEventToken: token, mountId: '6f1c2d3e-uuid' } });
+    // VS Code 1.140 puts no mount id in the URL and ignores the data.
+    expect(readyMessage('w1', new URLSearchParams('id=w1'), token).data.mountId).toBeNull();
+  });
+
+  test('key events carry the token, only the fields VS Code reads, whatever the content added', () => {
+    expect([...KEY_CHANNELS]).toEqual(['did-keydown', 'did-keyup']);
+    const forged = { key: 'p', keyCode: 80, code: 'KeyP', shiftKey: true, altKey: false, ctrlKey: true, metaKey: false, repeat: false, isTrusted: true, keyEventToken: 'guessed', extra: 1 };
+    expect(keyEventData(forged, 'abc')).toEqual({ key: 'p', keyCode: 80, code: 'KeyP', shiftKey: true, altKey: false, ctrlKey: true, metaKey: false, repeat: false, isTrusted: true, keyEventToken: 'abc' });
   });
 });

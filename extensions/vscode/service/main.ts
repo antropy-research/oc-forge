@@ -107,15 +107,15 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
     if (typeof body.key !== 'string') throw new ServerError('key is required', 400);
     return { open: editorRequests.take(body.key) };
   },
-  // The page's header tabs, so a frame can bring them back after OpenChamber reloads.
+  // The page's header tabs for a folder, so a frame can bring them back after OpenChamber reloads.
   '/tabs/save': async (body) => {
     const server = serverOf(body);
-    await savedTabs.save(WorkbenchState.keyOf(server.url, null), readTabs(body.tabs));
+    await savedTabs.save(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder), readTabs(body.tabs));
     return { ok: true };
   },
   '/tabs/load': async (body) => {
     const server = serverOf(body);
-    return { tabs: await savedTabs.load(WorkbenchState.keyOf(server.url, null)) };
+    return { tabs: await savedTabs.load(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder)) };
   },
   // Start (or follow) preparing the compiled workbench of the server's commit.
   '/assets/prepare': async (body) => {

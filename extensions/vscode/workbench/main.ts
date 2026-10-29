@@ -13,14 +13,16 @@ import { isConnectionToken, parseServerUrl, readOpenRequest, readSettings, type 
 import { roleOf, roleSettings, type Role } from '../src/surfaces.ts';
 import { isExternalAllowed, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
-import { persistentIndexedDB, IDBKeyRange, type StateOp, type StateSnapshot } from './storage.ts';
-import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceRole } from './surfaces.ts';
+import { persistentIndexedDB, IDBKeyRange, saveThroughService, type StateOp, type StateSnapshot } from './storage.ts';
+import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceController, type SurfaceRole } from './surfaces.ts';
 import { TunnelSocket, type TunnelService } from './tunnel.ts';
-import { VscodeServices, type InstantiationService } from './vscode.ts';
+import { VscodeServices, type InstantiationService, type StorageService } from './vscode.ts';
 
 const host = connectHost();
 // oc-forge's adapters answer at once; a stock OpenChamber never does, and the boot below takes longer than this anyway.
 const forgeReady = connectOcForge({ timeoutMs: 1_000 }).catch(() => null);
+/** The rail entry "Open in VS Code" shows: the chat's folder in the Explorer. */
+const EXPLORER_ENTRY = 'explorer';
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 installBasicShims((url) => void host.openUrl(url).catch(() => {}));
@@ -174,6 +176,8 @@ const boot = async (): Promise<void> => {
   Object.defineProperty(window, 'indexedDB', { configurable: true, get: () => storage.factory });
   Object.defineProperty(window, 'IDBKeyRange', { configurable: true, get: () => IDBKeyRange });
   window.addEventListener('pagehide', () => void storage.flush());
+  // VS Code's own save before a reload, once its services are there (saveThroughService).
+  let saveBeforeReload = (): Promise<void> => storage.flush();
 
   const authority = connected.config.remoteAuthority ?? '';
   installWorkerShim();
@@ -207,7 +211,7 @@ const boot = async (): Promise<void> => {
     },
   };
   const reloadWith = async (nextFolder: string | null, request?: OpenRequest): Promise<void> => {
-    await storage.flush();
+    await saveBeforeReload().catch(() => {});
     if (nextFolder) await host.storage.set('folder', nextFolder).catch(() => {});
     else await host.storage.delete('folder').catch(() => {});
     if (request) await host.storage.set('open-request', request as unknown as JsonValue).catch(() => {});
@@ -234,6 +238,11 @@ const boot = async (): Promise<void> => {
       if (!(ids instanceof Map)) return;
       const services = new VscodeServices(instantiation, ids);
       if (surfaceRole) prepareSurface(surfaceRole, services);
+      try {
+        saveBeforeReload = saveThroughService(services.get<StorageService>('storageService'), storage.flush);
+      } catch (error) {
+        console.warn('[OpenChamber VS Code] VS Code saves its state before a reload without waiting for the service', error);
+      }
       markServices(services);
     },
     workbench: (handle: typeof workbench) => {
@@ -275,7 +284,7 @@ const boot = async (): Promise<void> => {
         commands: [
           { id: 'openchamber.vscode.settings', label: 'OpenChamber: VS Code Server Connection…', handler: async () => {
             await host.storage.set('show-settings', true);
-            await storage.flush();
+            await saveBeforeReload().catch(() => {});
             location.reload();
           } },
           { id: 'openchamber.vscode.followFolder', label: "OpenChamber: Open OpenChamber's Folder", handler: async () => {
@@ -313,14 +322,16 @@ const boot = async (): Promise<void> => {
 
   // OpenChamber's own surfaces, once VS Code runs: this frame's part, and where the server keeps its extensions for the rail.
   const openFileAt = (file: string, line?: number) => workbench?.commands.executeCommand('_workbench.open', remoteUri(authority, file), [undefined, { pinned: true, ...(line ? { selection: { startLineNumber: line, startColumn: 1 } } : {}) }]);
+  let surface: SurfaceController = {};
   void Promise.all([servicesReady, running]).then(async ([services]) => {
     const serviceCall = <T>(path: string, body: Record<string, unknown> = {}): Promise<T> => call<T>(path, { ...server, ...body });
     void reportExtensionsPath(services, serviceCall).catch(() => {});
     if (!surfaceRole || !forge) return;
-    await startSurface({
+    surface = await startSurface({
       role: surfaceRole,
       forge,
       services,
+      folder,
       call: serviceCall,
       railEntries: async () => {
         const answer = await host.serviceRequest({ method: 'GET', path: '/rail' });
@@ -328,8 +339,11 @@ const boot = async (): Promise<void> => {
       },
       openUrl: (url) => void host.openUrl(url).catch(() => {}),
     });
-    // "Open in VS Code" with a file: the rail view hands it to the page.
-    if (surfaceRole === 'view' && fresh?.file) await openFileAt(fresh.file, fresh.line);
+    // "Open in VS Code" from a chat: the rail view shows that folder in the Explorer, and hands a file to the page.
+    if (surfaceRole === 'view' && fresh) {
+      await surface.showEntry?.(EXPLORER_ENTRY);
+      if (fresh.file) await openFileAt(fresh.file, fresh.line);
+    }
   }).catch((error) => console.warn('[OpenChamber VS Code] the surface did not start', error));
 
   // OpenChamber's look follows into VS Code when it changes; its folder is offered.
@@ -358,6 +372,9 @@ const boot = async (): Promise<void> => {
       void host.storage.get('folder').catch(() => undefined).then(async (stored) => {
         if (typeof stored === 'string' && stored.startsWith('/') && stored !== shownFolder) {
           shownFolder = stored;
+          // VS Code saves first: closing the page's last tab ends the page at once.
+          await saveBeforeReload().catch(() => {});
+          await surface.beforeFolderChange?.().catch(() => {});
           await reloadWith(stored);
         }
       });
@@ -369,9 +386,12 @@ const boot = async (): Promise<void> => {
       await host.storage.set(handledKey, request.at).catch(() => {});
       if (request.folder !== shownFolder) {
         shownFolder = request.folder;
+        // The rail view comes back on the Explorer of the new folder.
+        if (surfaceRole === 'view') await forge?.rail.setActive(EXPLORER_ENTRY).catch(() => {});
         await reloadWith(request.folder, request);
         return;
       }
+      if (surfaceRole === 'view') await surface.showEntry?.(EXPLORER_ENTRY);
       if (request.file && workbench) await openFileAt(request.file, request.line);
     });
   }, 1500);

@@ -34,10 +34,18 @@ interface Config {
     map.textContent = JSON.stringify({ imports });
     document.getElementById('_ocWebviewAgent')?.after(map);
   }
+  // Taken before the content's scripts run: content that replaced MessagePort.prototype.postMessage
+  // would otherwise see this port, and could send the host key events that never happened.
+  const nativeCall = Function.prototype.call;
+  const invoke = Function.prototype.bind.call(nativeCall, nativeCall) as (fn: Function, self: unknown, ...args: unknown[]) => unknown;
+  const nativePortPostMessage = MessagePort.prototype.postMessage;
   let port: MessagePort | null = null;
   const outbox: { channel: string; data: unknown; transfer: Transferable[] }[] = [];
+  const toPort = (target: MessagePort, message: unknown, transfer: Transferable[]): void => {
+    invoke(nativePortPostMessage, target, message, transfer);
+  };
   const send = (channel: string, data?: unknown, transfer: Transferable[] = []): void => {
-    if (port) port.postMessage({ channel, data }, transfer);
+    if (port) toPort(port, { channel, data }, transfer);
     else outbox.push({ channel, data, transfer });
   };
 
@@ -88,6 +96,11 @@ interface Config {
 
   // From the host: the extension's messages, styles, focus, find.
   let lastFind: string | undefined;
+  let lastFocused: HTMLElement | null = null;
+  window.addEventListener('focusin', () => {
+    const focused = document.activeElement as HTMLElement | null;
+    if (focused && focused !== document.body && focused !== document.documentElement) lastFocused = focused;
+  });
   const onHost = (event: MessageEvent): void => {
     const { channel, data } = event.data ?? {};
     switch (channel) {
@@ -101,9 +114,13 @@ interface Config {
       case 'focus':
         window.focus();
         break;
-      case 'execCommand':
+      case 'execCommand': {
+        // A context menu moved focus to the body: back to what had it, so Copy or Paste acts there (VS Code 1.143).
+        const active = document.activeElement;
+        if ((active === document.body || active === document.documentElement) && lastFocused?.isConnected) lastFocused.focus({ preventScroll: true });
         document.execCommand(data);
         break;
+      }
       case 'set-context-menu-visible':
         document.body?.classList.toggle('vscode-context-menu-visible', Boolean(data?.visible));
         break;
@@ -135,7 +152,7 @@ interface Config {
       event.stopImmediatePropagation();
       port = event.ports[0];
       port.onmessage = onHost;
-      for (const item of outbox.splice(0)) port.postMessage({ channel: item.channel, data: item.data }, item.transfer);
+      for (const item of outbox.splice(0)) toPort(port, { channel: item.channel, data: item.data }, item.transfer);
     }
   }, true);
 

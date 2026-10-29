@@ -4,7 +4,7 @@
 // OpenChamber serves, with `patch.ts` applied. It is written inside this
 // extension's folder (`vscode-web/<commit>/`), because an extension frame can
 // load files from its own package and from nowhere else.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -17,6 +17,9 @@ export const CACHE_FORMAT = 3;
 const MARKER = 'ready.json';
 const KEEP = 2;
 const DOWNLOADS_AT_ONCE = 8;
+/** Where VS Code's webview host page is, which this extension's own replaces. */
+const WEBVIEW_PRE = 'out/vs/workbench/contrib/webview/browser/pre';
+const WEBVIEW_FILES = ['index.html', 'host.js'] as const;
 
 export type AssetState =
   | { state: 'idle' }
@@ -76,6 +79,7 @@ export class WorkbenchAssets {
       try {
         const ready = JSON.parse(readFileSync(marker, 'utf8')) as { format?: number; files?: number; source?: 'local' | 'download'; missing?: unknown };
         if (ready.format === CACHE_FORMAT) {
+          this.refreshWebviewHost(commit);
           const surfaces = Array.isArray(ready.missing) && ready.missing.length === 0;
           return { state: 'ready', path: WorkbenchAssets.folder(commit), files: ready.files ?? 0, source: ready.source ?? 'local', surfaces };
         }
@@ -85,6 +89,29 @@ export class WorkbenchAssets {
     }
     // A cache that was ready but is gone (or older) is prepared again.
     return { state: 'idle' };
+  }
+
+  /**
+   * A prepared workbench carries this extension's webview host (`pre/`) as it
+   * was when it was prepared: a newer one replaces it there, without preparing
+   * the whole workbench again.
+   */
+  private refreshWebviewHost(commit: string): void {
+    if (!this.webviewHost) return;
+    const pre = join(this.cacheRoot, commit, WEBVIEW_PRE);
+    for (const name of WEBVIEW_FILES) {
+      try {
+        const wanted = readFileSync(join(this.webviewHost, name));
+        const target = join(pre, name);
+        if (existsSync(target) && readFileSync(target).equals(wanted)) continue;
+        mkdirSync(pre, { recursive: true });
+        writeFileSync(`${target}.tmp-${process.pid}`, wanted);
+        renameSync(`${target}.tmp-${process.pid}`, target);
+        this.log(`VS Code ${commit.slice(0, 8)}: webview host ${name} updated`);
+      } catch (error) {
+        this.log(`could not update the webview host's ${name}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   /** Start preparing (once per commit) and answer at once with the state. */
@@ -152,9 +179,9 @@ export class WorkbenchAssets {
       };
       await Promise.all(Array.from({ length: local ? 1 : DOWNLOADS_AT_ONCE }, worker));
       if (this.webviewHost) {
-        const pre = join(tmp, 'out/vs/workbench/contrib/webview/browser/pre');
+        const pre = join(tmp, WEBVIEW_PRE);
         await mkdir(pre, { recursive: true });
-        for (const name of ['index.html', 'host.js']) await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
+        for (const name of WEBVIEW_FILES) await writeFile(join(pre, name), await readFile(join(this.webviewHost, name)));
       }
       for (const file of ['out/vs/code/browser/workbench/workbench.js', 'out/vs/code/browser/workbench/workbench.css', 'out/nls.messages.js']) {
         if (!existsSync(join(tmp, file))) throw new Error(`${file} is missing from the VS Code Server`);

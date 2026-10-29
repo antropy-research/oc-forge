@@ -8,6 +8,7 @@
 // `load-resource` channel, and shows the content in a srcdoc frame run by
 // `agent.ts` over a second MessagePort.
 import { prepareContent, resourceRequestOf, type Loaded } from './content.ts';
+import { createKeyEventToken, KEY_CHANNELS, keyEventData, readyMessage } from './protocol.ts';
 
 declare const __OC_WEBVIEW_AGENT__: string;
 
@@ -15,6 +16,8 @@ const params = new URL(location.href).searchParams;
 const ID = params.get('id');
 const resourceBase = params.get('vscode-resource-base-authority');
 const remoteAuthority = params.get('remoteAuthority');
+// Sent with `webview-ready`; it authenticates the key events this page forwards (VS Code 1.143, protocol.ts).
+const keyEventToken = createKeyEventToken();
 
 // The same default styles VS Code's own host gives every webview.
 const DEFAULT_STYLES = `@layer vscode-default {
@@ -122,6 +125,11 @@ const fromContent = (event: MessageEvent): void => {
     });
     return;
   }
+  // Key events the agent saw in the content go out as this page's own, with its token.
+  if (KEY_CHANNELS.has(channel) && data && typeof data === 'object') {
+    toHost(channel, keyEventData(data, keyEventToken));
+    return;
+  }
   if (typeof channel === 'string') toHost(channel, data, channel === 'onmessage' && Array.isArray(data?.transfer) ? data.transfer : []);
 };
 
@@ -199,7 +207,7 @@ on('set-confirm-before-close', () => {});
 
 // Keys on the page itself, before any content is there, go to VS Code as VS Code's host sends them.
 for (const type of ['keydown', 'keyup'] as const) window.addEventListener(type, (event) => {
-  toHost(`did-${type}`, { key: event.key, keyCode: event.keyCode, code: event.code, shiftKey: event.shiftKey, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, repeat: event.repeat, isTrusted: event.isTrusted });
+  toHost(`did-${type}`, keyEventData(event as unknown as Record<string, unknown>, keyEventToken));
 });
 
 // Focus, as VS Code's host tracks it: the page or the content frame inside it.
@@ -212,4 +220,4 @@ setInterval(() => {
 }, 250);
 
 // Ready: the workbench takes our port. The workbench's origin cannot be named from an opaque origin.
-window.parent.postMessage({ target: ID, channel: 'webview-ready', data: {} }, '*', [host.port2]);
+window.parent.postMessage(readyMessage(ID, params, keyEventToken), '*', [host.port2]);
