@@ -389,19 +389,22 @@ export const upcomingValues = (task: UpcomingTask): OccurrenceValues => occurren
  * as Google Calendar shows a number of them on its grid: from the series'
  * open occurrence on, by its rule and template, from today on. One changed
  * on its own shows as changed (`change`): a date deleted shows nothing, one
- * moved shows on its new date. A date a real occurrence of the series shows
- * on (`shown`, kept as this series' own: the next one made, or one moved
- * there) is left to it, so one date never shows two. A task that only shares
- * the title and the date is a task of its own and shows beside it, as two
- * tasks do in Google Calendar (nor is it taken for the next occurrence:
- * `seriesNextIn`). A series deleted or ended shows none.
+ * moved shows on its new date. An occurrence is told by the date the series
+ * puts it on, wherever it shows: one Google has already (`shown`, kept as
+ * this series' own, as the next one made) is left to it, so an occurrence
+ * never shows twice, while one moved onto another occurrence's date shows
+ * beside that one, as two tasks of a series do in Google Calendar. A task
+ * that only shares the title and the date is a task of its own and shows
+ * beside it too (nor is it taken for the next occurrence: `seriesNextIn`). A
+ * series deleted or ended shows none.
  */
 export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, shown: readonly GoogleTaskItem[], from: DateKey, to: DateKey, today: DateKey): UpcomingTask[] => {
   const taken = new Set<string>();
   for (const item of shown) {
-    if (!item.due) continue;
-    const series = kept[googleTaskKey(item.account, item.id)]?.repeat?.seriesId;
-    if (series) taken.add(`${series}\n${item.due}`);
+    const repeat = kept[googleTaskKey(item.account, item.id)]?.repeat;
+    // Which occurrence it is: the date the series put it on (a one-off move leaves it), else, kept before those, its date.
+    const on = repeat?.on ?? item.due;
+    if (repeat && on) taken.add(`${repeat.seriesId}\n${on}`);
   }
   // Each occurrence once (by the date the series puts it on), however many open occurrences its series has.
   const projected = new Set<string>();
@@ -426,7 +429,7 @@ export const upcomingTasks = (kept: Readonly<Record<string, GoogleTaskKept>>, sh
       const on = change?.date ?? next;
       if (change?.skip || on < from || on > to || on < today) continue;
       const own = `${repeat.seriesId}\n${next}`;
-      if (projected.has(own) || taken.has(`${repeat.seriesId}\n${on}`)) continue;
+      if (projected.has(own) || taken.has(own)) continue;
       projected.add(own);
       out.push({ account: source.account, listId: source.listId, taskId: source.taskId, seriesId: repeat.seriesId, rule: repeat.rule, index, on: next, date: on, template: repeat.template, ...(change ? { change } : {}) });
       made++;
@@ -550,6 +553,128 @@ export const seriesCut = (kept: Readonly<Record<string, GoogleTaskKept>>, accoun
   const remove = tasks.filter(goes).sort((a, b) => Number(Boolean(a.repeat!.next)) - Number(Boolean(b.repeat!.next)) || (b.repeat!.on ?? '').localeCompare(a.repeat!.on ?? '') || b.repeat!.index - a.repeat!.index);
   const keep: EventBody[] = from === null ? [] : tasks.filter((entry) => !goes(entry)).map((entry) => ({ type: 'gtask.kept', account, listId: entry.listId, taskId: entry.taskId, patch: { repeat: endedBefore(entry.repeat!, from) } }));
   return { remove, keep };
+};
+
+/**
+ * The number the series gives the occurrence it puts on `on`, counting on
+ * from the open task it goes on from (`repeat.on`, the `index`th; a date
+ * deleted on its own counts, as an EXDATE does); null when it puts none
+ * there: a day its rule passes over, past its end, or not after that task.
+ */
+export const occurrenceIndex = (repeat: Repeat, on: DateKey): number | null => {
+  if (!repeat.on || on <= repeat.on) return null;
+  let date: DateKey | null = repeat.on;
+  for (let step = 0, index = repeat.index; date && date < on && step < STEPS_MAX; step++) {
+    date = nextRepeatDate(repeat.rule, date, index);
+    index += 1;
+    if (date === on) return index;
+  }
+  return null;
+};
+
+/**
+ * An edit of one occurrence made in a window from `before` (as it showed
+ * there) to `after` (its form), over the occurrence as it is now (`latest`):
+ * each field the edit changed takes its value, the others keep theirs, so a
+ * change made meanwhile (in another window, or of the series) stays. A time
+ * and its length go together.
+ */
+export const mergeOccurrence = (latest: OccurrenceValues, before: OccurrenceValues, after: OccurrenceValues): OccurrenceValues => {
+  const pick = <K extends 'title' | 'notes' | 'due' | 'deadline'>(key: K): OccurrenceValues[K] => (after[key] !== before[key] ? after[key] : latest[key]);
+  const timed = after.time !== before.time || after.duration !== before.duration;
+  return { title: pick('title'), notes: pick('notes'), due: pick('due'), time: timed ? after.time : latest.time, duration: timed ? after.duration : latest.duration, deadline: pick('deadline') };
+};
+
+/** One side of an edit of all tasks of a series: its rule (null: no repeat any more), its template, and the date of the task it was made from. */
+export interface SeriesSide {
+  rule: string | null;
+  template: GoogleTaskTemplate;
+  due: DateKey | null;
+}
+
+const TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'busy', 'visibility'] as const;
+
+/**
+ * An edit of all tasks of a series (Edit → All tasks, a new rule, no repeat
+ * any more), made in a window from `before` (the series as it showed there)
+ * to `after` (its form), against the series as it is now: what the edit
+ * changed goes over what changed meanwhile (another window's edit, a cut by
+ * "This and following tasks", a next task made), so a rule it did not change
+ * stays as it is now. `taskId` is the task it was made from, `own` what is
+ * kept for that task alone (its time, deadline, availability, star).
+ *
+ * While that task is the open one, it and the series' other open tasks take
+ * the new rule and template, and the exceptions still on its schedule, as
+ * the edit had them before (a new rule or date starts the schedule there).
+ * Once it was completed meanwhile, the edit is for the series from its open
+ * task on: that one takes the new rule (counted from its own date) and
+ * template. Each open task other than `taskId` takes its time, deadline and
+ * availability from the new template, and its title and details too when
+ * the edit changed them (`google`, for Google). No repeat any more ends the
+ * series with that task and each open one. Null when the series is gone.
+ */
+export const seriesEdit = (
+  state: Pick<PlannerState, 'googleTasks'>,
+  account: string,
+  seriesId: string,
+  taskId: string,
+  own: GoogleTaskKeptPatch,
+  before: SeriesSide,
+  after: SeriesSide,
+): { bodies: EventBody[]; google: { listId: string; taskId: string; title?: string; notes?: string }[] } | null => {
+  const entry = keptFor(state, { account, id: taskId });
+  const mine = entry?.repeat?.seriesId === seriesId ? entry : null;
+  const heads = seriesHeads(state, seriesId).filter((head) => head.account === account);
+  const open = mine && !mine.repeat!.next ? mine : null;
+  const base = open ?? heads[0] ?? null;
+  if (!base?.repeat) return null;
+  const at = (target: GoogleTaskKept, patch: GoogleTaskKeptPatch): EventBody => ({ type: 'gtask.kept', account, listId: target.listId, taskId: target.taskId, patch });
+  const others = heads.filter((head) => head.taskId !== taskId);
+  if (after.rule === null) return { bodies: [...(mine ? [at(mine, { ...own, repeat: null })] : []), ...others.map((head) => at(head, { repeat: null }))], google: [] };
+  const latest = base.repeat;
+  const rule = after.rule !== before.rule ? after.rule : latest.rule;
+  const ruleChanged = rule !== latest.rule;
+  const changed = TEMPLATE_FIELDS.filter((field) => after.template[field] !== before.template[field]);
+  const fields: Record<string, unknown> = { ...(latest.template ?? before.template) };
+  for (const field of changed) {
+    if (after.template[field] === undefined) delete fields[field];
+    else fields[field] = after.template[field];
+  }
+  const template = fields as unknown as GoogleTaskTemplate;
+  const timing = (head: GoogleTaskKept, made: GoogleTaskTemplate): GoogleTaskKeptPatch => ({
+    time: made.time,
+    duration: made.duration,
+    deadline: head.repeat?.on ? (made.deadline === null ? null : addDays(head.repeat.on, made.deadline)) : head.deadline,
+    busy: Boolean(made.busy),
+    visibility: made.visibility ?? 'default',
+  });
+  const google = changed.some((field) => field === 'title' || field === 'notes')
+    ? others.map((head) => ({ listId: head.listId, taskId: head.taskId, ...(changed.includes('title') ? { title: template.title } : {}), ...(changed.includes('notes') ? { notes: template.notes } : {}) }))
+    : [];
+  if (open) {
+    const on = open.repeat!.on ?? before.due ?? after.due!;
+    const moved = ruleChanged || Boolean(after.due && after.due !== before.due && after.due !== on);
+    const index = ruleChanged ? 1 : open.repeat!.index;
+    const made: GoogleTaskTemplate = { ...template, start: moved && after.due ? after.due : template.start };
+    const exceptions = moved && after.due ? exceptionsOnSchedule(open.repeat!.exceptions, rule, after.due, index) : open.repeat!.exceptions;
+    const repeat = withExceptions({ ...open.repeat!, rule, index, on: moved && after.due ? after.due : on, template: made }, exceptions);
+    return {
+      bodies: [at(open, { ...own, repeat }), ...others.map((head) => at(head, { ...timing(head, made), repeat: withExceptions({ ...head.repeat!, rule, template: made }, repeat.exceptions) }))],
+      google,
+    };
+  }
+  // Completed meanwhile: the series goes on from its open task, which the edit is for now.
+  return {
+    bodies: [
+      ...(mine ? [at(mine, own)] : []),
+      ...others.map((head) => {
+        const index = ruleChanged ? 1 : head.repeat!.index;
+        const exceptions = ruleChanged && head.repeat!.on ? exceptionsOnSchedule(head.repeat!.exceptions, rule, head.repeat!.on, index) : head.repeat!.exceptions;
+        return at(head, { ...timing(head, template), repeat: withExceptions({ ...head.repeat!, rule, index, template }, exceptions) });
+      }),
+    ],
+    google,
+  };
 };
 
 /** Starred tasks, the newest star first, as Google Tasks' Starred view lists them. */

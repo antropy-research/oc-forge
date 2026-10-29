@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import type { HostClient } from '@openchamber/sdk';
 import { GoogleStore, type TaskFields } from '../panel/lib/google.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
+import { seriesRoutes } from './seriesRoutes.ts';
 import { EventStore } from '../service/store.ts';
 import { Planner } from '../service/planner.ts';
 import type { TimeboxEvent } from '../service/googleData.ts';
@@ -326,12 +327,17 @@ const fakeClient = (start: PlannerState, answer: (method: string, path: string, 
   let state = start;
   let n = 0;
   const calls: { method: string; path: string; body?: any }[] = [];
+  // A repeating task's series changes in the service: its routes run the service's own code here (`seriesRoutes`).
+  const { handle } = seriesRoutes({ state: () => state, apply: (bodies) => (state = applyEvents(state, bodies.map(ev))) }, async (method, path, body) => answer(method, path, body));
   const client = {
     getView: () => ({ state, today: TODAY }),
     call: async (method: string, path: string, body?: unknown) => {
+      const answered = await handle(path, body);
+      if (answered) return answered;
       calls.push({ method, path, ...(body === undefined ? {} : { body }) });
       return answer(method, path, body);
     },
+    adopt: async () => {},
     dispatch: async (bodies: EventBody[]) => {
       for (const body of bodies) expect(validateCommand({ cmd: `c${n}`, ...body }, state)).toBeNull();
       n += bodies.length;

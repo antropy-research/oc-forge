@@ -193,21 +193,26 @@ describe('Google Tasks through the service', () => {
   });
 });
 
-describe('a repeating task through the service, asked by two windows at once (review 8)', () => {
-  /** A daily task from today at 9am, made as the panel makes one: the task in Google, then its series kept. */
-  const daily = async (title: string) => {
-    const made = await call('POST', '/google/tasks', { account: ME, listId: 'L1', title, notes: 'Series notes', due: today });
-    const id = made.body.task.id as string;
-    const seriesId = `s${id}`;
-    const template = { title, notes: 'Series notes', time: 540, duration: null, deadline: null, start: today };
-    expect((await commands({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: id, patch: { time: 540, repeat: { rule: 'RRULE:FREQ=DAILY', seriesId, index: 1, next: null, on: today, template } } })).status).toBe(200);
-    return { id, seriesId };
-  };
-  const inserts = (title: string) => fake.requests.filter((request) => request.method === 'POST' && request.path === '/tasks/v1/lists/L1/tasks' && request.body?.title === title);
-  const open = (title: string) => fake.tasks.get('L1')!.filter((task) => task.title === title && task.status !== 'completed');
-  const kept = async () => (await call('GET', '/state')).body.state.googleTasks as Record<string, any>;
-  const heads = (all: Record<string, any>, seriesId: string) => Object.values(all).filter((entry) => entry.repeat?.seriesId === seriesId && !entry.repeat.next).map((entry) => entry.taskId);
+/** A daily task from today at 9am, made as the panel makes one: the task in Google, then its series kept. */
+const daily = async (title: string) => {
+  const made = await call('POST', '/google/tasks', { account: ME, listId: 'L1', title, notes: 'Series notes', due: today });
+  const id = made.body.task.id as string;
+  const seriesId = `s${id}`;
+  const template = { title, notes: 'Series notes', time: 540, duration: null, deadline: null, start: today };
+  expect((await commands({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: id, patch: { time: 540, repeat: { rule: 'RRULE:FREQ=DAILY', seriesId, index: 1, next: null, on: today, template } } })).status).toBe(200);
+  return { id, seriesId, template };
+};
+const inserts = (title: string) => fake.requests.filter((request) => request.method === 'POST' && request.path === '/tasks/v1/lists/L1/tasks' && request.body?.title === title);
+const open = (title: string, list = 'L1') => fake.tasks.get(list)!.filter((task) => task.title === title && task.status !== 'completed');
+const kept = async () => (await call('GET', '/state')).body.state.googleTasks as Record<string, any>;
+const heads = (all: Record<string, any>, seriesId: string) => Object.values(all).filter((entry) => entry.repeat?.seriesId === seriesId && !entry.repeat.next).map((entry) => entry.taskId);
+/** Until Google has been asked what `check` waits for (a slow insert under way), at most 2 s. */
+const asked = async (check: () => boolean) => {
+  for (let attempt = 0; attempt < 100 && !check(); attempt++) await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(check()).toBe(true);
+};
 
+describe('a repeating task through the service, asked by two windows at once (review 8)', () => {
   test('completed in two windows at once, Google slow to make the next one: one next task in Google, linked; both answers name it, with the plan', async () => {
     const { id, seriesId } = await daily('Harness twin');
     expect((await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true })).status).toBe(200);
@@ -267,5 +272,132 @@ describe('a repeating task through the service, asked by two windows at once (re
     expect(Object.values(await kept()).filter((entry) => entry.repeat?.seriesId === other.seriesId)).toEqual([]);
     expect((await call('DELETE', `/google/tasks/series?${q({ account: ME, series: other.seriesId })}`)).status).toBe(404);
     expect((await call('DELETE', `/google/tasks/series?${q({ account: ME, series: other.seriesId, from: 'tomorrow' })}`)).status).toBe(400);
+  });
+});
+
+describe('a series changed while Google makes its next task, through the service (review 9)', () => {
+  const at = (date: string) => `${date}T00:00:00.000Z`;
+
+  test('tomorrow edited alone (This task) while Google makes it after today was completed: the edit waits, then the task Google made takes it; one task, kept with it', async () => {
+    const { id, seriesId } = await daily('Harness race');
+    const tomorrow = addDays(today, 1);
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    fake.delayNext('POST', '/tasks/v1/lists/L1/tasks', 1500);
+    const making = call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: today });
+    await asked(() => inserts('Harness race').length === 2);
+    const shown = { title: 'Harness race', notes: 'Series notes', due: tomorrow, time: 540, duration: null, deadline: null };
+    const editing = call('POST', '/google/tasks/occurrence', { account: ME, seriesId, on: tomorrow, before: shown, after: { ...shown, title: 'Harness race with Ann', time: 900 } });
+    const [made, edited] = await Promise.all([making, editing]);
+    expect([made.status, edited.status]).toEqual([200, 200]);
+    const next = open('Harness race with Ann');
+    expect(next.map((task) => task.due)).toEqual([at(tomorrow)]);
+    expect(open('Harness race')).toEqual([]);
+    expect(inserts('Harness race')).toHaveLength(2);
+    // As a window that loads now has it: the series' template stays; tomorrow's task has its own title and time.
+    const all = await kept();
+    expect(all[`${ME}\n${next[0].id}`]).toMatchObject({ time: 900, repeat: { seriesId, index: 2, on: tomorrow, next: null, template: { title: 'Harness race', time: 540 } } });
+    expect(all[`${ME}\n${id}`].repeat.next).toBe(next[0].id);
+    expect(heads(all, seriesId)).toEqual([next[0].id]);
+  });
+
+  test('a change written past the series lock while Google makes the next task (an older window, a sync): the task Google made is repaired, in Google and in the plan', async () => {
+    const { id } = await daily('Harness repair');
+    const tomorrow = addDays(today, 1);
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    fake.delayNext('POST', '/tasks/v1/lists/L1/tasks', 1500);
+    const making = call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: today });
+    await asked(() => inserts('Harness repair').length === 2);
+    const repeat = (await kept())[`${ME}\n${id}`].repeat;
+    const exceptions = { [tomorrow]: { title: 'Harness repair with Ann', time: 900, duration: null } };
+    expect((await commands({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: id, patch: { repeat: { ...repeat, exceptions } } })).status).toBe(200);
+    const made = await making;
+    expect(made.status).toBe(200);
+    expect(made.body.task).toMatchObject({ title: 'Harness repair with Ann', due: tomorrow });
+    const next = open('Harness repair with Ann');
+    expect(next).toHaveLength(1);
+    expect(fake.requests.filter((request) => request.method === 'PATCH' && request.path === `/tasks/v1/lists/L1/tasks/${next[0].id}`).map((request) => request.body)).toEqual([{ title: 'Harness repair with Ann' }]);
+    const all = await kept();
+    expect(all[`${ME}\n${next[0].id}`]).toMatchObject({ time: 900, repeat: { on: tomorrow, next: null } });
+    // The link went onto the series as it is now: the change stays with it.
+    expect(all[`${ME}\n${id}`].repeat).toMatchObject({ next: next[0].id, exceptions });
+  });
+
+  test('all tasks edited while Google makes the next task: the edit waits, then the next task takes the new title and time, and the one after it too', async () => {
+    const { id, seriesId, template } = await daily('Harness all-edit');
+    const tomorrow = addDays(today, 1);
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    fake.delayNext('POST', '/tasks/v1/lists/L1/tasks', 1500);
+    const making = call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: today });
+    await asked(() => inserts('Harness all-edit').length === 2);
+    // As the other window saves All tasks: Google has its task's own title first, then the series changes.
+    expect((await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, title: 'Harness all-edit daily' })).status).toBe(200);
+    const after = { ...template, title: 'Harness all-edit daily', time: 900 };
+    const editing = call('POST', '/google/tasks/series/edit', { account: ME, listId: 'L1', taskId: id, seriesId, own: { time: 900 }, before: { rule: 'RRULE:FREQ=DAILY', template, due: today }, after: { rule: 'RRULE:FREQ=DAILY', template: after, due: today } });
+    const [made, edited] = await Promise.all([making, editing]);
+    expect([made.status, edited.status]).toEqual([200, 200]);
+    const next = open('Harness all-edit daily');
+    expect(next.map((task) => task.due)).toEqual([at(tomorrow)]);
+    expect(open('Harness all-edit')).toEqual([]);
+    const all = await kept();
+    expect(all[`${ME}\n${next[0].id}`]).toMatchObject({ time: 900, repeat: { seriesId, on: tomorrow, template: { title: 'Harness all-edit daily', time: 900 } } });
+    expect(heads(all, seriesId)).toEqual([next[0].id]);
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id: next[0].id, completed: true });
+    const third = await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id: next[0].id, completed: true, due: tomorrow });
+    expect(third.body.task).toMatchObject({ title: 'Harness all-edit daily', due: addDays(today, 2) });
+    expect(third.body.state.googleTasks[`${ME}\n${third.body.task.id}`]).toMatchObject({ time: 900 });
+  });
+
+  test('today moved alone to tomorrow at 1pm: completing it makes tomorrow’s own at 9am beside it; completing that one makes the day after; the moved one stays as it is', async () => {
+    const { id, seriesId } = await daily('Harness moved');
+    const tomorrow = addDays(today, 1);
+    // This task: Google has its new date, the Planner its time; the series still puts it on today.
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, due: tomorrow });
+    await commands({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: id, patch: { time: 780 } });
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id, completed: true });
+    const own = (await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id, completed: true, due: tomorrow })).body.task;
+    expect(own).toMatchObject({ title: 'Harness moved', due: tomorrow });
+    let all = await kept();
+    expect(all[`${ME}\n${own.id}`]).toMatchObject({ time: 540, repeat: { on: tomorrow, index: 2 } });
+    expect(all[`${ME}\n${id}`]).toMatchObject({ time: 780, repeat: { on: today, next: own.id } });
+    await call('PATCH', '/google/tasks', { account: ME, listId: 'L1', id: own.id, completed: true });
+    const after = (await call('POST', '/google/tasks/next', { account: ME, listId: 'L1', id: own.id, completed: true, due: tomorrow })).body.task;
+    expect(after).toMatchObject({ due: addDays(today, 2) });
+    expect(fake.tasks.get('L1')!.find((task) => task.id === id)).toMatchObject({ due: at(tomorrow), status: 'completed', title: 'Harness moved' });
+    all = await kept();
+    expect(all[`${ME}\n${id}`]).toMatchObject({ time: 780, repeat: { on: today, next: own.id } });
+    expect(inserts('Harness moved')).toHaveLength(3);
+    expect(heads(all, seriesId)).toEqual([after.id]);
+  });
+
+  test('its open task deleted in Google’s own apps: the service goes on from its next one, as This task; one moved to another list there is followed; one still there is left alone', async () => {
+    const { id, seriesId } = await daily('Harness gone');
+    // Deleted there: the plan still has it.
+    await call('DELETE', `/google/tasks?${q({ account: ME, list: 'L1', id })}`);
+    const answer = await call('POST', '/google/tasks/gone', { account: ME, listId: 'L1', id });
+    expect(answer.status).toBe(200);
+    const next = open('Harness gone');
+    expect(next.map((task) => task.due)).toEqual([at(addDays(today, 1))]);
+    expect(answer.body.state.googleTasks[`${ME}\n${id}`]).toBeUndefined();
+    expect(heads(answer.body.state.googleTasks, seriesId)).toEqual([next[0].id]);
+    // Still there: nothing changes.
+    expect((await call('POST', '/google/tasks/gone', { account: ME, listId: 'L1', id: next[0].id })).status).toBe(200);
+    expect(heads(await kept(), seriesId)).toEqual([next[0].id]);
+    // Moved to another list there: followed, nothing made.
+    await call('POST', '/google/tasks/move', { account: ME, listId: 'L1', id: next[0].id, parent: null, previous: null, destinationListId: 'L2' });
+    await call('POST', '/google/tasks/gone', { account: ME, listId: 'L1', id: next[0].id });
+    expect((await kept())[`${ME}\n${next[0].id}`]).toMatchObject({ listId: 'L2', repeat: { seriesId, next: null } });
+    expect(inserts('Harness gone')).toHaveLength(2);
+  });
+
+  test('refusals: an occurrence its series does not put on that date, or past a cut; a malformed edit', async () => {
+    const { seriesId, template } = await daily('Harness refused');
+    const shown = { title: 'Harness refused', notes: 'Series notes', due: today, time: 540, duration: null, deadline: null };
+    // Today is the open task itself, not an upcoming one; yesterday is before the series.
+    expect((await call('POST', '/google/tasks/occurrence', { account: ME, seriesId, on: addDays(today, -1), before: shown, after: shown })).body).toEqual({ error: 'This task is no longer in its series' });
+    await call('DELETE', `/google/tasks/series?${q({ account: ME, series: seriesId, from: addDays(today, 2) })}`);
+    const later = { ...shown, due: addDays(today, 3) };
+    expect(await call('POST', '/google/tasks/occurrence', { account: ME, seriesId, on: addDays(today, 3), before: later, after: { ...later, title: 'Late' } })).toEqual({ status: 409, body: { error: 'This task is no longer in its series' } });
+    expect((await call('POST', '/google/tasks/occurrence', { account: ME, seriesId, on: addDays(today, 1), before: shown })).status).toBe(400);
+    expect((await call('POST', '/google/tasks/series/edit', { account: ME, listId: 'L1', taskId: 'x', seriesId, own: { repeat: null }, before: { rule: null, template, due: today }, after: { rule: null, template, due: today } })).status).toBe(400);
   });
 });
