@@ -51,6 +51,11 @@ describe("frame requests", () => {
     expect(readOcForgeRequest(envelope({ type: "key", payload: press("1", "Digit1", { ctrlKey: true }) }))?.request.type).toBe("key")
     expect(readOcForgeRequest(envelope({ type: "key", payload: { key: "1", code: "Digit1" } }))).toBeNull()
     expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: true } }))?.request).toEqual({ type: "tab-close-handler", payload: { on: true } })
+    // A tab's route: a string within the route limit; an update may clear it with null.
+    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", route: "/tab/a" } }))?.request).toEqual({ type: "tab-open", payload: { id: "a", title: "A", route: "/tab/a" } })
+    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", route: 7 } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", route: "x".repeat(2049) } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "tab-update", payload: { id: "a", route: null } }))?.request).toEqual({ type: "tab-update", payload: { id: "a", route: null } })
     expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: "yes" } }))).toBeNull()
   })
 })

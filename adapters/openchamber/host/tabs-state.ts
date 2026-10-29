@@ -98,7 +98,7 @@ export const openOcForgeTab = (guestId: string, tab: OcForgeTab, activate: boole
   return { ok: true };
 };
 
-export const updateOcForgeTab = (guestId: string, update: { id: string; title?: string; icon?: string | null; dirty?: boolean }): OcForgeTabResult => {
+export const updateOcForgeTab = (guestId: string, update: { id: string; title?: string; icon?: string | null; dirty?: boolean; route?: string | null }): OcForgeTabResult => {
   const state = useOcForgeStore.getState();
   if (!state.tabs.some((tab) => tab.guestId === guestId && tab.id === update.id)) return { ok: false, error: 'No such tab.' };
   useOcForgeStore.setState({
@@ -109,6 +109,8 @@ export const updateOcForgeTab = (guestId: string, update: { id: string; title?: 
       if (update.dirty !== undefined) next.dirty = update.dirty;
       if (update.icon === null) delete next.icon;
       else if (update.icon !== undefined) next.icon = update.icon;
+      if (update.route === null) delete next.route;
+      else if (update.route !== undefined) next.route = update.route;
       return next;
     }),
   });

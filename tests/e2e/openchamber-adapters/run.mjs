@@ -364,6 +364,15 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
     await tab.screenshot({ path: join(out, `${size}-r5-new-tab.png`) });
     await tab.close();
   }
+  // A header tab with a route is a link too: Ctrl+click opens the page on that route in a new browser tab.
+  const [tabTab] = await Promise.all([
+    context.waitForEvent('page', { timeout: 10_000 }).catch(() => null),
+    headerTab(page, 'a').locator('[role="tab"]').click({ modifiers: ['Control'] }),
+  ]);
+  const tabRouted = tabTab && await until(async () => (await text(tabTab.frameLocator(`[data-oc-forge-page="${TEST}"] iframe`), '#route')) === '/tab/a', 60_000);
+  check(`[${size}] R5 Ctrl+click on an extension's header tab opens the page on its route in a new browser tab`, tabRouted, tabTab ? tabTab.url().replace(base, '') : 'no new tab');
+  check(`[${size}] R5 …and this window stays on that tab`, await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+  if (tabTab) await tabTab.close();
   const sessionHref = await pageFrame(page).locator('#session-link').getAttribute('href');
   check(`[${size}] R5 the frame renders a real link to a chat`, sessionHref?.startsWith(`${base}/?session=ses_`), sessionHref ?? '');
   const pages = context.pages().length;
@@ -461,6 +470,13 @@ const plannerAndVscode = async (page, name) => {
   await box.press('Escape');
   check(`[${name}] the Planner works: a task added to Today stays there`, await until(() => today.locator('li.task-card', { hasText: title }).count(), 15_000));
   await page.screenshot({ path: join(out, `extensions-${name}-planner.png`) });
+  // The task goes again (through the Planner's service), so the next run compares the same Planner page on both.
+  const plannerService = async (method, path, body) => {
+    const response = await page.request.post(`${new URL(page.url()).origin}/api/guests/oc-forge-planner/service/request`, { data: { method, path, ...(body ? { body: JSON.stringify(body) } : {}) } });
+    return JSON.parse((await response.json()).body ?? '{}');
+  };
+  const added = Object.values((await plannerService('GET', '/state')).state?.tasks ?? {}).filter((task) => task.title === title && !task.deletedAt);
+  if (added.length) await plannerService('POST', '/commands', { commands: added.map((task) => ({ cmd: `e2e-clean-${task.id}`, type: 'task.deleted', taskId: task.id })) });
   await page.getByRole('button', { name: 'Back to chat' }).click();
   // Its one rail icon on the release; on the adapted build, its first rail entry (VS Code's Explorer).
   await page.locator('[data-context-surface="plugin:oc-forge-vscode"], [data-context-surface^="plugin:oc-forge-vscode--"]').first().click();

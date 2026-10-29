@@ -109,8 +109,8 @@ or not approved gets `ok: false`.
 |---|---|---|
 | `hello` | | The host answers with a `hello` event; only frames that said hello get events. |
 | `rail-active` | `{ entry }` | The extension's one panel shows this entry now (rail panels of `rail` extensions). |
-| `tab-open` | `{ id, title, icon?, dirty?, activate? }` | Opens or updates a header tab; `activate` shows the page on it. Needs `contributes.page`; at most 64 tabs. |
-| `tab-update` | `{ id, title?, icon? (null clears), dirty? }` | |
+| `tab-open` | `{ id, title, icon?, dirty?, route?, activate? }` | Opens or updates a header tab; `activate` shows the page on it; `route` is the tab's place on the page (a Cmd/Ctrl+click on the tab opens the page there in a new browser tab). Needs `contributes.page`; at most 64 tabs. |
+| `tab-update` | `{ id, title?, icon? (null clears), dirty?, route? (null clears) }` | |
 | `tab-close` | `{ id }` | The extension closed its tab (no `tab-closed` event comes back). After a `tab-close-request` for it, the host goes on as for the user's close (back to the chat after the last tab). |
 | `tab-close-handler` | `{ on }` | This frame decides how the extension's unsaved tabs close (the client sends it with the first `tabs.onCloseRequest` listener, and `on: false` after the last). A frame's `hello` resets it. |
 | `tab-activate` | `{ id }` | Shows the page on that tab. |
@@ -161,6 +161,10 @@ activation (a key press or click in the frame gives one for about 5 s).
   workspace's session tabs, then the extension tabs, which are the same in every
   workspace.
   Tabs are not persisted: after a reload the extension opens the ones it wants.
+  A plain click selects a tab and a middle click closes it, as on OpenChamber's
+  own tabs; a Cmd/Ctrl+click on a tab with a `route` opens the extension's page
+  on that route in a new browser tab, as on a link (`?extension=<id>&route=`),
+  and this window stays as it is.
 - **Kept-alive pages.** The page of an extension with tabs is mounted (hidden,
   with its size kept) as soon as it has a tab, and stays mounted while it has
   any; switching away and back does not reload it. After its last tab closes

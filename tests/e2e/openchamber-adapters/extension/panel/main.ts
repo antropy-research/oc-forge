@@ -50,7 +50,8 @@ if (!forge) {
   const tabCall = (label: string, call: () => Promise<void>) => () => {
     void call().then(() => log(label), (error: Error) => log(`${label} failed: ${error.message}`));
   };
-  $('open-a').onclick = tabCall('opened a', () => forge.tabs.open({ id: 'a', title: 'Tab A', icon: 'file-code' }, { activate: true }));
+  // Tab A has a place on the page (a Cmd/Ctrl+click opens it in a new browser tab); tab B has none.
+  $('open-a').onclick = tabCall('opened a', () => forge.tabs.open({ id: 'a', title: 'Tab A', icon: 'file-code', route: '/tab/a' }, { activate: true }));
   $('open-b').onclick = tabCall('opened b', () => forge.tabs.open({ id: 'b', title: 'Tab B', dirty: true }, { activate: true }));
   $('close-a').onclick = tabCall('closed a', () => forge.tabs.close('a'));
   // Off until asked, so the plain close checks stay as they are: then an unsaved tab the user closes is left to this frame.

@@ -42,7 +42,7 @@ export type OcForgeClient = {
     state(): OcForgeTabsState;
     /** Opens or updates a header tab; `activate` shows the extension's page on it. */
     open(tab: OcForgeTab, options?: { activate?: boolean }): Promise<void>;
-    update(id: string, patch: { title?: string; icon?: string | null; dirty?: boolean }): Promise<void>;
+    update(id: string, patch: { title?: string; icon?: string | null; dirty?: boolean; route?: string | null }): Promise<void>;
     close(id: string): Promise<void>;
     activate(id: string): Promise<void>;
     /** The user chose this tab (the page now shows it). */

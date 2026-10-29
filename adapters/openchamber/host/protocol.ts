@@ -93,6 +93,8 @@ export type OcForgeTab = {
   icon?: OcForgeIcon;
   /** Unsaved changes: the tab shows a dot instead of its close button until hovered. */
   dirty?: boolean;
+  /** Its place on the extension's page: a Cmd/Ctrl+click on the tab opens the page there in a new browser tab. */
+  route?: string;
 };
 
 export type OcForgeShortcuts = {
@@ -149,7 +151,7 @@ export type OcForgeRequest =
   | { type: 'hello' }
   | { type: 'rail-active'; payload: { entry: string } }
   | { type: 'tab-open'; payload: OcForgeTab & { activate?: boolean } }
-  | { type: 'tab-update'; payload: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean } }
+  | { type: 'tab-update'; payload: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean; route?: string | null } }
   | { type: 'tab-close'; payload: { id: string } }
   /** The frame decides how its dirty tabs close (it then gets `tab-close-request`), or stops deciding. */
   | { type: 'tab-close-handler'; payload: { on: boolean } }
@@ -202,6 +204,10 @@ const readTab = (value: Json): OcForgeTab | null => {
     if (typeof value.dirty !== 'boolean') return null;
     tab.dirty = value.dirty;
   }
+  if (value.route !== undefined) {
+    if (!isRoute(value.route)) return null;
+    tab.route = value.route;
+  }
   return tab;
 };
 
@@ -226,7 +232,7 @@ export const readOcForgeRequest = (data: unknown): { id: string | null; request:
     }
     case 'tab-update': {
       if (typeof payload.id !== 'string' || !payload.id || payload.id.length > OC_FORGE_LIMITS.tabId) return null;
-      const update: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean } = { id: payload.id };
+      const update: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean; route?: string | null } = { id: payload.id };
       if (payload.title !== undefined) {
         const title = text(payload.title, OC_FORGE_LIMITS.title);
         if (!title) return null;
@@ -239,6 +245,10 @@ export const readOcForgeRequest = (data: unknown): { id: string | null; request:
       if (payload.dirty !== undefined) {
         if (typeof payload.dirty !== 'boolean') return null;
         update.dirty = payload.dirty;
+      }
+      if (payload.route !== undefined) {
+        if (payload.route !== null && !isRoute(payload.route)) return null;
+        update.route = payload.route;
       }
       return { id, request: { type: 'tab-update', payload: update } };
     }

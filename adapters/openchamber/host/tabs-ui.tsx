@@ -13,6 +13,7 @@ import { getRuntimeUrlResolver } from '@/lib/runtime-url';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 
+import { ocForgeLinks } from './routes.ts';
 import { useOcForgeStore, type OcForgeHeaderTab } from './store.ts';
 import { activateOcForgeTab, requestCloseOcForgeTab, useOcForgeTabActive } from './tabs-state.ts';
 
@@ -34,6 +35,15 @@ const HeaderTab: React.FC<{ tab: OcForgeHeaderTab; guest: InstalledGuest | undef
   const { t } = useI18n();
   const select = () => activateOcForgeTab(tab.guestId, tab.id);
   const close = () => requestCloseOcForgeTab(tab.guestId, tab.id);
+  // A Cmd/Ctrl+click on a tab with a route opens the page there in a new browser tab, as on a link, and this window
+  // stays as it is. Without a route it is a plain click, as on OpenChamber's own tabs.
+  const openInNewTab = (event: React.MouseEvent): boolean => {
+    const links = tab.route !== undefined && (event.metaKey || event.ctrlKey) ? ocForgeLinks(tab.guestId) : null;
+    if (!links) return false;
+    event.preventDefault();
+    window.open(`${links.page}${encodeURIComponent(tab.route ?? '')}`, '_blank', 'noopener');
+    return true;
+  };
   const { icon, iconSrc } = tabIcon(tab, guest);
   return (
     <div
@@ -47,7 +57,9 @@ const HeaderTab: React.FC<{ tab: OcForgeHeaderTab; guest: InstalledGuest | undef
         aria-selected={isActive}
         tabIndex={isActive ? undefined : 0}
         title={guest ? `${tab.title} — ${guest.name}` : tab.title}
-        onClick={isActive ? undefined : select}
+        onClick={(event) => {
+          if (!openInNewTab(event) && !isActive) select();
+        }}
         onKeyDown={isActive ? undefined : (event) => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();

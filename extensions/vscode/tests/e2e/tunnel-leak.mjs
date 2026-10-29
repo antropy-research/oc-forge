@@ -49,6 +49,8 @@ const connections = () => execFileSync('ss', ['-tnH', 'state', 'established', 'd
 const serverLog = () => readFileSync(join(work, 'vscode', 'vscode.log'), 'utf8');
 
 const browser = await chromium.launch();
+// What this run made (its chat), removed at the end however the run went.
+let cleanup = async () => {};
 try {
   // ── Seed: the demo project, a chat in it, the VS Code extension installed ──
   const setup = await browser.newContext();
@@ -63,6 +65,10 @@ try {
   }
   const chat = await (await request.post(`${base}/api/session?directory=${encodeURIComponent(project)}`, { data: { title: `tunnel-leak ${Date.now().toString(36)}`, location: { directory: project } } })).json();
   const chatId = (chat.data ?? chat).id;
+  cleanup = async () => {
+    await request.delete(`${base}/api/session/${chatId}?directory=${encodeURIComponent(project)}`);
+    await setup.close();
+  };
   const catalog = await (await request.get(`${base}/api/guests`)).json();
   if (!catalog.guests.some((guest) => guest.id === VSCODE)) await request.post(`${base}/api/guests`, { data: { path: join(work, 'extensions', 'vscode') } });
   for (const guest of (await (await request.get(`${base}/api/guests`)).json()).guests) {
@@ -118,10 +124,10 @@ try {
   check("the service's /health shows no tunnel and no open socket left", after.tunnels === 0 && after.sockets === 0, JSON.stringify(after));
   const graced = await until(() => /The client has disconnected, will wait for reconnection/.test(serverLog().slice(logBefore)), 15_000);
   check("the VS Code Server sees the client gone and starts the grace after which it frees the workbench's extension host", graced);
-  await setup.close();
 } catch (error) {
   check('journey completed', false, String(error).split('\n')[0]);
 } finally {
+  await cleanup().catch(() => {});
   await browser.close();
   writeFileSync(join(out, 'results.json'), JSON.stringify(results, null, 2));
 }
