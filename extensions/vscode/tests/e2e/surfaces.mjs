@@ -43,6 +43,11 @@
 //      rail view, no terminal): its last tab closed, the hidden page keeps the
 //      folder's tabs empty before OpenChamber removes it, and after a reload
 //      no tab comes back, nor with the next file;
+//  14. two browser tabs with VS Code: a Cmd/Ctrl+click on a VS Code file tab
+//      opens that file in a new browser tab (the tab's route), and this window
+//      stays as it is; VS Code's rail view and page work in the new tab, and
+//      the first one's still do, each tab's service requests over a WebSocket
+//      of its own (the adapters' transport);
 // and, with OpenChamber's session tabs off, the page keeps VS Code's own tab
 // bar. It also measures each workbench's start and memory (`<size>-frames.json`).
 //
@@ -249,8 +254,8 @@ const deepLinkOf = (url) => {
   }
 };
 
-/** A Cmd/Ctrl+click that should open `file` in a new browser tab: that tab shows its editor (at `line`); closed after. */
-const newTabShows = async (context, file, line, click, name) => {
+/** A Cmd/Ctrl+click that should open `file` in a new browser tab: that tab shows its editor (at `line`); closed after, unless `keep`. */
+const newTabShows = async (context, file, line, click, name, keep = false) => {
   const next = context.waitForEvent('page', { timeout: 30_000 }).catch(() => null);
   await click();
   const tab = await next;
@@ -266,7 +271,7 @@ const newTabShows = async (context, file, line, click, name) => {
     const ok = Boolean(link?.key.endsWith(`/${file}`)) && shown && (!line || (link.line === line && activeLine === String(line)));
     return { tab, ok, detail: `${link ? `route to ${link.key.split('/').pop()}${link.line ? ` line ${link.line}` : ''}` : tab.url()}; its editor ${shown ? 'shown' : 'not shown'}${line ? `, cursor on line ${activeLine}` : ''}` };
   } finally {
-    await tab.close().catch(() => undefined);
+    if (!keep) await tab.close().catch(() => undefined);
   }
 };
 
@@ -1169,6 +1174,102 @@ const pageAlone = async () => {
   }
 };
 
+/** A browser tab's guest service requests: over the adapters' socket (one WebSocket per window) or over HTTP. */
+const serviceTraffic = (page) => {
+  const traffic = { sockets: 0, answeredAt: 0, http: 0, httpAfterSocket: 0 };
+  page.on('websocket', (socket) => {
+    if (!socket.url().includes('/api/oc-forge/service-socket')) return;
+    traffic.sockets += 1;
+    socket.on('framereceived', () => {
+      traffic.answeredAt ||= Date.now();
+    });
+  });
+  page.on('request', (request) => {
+    if (!request.url().includes(`/api/guests/${VSCODE}/service/request`)) return;
+    traffic.http += 1;
+    if (traffic.answeredAt) traffic.httpAfterSocket += 1;
+  });
+  return traffic;
+};
+
+// ── 14. Two browser tabs with VS Code. A Ctrl+click on a VS Code file tab opens that file in a new browser tab (the
+// tab's route), and this window stays as it is. The new tab runs VS Code too, its rail view and its page, beside the
+// first one's rail view, page and terminal: each frame long-polls its service, which would hold all of the browser's
+// six connections to OpenChamber; the adapters send service requests over one WebSocket per window instead. A file
+// opened from either tab's Explorer shows in that tab's page ──
+const twoTabs = async (chat) => {
+  const size = '1440x900, two browser tabs';
+  const label = size.replace(/, /g, '-').replace(/ /g, '-');
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await context.request.post(`${base}/auth/session`, { data: { password } });
+  const first = await context.newPage();
+  const traffic = [serviceTraffic(first)];
+  context.on('page', (page) => traffic.push(serviceTraffic(page)));
+  const explorerRow = (page, file) => viewFrame(page).locator('.explorer-folders-view .monaco-list-row', { hasText: file }).first();
+  const roles = (page) => Promise.all(page.frames().filter((frame) => frame.url().includes('/workbench/index.html'))
+    .map((frame) => frame.evaluate(() => document.documentElement.dataset.ocVscodeRole).catch(() => null))).then((list) => list.filter(Boolean).sort());
+  /** A file opened from a tab's Explorer: how long until that tab's page shows it, or null. */
+  const openFromExplorer = async (page, file) => {
+    const start = Date.now();
+    await explorerRow(page, file).click();
+    const editor = pageFrame(page).locator(`.monaco-editor[data-uri$="/${file}"] .view-line`).first();
+    return until(async () => (await pageShown(page) && await editor.isVisible().catch(() => false) ? Date.now() - start : null), 90_000);
+  };
+  let second = null;
+  try {
+    // The first tab: a chat, VS Code's Explorer and terminal, linked.md and notes.ts in the page (notes.ts selected).
+    await first.goto(`${base}/?session=${chat}`);
+    await until(async () => (await rail(first)).some((entry) => entry.id === entrySurface('explorer')), 60_000);
+    await entryButton(first, 'explorer').click();
+    await explorerRow(first, 'linked.md').waitFor({ timeout: 120_000 });
+    await entryButton(first, 'terminal').click();
+    await bottomFrame(first).locator('.xterm:visible').first().waitFor({ timeout: 90_000 }).catch(() => undefined);
+    for (const file of ['linked.md', 'notes.ts']) {
+      if (!(await openFromExplorer(first, file))) throw new Error(`${file} didn't show in the page from the Explorer`);
+    }
+    await pageStarted(first);
+    await wait(1_000);
+    const firstRoles = await roles(first);
+    const before = await tabState(first);
+    const linkedTab = first.locator(`[data-oc-forge-tab^="${VSCODE}:"]`, { hasText: 'linked.md' }).first();
+    const opened = await newTabShows(context, 'linked.md', null, () => linkedTab.click({ modifiers: ['Control'] }), `${label}-14-new-tab`, true);
+    second = opened.tab;
+    await wait(1_500);
+    const after = await tabState(first);
+    check(`[${size}] 14 Ctrl+click on a VS Code file tab opens that file in a new browser tab (the tab's route)`, opened.ok, opened.detail);
+    check(`[${size}] 14 ... and this window stays as it is`, JSON.stringify(after) === JSON.stringify(before), `${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+    if (!second || !opened.ok) throw new Error('no second browser tab with VS Code');
+    // The second tab has the window's chat and panels (one browser profile), VS Code's rail view among them; else the
+    // rail opens it.
+    if (!(await rail(second)).some((entry) => entry.id === entrySurface('explorer') && entry.pressed)) await entryButton(second, 'explorer').click();
+    const listed = await explorerRow(second, 'README.md').waitFor({ timeout: 120_000 }).then(() => true).catch(() => false);
+    const inSecond = listed ? await openFromExplorer(second, 'README.md') : null;
+    const secondRoles = await roles(second);
+    await second.screenshot({ path: join(out, `${label}-14-second-tab.png`) });
+    check(`[${size}] 14 in the second browser tab VS Code works: its rail view lists the project, and a file opened there shows in its page`,
+      listed && Boolean(inSecond), `parts: ${secondRoles.join(', ')}; README.md ${inSecond ? `in ${inSecond} ms` : 'not shown'}`);
+    // Back in the first, with the second open.
+    await first.bringToFront();
+    const inFirst = await openFromExplorer(first, 'README.md');
+    await shot(first, `${label}-14-first-tab`);
+    check(`[${size}] 14 ... and in the first one still, with the second open`, Boolean(inFirst), `parts: ${firstRoles.join(', ')}; README.md ${inFirst ? `in ${inFirst} ms` : 'not shown'}`);
+    check(`[${size}] 14 each browser tab sends VS Code's service requests over a WebSocket of its own, none over HTTP once it answers`,
+      traffic.length === 2 && traffic.every((each) => each.sockets >= 1 && each.httpAfterSocket === 0),
+      traffic.map((each, index) => `tab ${index + 1}: ${each.sockets} socket${each.sockets === 1 ? '' : 's'}, ${each.http} over HTTP (${each.httpAfterSocket} after the socket answered)`).join('; '));
+    await second.close();
+    second = null;
+    for (const title of ['README.md', 'notes.ts', 'linked.md']) {
+      await closeHeaderTab(first, title);
+      await until(async () => !(await headerTabs(first)).some((tab) => tab.title.includes(title)), 10_000);
+    }
+  } catch (error) {
+    check(`[${size}] the journey ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+    await shot(first, '1440x900-14-failure').catch(() => undefined);
+  } finally {
+    await context.close();
+  }
+};
+
 try {
   const seeded = await seed();
   await classic();
@@ -1177,6 +1278,7 @@ try {
   await openInVscode(seeded.chats, seeded.chatB);
   await withoutStrip(seeded.chats);
   await pageAlone();
+  await twoTabs(seeded.chats[0]);
 } catch (error) {
   check('the check ran to the end', false, String(error.message ?? error).split('\n')[0]);
 } finally {

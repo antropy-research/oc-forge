@@ -57,7 +57,7 @@ OpenChamber `connectOcForge()` answers null and every frame is the whole workben
 |---|---|---|
 | Activity bar: Explorer, Search, Source Control, Run and Debug, Extensions, and every installed extension's view container | One rail icon each, in VS Code's order; installed or uninstalled on the VS Code Server, an icon comes or goes within the next poll (2 s), no reload | The manifest's `ocForge.rail` (`GET /rail`, every 2 s). The service lists the built-ins (Remixicons of OpenChamber's sprite: `file-copy-2`, `search`, `git-branch`, `bug`, `puzzle`) and each installed extension's `contributes.viewsContainers.activitybar`, read from the server's `extensions.json`, `package.json` (and `package.nls.json`) and SVG icon through the server's own `/vscode-remote-resource` route, so it needn't share the server's disk (`service/rail.ts`, `src/rail.ts`). An SVG is inlined (16 KB at most, cleaned for the mask), a `$(codicon)` maps to a Remixicon, anything else is `apps`. Where the extensions live, a workbench tells the service once (its default profile's `extensions.json`); it is kept with the server's address (mode 0600), so after a restart the rail is complete before any frame runs |
 | A view container in the side bar | The rail panel shows that container alone, filling it | The panel's frame is the **view** role: `rail-entry` opens the container (`IViewsService.openViewContainer`); VS Code switching containers by itself (Ctrl+Shift+F, *Reveal in Explorer*) moves the rail's light (`rail.setActive`) |
-| Editor tabs | Header tabs after the chats'; choosing one shows its editor in the main area; they switch and close like chat tabs | The page is the **editor** role: each editor it has open is a header tab (id: its resource, or `diff:<original> <modified>`; title; icon by type; the unsaved dot). Choosing one activates its editor; closing one (its ×, a middle click, the close-tab key) closes the editor. An unsaved one is left to the page (`forge.tabs.onCloseRequest`): VS Code closes it as its own tab, with its save prompt, and the tab goes only once the editor has (Save, Don't Save), back to the chat after the last one; Cancel keeps the tab, the editor and the changes. An editor VS Code closes or switches to moves the header with it. VS Code's own tab bar is off (`workbench.editor.showTabs: none`), and so is preview mode, as header tabs have none |
+| Editor tabs | Header tabs after the chats'; choosing one shows its editor in the main area; they switch and close like chat tabs | The page is the **editor** role: each editor it has open is a header tab (id: its resource, or `diff:<original> <modified>`; title; icon by type; the unsaved dot). Choosing one activates its editor; closing one (its ×, a middle click, the close-tab key) closes the editor. An unsaved one is left to the page (`forge.tabs.onCloseRequest`): VS Code closes it as its own tab, with its save prompt, and the tab goes only once the editor has (Save, Don't Save), back to the chat after the last one; Cancel keeps the tab, the editor and the changes. An editor VS Code closes or switches to moves the header with it. A tab of an editor the page can open from its id (a file, a diff) carries the editor's link as its `route`: a Cmd/Ctrl+click on it opens that editor in a new browser tab, and this window stays as it is (`tabRoute`; a webview's tab has none). VS Code's own tab bar is off (`workbench.editor.showTabs: none`), and so is preview mode, as header tabs have none |
 | The panel's terminal | VS Code's panel at OpenChamber's bottom, maximized: several terminals, split, the shell picker, Problems and Output beside it; under a chat, and under a file's editor as in VS Code | A rail entry `terminal` with `zone: "bottom"`, so a panel of its own (`plugin:oc-forge-vscode--terminal`): the **terminal** role. Its workbench starts the first time that panel is shown. The manifest's `ocForge.page.keepBottomZone` keeps OpenChamber's bottom zone under the page, which OpenChamber (2.5.2, 2.5.3) otherwise covers with it. The parts are one workspace, whose terminals VS Code reconnects every window to as it starts: only this part does (`terminal.integrated.enablePersistentSessions` is off in the views and the page), so after a reload its shells come back here |
 
 **Roles.** Each frame is a workbench of its own on the same server, in one role (`src/surfaces.ts`, `workbench/surfaces.ts`):
@@ -138,12 +138,13 @@ Keys Chrome keeps in a normal tab (Ctrl+Tab, Cmd+W, Cmd+Option+←/→) reach VS
 **Tunnels.** Each workbench holds 2 of the service's tunnels (its management connection and its extension host's).
 A browser window runs up to 3 workbenches, so 6, and 12 for the 45 s a reloaded frame's old tunnels linger; past
 `MAX_TUNNELS` the least recently polled one is closed, which ends a live workbench. The limit is 128 (was 32): room
-for about ten such windows. A frame long-polls once for both of its tunnels (`/tunnel/recv` with its `poller`): a
-poll held open takes one of the browser's connections to OpenChamber, and over plain HTTP (HTTP/1.1) Chrome opens six
-per host, for all its tabs. With a poll per tunnel, the three workbenches of a window held all six with
-OpenChamber's own event stream, and every other request (the tunnels' sends, the files a webview loads,
-OpenChamber's own calls) waited in the browser until a poll came back, on VS Code's 5 s keep-alive: a Markdown
-preview revived after a reload took minutes to load its 60-odd files one after another, and stayed blank.
+for about ten such windows. A frame long-polls once for both of its tunnels (`/tunnel/recv` with its `poller`): sent
+as an HTTP request, a poll held open takes one of the browser's connections to OpenChamber, and over plain HTTP
+(HTTP/1.1) Chrome opens six per host, for all its tabs (the adapted host's service WebSocket takes none). With a poll
+per tunnel, the three workbenches of a window held all six with OpenChamber's own event stream, and every other
+request (the tunnels' sends, the files a webview loads, OpenChamber's own calls) waited in the browser until a poll
+came back, on VS Code's 5 s keep-alive: a Markdown preview revived after a reload took minutes to load its 60-odd
+files one after another, and stayed blank.
 
 **Cost** (adapters' scratch stack, VS Code 1.143.1, Chromium headless; `tests/e2e/surfaces.mjs` writes
 `<size>-frames.json`; two runs at 1440×900 and 1024×768). Each workbench, from its frame's navigation to running,
@@ -157,11 +158,13 @@ a tab or is opened.
 **Limits.**
 - A file a rail view or the terminal hands to a page that is still starting (VS Code restoring, the page closing
   editors closed before) opens once the page is ready, and takes the focus then.
-- Over plain HTTP, a second browser tab of OpenChamber with VS Code's parts (a Cmd/Ctrl+click tab beside the first)
-  makes six polls and two event streams, more than Chrome's six connections per host, and starves: on the scratch
-  stack the second tab's VS Code didn't show its file within 2 minutes (its tunnels' first sends never left the
-  browser), and the first tab stopped answering too until the second went. Over HTTPS (HTTP/2, e.g. `tailscale
-  serve`) requests share one connection and Chrome's per-host limit doesn't apply.
+- The adapted OpenChamber sends a window's service requests over one WebSocket (its transport, which Chrome pools
+  apart from the six connections), so two browser tabs each run VS Code's parts. Where they go over plain HTTP
+  instead (an adapted build before the transport, or with it off, `oc-forge:service-socket` in localStorage), a
+  second browser tab with VS Code's parts (a Cmd/Ctrl+click tab beside the first) makes six polls and two event
+  streams, more than Chrome's six connections per host, and starves: on the scratch stack the second tab's VS Code
+  didn't show its file within 2 minutes, and the first tab stopped answering too until the second went. Over HTTPS
+  (HTTP/2, e.g. `tailscale serve`) requests share one connection and the per-host limit doesn't apply.
 - The terminal's part reconnects to the folder's terminals as it starts. Within about a minute of another window's
   VS Code on that folder going away (a reload, a closed browser tab), VS Code's cross-window detach can stall it: the
   panel opens without a terminal until that window's connection is gone.
@@ -215,9 +218,11 @@ a second project and back; the terminal under a file's editor (`keepBottomZone`:
 zone begins, both take input, both stay through a chat); closing the last unsaved file tab (Cancel keeps the tab,
 the editor and the change; Don't Save closes without writing, and the file opens again as on disk; Save writes;
 each back to the chat), and across a
-reload the tabs coming back once each (Markdown's preview too) and closed ones staying closed; and the page alone
-(as a new browser tab from Cmd/Ctrl+click loads it, no rail view or terminal): its last tab closed, the hidden page
-keeps the folder's tabs empty, and nothing comes back after a reload. It writes each size's
+reload the tabs coming back once each (Markdown's preview too) and closed ones staying closed; the page alone (as a
+new browser tab from Cmd/Ctrl+click loads it, no rail view or terminal): its last tab closed, the hidden page keeps
+the folder's tabs empty, and nothing comes back after a reload; and a Cmd/Ctrl+click on a file tab opening that file
+in a new browser tab while this one stays as it was, VS Code's rail view and page then working in both browser tabs,
+each sending its service requests over a WebSocket of its own (the adapters' transport). It writes each size's
 start times and memory to `<size>-frames.json`. Run the stack's `prepare` outside a private network namespace (it
 downloads), then `up`, the check and `down` inside one.
 

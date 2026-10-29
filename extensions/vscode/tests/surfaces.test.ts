@@ -15,6 +15,7 @@ import {
   roleOf,
   roleSettings,
   tabIcon,
+  tabRoute,
   tabTitle,
   unmarshal,
   type HostHello,
@@ -139,6 +140,20 @@ describe('an editor between frames', () => {
     const route = editorRoute('vscode-remote://h/p/a b.ts', 7);
     expect(readEditorRoute(route)).toEqual({ key: 'vscode-remote://h/p/a b.ts', line: 7 });
     expect(readEditorRoute('/somewhere')).toBeNull();
+  });
+
+  test("a file tab's route is its editor's link; editors the page can't open from their key have none", () => {
+    const file = 'vscode-remote://h/p/README.md';
+    expect(tabRoute(file)).toBe(editorRoute(file));
+    expect(readEditorRoute(tabRoute(file)!)).toEqual({ key: file, line: null });
+    expect(tabRoute(`diff:git:/p/README.md?x ${file}`)).toBe(editorRoute(`diff:git:/p/README.md?x ${file}`));
+    expect(tabRoute('vscode-userdata:/home/u/.vscode-server/data/User/settings.json')).toBeDefined();
+    for (const key of ['workbench.editors.webviewInput|webview-panel:webview-panel/webview-1', 'changes:scm/git/resourceGroup', 'untitled:Untitled-1', 'vscode-terminal:/1/2', 'output:extension-output-1', 'Settings']) {
+      expect(tabRoute(key)).toBeUndefined();
+    }
+    // A key shortened by `bounded`, or whose route the host wouldn't take.
+    expect(tabRoute(`vscode-remote://h/${'a'.repeat(1010)}`)).toBeUndefined();
+    expect(tabRoute(`vscode-remote://h/${'/'.repeat(700)}x`)).toBeUndefined();
   });
 });
 

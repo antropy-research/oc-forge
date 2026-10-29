@@ -20,6 +20,7 @@ import {
   restoredTabOf,
   roleSettings,
   tabIcon,
+  tabRoute,
   tabTitle,
   unmarshal,
   type OpenRequest,
@@ -204,6 +205,12 @@ interface Handoff {
 
 const FILE_INPUTS = new Set(['workbench.editors.files.fileEditorInput', 'workbench.editors.untitledEditorInput', 'workbench.editors.resourceEditorInput']);
 
+/** A header tab with its route (`tabRoute`): a Cmd/Ctrl+click on it opens its editor in a new browser tab. */
+const withRoute = (tab: OcForgeTab): OcForgeTab => {
+  const route = tabRoute(tab.id);
+  return route ? { ...tab, route } : tab;
+};
+
 /** The header tab of an editor open in a workbench. */
 export const keyOfEditor = (editor: EditorInput): string => {
   let untyped: unknown;
@@ -291,7 +298,7 @@ const handEditorsToPage = (context: SurfaceContext): void => {
     }
     try {
       await context.call('/editors/request', { key: handoff.key, open: handoff.open });
-      await context.forge.tabs.open({ id: handoff.key, title: handoff.title, icon: handoff.icon }, { activate: true });
+      await context.forge.tabs.open(withRoute({ id: handoff.key, title: handoff.title, icon: handoff.icon }), { activate: true });
     } catch (error) {
       log('could not hand the editor to the page', error);
     }
@@ -394,7 +401,7 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   // After OpenChamber reloads, the page's tabs come back with the rail view, which starts the page behind them.
   if (forge.has('tabs') && forge.tabs.state().list.length === 0) {
     const saved = await context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: context.folder }).catch(() => ({ tabs: [] }));
-    for (const tab of saved.tabs ?? []) await forge.tabs.open(tab).catch(() => undefined);
+    for (const tab of saved.tabs ?? []) await forge.tabs.open(withRoute(tab)).catch(() => undefined);
   }
   return {
     showEntry: async (next) => {
@@ -421,6 +428,8 @@ class EditorArea {
   private hostTabs = new Map<string, OcForgeTab>();
   /** Keys that were editors here: only those tabs are closed when their editor goes. */
   private readonly adopted = new Set<string>();
+  /** Keys whose tab this page gave its route. */
+  private readonly routed = new Set<string>();
   private shown: boolean;
   private strip: boolean;
   private settings: Record<string, unknown> = {};
@@ -547,11 +556,14 @@ class EditorArea {
       for (const [key, item] of current) {
         if (this.leaving) return;
         this.adopted.add(key);
-        const tab: OcForgeTab = { id: key, title: item.title, icon: tabIcon(key), dirty: item.dirty };
+        const tab = withRoute({ id: key, title: item.title, icon: tabIcon(key), dirty: item.dirty });
         const host = this.hostTabs.get(key);
-        if (host && host.title === tab.title && Boolean(host.dirty) === tab.dirty && host.icon === tab.icon) continue;
+        // Its route is sent once more at most: an adapted OpenChamber older than tab routes keeps none.
+        const routed = host?.route === tab.route || this.routed.has(key);
+        if (host && host.title === tab.title && Boolean(host.dirty) === tab.dirty && host.icon === tab.icon && routed) continue;
         await forge.tabs.open(tab);
         this.hostTabs.set(key, tab);
+        if (tab.route) this.routed.add(key);
       }
       // Activate before closing: closing the shown tab would move the page to OpenChamber's choice of neighbour.
       // Only for a change made in VS Code (Ctrl+Tab, Go to Definition): a click on a header tab is OpenChamber's and on its way here.
@@ -566,6 +578,7 @@ class EditorArea {
         await forge.tabs.close(key);
         this.hostTabs.delete(key);
         this.adopted.delete(key);
+        this.routed.delete(key);
       }
       const route = active ? editorRoute(active) : null;
       if (route !== this.route && this.shown) {
@@ -609,7 +622,7 @@ class EditorArea {
       if (tab === key) continue;
       if (tab) {
         taken.add(tab);
-        await this.replaceTab(tab, { id: key, title, icon: tabIcon(key), dirty: identifier.editor.isDirty() });
+        await this.replaceTab(tab, withRoute({ id: key, title, icon: tabIcon(key), dirty: identifier.editor.isDirty() }));
       } else if (key !== this.linked && !identifier.editor.isDirty()) {
         // Not waited on for long: the page's start (and its header) must not hang on one.
         await Promise.race([this.editorService.closeEditor(identifier).catch(() => undefined), later(2_000)]);
@@ -702,7 +715,7 @@ class EditorArea {
     // A link names what the page shows: its tab is the selected one, not the tab the header had selected meanwhile.
     const opened = this.current().get(target.key);
     if (!opened || this.context.forge.tabs.state().active === target.key) return;
-    const tab: OcForgeTab = { id: target.key, title: opened.title, icon: tabIcon(target.key), dirty: opened.dirty };
+    const tab = withRoute({ id: target.key, title: opened.title, icon: tabIcon(target.key), dirty: opened.dirty });
     this.adopted.add(target.key);
     this.hostTabs.set(target.key, tab);
     this.lastActive = target.key;
@@ -721,6 +734,7 @@ class EditorArea {
     for (const id of [...this.hostTabs.keys()]) await this.context.forge.tabs.close(id).catch(() => undefined);
     this.hostTabs.clear();
     this.adopted.clear();
+    this.routed.clear();
   }
 
   /**
@@ -763,6 +777,7 @@ class EditorArea {
     if (this.current().has(id)) return;
     this.hostTabs.delete(id);
     this.adopted.delete(id);
+    this.routed.delete(id);
     // The last tab takes the page with it, back to the chat: what it keeps reaches the service first (the backup of
     // the file is gone in VS Code's state, else the next start would bring back what Don't Save threw away).
     if (!this.context.forge.tabs.state().list.some((tab) => tab.id !== id)) await this.keepBeforeGoing();

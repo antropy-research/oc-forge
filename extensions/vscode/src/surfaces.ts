@@ -224,6 +224,24 @@ export const readOpenRequest = (value: unknown): OpenRequest | null => {
 /** The page's place, as a route in OpenChamber's address bar (`?extension=oc-forge-vscode&route=…`): its editor. */
 export const editorRoute = (key: string, line?: number): string => `/editor?key=${encodeURIComponent(key)}${line ? `&line=${line}` : ''}`;
 
+/** The longest route the host takes (the adapters' `OC_FORGE_LIMITS.route`). */
+const ROUTE_MAX = 2048;
+
+/**
+ * A header tab's route: where a Cmd/Ctrl+click on the tab opens the page in a new browser tab, the editor's own link.
+ * Only for an editor the page opens from its key alone (a resource, a diff); none for one that lives in its frame
+ * (a webview, a terminal, an untitled file) or whose key `bounded` shortened.
+ */
+export const tabRoute = (key: string): string | undefined => {
+  if (key.length > KEY_MAX - 12 || key.includes('|') || key.startsWith('changes:')) return undefined;
+  if (!key.startsWith('diff:')) {
+    const scheme = /^([a-z][\w+.-]*):\S+$/i.exec(key)?.[1];
+    if (!scheme || scheme === 'untitled' || LOCAL_SCHEMES.test(scheme)) return undefined;
+  }
+  const route = editorRoute(key);
+  return route.length <= ROUTE_MAX ? route : undefined;
+};
+
 export const readEditorRoute = (route: string | null): { key: string; line: number | null } | null => {
   if (!route) return null;
   const match = /^\/editor\?(.*)$/.exec(route);
