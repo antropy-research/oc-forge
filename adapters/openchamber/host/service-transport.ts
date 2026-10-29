@@ -10,9 +10,19 @@ import { getRuntimeUrlResolver } from '@/lib/runtime-url';
 import { createOcForgeServiceSocket } from './service-socket.ts';
 
 const PATH = '/api/oc-forge/service-socket';
+/** `off` in the window's localStorage keeps service requests on HTTP (tests that answer them in place set it). */
+export const OC_FORGE_SERVICE_SOCKET_SWITCH = 'oc-forge:service-socket';
+
+const switchedOff = (): boolean => {
+  try {
+    return window.localStorage.getItem(OC_FORGE_SERVICE_SOCKET_SWITCH) === 'off';
+  } catch {
+    return false;
+  }
+};
 
 const openSocket = (): WebSocket | null => {
-  if (typeof window === 'undefined' || typeof WebSocket === 'undefined' || getActiveRelayTunnel()) return null;
+  if (typeof window === 'undefined' || typeof WebSocket === 'undefined' || getActiveRelayTunnel() || switchedOff()) return null;
   const url = new URL(getRuntimeUrlResolver().websocket(PATH), window.location.href);
   if (url.host !== window.location.host || url.pathname !== PATH || [...url.searchParams.keys()].some((key) => key !== 'oc_url_token')) return null;
   return new WebSocket(url.toString());

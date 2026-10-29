@@ -208,7 +208,11 @@ activation (a key press or click in the frame gives one for about 5 s).
   requests go over HTTP as in the release. A request whose answer is lost with
   the socket fails, as a fetch that is cut off does: it is never sent twice.
   Frames and services see no difference. Over HTTPS (HTTP/2, one connection
-  for everything) the limit does not exist.
+  for everything) the limit does not exist. `off` under the window's
+  localStorage key `oc-forge:service-socket` keeps service requests on HTTP:
+  tests that answer them in place with Playwright routes set it (the Planner's
+  harness and its full end-to-end check), since requests over the socket would
+  pass their routes and reach the real service.
 
 ## How it is applied
 

@@ -499,7 +499,8 @@ const plannerAndVscode = async (page, name) => {
   await page.getByRole('button', { name: 'Back to chat' }).click();
   // Its one rail icon on the release; on the adapted build, its first rail entry (VS Code's Explorer).
   await page.locator('[data-context-surface="plugin:oc-forge-vscode"], [data-context-surface^="plugin:oc-forge-vscode--"]').first().click();
-  const panel = page.frameLocator('iframe[title="VS Code"][src*="/workbench/index.html"]').first();
+  // The panel's frame in its zone: a file tab VS Code restored mounts its page, a second "VS Code" frame.
+  const panel = page.frameLocator('[data-context-zone] iframe[title="VS Code"][src*="/workbench/index.html"]').first();
   const form = await panel.getByRole('textbox', { name: 'VS Code Server address' }).waitFor({ timeout: 30_000 }).then(() => true).catch(() => false);
   if (form) {
     await panel.getByRole('textbox', { name: 'VS Code Server address' }).fill(VSCODE_SERVER);

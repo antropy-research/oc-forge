@@ -192,6 +192,20 @@ export async function startHarness({
   if (!password) throw new Error('no UI password in secrets.env');
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport, timezoneId });
+  // oc-forge's adapted OpenChamber sends service requests over a WebSocket (adapters/openchamber, Transport), past the
+  // HTTP routes that answer them here, to the container's own Planner service: its switch keeps them on HTTP, and any
+  // that still come over the socket are refused loudly instead of reaching the real plan.
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem('oc-forge:service-socket', 'off');
+    } catch {
+      // A sandboxed frame has no storage; the switch is the host page's.
+    }
+  });
+  await context.routeWebSocket((url) => new URL(url).pathname === '/api/oc-forge/service-socket', (socket) => {
+    console.error('FAIL the page opened the service socket despite its switch: its requests would reach the real service');
+    socket.close({ code: 1008, reason: 'service socket off in tests' });
+  });
   const login = await context.request.post(`${base}/auth/session`, { data: { password } });
   if (login.status() !== 200) throw new Error(`login failed: ${login.status()}`);
 
