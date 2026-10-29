@@ -90,12 +90,14 @@ message:
   editor) opens in that frame.
 - The page keeps its tabs in the service, per server and folder (`/tabs/save`); after OpenChamber reloads, the rail
   view opens that folder's again (`/tabs/load`), which mounts the page behind them, and the page's VS Code restores
-  the same editors. OpenChamber removes the page with its last tab, before the page hears of the close: a part that
-  stays (a rail view, the terminal) hears it (`tab-closed`) and saves the folder's tabs empty. An unsaved last tab
-  the page closes itself: it saves the tabs and VS Code's state first (as before a reload), so the file's backup is
-  gone too and Don't Save's change doesn't come back. VS Code's own state may still name editors whose tabs were closed (the
-  page went before VS Code saved it): when the page starts it closes the editors no saved or header tab stands for
-  (an unsaved one stays). A webview panel (Markdown's preview) comes back under a new key, as VS Code revives it with
+  the same editors. After the page's last tab closes, OpenChamber keeps the page a few seconds more, hidden (the
+  adapters' `OC_FORGE_PAGE_LINGER_MS`): on that `tab-closed` the page closes the editor and saves the folder's tabs
+  empty and VS Code's state (as before a reload) at once, so neither brings the file back; an unsaved last tab it
+  closes itself the same way, after the save prompt, so the file's backup is gone too and Don't Save's change doesn't
+  come back. A page still starting (its VS Code not running yet) hears nothing: a part that stays (a rail view, the
+  terminal) also saves the folder's tabs empty on the last `tab-closed`. VS Code's own state may still name editors
+  whose tabs were closed: when the page starts it closes the editors no saved or header tab stands for (an unsaved
+  one stays). A webview panel (Markdown's preview) comes back under a new key, as VS Code revives it with
   a new id: it takes the place of its old tab, which can't open it (`restoredTabOf`).
 - The page and the terminal follow the folder the rail view shows (host storage `folder`); the page closes its tabs
   first, as they are the other folder's editors. "Open in VS Code" on a chat is answered by the rail view: it shows
@@ -148,10 +150,6 @@ To keep it down the terminal's workbench starts only when its panel is first sho
 a tab or is opened.
 
 **Limits.**
-- Closing the last file tab while no other part of VS Code runs (no rail view, no terminal panel opened since
-  OpenChamber loaded): nothing of the extension hears the close, so the folder's saved tabs still name it, and it
-  comes back the next time the page starts (after a reload, or beside the next file). The page can't tell that
-  from a reload; OpenChamber would have to keep the page until it has heard (an adapters change).
 - A file a rail view or the terminal hands to a page that is still starting (VS Code restoring, the page closing
   editors closed before) opens once the page is ready, and takes the focus then.
 - A Markdown preview that wasn't the editor on top in its group (behind the SCM diff) when OpenChamber reloads comes

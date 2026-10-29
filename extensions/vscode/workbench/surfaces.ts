@@ -333,8 +333,9 @@ const handEditorsToPage = (context: SurfaceContext): void => {
 const editorsOf = (services: VscodeServices): readonly EditorIdentifier[] => services.get<EditorService>('editorService').getEditors(1);
 
 /**
- * OpenChamber removes the page with its last tab, before the page hears that the user closed it: a part that stays
- * (a rail view, the terminal) empties the folder's saved tabs then, so that the tab doesn't come back after a reload.
+ * The page keeps the folder's tabs when the user closes its last one (OpenChamber keeps it a few seconds for that),
+ * but a page still starting hears nothing yet: its VS Code isn't running, as after a reload the rail view brought the
+ * tabs back. A part that stays (a rail view, the terminal) empties them too, so that the tab doesn't come back.
  */
 const keepLastClose = (context: SurfaceContext): void => {
   const { forge } = context;
@@ -708,11 +709,15 @@ class EditorArea {
     await this.context.forge.tabs.open(tab, { activate: true }).catch(() => undefined);
   }
 
-  /** Another folder is coming: its editors are not these, so neither are the header's tabs. */
+  /** Another folder is coming: its editors are not these, so neither are the header's tabs, nor the page's route. */
   async closeAllTabs(): Promise<void> {
     this.leaving = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    // OpenChamber keeps the page a few seconds after its last tab, and the route after the page: the page that starts
+    // on the new folder in this frame would take it for a link, and open this folder's editor there.
+    this.route = '/';
+    await this.context.forge.links.setRoute('/').catch(() => undefined);
     for (const id of [...this.hostTabs.keys()]) await this.context.forge.tabs.close(id).catch(() => undefined);
     this.hostTabs.clear();
     this.adopted.clear();
@@ -721,12 +726,29 @@ class EditorArea {
   /**
    * The user closed the tab in the header, which OpenChamber has done already (a saved one, or any while no frame
    * decides): close its editors (one per group). If VS Code asks to save and the user cancels, the tab comes back.
+   * After the last one OpenChamber keeps the page a few seconds more, hidden, before it goes (the adapters'
+   * OC_FORGE_PAGE_LINGER_MS): the page keeps the folder's tabs and VS Code's state then, so neither brings it back.
    */
   private async closeFromHeader(id: string): Promise<void> {
     this.hostTabs.delete(id);
     const editors = this.editorService.getEditors(1).filter((identifier) => keyOfEditor(identifier.editor) === id);
     for (const identifier of editors) await this.editorService.closeEditor(identifier);
-    this.schedule();
+    // The host's new list comes after the close: the closed tab is still in it.
+    if (this.context.forge.tabs.state().list.some((tab) => tab.id !== id)) this.schedule();
+    else await this.keepBeforeGoing();
+  }
+
+  /**
+   * The page goes with its last tab: the folder's tabs, and VS Code's state (in which the closed editors, and the
+   * backup of a file closed unsaved, are gone), reach the service before it does. Not on a timer, which a hidden
+   * frame may slow down.
+   */
+  private async keepBeforeGoing(): Promise<void> {
+    const current = this.current();
+    await this.saveTabs(current);
+    await this.context.saveState().catch(() => undefined);
+    // An editor that stayed (VS Code didn't close it) gets its tab back, which brings the page back.
+    if (current.size > 0) this.schedule();
   }
 
   /**
@@ -738,14 +760,13 @@ class EditorArea {
     await this.ready;
     const editors = this.editorService.getEditors(1).filter((identifier) => keyOfEditor(identifier.editor) === id);
     for (const identifier of editors) await this.editorService.closeEditor(identifier);
-    const current = this.current();
-    if (current.has(id)) return;
+    if (this.current().has(id)) return;
     this.hostTabs.delete(id);
     this.adopted.delete(id);
-    // The last tab takes the page with it, back to the chat: the folder's tabs are kept before it goes, and VS Code's
-    // state, in which the file's backup is gone (else the next start would bring back what Don't Save threw away).
-    await this.saveTabs(current);
-    if (!this.context.forge.tabs.state().list.some((tab) => tab.id !== id)) await this.context.saveState().catch(() => undefined);
+    // The last tab takes the page with it, back to the chat: what it keeps reaches the service first (the backup of
+    // the file is gone in VS Code's state, else the next start would bring back what Don't Save threw away).
+    if (!this.context.forge.tabs.state().list.some((tab) => tab.id !== id)) await this.keepBeforeGoing();
+    else await this.saveTabs(this.current());
     await this.context.forge.tabs.close(id).catch(() => undefined);
     this.schedule();
   }
