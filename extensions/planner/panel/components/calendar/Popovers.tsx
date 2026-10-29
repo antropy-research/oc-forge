@@ -14,6 +14,7 @@ import { KEPT_HINT, keptFor, keptTimeLabel, upcomingValues } from '../../../src/
 import { blocksOnDay, edgePosition } from '../../../src/domain/selectors.ts';
 import { newId } from '../../../src/domain/ids.ts';
 import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
+import { DELETE_CHOICES } from '../../lib/google.ts';
 import { useUi } from '../../lib/ui.ts';
 import { anchorOf, calendarUi, eventDetail, popoverKind, removeEvent, respond, type Anchor } from '../../lib/gcal.ts';
 import { plannedLabel } from '../GitHubPanel.tsx';
@@ -282,9 +283,9 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
   const kept = keptFor(view.state, item);
   const time = keptTimeLabel(kept);
   const remove = async () => {
-    // A repeating task asks, as Google does: this one (the series goes on) or all future ones.
-    const scope = kept?.repeat ? await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All future tasks' }] }) : 'this';
-    if (scope === 'this' || scope === 'all') run(() => google.deleteListTask(item, scope), 'Task deleted');
+    // A repeating task asks, as Google Calendar does: this one (the series goes on), this and the following ones, or all of them.
+    const scope = kept?.repeat ? await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: DELETE_CHOICES }) : 'this';
+    if (scope === 'this' || scope === 'following' || scope === 'all') run(() => google.deleteListTask(item, scope), scope === 'this' ? 'Task deleted' : 'Tasks deleted');
   };
   const run = (work: () => Promise<unknown>, done?: string) => {
     setBusy(true);
@@ -372,11 +373,14 @@ export const TaskPopover = ({ event, anchor }: { event: CalendarEvent; anchor: A
 /**
  * An upcoming occurrence of a repeating task, as Google Calendar shows a
  * future one: its title, when, and how its series repeats, with Edit (This
- * task or All tasks) and Delete (This task or All future tasks). This task
- * changes or deletes that occurrence alone, kept with its series until the
- * series makes it (`setOccurrence`); the series and its other tasks stay as
- * they are. All tasks and All future tasks act on the series through the
- * occurrence open now, which Google has.
+ * task or All tasks) and Delete (This task, This and following tasks or All
+ * tasks), as Google Calendar asks. This task changes or deletes that
+ * occurrence alone, kept with its series until the series makes it
+ * (`setOccurrence`); the series and its other tasks stay as they are. This
+ * and following tasks ends the series the day before it, so the tasks before
+ * it stay as they are (`deleteSeries`). Editing all tasks acts on the series
+ * through the occurrence open now, which Google has; deleting them deletes
+ * the series, its completed tasks too.
  */
 export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; anchor: Anchor }) => {
   const { client, google } = usePlanner();
@@ -408,15 +412,16 @@ export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; ancho
     else if (scope === 'all') calendarUi.editTask({ item: await current(), series: true });
   };
   const remove = async () => {
-    const scope = await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All future tasks' }] });
+    const scope = await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: DELETE_CHOICES });
     if (scope === 'this') {
       // The series passes over this date and goes on; Undo gives it back as it was.
       const before = upcoming.change ?? null;
       await google.setOccurrence(upcoming, { skip: true });
       close();
       calendarUi.snack('Task deleted', () => google.setOccurrence(upcoming, before).catch((error) => client.notify(`The Planner did not put "${values.title}" back: ${messageOf(error)}`)));
-    } else if (scope === 'all') {
-      await google.deleteListTask(await current(), 'all');
+    } else if (scope === 'following' || scope === 'all') {
+      // By the date the series puts this one on: the tasks before it stay (This and following), or none does (All tasks).
+      await google.deleteSeries({ account: upcoming.account, seriesId: upcoming.seriesId, from: scope === 'following' ? upcoming.on : null });
       close();
       calendarUi.snack('Tasks deleted');
     }

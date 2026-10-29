@@ -26,7 +26,7 @@ export interface SyncStatus {
   syncing: boolean;
 }
 
-interface Snapshot {
+export interface Snapshot {
   state: PlannerState;
   today: DateKey | null;
   storage: StorageInfo;
@@ -184,6 +184,19 @@ export class PlannerClient {
   /** A raw call to the local service, for modules with their own endpoints. */
   call<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
     return this.request<T>(method, path, body);
+  }
+
+  /**
+   * The plan a service route answered with after changing it itself (a
+   * repeating Google task's series, changed there for every window at once):
+   * taken in its turn after this window's batches on their way, unless one of
+   * their answers brought a later plan already.
+   */
+  adopt(snapshot: Snapshot): Promise<void> {
+    this.queue = this.queue.then(() => {
+      if (snapshot.state && snapshot.state.version >= this.confirmed.version) this.accept(snapshot);
+    });
+    return this.queue;
   }
 
   /** Set (or clear) the git remote the planner data syncs with. */

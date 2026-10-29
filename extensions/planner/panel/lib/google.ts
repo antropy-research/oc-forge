@@ -32,15 +32,13 @@ import {
   keptFor,
   nextOccurrence,
   occurrenceChange,
-  occurrenceTask,
   scheduledOn,
+  seriesCut,
   seriesHeads,
-  seriesNextIn,
   seriesTemplate,
   templateOf,
   withException,
   withExceptions,
-  type NextOccurrence,
   type UpcomingTask,
 } from '../../src/domain/gtaskKept.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
@@ -48,8 +46,8 @@ import { newId } from '../../src/domain/ids.ts';
 import { addDays } from '../../src/domain/dates.ts';
 import { longDay } from '../../src/domain/gcalendar.ts';
 import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
-import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Task } from '../../src/domain/types.ts';
-import type { Origin, PlannerClient } from './client.ts';
+import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, Placement, PlannerState, Task } from '../../src/domain/types.ts';
+import type { Origin, PlannerClient, Snapshot } from './client.ts';
 import { calendarUi } from './gcal.ts';
 
 /** What a Google task's form sets: Google's own fields, and what the Planner keeps for it. */
@@ -70,8 +68,16 @@ export const SUBTASK_NO_REPEAT = "A subtask can't repeat, as in Google Tasks";
 /** Why one upcoming task of a series keeps a date: deleting it is how it goes. */
 export const OCCURRENCE_KEEPS_DATE = 'A task of a repeating series keeps a date: delete it to skip that day';
 
-/** Which tasks of a repeating series a change or a deletion is for, as Google Tasks asks. */
+/** Which tasks of a repeating series a change is for, as Google Calendar asks: This task or All tasks. */
 export type RepeatScope = 'this' | 'all';
+/** Which tasks of a repeating series a deletion is for, as Google Calendar asks. */
+export type DeleteScope = 'this' | 'following' | 'all';
+/** Google Calendar's choices for deleting a repeating task, in its words. */
+export const DELETE_CHOICES: { id: DeleteScope; label: string }[] = [
+  { id: 'this', label: 'This task' },
+  { id: 'following', label: 'This and following tasks' },
+  { id: 'all', label: 'All tasks' },
+];
 
 export type GoogleFeature = 'calendar' | 'tasks' | 'mail';
 
@@ -553,7 +559,7 @@ export class GoogleStore {
           await this.client.dispatch([{ type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch: { repeat: null } }], { origin: 'google' });
           continue;
         }
-        const made = await this.makeSuccessor({ ...next, date, template });
+        const made = await this.makeSuccessor(item);
         // Google may renumber the other tasks' places: read the list as Google has it now.
         if (made && this.view.board[listKey(made.account, made.listId)]) void this.loadBoard(made.account, made.listId);
       } catch (error) {
@@ -565,40 +571,24 @@ export class GoogleStore {
   }
 
   /**
-   * Make the occurrence a series has after `next.item`: a new Google task in
-   * the same list, on the series' next date (past the dates deleted on their
-   * own) from its template, or as that occurrence was changed on its own, as
-   * Google Tasks makes it; then what is kept for it (its time, deadline and
-   * the series) and the link (`repeat.next`). One another Planner window made
-   * already (kept as this series' later occurrence) is taken instead of
-   * making a second; a task that only shares the title and the date is never
-   * taken for it. A refusal throws before anything here changed. The task
-   * made or taken; null when another window had linked one meanwhile.
+   * The occurrence a series has after `item`, made by the service, which
+   * changes one series at a time for every window (`GoogleSeries.next`): a
+   * new Google task in the same list, on the series' next date (past the
+   * dates deleted on their own) from its template, or as that occurrence was
+   * changed on its own, as Google Tasks makes it, kept with its link
+   * (`repeat.next`) in the same step. Another window asking at the same time
+   * gets the one this one made, and one made already (kept as this series'
+   * later occurrence) is taken, never a second; a task that only shares the
+   * title and the date is never taken for it. A refusal throws before
+   * anything changed. The task made or taken; null when the series has none
+   * after `item`.
    */
-  private async makeSuccessor(next: NextOccurrence & { date: DateKey; template: GoogleTaskTemplate }): Promise<GoogleTaskItem | null> {
-    const { item, kept, template, date, index } = next;
-    if (!kept.repeat) return null;
-    const list = await this.client.call<{ tasks: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}`);
-    // Read again: another window may have made it while this one asked.
-    const now = keptFor(this.client.getView().state, item)?.repeat ?? kept.repeat;
-    if (now.next) return null;
-    const task = occurrenceTask(now, template, date, index);
-    let made = seriesNextIn(this.client.getView().state, list.tasks ?? [], now, item.id);
-    if (!made) {
-      const created = await this.client.call<{ task: GoogleTaskItem | null }>('POST', '/google/tasks', { account: item.account, listId: item.listId, title: task.title.trim() || item.title, ...(task.notes ? { notes: task.notes } : {}), due: task.due });
-      made = created.task;
-    }
-    if (!made) throw new Error('Google did not return the task');
-    await this.client.dispatch(
-      [
-        { type: 'gtask.kept', account: item.account, listId: item.listId, taskId: item.id, patch: { repeat: { ...now, next: made.id } } },
-        { type: 'gtask.kept', account: made.account, listId: made.listId, taskId: made.id, patch: task.kept },
-      ],
-      { origin: 'google' },
-    );
-    this.remember(made, true);
+  private async makeSuccessor(item: GoogleTaskItem): Promise<GoogleTaskItem | null> {
+    const answer = await this.client.call<Snapshot & { task: GoogleTaskItem | null }>('POST', '/google/tasks/next', { account: item.account, listId: item.listId, id: item.id });
+    await this.client.adopt(answer);
+    if (answer.task) this.remember(answer.task, true);
     calendarUi.refresh();
-    return made;
+    return answer.task;
   }
 
   answerPrompt(answer: 'yes' | 'no' | 'always'): void {
@@ -949,25 +939,31 @@ export class GoogleStore {
 
   /**
    * Delete a task and its subtasks. A repeating task asks first, as Google
-   * does: "This task" (the series goes on with the next one) or "All future
-   * tasks" (the series ends). "This task", all or nothing: on an occurrence
-   * whose next one is not made yet, the series makes it first, as when it is
-   * done (`makeSuccessor`), and only then is this one deleted; when the next
-   * one can't be made, nothing is deleted and the series stays as it was, to
-   * delete again. The series' template, schedule and exceptions go on with
-   * the next one; deleting this one never drops them while the series goes on.
+   * Calendar does: "This task" (the series goes on with the next one), "This
+   * and following tasks" (the series ends before it) or "All tasks" (the
+   * series goes, its completed tasks too); the last two are `deleteSeries`.
+   * "This task", all or nothing: on an occurrence whose next one is not made
+   * yet, the series makes it first, as when it is done (`makeSuccessor`), and
+   * only then is this one deleted; when the next one can't be made, nothing is
+   * deleted and the series stays as it was, to delete again. The series'
+   * template, schedule and exceptions go on with the next one; deleting this
+   * one never drops them while the series goes on.
    */
-  async deleteListTask(item: GoogleTaskItem, scope: RepeatScope = 'this'): Promise<void> {
+  async deleteListTask(item: GoogleTaskItem, scope: DeleteScope = 'this'): Promise<void> {
     const key = listKey(item.account, item.listId);
     const before = this.view.board[key]?.items ?? [];
     const kept = keptFor(this.client.getView().state, item);
-    const next = kept?.repeat && scope === 'this' && !kept.repeat.next ? nextOccurrence(item, kept) : null;
+    if (kept?.repeat && scope !== 'this') {
+      const from = scope === 'following' ? scheduledOn(kept, item) : null;
+      return this.deleteSeries({ account: item.account, seriesId: kept.repeat.seriesId, from, task: item.id });
+    }
+    const next = kept?.repeat && !kept.repeat.next ? nextOccurrence(item, kept) : null;
     this.patchBoard(key, before.filter((other) => other.id !== item.id && other.parent !== item.id));
     let made: GoogleTaskItem | null = null;
     try {
       if (next?.date && next.template) {
         try {
-          made = await this.makeSuccessor({ ...next, date: next.date, template: next.template });
+          made = await this.makeSuccessor(item);
         } catch (error) {
           throw new Error(`the next "${item.title}" couldn't be made, so this one stays (${messageOf(error)})`);
         }
@@ -981,19 +977,53 @@ export class GoogleStore {
         if (made) throw new Error(`${messageOf(error)}; its next task, ${longDay(made.due ?? next!.date!)}, is made, so deleting this one again finishes`);
         throw error;
       }
-      const state = this.client.getView().state;
-      const series = kept?.repeat && scope === 'all' ? Object.values(state.googleTasks).filter((other) => other.repeat?.seriesId === kept.repeat!.seriesId && other.taskId !== item.id && !other.repeat.next) : [];
-      for (const other of series) await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(other.account)}&list=${encodeURIComponent(other.listId)}&id=${encodeURIComponent(other.taskId)}`).catch(() => {});
-      const dropped: EventBody[] = [...(keptFor(state, item) ? [item] : []), ...series.map((other) => ({ account: other.account, id: other.taskId }))].map((gone) => ({ type: 'gtask.dropped', account: gone.account, taskId: gone.id }));
-      if (dropped.length) await this.client.dispatch(dropped, { origin: 'google' });
+      if (keptFor(this.client.getView().state, item)) await this.client.dispatch([{ type: 'gtask.dropped', account: item.account, taskId: item.id }], { origin: 'google' });
       this.afterTaskWrite(item.account, item.listId, true);
       // Read once this one is gone (a read before it could bring it back): Google may renumber the places around them.
-      if ((series.length || made) && this.view.board[key]) void this.loadBoard(item.account, item.listId);
+      if (made && this.view.board[key]) void this.loadBoard(item.account, item.listId);
     } catch (error) {
       this.patchBoard(key, before);
       if (made) this.remember(made, true);
       throw error;
     }
+  }
+
+  /**
+   * "This and following tasks" of a series, from the date it puts an
+   * occurrence on (`from`; `task`, when asked from a task Google has, goes
+   * too), or "All tasks" (`from` null), as Google Calendar deletes them. The
+   * service does it, one change of a series at a time for every window
+   * (`GoogleSeries.remove`): the open tasks go in Google first, then the
+   * series as kept here, its tasks before `from` ending the day before, so
+   * those and their upcoming occurrences stay and nothing is made past it;
+   * the completed tasks from `from` on (all of them for All tasks) go too.
+   * Shown at once in the Tasks view, and back when Google refuses.
+   */
+  async deleteSeries(target: { account: string; seriesId: string; from: DateKey | null; task?: string }): Promise<void> {
+    const { remove } = seriesCut(this.client.getView().state.googleTasks, target.account, target.seriesId, target.from, target.task ?? null);
+    const boards = Object.entries(this.view.board).filter(([key]) => key.startsWith(`${target.account}\n`));
+    const without = (ids: Iterable<string>) => {
+      const gone = new Set(ids);
+      for (const [key] of boards) {
+        const list = this.view.board[key];
+        if (list) this.patchBoard(key, list.items.filter((other) => !gone.has(other.id) && !(other.parent && gone.has(other.parent))));
+      }
+    };
+    without([...remove.map((kept) => kept.taskId), ...(target.task ? [target.task] : [])]);
+    let deleted: string[];
+    try {
+      const query = new URLSearchParams({ account: target.account, series: target.seriesId, ...(target.from ? { from: target.from } : {}), ...(target.task ? { task: target.task } : {}) });
+      const answer = await this.client.call<Snapshot & { deleted: string[] }>('DELETE', `/google/tasks/series?${query}`);
+      await this.client.adopt(answer);
+      deleted = answer.deleted ?? [];
+    } catch (error) {
+      for (const [key, list] of boards) this.patchBoard(key, list.items);
+      throw error;
+    }
+    // What the service deleted, which another window may have added to since this one read the series.
+    without(deleted);
+    for (const listId of new Set(remove.map((kept) => kept.listId))) this.afterTaskWrite(target.account, listId, false);
+    calendarUi.refresh();
   }
 
   /**

@@ -2,15 +2,23 @@
 // events read in full, created, changed, answered, moved and deleted (with
 // Google Calendar's "This event", "This and following events" and "All
 // events"), task lists made, renamed and deleted, and tasks read with the
-// completed ones, moved, nested and deleted. Each write makes the next
-// calendar read ask Google again.
+// completed ones, moved, nested and deleted; a repeating task's next
+// occurrence made once, and its series deleted from one of its tasks on
+// ("This and following tasks") or whole ("All tasks"), answered with the plan
+// as it is then. Each write makes the next calendar read ask Google again.
 import type http from 'node:http';
+import { isDateKey } from '../src/domain/dates.ts';
 import { EDIT_SCOPES, type EditScope, type EventInput } from '../src/domain/gevents.ts';
 import type { GoogleResponse } from '../src/domain/google.ts';
 import type { GoogleData, SendUpdates } from './googleData.ts';
+import type { GoogleSeries } from './googleSeries.ts';
 
 export interface GoogleRouteContext {
   data: GoogleData;
+  /** Repeating tasks' series, one change of a series at a time for every window. */
+  series: GoogleSeries;
+  /** The plan as it is now, for an answer that changed it. */
+  snapshot: () => object;
   readJson: (req: http.IncomingMessage) => Promise<unknown>;
   /** The user's zone, for moving a series by its clock time. */
   zone: () => string;
@@ -130,6 +138,25 @@ export const googleWriteRoute = async (req: http.IncomingMessage, url: URL, ctx:
     try {
       await ctx.data.deleteTask(account, list, id);
       return ok({ deleted: true });
+    } finally {
+      ctx.changed('tasks');
+    }
+  }
+  if (path === '/google/tasks/next' && method === 'POST') {
+    const input = await body();
+    if (!isEmail(input.account) || !isId(input.listId) || !isId(input.id)) return bad('account, listId and id are required');
+    try {
+      return ok({ ...(await ctx.series.next(input.account, input.listId, input.id)), ...ctx.snapshot() });
+    } finally {
+      ctx.changed('tasks');
+    }
+  }
+  if (path === '/google/tasks/series' && method === 'DELETE') {
+    const [account, series, from, task] = [query('account'), query('series'), query('from'), query('task')];
+    if (!isEmail(account) || !isId(series)) return bad('account and series are required');
+    if ((from !== null && !isDateKey(from)) || (task !== null && !isId(task))) return bad('from must be a date, task a task id');
+    try {
+      return ok({ ...(await ctx.series.remove(account, series, from, task)), ...ctx.snapshot() });
     } finally {
       ctx.changed('tasks');
     }

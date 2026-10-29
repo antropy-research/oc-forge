@@ -15,7 +15,7 @@ import { KEPT_HINT, TASKS_API_REFERENCE, keptFor, keptTimeLabel, starredKept, ta
 import { completedItems, dateGroups, dropTarget, indentTarget, moveDownTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
-import { REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, listKey, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { DELETE_CHOICES, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
 import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
@@ -358,11 +358,17 @@ const StarButton = ({ item, kept }: { item: GoogleTaskItem; kept: GoogleTaskKept
   );
 };
 
-/** Ask which tasks of a series a change or a deletion is for, as Google Tasks and Google Calendar ask; null when cancelled. */
-const askRepeat = async (action: 'edit' | 'delete', ruleChanged = false): Promise<RepeatScope | null> => {
-  const choices = action === 'delete' ? [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All future tasks' }] : ruleChanged ? [{ id: 'all', label: 'All tasks' }] : [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All tasks' }];
-  const choice = await calendarUi.ask({ title: action === 'delete' ? 'Delete repeating task' : 'Edit repeating task', style: 'radio', choices });
+/** Ask which tasks of a series a change is for, as Google Calendar asks (This task or All tasks; a new rule is for all); null when cancelled. */
+const askRepeat = async (ruleChanged = false): Promise<RepeatScope | null> => {
+  const choices = ruleChanged ? [{ id: 'all', label: 'All tasks' }] : [{ id: 'this', label: 'This task' }, { id: 'all', label: 'All tasks' }];
+  const choice = await calendarUi.ask({ title: 'Edit repeating task', style: 'radio', choices });
   return choice === 'this' || choice === 'all' ? choice : null;
+};
+
+/** Ask which tasks of a series a deletion is for, as Google Calendar asks (This task, This and following tasks, All tasks); null when cancelled. */
+const askDelete = async (): Promise<DeleteScope | null> => {
+  const choice = await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: DELETE_CHOICES });
+  return DELETE_CHOICES.find((option) => option.id === choice)?.id ?? null;
 };
 
 /**
@@ -383,7 +389,7 @@ export const useTaskSave = () => {
     const star = Boolean(kept?.starredAt) !== starred ? starred : undefined;
     const moveTo = listId && listId !== item.listId ? listId : undefined;
     if (changed) {
-      const chosen = scope ?? (kept?.repeat ? await askRepeat('edit', fields.kept.rule !== kept.repeat.rule) : 'this');
+      const chosen = scope ?? (kept?.repeat ? await askRepeat(fields.kept.rule !== kept.repeat.rule) : 'this');
       if (!chosen) return false;
       await google.saveListTask(item, fields, chosen, { starred: star, listId: moveTo });
       return true;
@@ -420,7 +426,7 @@ const RowMenu = ({ row, rows, list, lists, ordered, place, onClose, onEdit, onSu
   const indent = ordered ? indentTarget(rows, item.id) : null;
   const indentBlock = !indent ? null : repeating ? REPEATING_NOT_SUBTASK : indent.parent && keptFor(view.state, { account: item.account, id: indent.parent })?.repeat ? REPEATING_NO_SUBTASKS : null;
   const remove = async () => {
-    const scope = keptFor(view.state, item)?.repeat ? await askRepeat('delete') : 'this';
+    const scope = keptFor(view.state, item)?.repeat ? await askDelete() : 'this';
     if (scope) await google.deleteListTask(item, scope);
   };
   return (

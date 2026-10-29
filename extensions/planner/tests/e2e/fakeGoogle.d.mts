@@ -26,6 +26,7 @@ export interface FakeGoogle {
   tasks: Map<string, any[]>;
   lists: { id: string; title: string }[];
   failNext(method: string, path: string, status: number, message: string): void;
+  delayNext(method: string, path: string, ms: number, times?: number): void;
   accountsFile(): string;
   close(): Promise<void>;
 }
