@@ -145,6 +145,24 @@ export const readServerPage = (html: string): { config: ServerWorkbenchConfig; b
 export const commitOfBase = (base: string): string | null => /\/(?:stable|insider|exploration)-([0-9a-f]{40})\/static\/?$/.exec(base)?.[1] ?? null;
 
 /**
+ * VS Code's dialogs in a frame narrower than they are. A part's frame can be 340 px wide (the page beside the rail
+ * panel at 1024 px, the terminal under it), and a dialog is at least 480 px (350 px laid out vertically), centred:
+ * its text and buttons ran past both edges, out of reach (Save of the unsaved-file prompt among them). Here a dialog
+ * is never wider than its frame; in a narrow one it keeps 8 px from each side (its padding and border within that)
+ * and its buttons wrap rather than hide. In a frame as wide as VS Code's own window nothing changes. Notifications
+ * fit already (VS Code sizes them by the workbench), as do the quick input and menus. Appended after VS Code's
+ * stylesheet, and more specific than its rules.
+ */
+export const NARROW_FRAME_CSS = `
+.monaco-workbench .monaco-dialog-box { min-width: min(480px, calc(100vw - 16px)); max-width: min(90vw, calc(100vw - 16px)); }
+.monaco-workbench .monaco-dialog-box.align-vertical { min-width: min(350px, calc(100vw - 16px)); }
+@media (max-width: 495px) {
+  .monaco-workbench .monaco-dialog-box { box-sizing: border-box; }
+  .monaco-workbench .monaco-dialog-box:not(.align-vertical) > .dialog-buttons-row > .dialog-buttons { margin-left: 0; flex-wrap: wrap; }
+}
+`;
+
+/**
  * A 52-character base-32 name for a webview origin, the shape of VS Code's
  * SHA-256 one, for a page without crypto.subtle (plain HTTP). It names
  * webviews apart; it guards nothing.

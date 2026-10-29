@@ -8,8 +8,9 @@
 //      uninstalled, the icon goes; no reload;
 //   3. a file opened from the Explorer is a header tab beside the chats: it
 //      shows the editor in the main area, survives a trip to a chat, turns
-//      dirty when edited, and closing it closes the editor, asking to save;
-//      VS Code's own tab bar is not shown;
+//      dirty when edited, and closing it closes the editor, asking to save in
+//      a prompt that fits the page's frame (its buttons within reach beside
+//      the rail panel); VS Code's own tab bar is not shown;
 //   4. the terminal entry opens VS Code's terminal at the bottom: a command
 //      runs, a second terminal, a split, the shell picker;
 //   5. with focus in VS Code, Ctrl+1 and Ctrl+Alt+→ act in VS Code, and
@@ -256,6 +257,30 @@ const deepLinkOf = (url) => {
   } catch {
     return null;
   }
+};
+
+/**
+ * VS Code's dialog in the page: whether it and each of its buttons lie inside the page's frame, and each button's
+ * centre reaches that button, inside the frame and from OpenChamber's page (not a frame beside it, the rail panel's).
+ */
+const dialogFits = async (page) => {
+  const frame = await page.locator(`[data-oc-forge-page="${VSCODE}"] iframe`).first().boundingBox();
+  const fit = await pageFrame(page).locator('.monaco-dialog-box').first().evaluate((box) => {
+    const within = (rect) => rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+    const buttons = [...box.querySelectorAll('.dialog-buttons .monaco-button')].map((button) => {
+      const rect = button.getBoundingClientRect();
+      const [x, y] = [rect.left + rect.width / 2, rect.top + rect.height / 2];
+      const hit = document.elementFromPoint(x, y);
+      return { label: button.textContent.trim(), within: within(rect), reached: Boolean(hit && button.contains(hit)), x, y };
+    });
+    return { within: within(box.getBoundingClientRect()), width: Math.round(box.getBoundingClientRect().width), frame: innerWidth, buttons };
+  });
+  for (const button of fit.buttons) {
+    button.host = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.closest('[data-oc-forge-page]') !== null, [frame.x + button.x, frame.y + button.y]);
+  }
+  fit.ok = fit.within && fit.buttons.length >= 3 && fit.buttons.every((button) => button.within && button.reached && button.host);
+  fit.detail = `dialog ${fit.width} px in a ${fit.frame} px frame; ${fit.buttons.map((button) => `${button.label}${button.within && button.reached && button.host ? '' : ' (out of reach)'}`).join(', ')}`;
+  return fit;
 };
 
 /** A Cmd/Ctrl+click that should open `file` in a new browser tab: that tab shows its editor (at `line`); closed after, unless `keep`. */
@@ -554,6 +579,9 @@ const journey = async (viewport, seeded, first) => {
     await closeHeaderTab(page, 'README.md');
     const asked = await until(async () => (await pageFrame(page).locator('.monaco-dialog-box').first().innerText({ timeout: 1_000 })).includes('README.md'), 15_000);
     await shot(page, `${size}-3-save-dialog`);
+    // The page beside the rail panel can be narrower than VS Code's dialogs (340 px at 1024 wide): the prompt fits it.
+    const fits = asked ? await dialogFits(page) : null;
+    check(`[${size}] 3 the save prompt fits the page's frame: Save, Don't Save and Cancel inside it, each within reach`, fits?.ok, fits?.detail ?? 'no prompt');
     if (asked) await pageFrame(page).locator('.monaco-dialog-box .monaco-button', { hasText: "Don't Save" }).first().click();
     const closed = await until(async () => !(await headerTabs(page)).some((tab) => tab.title.includes('README.md')) && !(await pageFrame(page).locator('.monaco-editor[data-uri$="README.md"]').count()), 15_000);
     check(`[${size}] 3 closing the tab closes the editor, asking to save as VS Code does`, asked && closed, `asked ${Boolean(asked)}, closed ${Boolean(closed)}`);

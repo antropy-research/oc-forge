@@ -11,7 +11,7 @@ import { connectOcForge } from '../../../adapters/openchamber/client/index.ts';
 import type { RailEntry } from '../src/rail.ts';
 import { isConnectionToken, parseServerUrl, readOpenRequest, readSettings, type OpenRequest, type VscodeSettings } from '../src/settings.ts';
 import { roleOf, roleSettings, type Role } from '../src/surfaces.ts';
-import { isExternalAllowed, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
+import { isExternalAllowed, NARROW_FRAME_CSS, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
 import { persistentIndexedDB, IDBKeyRange, saveThroughService, type StateOp, type StateSnapshot } from './storage.ts';
 import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceController, type SurfaceRole } from './surfaces.ts';
@@ -311,6 +311,8 @@ const boot = async (): Promise<void> => {
     stylesheet.addEventListener('error', () => resolve(), { once: true });
     document.head.append(stylesheet);
   });
+  // A part's frame can be narrower than VS Code's dialogs: they fit it.
+  document.head.append(el('style', { id: 'oc-vscode-narrow', textContent: NARROW_FRAME_CSS }));
   root().remove();
   document.body.setAttribute('aria-label', '');
   try {

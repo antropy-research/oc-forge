@@ -36,6 +36,7 @@ its server's origin. The extension's intermediate components close that gap:
 | Module workers from `blob:` URLs | An opaque origin cannot start them | The bootstrap's text starts the worker from a `data:` URL |
 | IndexedDB, localStorage, cookies | They throw | An in-memory IndexedDB (`fake-indexeddb`) filled from, and saved to, the service (`~/.local/share/openchamber-vscode/state/`, one file per server, mode 0600); memory storage for the rest. What a frame sends as it unloads never reaches the service, so VS Code's save before it reloads the window (Reload Window, a folder switch) waits for the service before the reload; otherwise a Markdown preview opened just before came back without its state and its extension threw restoring it |
 | Codicon font | Fonts are not served to the frame | Inlined into the stylesheet |
+| Room for its dialogs: 480 px (350 px laid out vertically), centred | A part's frame can be narrower: 340 px for the page beside the rail panel at 1024×768, and the terminal under it | A stylesheet after VS Code's (`NARROW_FRAME_CSS`, `src/workbench.ts`): a dialog is never wider than its frame, and in a narrow one it keeps 8 px from each side and wraps its buttons, so the unsaved-file prompt's Save, Don't Save and Cancel stay in reach. Notifications, the quick input and menus fit already |
 
 | Webviews (Markdown preview, extension pages, Mermaid) | VS Code's webview host needs a service worker, `crypto.subtle` and same-origin access to the frame it writes into | `webview/` replaces it in the prepared workbench: the same protocol with the workbench, the content in a srcdoc frame run by an agent over a MessagePort, its files read through the workbench's `load-resource` channel and put inline (module imports through an import map of `blob:` URLs); the webview's own CSP keeps its nonce. VS Code 1.143 takes `webview-ready` only with the mount id from the host page's URL and a key-event token, and runs the webview's keys only when they carry that token (`webview/protocol.ts`); the agent keeps the native `MessagePort.postMessage` before the content runs, so the content can't send keys of its own. A workbench prepared earlier gets the current host page when the service next reports it ready |
 
@@ -202,28 +203,27 @@ connection to the VS Code Server ends and that the server starts the grace after
 `surfaces.mjs` checks OpenChamber's own surfaces at 1440×900 and 1024×768, with screenshots: the five built-ins
 as rail icons, each opening its view alone; an extension it builds and installs with the server's CLI getting
 its icon, opening its view, and losing the icon when uninstalled; files from the Explorer as header tabs (the
-editor in the main area, kept across a chat, the unsaved dot, closing asks to save, no VS Code tab bar); the
-terminal at the bottom (a command, a second terminal, a split, the shell picker, kept while file tabs show);
-Ctrl+Alt+→ and Ctrl+1 acting in VS Code; nothing opening another page but the Ctrl+click tabs; the page with
-session tabs off keeping VS Code's tab bar. At 1440×900 also: Markdown's preview in the stock instance's whole
-workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a rail
-view; Ctrl+click on a link in a rail view (the probe extension's welcome view) and on a file link in the terminal
+editor in the main area, kept across a chat, the unsaved dot, closing asks to save in a prompt within the page's
+frame, no VS Code tab bar); the terminal at the bottom (a command, a second terminal, a split, the shell picker, kept
+while file tabs show); Ctrl+Alt+→ and Ctrl+1 acting in VS Code; nothing opening another page but the Ctrl+click tabs;
+the page with session tabs off keeping VS Code's tab bar. At 1440×900 also: Markdown's preview in the stock instance's
+whole workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a
+rail view; Ctrl+click on a link in a rail view (the probe extension's welcome view) and on a file link in the terminal
 opening a new browser tab on that file's editor while this tab stays as it was, a plain click opening it here;
-OpenChamber's rail digits (Ctrl+Alt+digit) reaching it from the rail view, the page and the terminal, Alt+W from
-a rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; "Open in VS Code" on a chat in
-a second project and back; the terminal under a file's editor (`keepBottomZone`: the page ends where the bottom
-zone begins, both take input, both stay through a chat); closing the last unsaved file tab (Cancel keeps the tab,
-the editor and the change; Don't Save closes without writing, and the file opens again as on disk; Save writes;
-each back to the chat), and across a
-reload the tabs coming back once each (Markdown's preview too), tabs chosen while the page starts ending on the one
-chosen last, and closed ones staying closed; the page alone (as a new browser tab from Cmd/Ctrl+click loads it, no
-rail view or terminal): its last tab closed, the hidden page keeps the folder's tabs empty, and nothing comes back
-after a reload; a Cmd/Ctrl+click on a file tab opening that file in a new browser tab while this one stays as it was,
-VS Code's rail view and page then working in both browser tabs, each sending its service requests over a WebSocket of
-its own (the adapters' transport); and three browser windows in a row each opening the terminal and running a command
-in it, the terminal's part adding no terminal to the ones VS Code reconnects. It writes each size's
-start times and memory to `<size>-frames.json`. Run the stack's `prepare` outside a private network namespace (it
-downloads), then `up`, the check and `down` inside one.
+OpenChamber's rail digits (Ctrl+Alt+digit) reaching it from the rail view, the page and the terminal, Alt+W from a
+rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; "Open in VS Code" on a chat in a
+second project and back; the terminal under a file's editor (`keepBottomZone`: the page ends where the bottom zone
+begins, both take input, both stay through a chat); closing the last unsaved file tab (Cancel keeps the tab, the
+editor and the change; Don't Save closes without writing, and the file opens again as on disk; Save writes; each back
+to the chat), and across a reload the tabs coming back once each (Markdown's preview too), tabs chosen while the page
+starts ending on the one chosen last, and closed ones staying closed; the page alone (as a new browser tab from
+Cmd/Ctrl+click loads it, no rail view or terminal): its last tab closed, the hidden page keeps the folder's tabs
+empty, and nothing comes back after a reload; a Cmd/Ctrl+click on a file tab opening that file in a new browser tab
+while this one stays as it was, VS Code's rail view and page then working in both browser tabs, each sending its
+service requests over a WebSocket of its own (the adapters' transport); and three browser windows in a row each
+opening the terminal and running a command in it, the terminal's part adding no terminal to the ones VS Code
+reconnects. It writes each size's start times and memory to `<size>-frames.json`. Run the stack's `prepare` outside a
+private network namespace (it downloads), then `up`, the check and `down` inside one.
 
 `run.mjs` checks the dev container, whichever OpenChamber it runs; its catalog tells (an adapted server publishes the
 extension's `ocForge` block). On a stock OpenChamber it connects the panel to the VS Code Server and checks the
