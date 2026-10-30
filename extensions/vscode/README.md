@@ -228,6 +228,205 @@ a tab or is opened.
 - On an adapted OpenChamber this extension's rail entries replace its one `plugin:oc-forge-vscode` icon; a check
   that compares the rail with a stock build's turns the extension off first.
 
+## One VS Code across the parts (draft: design and spike, round 14 phase 1)
+
+Status: a design and a spike, not built out. The spike is the bridge extension (`bridge/`), two embedder commands in
+`workbench/main.ts`, the runtime's debug settings in `src/surfaces.ts`, and `tests/e2e/runtime-spike.mjs`.
+
+**Why.** Each part is a workbench of its own, with its own extension host and state (*Roles* above), so what VS Code
+keeps per window doesn't cross between them. A breakpoint set in the page is not in the rail's Run and Debug view,
+and a launch from the rail runs past it. F5 in the page opens a Debug side bar and console inside the page. A
+terminal or task started in the page opens a panel inside the page (REVIEW-13 gaps 3 and 4). Problems, Output,
+Testing and the views that follow the active editor (Outline, Timeline) split the same way.
+
+**Design.**
+1. **One runtime per folder: the terminal part** (the bottom). Debug sessions, terminals and tasks run there. Its
+   panel's Debug Console, Terminal, Problems and Output are VS Code's own, at the bottom where VS Code has them.
+2. **A bridge extension in every part's extension host** (`bridge/extension.js`). It is plain CommonJS with
+   `extensionKind: ["workspace"]` and uses the stable `vscode` API only.
+   - It learns its part from its frame: the embedder command `openchamber.vscode.bridge.info` gives the role, the
+     folder and the server's authority.
+   - It joins the folder's other parts on a Unix socket on the server
+     (`$TMPDIR/ocvsb-<uid>/<sha1(host|folder)>.sock`, in a 0700 directory). The first part listens and relays JSON
+     lines.
+   - Why a socket rather than the frames and the service: every part's extension host already runs on the server.
+     A socket is one hop (a relayed debug request takes 25 ms median), works on any server a user connects to, and
+     needs no host change. The frames could reach the other extension hosts only through VS Code's own RPC.
+   - A window that went (closed or reloaded) leaves its extension host on the server for VS Code's reconnection
+     grace, hours by default. Its part leaves the bus while its window doesn't answer `bridge.info` (a 2 s
+     heartbeat with a 3 s timeout), and comes back when it answers again.
+   - A request for a part goes to one member of that part: the one that joined first. Two browser tabs on the folder
+     have two terminal parts, and one runtime runs what either tab asks. Requests about a session go to the runtime
+     that runs it.
+3. **Debug.**
+   - *Breakpoints*: one list for the folder.
+     - A change in one part goes to the others through the breakpoints API (`addBreakpoints`, `removeBreakpoints`,
+       `onDidChangeBreakpoints`).
+     - It is also written to a file on the server: the bridge's global storage, one file per folder. The workspace
+       storage can't hold it: VS Code gives each window open on the folder at once a folder of its own (`<id>-1`,
+       `<id>-2`).
+     - A part that joins takes that file. The first time, the list is the union of what every part had.
+   - *A launch from the page or the rail* is caught in the `'*'` provider's `resolveDebugConfiguration`.
+     - That hook runs after the type's own providers, and before VS Code substitutes variables and runs the
+       preLaunchTask. Returning `undefined` there aborts the launch, and nothing opens.
+     - The runtime starts it with `startDebugging(folder, config, { suppressDebugView, suppressDebugToolbar,
+       suppressDebugStatusbar, suppressSaveBeforeStart })`.
+     - The page substitutes the variables that name its editor (`${file}`, `${lineNumber}`, `${selectedText}`, …)
+       first. A launch from the rail that uses them goes to the page to do that.
+     - Not `resolveDebugConfigurationWithSubstitutedVariables`: the preLaunchTask runs before it, so the task would
+       run twice.
+   - *The page and the rail mirror each session the runtime runs.*
+     - A mirror is a debug session of type `openchamber-mirror` (contributed with `hiddenWhen: "true"`). Its
+       adapter is inline (`DebugAdapterInlineImplementation`).
+     - It relays every DAP request to the real session (`DebugSession.customRequest` in the runtime). It gets
+       every event back from a `'*'` tracker in the runtime: DAP's own events, except `initialized`,
+       `breakpoint`, `output` and progress.
+     - It answers some requests itself:
+       - `initialize`, with the real adapter's capabilities;
+       - `setBreakpoints`, because the breakpoints are the folder's;
+       - the exception filters while it starts (later changes are relayed).
+     - Once configured, it replays the threads that are stopped now.
+     - A child session (js-debug's process under its launch) is mirrored under its parent's mirror
+       (`parentSession`, `lifecycleManagedByParent`, `compact`, `consoleMode: MergeWithParent`).
+     - In the page the mirror suppresses the debug view. VS Code's editor debug UI then works natively: the paused
+       line, hovers, inline values, F10/F11, the floating toolbar and the status bar.
+     - In the rail it suppresses the toolbar and the status bar. The Run and Debug view shows the call stack,
+       variables, watch, breakpoints and loaded scripts.
+   - *Stop.* Stop (`terminate`) in a mirror stops the real session, and its end ends every mirror. A window that
+     closes or reloads disconnects its sessions with no arguments, and the mirror tells that apart: the real session
+     goes on, and a reloaded page shows its paused line again.
+   - *The runtime's settings*: `debug.openDebug: neverOpen` and `debug.toolBarLocation: hidden` (role settings). A
+     child session doesn't take its parent's suppress options.
+   - *Paths*: a relayed request that names a file (`source.path`) gets the main thread's name for it
+     (`vscode-remote://<authority>/…`). A plain path would be read as the browser's (`vscode-local`).
+4. **Terminals and tasks.**
+   - In the page and the rail, the bridge registers VS Code's own command ids, which then run in the runtime
+     instead:
+     - terminal: `workbench.action.terminal.new`, `newWithProfile`, `split`, `toggleTerminal`, `focus`;
+     - tasks: `workbench.action.tasks.runTask`, `build`, `test`, `reRunTask`, `restartTask`, `terminate`,
+       `showTasks`.
+   - Why these win: the latest registration is the one a key, a menu or the command palette runs
+     (`CommandsRegistry` puts it first). An `onCommand:` activation event makes VS Code wait for the bridge before
+     running the command the first time.
+   - The embedder's `commands` option can't do this. It registers before the task service, which registers its
+     commands when it is created, and before extensions.
+   - Run Task picks the task where the user is (a quick pick in the page) and runs it in the runtime by its label.
+     A launch's preLaunchTask runs in the runtime, once.
+   - The runtime calls `openchamber.vscode.bridge.allowFocus` first, so the new terminal takes the keyboard (see
+     *Focus*).
+5. **Problems.** Each part publishes its own diagnostics on the bus (`languages.getDiagnostics`,
+   `onDidChangeDiagnostics`, without the ones it mirrors). Every other part mirrors them into a `DiagnosticCollection`
+   of its own. The result:
+   - the bottom's Problems lists the page's language servers' diagnostics;
+   - the page's editor shows a build task's problem matches;
+   - the rail's Explorer marks files that have problems.
+
+   A problem chosen in the bottom opens its file in the page, where its quick fixes are. (Not in the spike.)
+6. **Output.** The bottom's Output also lists the page's and the rail's channels. They are files on the server, in
+   each extension host's log folder, so the runtime's frame registers them as file-backed channels
+   (`IOutputChannelRegistry.registerChannel`). No stable API reads another window's output. (Not in the spike.)
+7. **The active editor's views in the rail** (Outline, Timeline, and extensions' views such as file history).
+   - The rail has no active editor.
+   - *Recommended*: bridge views fed from the page, both through stable APIs.
+     - Outline: `vscode.executeDocumentSymbolProvider` run in the page, a tree in the rail that follows the page's
+       cursor, and a choice reveals the symbol in the page.
+     - Timeline: the Git extension's API for the file's history. Local history has no API, so it is missing.
+   - *Alternative*: a hidden "shadow" editor in the rail on the page's file, with the selection relayed. All
+     native views would work, but each language extension does its work twice: a second language server per folder
+     (tsserver: hundreds of MB on a mid-size project), and its diagnostics twice. Better offered as an opt-in for
+     third-party views. (Not in the spike.)
+8. **Testing.**
+   - Each part's test extension discovers tests by itself. A run started in the rail or the page would run in that
+     part's extension host, with its results in that part's hidden panel.
+   - Route the run commands (`testing.*`, the editor gutter's) to the runtime, so results show natively in the
+     bottom's Test Results.
+   - The rail's tree and the page's gutter would then show no pass or fail: no stable API sets another extension's
+     results. The riskiest item. (Not in the spike.)
+9. **Lifecycle.**
+   - A closed zone keeps its frame mounted at opacity 0. A session or a task goes on, and F10 in the page still
+     steps while the bottom is closed.
+   - Starting something from the page or the rail before the bottom ever opened needs OpenChamber to open the zone.
+     The adapters let a frame light its rail panel's entry (`rail-active`), not open one.
+   - So this needs a host addition: `rail.open(entry)` for an extension's own entries. It is proposed, not built.
+     Until then the page says to open the terminal.
+10. **Deployment.**
+    - The bridge is a .vsix the extension carries (`bridge/pack.mjs`). The frame installs it on the server it's
+      connected to when it's missing or older: `workbench.extensions.installExtension` with the .vsix that the
+      service writes on that server. This works on the dev container's server and any other, with no marketplace.
+    - It shows in the Extensions view as "OpenChamber Bridge". Uninstalled, the next start installs it again.
+      Disabled, the parts work as before, with a notice.
+    - The spike installs it with the server's CLI.
+
+**Interfaces.**
+
+| Interface | Kind | Used for |
+|---|---|---|
+| `vscode.debug`: breakpoints API; `registerDebugConfigurationProvider('*')` (`resolveDebugConfiguration`); `registerDebugAdapterTrackerFactory('*')`; `registerDebugAdapterDescriptorFactory` with `DebugAdapterInlineImplementation`; `startDebugging` with `DebugSessionOptions`; `stopDebugging`; `DebugSession.customRequest`; `onDidStartDebugSession`, `onDidTerminateDebugSession` | stable | debug |
+| Debug Adapter Protocol | stable | the mirror |
+| `vscode.commands.registerCommand` with VS Code's command ids (the documented keybinding commands); `executeCommand` | stable | terminals, tasks |
+| `vscode.tasks.fetchTasks`; `ExtensionContext.globalStorageUri`; Node's `net`, `fs` | stable | Run Task's pick; the breakpoints' file; the bus |
+| Manifest: `extensionKind`, `contributes.debuggers[].hiddenWhen`, `onCommand:`/`onDebug` activation | stable | the bridge |
+| Embedder API `commands` (`web.api.ts`) | stable | `bridge.info`, `bridge.allowFocus` |
+| `languages.getDiagnostics`, `createDiagnosticCollection`; `executeDocumentSymbolProvider`; the Git extension's API | stable | Problems; the rail's Outline and Timeline (to build) |
+| `ITaskService.run` | internal, public member | tasks an extension starts by API in the page or the rail (the NPM Scripts view in the rail's Explorer): no stable API reaches another window's tasks (to build) |
+| `IOutputChannelRegistry.registerChannel` | internal, public member | the page's output channels in the bottom (to build) |
+| `ITerminalService.createTerminal({ config: { attachPersistentProcess } })` | internal, public member | a terminal an extension creates by API in the page: moved to the bottom through the server's pty host (to build) |
+| `IDebugService.focusStackFrame` | internal, public member | the bottom's Debug Console evaluates in the frame chosen in the rail (to build) |
+
+The spike uses no internal member. There is no new patch to VS Code, nothing under `vendors/`, and no change under
+`adapters/`.
+
+**What the spike shows.** `tests/e2e/runtime-spike.mjs` ran on the scratch stack (VS Code 1.144.0, headless
+Chromium, 1440×900) and passed 23 of 23 checks. Its fixture is a Node program that ticks every 300 ms, debugged with
+js-debug's parent and child sessions.
+
+| What | Measured |
+|---|---|
+| A breakpoint set in the page (F9): in the rail's model and Run and Debug view, and the runtime's | 24 ms |
+| F5 in the rail: paused in the rail (call stack, variables) and on the page's line; its preLaunchTask ran once | 1.85 s / 1.88 s |
+| F10 in the page: line 4 in the page and the rail; the rail's variables | 156 ms; 633 ms |
+| Hover over a variable in the page | its value |
+| Shift+F5 in the page: every session ended | 207 ms |
+| F5 in the page: the paused line; the preLaunchTask ran once more | 1.36 s |
+| Sampled every animation frame: no Debug side bar or panel in the page, no editor area in the rail, no side bar, editor area or debug toolbar in the bottom | 0 frames |
+| The bottom zone closed: the session goes on, F10 steps | yes |
+| The page reloaded while paused: the session goes on, the paused line is back | 3.8 s |
+| "Terminal: Create New Terminal" in the page, from the palette / with Ctrl+Shift+`: in the bottom's list, focused, no panel in the page | 457 ms / 84 ms |
+| Run Task in the page: ran once, in the bottom | 1.06 s |
+| Two browser tabs: a launch from the second ran once, in one runtime, and both rails show it paused | sessions per runtime [2, 0] |
+| A relayed DAP request's round trip | median 25 ms, p95 68 ms, max 584 ms (`breakpointLocations`) |
+
+**Risks.**
+- The bridge is an extension on the user's server. A user can disable it; it then reinstalls itself, or the parts
+  fall back to today's behaviour with a notice. A VS Code release that registered these commands lazily after
+  activation, or another extension overriding the same ids, would take the keys back. The end-to-end check would
+  show it.
+- The mirror's type is `openchamber-mirror`, so UI that an adapter's own extension adds for its type (js-debug's
+  "Toggle Skipping This File", pretty print, …: `debugType == pwa-node`) doesn't show in the page or the rail. Its
+  custom requests, sent through the mirror, would work.
+- Every request takes one more hop (25 ms median). A large Variables tree or many threads multiply it.
+- The bus is per folder across browser tabs: every tab's rail shows every session, and the first runtime runs
+  launches from either tab.
+- Socket election: two parts that both find a stale socket can, rarely, both listen. A lock file fixes that.
+- A disconnected extension host queues the heartbeat's call (one every 2 s) until VS Code's grace ends. Backing
+  off while away keeps that small.
+
+**Remaining work** (estimate about 17 working days):
+
+| Item | Days |
+|---|---|
+| The bridge in TypeScript, unit tests (bus, part addressing, heartbeat, leader change, mirror DAP sequences, breakpoint list) | 2 |
+| Deployment: the frame installs and updates the .vsix, notice when disabled | 1 |
+| Debug: Restart (through the runtime), exception filters, breakpoint verification and moved lines, the Debug Console's frame, compounds (their own preLaunchTask runs in the part), input variables | 2 |
+| Terminals and tasks: every command that makes or acts on one; tasks extensions start by API (`ITaskService.run`); terminals extensions create by API; the page's and the rail's panel kept closed as a guard | 2 |
+| Host addition `rail.open(entry)` (adapters, needs approval), and waiting for the runtime | 1 |
+| Problems both ways | 1 |
+| Output channels of the page and the rail | 1 |
+| Outline and Timeline in the rail (bridge views) | 2 |
+| Testing through the runtime (a test extension in the check) | 2 |
+| The spike's checks as journeys at both sizes, with negative controls on the old build | 2 |
+| Docs, review fixes | 1 |
+
 ## Layout
 
 | Path | Role |
@@ -236,6 +435,7 @@ a tab or is opened.
 | `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`), the rail (`rail.ts`), editors handed to the page and its saved tabs (`editors.ts`) |
 | `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB; the roles in OpenChamber's own surfaces (`surfaces.ts`) and the VS Code services they use (`vscode.ts`) |
 | `panel/` | The background frame: "Open in VS Code" on a chat |
+| `bridge/` | Spike: the VS Code extension that makes the parts one VS Code (`extension.js`, *One VS Code across the parts*), packed by `pack.mjs` |
 | `webview/` | The webview host page (`host.ts`, built to `host.js` with the agent inside) and the agent that runs in each webview's content (`agent.ts`); `content.ts` makes a webview's HTML self-contained |
 | `scripts/web-files.ts` | Lists the browser's files of a VS Code Server install for `service/web-files.json` |
 

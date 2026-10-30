@@ -313,6 +313,11 @@ const boot = async (): Promise<void> => {
           { id: 'openchamber.vscode.followFolder', label: "OpenChamber: Open OpenChamber's Folder", handler: async () => {
             await reloadWith(context.directory);
           } },
+          // For the bridge extension (bridge/extension.js) in this workbench's extension host: which part of VS Code
+          // this frame is, and the server's name for its files; and, in the terminal's part, the user's request from
+          // another part (a new terminal) may take the focus as the user's own action here would (src/focus.ts).
+          { id: 'openchamber.vscode.bridge.info', handler: () => ({ role, folder, authority }) },
+          { id: 'openchamber.vscode.bridge.allowFocus', handler: () => focus?.allow() },
         ],
       };
     },

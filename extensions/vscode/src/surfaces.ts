@@ -51,6 +51,10 @@ export const roleSettings = (role: Role, strip = true): Record<string, unknown> 
       'workbench.panel.opensMaximized': 'always',
       // A horizontal panel maximizes only when centred.
       'workbench.panel.alignment': 'center',
+      // The folder's debug sessions run here (bridge/extension.js); their view and toolbar are the rail's and the
+      // page's. A child session (js-debug's process under its launch) doesn't take its parent's suppress options.
+      'debug.openDebug': 'neverOpen',
+      'debug.toolBarLocation': 'hidden',
     };
   }
   // The editor area: its editors are OpenChamber's header tabs, which have no preview state.

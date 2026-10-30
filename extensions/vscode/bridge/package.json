@@ -1,0 +1,40 @@
+{
+  "name": "openchamber-bridge",
+  "publisher": "openchamber",
+  "displayName": "OpenChamber Bridge",
+  "description": "Makes VS Code's parts in OpenChamber (the rail view, the page, the bottom terminal) one VS Code: one debugger, one list of terminals, one task runner.",
+  "version": "0.0.1",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onDebug",
+    "onCommand:workbench.action.terminal.new",
+    "onCommand:workbench.action.terminal.newWithProfile",
+    "onCommand:workbench.action.terminal.split",
+    "onCommand:workbench.action.terminal.toggleTerminal",
+    "onCommand:workbench.action.terminal.focus",
+    "onCommand:workbench.action.tasks.runTask",
+    "onCommand:workbench.action.tasks.build",
+    "onCommand:workbench.action.tasks.test",
+    "onCommand:workbench.action.tasks.reRunTask",
+    "onCommand:workbench.action.tasks.restartTask",
+    "onCommand:workbench.action.tasks.terminate",
+    "onCommand:workbench.action.tasks.showTasks"
+  ],
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "openchamber-mirror",
+        "label": "OpenChamber",
+        "hiddenWhen": "true"
+      }
+    ]
+  }
+}
