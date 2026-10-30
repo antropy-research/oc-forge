@@ -117,14 +117,21 @@ export class GmailStore {
   /** An email task's thread, as Gmail has it now. */
   async loadThread(account: string, thread: string): Promise<void> {
     const key = threadKey(account, thread);
+    // Read again meanwhile (after an action on it): the newer read's answer stands.
+    const seq = (this.threadSeq.get(key) ?? 0) + 1;
+    this.threadSeq.set(key, seq);
     this.set({ threads: { ...this.view.threads, [key]: { loading: true, thread: this.view.threads[key]?.thread ?? null, error: null } } });
     try {
       const answer = await this.client.call<{ thread: MailThread }>('GET', `/google/mail/thread?account=${encodeURIComponent(account)}&thread=${encodeURIComponent(thread)}`);
+      if (this.threadSeq.get(key) !== seq) return;
       this.set({ threads: { ...this.view.threads, [key]: { loading: false, thread: answer.thread, error: null } } });
     } catch (error) {
+      if (this.threadSeq.get(key) !== seq) return;
       this.set({ threads: { ...this.view.threads, [key]: { loading: false, thread: this.view.threads[key]?.thread ?? null, error: messageOf(error) } } });
     }
   }
+
+  private readonly threadSeq = new Map<string, number>();
 
   /** Whether the account allowed the Planner to act on its email. */
   allowed(account: string): boolean {

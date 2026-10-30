@@ -266,6 +266,31 @@ fake GitHub), `linearStore.test.ts`, `pastedUrl.test.ts` and `sunsama.mjs` (its 
 | Google Calendar, Google Tasks | | Round 11 | [Google's limits, one by one](#googles-limits-one-by-one) |
 | Daily planning's sources | | | The same panels as the board's (Linear, GitHub, Gmail, Google Tasks), so the same paging; its meetings are the day's events |
 
+## A read that a newer one overtakes
+
+Review 12 found GitHub's Load more stuck: with page two on its way, another search showed its own first page, but the
+list stayed "Showing 50 of 101 / Loading…", disabled, and Refresh did not help. The superseded Load more returned
+without clearing its flag, and nothing else cleared it. Every read that a newer one can overtake was audited for the
+same thing. The rule now: an older answer, or its error, never shows over a newer one's; nothing is left loading; and
+a Load more button says "Loading…" while any read of its list is under way.
+
+| Read | Before | Now | Checked by |
+|---|---|---|---|
+| GitHub: the source's list, and its Load more (`panel/lib/github.ts`) | Another search, repository or list kind, or Refresh, during a Load more: "Loading…" for good. During a Refresh the button said Load more and did nothing. The 5-minute refresh could drop a Load more the user asked for | Another list (`replace`) or Refresh drops what was under way for the one before, its Load more flag with it; a late page changes nothing. The 5-minute refresh waits for a Load more | `github.test.ts` (each change, the old page answering before and after the new one, an old error, Load more during a Refresh, the 5-minute refresh); `sunsama.mjs`'s GitHub part at 1440 and 1024: each change during a held Load more, then the list's own Load more to #101, planned |
+| Linear: issue lists (`loadList`, `loadMore`) | A newer read cleared `loadingMore` only when it succeeded; one that failed (a view gone) left it set. A workspace taken off during Load more got its page back into the list. The button said Load more, doing nothing, while the list was read again | A read clears it as it starts. A page of a workspace taken off is dropped, its cursor with it. "Loading…" while the list is read | `linearStore.test.ts` |
+| Linear: saved views (`loadViews`, Load more views) | Read again during Load more views, the old page joined the views read since (a view deleted in Linear came back); an older read could replace a newer one | The newest read stands; Load more views adds only to the views it was asked for | `linearStore.test.ts` |
+| Linear: projects | Right as is: one flag for both reads; Load more projects waits for a read; a newer read drops an older Load more and clears the flag itself | A workspace taken off: its page is dropped, as for issue lists | Reading |
+| Linear: favorites; issue options and filter catalogs | Right as is: favorites come with the views' read (its guard now). Options and catalogs have no paging control and no loading flag: they are read whole and cached per team or workspace, and two reads at once read the same | — | — |
+| Gmail: a search and Load more messages (`searchMail`) | A search left behind that failed showed its error over the newer one, and cleared its loading. Refresh during Load more let the old page join the list read again. An account gone during a search left the list loading (the panel searches only when nothing is), with the old account's cursor | The newest search's answer stands. Another account clears loading and the cursor, so the panel searches it | `superseded.test.ts` |
+| Gmail: an email task's thread (`loadThread`) | Two reads at once (after an action): the older answer, or its error, could show last | The newest read of each thread stands | `superseded.test.ts` |
+| Google Tasks: the Tasks panel's list (`refreshTasks`) | The older of two reads could show over the newer; a failed read left behind showed its error | The newest read stands | `superseded.test.ts` |
+| Google Tasks: the Tasks view's lists (`loadBoard`) | Two reads at once (after changes made there): the older answer replaced the newer, and was followed up (series, moves) | The newest read of each list shows, and only it is followed up | `superseded.test.ts` |
+| Google Drive: More files in the attachment picker | A search typed while More files was on its way: the page joined the new search's files and set its cursor. Clicked again while loading, it asked again | Dropped once the search changed; "Loading…", disabled, while on its way | Reading only: the picker's state is a component's, and the unit tests have no DOM. `tasks-calendar.mjs`'s `advanced` part runs the picker |
+| Google Calendar: event search; an event's declined meetings | Right as is: one request a query, dropped by its effect's cleanup when another query comes; no paging (Google's "more" says to narrow the search) | — | — |
+| Daily highlights: GitHub activity (`readAndKeep`) | A day's read is kept a few minutes for going back to it: one asked before a Refresh, answering last, replaced the newer one in what was kept | What is kept is the read asked for last | `superseded.test.ts` |
+| The agents and models to assign to (`loadCatalog`) | Look again during a read: the older answer could show last. Another folder before the models came: the first folder's follow-up read it again, over the second | The newest read stands; only it reads the models again | `superseded.test.ts` |
+| Other effects with a `live` flag (the calendar's feed, oc-forge's state) | Right as is: an effect's cleanup drops what it asked for | — | — |
+
 ## Sunsama's integration pages, behaviour by behaviour
 
 Round 12's inventory of help.sunsama.com's integration pages for the sources the Planner has

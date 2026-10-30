@@ -253,7 +253,7 @@ describe('nothing of Linear is left out unsaid', () => {
     const client = { getView: () => ({ state, today: '2026-10-26' }), call: async () => ({ workspaces: [] }), dispatch: async () => {}, notify: () => {}, onCommitted: () => () => {} } as unknown as PlannerClient;
     const store = new LinearStore(host, client, 'page');
     const afters = (op: string) => calls.filter((call) => call.op === op).map((call) => call.variables.after ?? null);
-    return { store, calls, afters, world };
+    return { store, calls, afters, world, host };
   };
   const until = async (test: () => boolean) => {
     for (let i = 0; i < 200 && !test(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -313,6 +313,31 @@ describe('nothing of Linear is left out unsaid', () => {
     expect(partialNote('priority', [catalog])).toBeNull();
   });
 
+  test('saved views read again while Load more views is on the way: its old page never joins the views read since', async () => {
+    const { store, world, host } = bigLinear();
+    await store.refresh(true);
+    await until(() => store.getView().viewsLoaded);
+    // The next page, as Linear had it when asked (v1020 still there), answers late.
+    const held: (() => void)[] = [];
+    const request = host.request.bind(host);
+    (host as { request: unknown }).request = async (init: { body: string }) => {
+      const answer = await request(init as Parameters<HostClient['request']>[0]);
+      if (/query PlannerViews\b/.test(init.body) && JSON.parse(init.body).variables.after === '1000' && held.length === 0) await new Promise<void>((release) => held.push(release));
+      return answer;
+    };
+    const more = store.loadMoreViews();
+    await until(() => held.length === 1);
+    world.views = world.views.filter((view) => view.id !== 'v1020');
+    const shown = store.getView().views;
+    void store.refresh(true);
+    await until(() => store.getView().views !== shown);
+    held[0]!();
+    await more;
+    expect([store.getView().views.length, store.getView().viewsMore]).toEqual([1000, { 'org-1': '1000' }]);
+    await store.loadMoreViews();
+    expect([store.getView().views.length, store.getView().views.some((view) => view.id === 'v1020'), store.getView().viewsMore]).toEqual([1029, false, {}]);
+  });
+
   test('past the bounds of a read (2,500 favorites, 2,000 teams) the sidebar and the team picker say Linear has more', async () => {
     const { store, world } = bigLinear();
     await store.refresh(true);
@@ -333,6 +358,92 @@ describe('nothing of Linear is left out unsaid', () => {
     const detail = { ...issue(1, STATES[1]!), description: '', labels: { nodes: [], pageInfo: none }, comments: { nodes: [], pageInfo: more }, children: { nodes: [], pageInfo: more }, attachments: { nodes: [] }, history: { nodes: [], pageInfo: more } } as unknown as LinearIssueDetail;
     expect(issueDetailMore(detail)).toEqual(['sub-issues', 'comments', 'activity']);
     expect(issueDetailMore({ ...detail, comments: { nodes: [] }, children: { nodes: [] }, history: { nodes: [] } } as unknown as LinearIssueDetail)).toEqual([]);
+  });
+});
+
+// Round 12's review: GitHub's Load more stayed "Loading…" when the search changed before it answered. Linear's lists,
+// saved views and workspaces, audited for the same: a page asked for a list that changed since never joins it, and
+// nothing is left loading.
+describe('a Linear list that changes while its Load more is on the way', () => {
+  /** The first answer `pick` chooses, read as Linear had it when asked, held until the test lets it through. */
+  const holdAnswer = (target: HostClient, pick: (op: string, variables: Record<string, unknown>) => boolean) => {
+    const held: (() => void)[] = [];
+    const request = target.request.bind(target);
+    (target as { request: unknown }).request = async (init: { body: string }) => {
+      const answer = await request(init as Parameters<HostClient['request']>[0]);
+      const { query, variables } = JSON.parse(init.body) as { query: string; variables: Record<string, unknown> };
+      if (held.length === 0 && pick(/(?:query|mutation) (\w+)/.exec(query)![1]!, variables)) await new Promise<void>((release) => held.push(release));
+      return answer;
+    };
+    return held;
+  };
+  const until = async (test: () => boolean) => {
+    for (let i = 0; i < 200 && !test(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+
+  test('read again meanwhile, and the read fails: nothing is left loading, the old page never joins, and the list goes on from its own cursor', async () => {
+    const fake = fakeLinear();
+    const held = holdAnswer(fake.host, (op, variables) => op === 'PlannerViewIssues' && variables.after === '300');
+    const store = new LinearStore(fake.host, fake.client, 'page');
+    store.setSource({ kind: 'view', id: 'v-big', workspaceId: 'org-1' });
+    await settle(store);
+    expect([store.list('page').issues.length, store.list('page').more]).toEqual([300, { 'org-1': '300' }]);
+    const more = store.loadMore('page');
+    await until(() => held.length === 1);
+    expect(store.list('page').loadingMore).toBe(true);
+    const big = fake.views['v-big']!;
+    delete fake.views['v-big'];
+    void store.refresh();
+    await until(() => store.list('page').error !== null);
+    expect(store.list('page')).toMatchObject({ loading: false, loadingMore: false, error: 'Linear no longer has this view', issues: [], more: {} });
+    fake.views['v-big'] = big;
+    held[0]!();
+    await more;
+    expect(store.list('page')).toMatchObject({ loading: false, loadingMore: false, issues: [], more: {} });
+    void store.refresh();
+    await until(() => store.list('page').issues.length === 300 && !store.list('page').loading);
+    await store.loadMore('page');
+    expect([store.list('page').issues.length, store.list('page').more, store.list('page').loadingMore]).toEqual([320, {}, false]);
+  });
+
+  test('a workspace taken off while its Load more is on the way: its page never comes back into the list', async () => {
+    const fake = fakeLinear();
+    const second = Array.from({ length: 320 }, (_, n) => ({ ...issue(1000 + n, STATES[1]!), id: `w2-${n}` }));
+    const page = (nodes: LinearIssue[], after: unknown) => {
+      const start = typeof after === 'string' ? Number(after) : 0;
+      const end = Math.min(start + 100, nodes.length);
+      return { nodes: nodes.slice(start, end), pageInfo: { hasNextPage: end < nodes.length, endCursor: end < nodes.length ? String(end) : null } };
+    };
+    let keyed = [{ id: 'org-2', name: 'Two', urlKey: 'two', account: 'Me' }];
+    const held: (() => void)[] = [];
+    const client = {
+      ...fake.client,
+      call: async (method: string, path: string, body?: { query: string; variables: Record<string, unknown> }) => {
+        if (path === '/linear/workspaces') return method === 'POST' ? { workspace: keyed[0] } : { workspaces: keyed };
+        if (path.startsWith('/linear/workspaces/')) return (keyed = []);
+        if (path !== '/linear/graphql') return { workspaces: [] };
+        const op = /(?:query|mutation) (\w+)/.exec(body!.query)![1]!;
+        const data =
+          op === 'PlannerAssigned' ? { viewer: { id: 'u2', name: 'Me', assignedIssues: page(second, body!.variables.after) } }
+          : op === 'PlannerWhoAmI' ? { viewer: { id: 'u2', name: 'Me' }, organization: { id: 'org-2', name: 'Two', urlKey: 'two' } }
+          : op === 'PlannerLinked' ? { issues: { nodes: [] } }
+          : null;
+        if (op === 'PlannerAssigned' && body!.variables.after === '300') await new Promise<void>((release) => held.push(release));
+        return { status: 200, body: JSON.stringify(data ? { data } : { errors: [{ message: `unexpected ${op}` }] }) };
+      },
+    } as unknown as PlannerClient;
+    const store = new LinearStore(fake.host, client, 'page');
+    await store.addWorkspace('lin_api_harness');
+    store.setSource({ kind: 'assigned' });
+    await settle(store);
+    await until(() => store.getView().workspaces.length === 2 && store.list('page').issues.length === 303);
+    expect(store.list('page').more).toEqual({ 'org-2': '300' });
+    const more = store.loadMore('page');
+    await until(() => held.length === 1);
+    await store.removeWorkspace('org-2');
+    held[0]!();
+    await more;
+    expect([store.list('page').issues.map((item) => item.workspaceId), store.list('page').more, store.list('page').loadingMore]).toEqual([['org-1', 'org-1', 'org-1'], {}, false]);
   });
 });
 

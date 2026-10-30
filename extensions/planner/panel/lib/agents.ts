@@ -95,6 +95,7 @@ export const assignBranch = (state: PlannerState, taskId: string): string => {
 export class AgentStore {
   private view: AgentView = { available: null, projects: [], sessions: new Map(), dispatching: new Set(), attention: 0, prError: null, catalog: null, catalogLoading: false, catalogError: null };
   private catalogFor: string | null | undefined = undefined;
+  private catalogSeq = 0;
   private lookingUp = false;
   private readonly listeners = new Set<() => void>();
   private readonly watched = new Map<string, () => void>();
@@ -208,15 +209,22 @@ export class AgentStore {
   async loadCatalog(directory: string | null = null, refresh = false, again = false): Promise<void> {
     if (!refresh && !again && this.catalogFor === directory && (this.view.catalog || this.view.catalogLoading)) return;
     this.catalogFor = directory;
+    // Another folder, or Look again, meanwhile: the newest read's answer stands (and only it reads the models again).
+    const seq = ++this.catalogSeq;
     this.set({ catalogLoading: true });
     try {
       const query = [directory ? `directory=${encodeURIComponent(directory)}` : '', refresh ? 'refresh=1' : ''].filter(Boolean).join('&');
       const catalog = await this.client.call<AgentCatalog>('GET', `/agents${query ? `?${query}` : ''}`);
-      if (this.catalogFor === directory) this.set({ catalog, catalogLoading: false, catalogError: null });
+      if (seq !== this.catalogSeq) return;
+      this.set({ catalog, catalogLoading: false, catalogError: null });
       // The agents are here; the models follow once OpenCode has listed them.
-      if (catalog.modelsPending && this.catalogFor === directory) setTimeout(() => void this.loadCatalog(directory, false, true), 2500);
+      if (catalog.modelsPending) {
+        setTimeout(() => {
+          if (seq === this.catalogSeq) void this.loadCatalog(directory, false, true);
+        }, 2500);
+      }
     } catch (error) {
-      if (this.catalogFor === directory) this.set({ catalogLoading: false, catalogError: messageOf(error) });
+      if (seq === this.catalogSeq) this.set({ catalogLoading: false, catalogError: messageOf(error) });
     }
   }
 

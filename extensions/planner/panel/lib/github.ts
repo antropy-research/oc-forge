@@ -60,7 +60,11 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 export class GitHubStore {
   private view: GitHubView = { status: null, kind: 'assigned', items: [], loading: false, error: null, total: 0, next: null, text: '', loadingMore: false, repos: null };
-  /** The list being read: a newer kind or search makes an older answer moot. */
+  /**
+   * The list being read: another kind, search or a Refresh starts another one, and what was under way for the one
+   * before (its first page, a Load more) is dropped when it answers, its Load more with it (round 12's review: a search
+   * changed during Load more left the list "Loading…" for good).
+   */
   private seq = 0;
   private readonly listeners = new Set<() => void>();
   private started = false;
@@ -79,7 +83,8 @@ export class GitHubStore {
     this.started = true;
     await this.checkStatus();
     setInterval(() => {
-      if (this.view.status?.available && !document.hidden) void this.refresh();
+      // Never over a Load more the user asked for: the next round reads it with the rest.
+      if (this.view.status?.available && !document.hidden && !this.view.loadingMore) void this.refresh();
     }, REFRESH_MS);
   }
 
@@ -94,11 +99,16 @@ export class GitHubStore {
   }
 
   setKind(kind: GitHubListKind): void {
-    this.set({ kind, items: [], total: 0, next: null });
+    this.replace({ kind });
     void this.refresh();
   }
 
-  /** Words narrowing the list (GitHub's search syntax); the list is read again from its first page. */
+  /** Another list from now on (a kind, a search): nothing still under way for the one before may change it. */
+  private replace(patch: Partial<GitHubView>): void {
+    this.seq++;
+    this.set({ ...patch, items: [], total: 0, next: null, loadingMore: false });
+  }
+
   /** The repositories to offer, read once (Sunsama surfaces the ones the viewer most recently contributed to). */
   async loadRepos(): Promise<void> {
     if (this.view.repos) return;
@@ -110,9 +120,10 @@ export class GitHubStore {
     }
   }
 
+  /** Words narrowing the list (GitHub's search syntax); the list is read again from its first page. */
   setText(text: string): void {
     if (text === this.view.text) return;
-    this.set({ text, items: [], total: 0, next: null });
+    this.replace({ text });
     void this.refresh();
   }
 
@@ -129,7 +140,8 @@ export class GitHubStore {
     if (!this.view.status?.available) return;
     const seq = ++this.seq;
     const shown = this.view.items.length;
-    this.set({ loading: true, error: null });
+    // A Load more still on its way belongs to the read before this one: dropped, this read's own starts afresh.
+    this.set({ loading: true, loadingMore: false, error: null });
     try {
       const [list] = await Promise.all([
         (async () => {
@@ -162,6 +174,7 @@ export class GitHubStore {
     this.set({ loadingMore: true, error: null });
     try {
       const page = await this.page(after);
+      // Another list since (another kind, search or a Refresh): its own state stands, this page is not its.
       if (seq !== this.seq) return;
       const items = appendItems(this.view.items, page.items);
       this.set({ items, total: Math.max(page.total, items.length), next: page.next, loadingMore: false });

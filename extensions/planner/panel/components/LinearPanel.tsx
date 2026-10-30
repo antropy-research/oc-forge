@@ -200,7 +200,7 @@ export const LinearIssues = (_props: { page?: boolean }) => {
       {more && (
         <div class="lin-more">
           <span class="muted">{list.issues.length} loaded</span>
-          <button type="button" class="lin-button" disabled={list.loadingMore} onClick={() => void linear.loadMore('side')}>{list.loadingMore ? 'Loading…' : 'Load more'}</button>
+          <button type="button" class="lin-button" disabled={list.loadingMore || list.loading} onClick={() => void linear.loadMore('side')}>{list.loadingMore || list.loading ? 'Loading…' : 'Load more'}</button>
         </div>
       )}
     </div>
