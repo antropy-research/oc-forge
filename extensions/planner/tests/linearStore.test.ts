@@ -404,11 +404,12 @@ describe("Sunsama's prompts to update the status in Linear (round 12)", () => {
     expect(dispatched.find((body) => body.type === 'task.created')).toMatchObject({ task: { title: 'issue 1', source: { kind: 'linear', id: 'i1' } } });
     expect(fake.moves()).toEqual([{ id: 'i1', stateId: 's-prog' }]);
     // The add field asked already: the import prompt for that task does not ask again; another task's stays.
-    const store = fake.store as unknown as { set: (patch: object) => void } & LinearStore;
-    store.set({ prompt: { kind: 'import', taskId: 'other', key: 'HAR-2' } });
+    const store = fake.store;
+    const prompt = (taskId: string, key: string) => (store as unknown as { set: (patch: object) => void }).set({ prompt: { kind: 'import', taskId, key } });
+    prompt('other', 'HAR-2');
     store.dismissImportPrompt('t-pasted');
     expect(store.getView().prompt?.taskId).toBe('other');
-    store.set({ prompt: { kind: 'import', taskId: 't-pasted', key: 'HAR-1' } });
+    prompt('t-pasted', 'HAR-1');
     store.dismissImportPrompt('t-pasted');
     expect(store.getView().prompt).toBeNull();
   });
