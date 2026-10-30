@@ -116,11 +116,15 @@ const githubPart = async (viewport) => {
     await ghRow(`${run} gh issue 50`).waitFor({ timeout: 30_000 });
     check(`${size}: the GitHub source shows the first 50 of 51 assigned issues, and says so, with Load more`, (await shown()) === 50 && (await status().innerText()).includes('Showing 50 of 51') && (await ghPanel().getByRole('button', { name: 'Load more' }).count()) === 1, await status().innerText().catch(() => 'no count'));
     check(`${size}: read through the real gh: a page of 50, from the first`, lists().length >= 1 && lists()[0].variables?.after === undefined && /assignee:@me/.test(String(lists()[0].variables?.q)), JSON.stringify(lists().map((request) => request.variables)));
+    // The list's end: "Showing 50 of 51" and Load more.
+    await status().scrollIntoViewIfNeeded();
     await shotHere('gh-50-of-51');
     await ghPanel().getByRole('button', { name: 'Load more' }).click();
     await ghRow(`${run} gh issue 51`).waitFor({ timeout: 15_000 });
     const after = lists().at(-1)?.variables?.after;
     check(`${size}: Load more reads the next page from the first page's cursor, and shows the 51st`, (await shown()) === 51 && typeof after === 'string' && after.length > 0 && (await status().innerText()).includes('All 51 shown'), JSON.stringify({ after, shown: await shown() }));
+    await status().scrollIntoViewIfNeeded();
+    await shotHere('gh-all-51');
     // Planned from the source: a task linked to issue 51, its real id, title and URL.
     await ghRow(`${run} gh issue 51`).hover();
     await ghRow(`${run} gh issue 51`).getByRole('button', { name: new RegExp(`^Plan ${repo}#51 `) }).first().click();
