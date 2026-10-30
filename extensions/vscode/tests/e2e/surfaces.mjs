@@ -31,6 +31,11 @@
 //      and back, at both sizes. The chat's menu opens once each time, and a
 //      menu opened while VS Code follows the folder (its frames reload and
 //      start on it) stays open: no VS Code frame takes the focus;
+//  18. the same with Markdown's preview as the page's active editor, at both
+//      sizes: coming back, the page starts again with the preview (a webview)
+//      as its active editor, and the menu held open stays open; then a click
+//      into the preview focuses it and typing reaches it, and choosing its
+//      header tab (from README.md's) gives it the keyboard;
 //  11. with a file tab shown, the terminal entry opens VS Code's terminal under
 //      the editor (`ocForge.page.keepBottomZone`): both take input, both stay
 //      through a trip to a chat, and a file link Cmd/Ctrl+clicked there opens
@@ -1149,8 +1154,11 @@ const journey = async (viewport, seeded, first) => {
 
 // ── 10. "Open in VS Code" on a chat in another folder, and back: VS Code follows the folder in its frames, none of
 // which takes the focus from OpenChamber meanwhile (src/focus.ts) ──
-const openInVscode = async (seeded, chatB, viewport) => {
+// ── 18. The same with Markdown's preview as the page's active editor: a webview, which VS Code focuses through its
+// frame's window as the page starts (guardWebviews); then the preview still takes the focus for the user ──
+const openInVscode = async (seeded, chatB, viewport, { preview = false } = {}) => {
   const size = `${viewport.width}x${viewport.height}`;
+  const phase = preview ? '18' : '10';
   const context = await browser.newContext({ viewport });
   await context.request.post(`${base}/auth/session`, { data: { password } });
   await context.addInitScript(seedTabs, [...seeded, chatB]);
@@ -1189,7 +1197,10 @@ const openInVscode = async (seeded, chatB, viewport) => {
     const done = await until(async () => {
       const rows = await explorerRows();
       if (!rows.some((row) => row.includes(shows)) || rows.some((row) => row.includes(gone)) || !(await followed(view))) return false;
-      if (tabsBack) return (await headerTabs(page)).some((tab) => tab.title.includes('README.md')) && await followed(pageFrame(page));
+      if (tabsBack) {
+        return (await headerTabs(page)).some((tab) => tab.title.includes('README.md')) && await followed(pageFrame(page))
+          && (!preview || (await previewHeading(pageFrame(page))) === 'demo');
+      }
       return !(await pagePresent()) || await followed(pageFrame(page));
     }, 120_000);
     const open = await menuItem.isVisible().catch(() => false);
@@ -1218,32 +1229,75 @@ const openInVscode = async (seeded, chatB, viewport) => {
     await view.locator('.explorer-folders-view .monaco-list-row', { hasText: 'README.md' }).first().click({ timeout: 120_000 });
     await until(async () => await pageShown(page) && await pageFrame(page).locator('.monaco-editor[data-uri$="README.md"] .view-line').first().isVisible(), 120_000);
     await pageStarted(page);
+    if (preview) {
+      // Markdown's preview of README.md, opened in the page: its active editor, with a header tab of its own.
+      await pageFrame(page).locator('.monaco-editor[data-uri$="README.md"] .view-line').first().click();
+      await runCommand(page, pageFrame(page), 'Markdown: Open Preview');
+      const active = await until(async () => (await previewHeading(pageFrame(page))) === 'demo' && (await headerTabs(page)).find((tab) => tab.active)?.title.startsWith('Preview'), 60_000);
+      check(`[${size}] 18 Markdown's preview of README.md is the page's active editor, with its header tab`, active, (await headerTabs(page)).map((tab) => `${tab.title}${tab.active ? '*' : ''}`).join(' | '));
+    }
     const tabsBefore = (await headerTabs(page)).map((tab) => tab.title);
     await openInVscodeOn(CHAT_B);
     const heldThere = await holdMenuWhileFollowing({ shows: 'b.txt', gone: 'README.md', tabsBack: false });
-    check(`[${size}] 10 a menu opened in OpenChamber while VS Code follows that folder stays open: no VS Code frame takes the focus`, heldThere.ok, heldThere.detail);
+    check(`[${size}] ${phase} a menu opened in OpenChamber while VS Code follows that folder stays open: no VS Code frame takes the focus`, heldThere.ok, heldThere.detail);
     const inB = await until(async () => {
       const rows = await explorerRows();
       return await explorerLit() && rows.some((row) => row.includes('b.txt')) && !rows.some((row) => row.includes('README.md')) ? rows : null;
     }, 120_000);
-    check(`[${size}] 10 "Open in VS Code" on a chat in another folder shows that folder in VS Code's Explorer, in the rail panel`, inB, (inB ?? await explorerRows().catch(() => [])).map((row) => row.trim()).join(' | '));
+    check(`[${size}] ${phase} "Open in VS Code" on a chat in another folder shows that folder in VS Code's Explorer, in the rail panel`, inB, (inB ?? await explorerRows().catch(() => [])).map((row) => row.trim()).join(' | '));
     const closedThere = await until(async () => !(await headerTabs(page)).some((tab) => /README\.md|notes\.ts|linked\.md/.test(tab.title)), 30_000);
-    check(`[${size}] 10 the page follows that folder: the first folder's file tabs close`, closedThere, `${tabsBefore.join(' | ')} → ${(await headerTabs(page)).map((tab) => tab.title).join(' | ') || 'none'}`);
-    await shot(page, `${size}-10-open-in-vscode`);
+    check(`[${size}] ${phase} the page follows that folder: the first folder's file tabs close`, closedThere, `${tabsBefore.join(' | ')} → ${(await headerTabs(page)).map((tab) => tab.title).join(' | ') || 'none'}`);
+    await shot(page, `${size}-${phase}-open-in-vscode`);
     await openInVscodeOn(CHATS[0]);
     const heldBack = await holdMenuWhileFollowing({ shows: 'README.md', gone: 'b.txt', tabsBack: true });
-    check(`[${size}] 10 …and back: a menu opened meanwhile stays open, as the rail view and the page start again on the first folder`, heldBack.ok, heldBack.detail);
+    check(`[${size}] ${phase} …and back: a menu opened meanwhile stays open, as the rail view and the page start again on the first folder`, heldBack.ok, heldBack.detail);
     const backHome = await until(async () => {
       const rows = await explorerRows();
       return await explorerLit() && rows.some((row) => row.includes('README.md')) && !rows.some((row) => row.includes('b.txt'));
     }, 120_000);
     const tabsBack = await until(async () => (await headerTabs(page)).some((tab) => tab.title.includes('README.md')), 60_000);
-    check(`[${size}] 10 and on the first chat, its folder comes back in the Explorer, with its file tabs (kept per folder)`, backHome && tabsBack, (await headerTabs(page)).map((tab) => tab.title).join(' | ') || 'no file tabs');
-    await shot(page, `${size}-10-back`);
-    check(`[${size}] 10 nothing opened another page or window`, popups.length === 0, popups.join(' '));
+    check(`[${size}] ${phase} and on the first chat, its folder comes back in the Explorer, with its file tabs (kept per folder)`, backHome && tabsBack, (await headerTabs(page)).map((tab) => tab.title).join(' | ') || 'no file tabs');
+    await shot(page, `${size}-${phase}-back`);
+    if (preview) {
+      const tabNamed = async (test) => (await headerTabs(page)).find((tab) => test(tab.title));
+      const choose = async (test) => page.locator(`[data-oc-forge-tab="${VSCODE}:${(await tabNamed(test))?.id}"]`).first().click();
+      const isPreview = (title) => title.startsWith('Preview');
+      // What is typed while the preview has the keyboard reaches its document (a listener there, set up first).
+      const typedInto = async (text, focusIt) => {
+        await previewContent(pageFrame(page)).locator('body').evaluate(() => {
+          window.__typed = '';
+          // Once per document: a second listener would note each key twice.
+          if (window.__typing) return;
+          window.__typing = true;
+          document.addEventListener('keydown', (event) => {
+            if (event.key.length === 1) window.__typed += event.key;
+          }, true);
+        });
+        if (focusIt) await focusIt();
+        await page.keyboard.type(text);
+        return until(async () => (await previewContent(pageFrame(page)).locator('body').evaluate(() => window.__typed).catch(() => '')) === text, 5_000);
+      };
+      await choose(isPreview);
+      const restored = await until(async () => await pageShown(page) && (await previewHeading(pageFrame(page))) === 'demo', 60_000);
+      check(`[${size}] 18 the page came back with the preview as its active editor`, restored, (await headerTabs(page)).map((tab) => `${tab.title}${tab.active ? '*' : ''}`).join(' | '));
+      const clicked = await typedInto('clicked', () => previewContent(pageFrame(page)).locator('h1').first().click());
+      check(`[${size}] 18 a click into the preview focuses it, and typing reaches it`, clicked, clicked ? 'typed into the preview' : `the preview got "${await previewContent(pageFrame(page)).locator('body').evaluate(() => window.__typed).catch(() => '?')}"`);
+      // From README.md's tab to the preview's: choosing it gives it the keyboard, with no click into it.
+      await choose((title) => title === 'README.md');
+      await until(async () => await pageFrame(page).locator('.monaco-editor[data-uri$="README.md"] .view-line').first().isVisible(), 30_000);
+      await choose(isPreview);
+      await until(async () => (await previewHeading(pageFrame(page))) === 'demo', 60_000);
+      const chosen = await typedInto('chosen', null);
+      check(`[${size}] 18 choosing the preview's header tab gives it the keyboard: typing reaches it`, chosen, chosen ? 'typed into the preview' : `the preview got "${await previewContent(pageFrame(page)).locator('body').evaluate(() => window.__typed).catch(() => '?')}"`);
+      await shot(page, `${size}-18-preview-typed`);
+      // As phase 10 leaves it: the preview closed (it is no file, nothing to save).
+      await closeHeaderTab(page, 'Preview');
+      await until(async () => !(await headerTabs(page)).some((tab) => isPreview(tab.title)), 10_000);
+    }
+    check(`[${size}] ${phase} nothing opened another page or window`, popups.length === 0, popups.join(' '));
   } catch (error) {
-    check(`[${size}] 10 the journey ran to the end`, false, String(error.message ?? error).split('\n')[0]);
-    await shot(page, `${size}-10-99-failure`).catch(() => undefined);
+    check(`[${size}] ${phase} the journey ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+    await shot(page, `${size}-${phase}-99-failure`).catch(() => undefined);
   } finally {
     await context.close();
     // VS Code shows the first folder again for the next journeys, however this one ended (the extension keeps it).
@@ -1775,6 +1829,8 @@ try {
   if (runs('journey')) await journey({ width: 1024, height: 768 }, seeded.chats, false);
   if (runs('openInVscode')) await openInVscode(seeded.chats, seeded.chatB, { width: 1440, height: 900 });
   if (runs('openInVscode')) await openInVscode(seeded.chats, seeded.chatB, { width: 1024, height: 768 });
+  if (runs('openInVscodePreview')) await openInVscode(seeded.chats, seeded.chatB, { width: 1440, height: 900 }, { preview: true });
+  if (runs('openInVscodePreview')) await openInVscode(seeded.chats, seeded.chatB, { width: 1024, height: 768 }, { preview: true });
   if (runs('withoutStrip')) await withoutStrip(seeded.chats);
   if (runs('pageAlone')) await pageAlone(seeded.chats[0]);
   if (runs('twoTabs')) await twoTabs(seeded.chats[0]);

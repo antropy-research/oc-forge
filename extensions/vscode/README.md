@@ -252,7 +252,10 @@ to from its tab and closed unsaved from the header, asks to save: Cancel keeps i
 shown next is the selected tab and the address bar's; `4ac4898`'s build failed all of these); "Open in VS Code" on a
 chat in a second project and back, the chat's menu opened once each time (no retry), and a menu opened while VS Code
 follows the folder staying open, with the focus still in OpenChamber once the rail view and the page have started on it
-(`ffd6c44`'s build lost the menu and the focus to a VS Code frame every time).
+(`ffd6c44`'s build lost the menu and the focus to a VS Code frame every time); the same with Markdown's preview as the
+page's active editor: coming back, the page starts again with the preview active while the menu held open stays open
+(`63c9cb1`'s build lost both to the preview's frame every time), then a click into the preview and choosing its header
+tab each give it the keys.
 At 1440×900 also: Markdown's preview in the stock instance's
 whole workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a
 rail view; Ctrl+click on a link in a rail view (the probe extension's welcome view) and on a file link in the terminal
