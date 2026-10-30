@@ -6,6 +6,8 @@ import { reorderCommands, sortTasks } from '../../src/domain/sort.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { addParsedTask, urlHint } from '../lib/addTask.ts';
+import { LinearUrlStatus, useLinearUrlStatus } from './LinearUrlStatus.tsx';
+import { MergeChip } from './AddTask.tsx';
 import { useUi } from '../lib/ui.ts';
 import type { Route } from './Shell.tsx';
 
@@ -135,22 +137,25 @@ export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
   useLayoutEffect(() => input.current?.focus(), []);
   useEscape(onClose);
   const parsed = text.trim() ? parseQuickAdd(text, view.today, view.state.settings.weekStartsOn) : null;
+  const status = useLinearUrlStatus(parsed?.title ?? '');
   return (
     <div class="modal-backdrop palette-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div class="palette" role="dialog" aria-modal="true" aria-label="Add task">
         <input
           ref={input}
           value={text}
-          placeholder="Task name  ~30m  @tomorrow  #channel  $objective  !high"
+          placeholder="Task name  ~30m  @tomorrow  #channel  $objective  !high  >merge into"
           aria-label="New task"
           onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key !== 'Enter' || !parsed?.title.trim()) return;
-            void addParsedTask({ client, linear, github, google }, parsed, { kind: 'day', date: view.today }, 'bottom', view.today);
+            void addParsedTask({ client, linear, github, google }, parsed, { kind: 'day', date: view.today }, 'bottom', view.today, null, { linearStateId: status.chosen });
             onClose();
           }}
         />
         <p class="hint palette-hint">{(parsed && urlHint(parsed.title)) ?? `Enter adds to ${parsed?.placement ? 'the day or bucket you named' : 'today'}. Esc cancels.`}</p>
+        <LinearUrlStatus status={status} />
+        {parsed && <MergeChip parsed={parsed} fallback={{ kind: 'day', date: view.today }} />}
       </div>
     </div>
   );

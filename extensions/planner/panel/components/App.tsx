@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { openSource } from '../lib/sourcePanel.ts';
+import { sourceUrl } from '../../src/domain/gmail.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { UiContext, type UiState } from '../lib/ui.ts';
 import { ArchiveView } from './ArchiveView.tsx';
@@ -17,6 +19,7 @@ import { TaskDetail } from './TaskDetail.tsx';
 import { CompactToday, TodayView } from './TodayView.tsx';
 import { StatsView } from './StatsView.tsx';
 import { LinearPage, LinearPromptBar } from './LinearPanel.tsx';
+import { GmailPromptBar } from './GmailPanel.tsx';
 import { IssueEditor } from './IssueEditor.tsx';
 import { AgentsView } from './Agents.tsx';
 import { GitHubPage } from './GitHubPanel.tsx';
@@ -24,7 +27,7 @@ import { GooglePage, GooglePromptBar } from './GooglePanel.tsx';
 import { isGuestAttachItem } from '@openchamber/sdk';
 import { CommandPalette, QuickAddModal } from './CommandPalette.tsx';
 import { AssistantModal } from './Assistant.tsx';
-import { hoveredTask } from '../lib/hover.ts';
+import { hoveredSource, hoveredTask } from '../lib/hover.ts';
 import { moveTo } from '../lib/commands.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 import { startTaskNotifications } from '../lib/notifications.ts';
@@ -151,12 +154,31 @@ export const App = ({ surface }: { surface: string }) => {
         case 'p': setRoute('planning'); break;
         case 'o': setRoute('shutdown'); break;
         case 'c':
+          // Shift C: the calendar in the right-hand panel (Sunsama's).
+          if (event.shiftKey) {
+            if (route !== 'home' && route !== 'today') setRoute('home');
+            openSource('calendar');
+            break;
+          }
           if (route === 'focus' || !task) return;
           void client.dispatch([task.completedAt ? { type: 'task.reopened', taskId: task.id } : { type: 'task.completed', taskId: task.id, on: client.getView().today }]);
           break;
         case 'z':
           if (!task || task.placement.kind === 'backlog') return;
           void client.dispatch([moveTo(state, task.id, { kind: 'backlog', bucket: 'next-weeks' }, 'top')], { undo: 'Moved to backlog' });
+          break;
+        case 'g':
+          // Shift G: Gmail in the right-hand panel; G: the hovered task's item in its tool (Sunsama's shortcuts).
+          if (event.shiftKey) {
+            if (route !== 'home' && route !== 'today') setRoute('home');
+            openSource('mail');
+            break;
+          }
+          {
+            const item = hoveredSource() ?? task?.source;
+            if (!item) return;
+            void host.openUrl(sourceUrl(item, state.settings));
+          }
           break;
         case 'x':
           if (!task || task.completedAt) return;
@@ -235,6 +257,7 @@ export const App = ({ surface }: { surface: string }) => {
       {overlay === 'quickadd' && <QuickAddModal onClose={() => setOverlay(null)} />}
       <LinearPromptBar />
       <GooglePromptBar />
+      <GmailPromptBar />
       <Toasts />
     </UiContext.Provider>
   );

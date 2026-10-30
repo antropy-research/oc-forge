@@ -3,7 +3,14 @@ import type { EventBody } from '../../src/domain/events.ts';
 import { SOURCE_NAMES, type Task } from '../../src/domain/types.ts';
 import { addDays, formatMinutes, monthDay, nextWeekday } from '../../src/domain/dates.ts';
 import { parseDuration } from '../../src/domain/quickAdd.ts';
-import { DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
+import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../lib/context.ts';
+import { CANNOT_MERGE_EVENTS, mergeItemCommands, mergeTaskCommands } from '../../src/domain/merge.ts';
+import { sourceUrl } from '../../src/domain/gmail.ts';
+import { isGitHubItem, githubSource } from '../../src/domain/github.ts';
+import { isLinearIssue, issueSource } from '../../src/domain/linear.ts';
+import { gtaskSource, isGoogleTaskItem, isMailItem, mailSource } from '../../src/domain/google.ts';
+import { ExternalLink } from './ExternalLink.tsx';
+import { SourceIcon } from './SourceIcons.tsx';
 import { moveTo } from '../lib/commands.ts';
 import { actualMinutes, blocksFor, positionAt, tasksIn } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
@@ -59,8 +66,35 @@ export const InlineInput = ({ value, className, onCommit, onCancel }: InlineInpu
   );
 };
 
+/** The tool a linked task's item opens in: its source's, Superhuman for email when that is the email client. */
+const toolName = (source: NonNullable<Task['source']>, emailClient: string): string =>
+  source.kind === 'email' && emailClient === 'superhuman' ? 'Superhuman' : source.kind === 'link' ? source.key : SOURCE_NAMES[source.kind];
+
+/** What is being dragged with Alt/Option held, to merge into a task (Sunsama's Merge tasks). */
+const MERGE_TYPES = [DRAG_TYPE, LINEAR_DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE];
+
+/** A dropped panel item as the title and link it merges in with, or null. */
+const droppedItem = (data: DataTransfer): { title: string; source: NonNullable<Task['source']> } | null => {
+  const parse = (type: string): unknown => {
+    try {
+      const raw = data.getData(type);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  };
+  const issue = parse(LINEAR_DRAG_TYPE);
+  if (isLinearIssue(issue)) return { title: issue.title, source: issueSource(issue) };
+  const item = parse(GITHUB_DRAG_TYPE);
+  if (isGitHubItem(item)) return { title: item.title, source: githubSource(item) };
+  const google = parse(GOOGLE_DRAG_TYPE) as { kind?: string; item?: unknown } | null;
+  if (google?.kind === 'mail' && isMailItem(google.item)) return { title: google.item.subject.trim() || '(No subject)', source: mailSource(google.item) };
+  if (google?.kind === 'gtask' && isGoogleTaskItem(google.item)) return { title: google.item.title, source: gtaskSource(google.item) };
+  return null;
+};
+
 const TaskMenu = ({ task, onClose, onAssign }: { task: Task; onClose: () => void; onAssign: () => void }) => {
-  const { client } = usePlanner();
+  const { client, host } = usePlanner();
   const view = useView();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -120,6 +154,15 @@ const TaskMenu = ({ task, onClose, onAssign }: { task: Task; onClose: () => void
           Assign to an agent…
         </button>
       )}
+      {task.source && (
+        <button role="menuitem" onClick={() => { onClose(); void host.openUrl(sourceUrl(task.source!, state.settings)); }}>
+          Open in {toolName(task.source, state.settings.emailClient)}
+        </button>
+      )}
+      {task.source?.kind === 'event' && (
+        // Sunsama's: off the task list, the calendar event left as it is (and never added again by auto-sync).
+        <button role="menuitem" onClick={() => run({ type: 'task.deleted', taskId: task.id }, 'Removed from tasks')}>Remove from tasks</button>
+      )}
       <hr />
       <button role="menuitem" onClick={() => run({ type: 'task.archived', taskId: task.id }, 'Task archived')}>Archive</button>
       <button role="menuitem" class="danger" onClick={() => run({ type: 'task.deleted', taskId: task.id }, 'Task deleted')}>Delete</button>
@@ -141,6 +184,7 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
     (a, b) => minutesOf(a) === minutesOf(b),
   );
   const [menuOpen, setMenuOpen] = useState(false);
+  const [merging, setMerging] = useState(false);
   // "Assign to an agent…" from the menu: the assignee picker, in place.
   const [assigning, setAssigning] = useState(false);
   const channel = task.channelId ? view.state.channels[task.channelId] : null;
@@ -164,6 +208,17 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
   const toggle = () =>
     void client.dispatch([done ? { type: 'task.reopened', taskId: task.id } : { type: 'task.completed', taskId: task.id, on: view.today }]);
 
+  // Alt/Option + drop: merge a task, or an item from a panel, into this one as a subtask (Sunsama's Merge tasks).
+  const merge = (event: DragEvent) => {
+    const data = event.dataTransfer;
+    if (!data) return;
+    const state = view.state;
+    const draggedId = data.getData(DRAG_TYPE);
+    const item = draggedId ? null : droppedItem(data);
+    const result = draggedId ? mergeTaskCommands(state, draggedId, task.id, newId) : item ? mergeItemCommands(state, task.id, item, newId) : [];
+    if (typeof result === 'string') client.notify(result);
+    else if (result.length) void client.dispatch(result, { undo: `Merged into "${task.title}"` });
+  };
   return (
     <li
       data-task={task.id}
@@ -171,6 +226,33 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
       draggable={!editingTime}
       onMouseEnter={() => setHoveredTask(task.id)}
       onMouseLeave={() => setHoveredTask(null)}
+      data-merging={merging ? 'true' : undefined}
+      onContextMenu={(event) => {
+        // Right-click opens the task's menu (Sunsama's, where Remove from tasks is).
+        if (editingTime) return;
+        event.preventDefault();
+        setMenuOpen(true);
+      }}
+      onDragOver={(event) => {
+        const types = event.dataTransfer?.types ?? [];
+        if (!event.altKey || !MERGE_TYPES.some((type) => types.includes(type))) {
+          if (merging) setMerging(false);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer!.dropEffect = 'copy';
+        if (!merging) setMerging(true);
+      }}
+      onDragLeave={() => merging && setMerging(false)}
+      onDrop={(event) => {
+        if (!event.altKey) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setMerging(false);
+        if (task.source?.kind === 'event') return client.notify(CANNOT_MERGE_EVENTS);
+        merge(event);
+      }}
       onDragStart={(event) => {
         event.dataTransfer?.setData(DRAG_TYPE, task.id);
         if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
@@ -232,6 +314,12 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
         />
       ) : (
         <span class="times">
+          {task.source && (
+            // The tool's icon; a click opens the item there (Sunsama's integrated task card).
+            <ExternalLink className="source-open" href={sourceUrl(task.source, view.state.settings)} label={`Open ${task.source.key} in ${toolName(task.source, view.state.settings.emailClient)}`}>
+              <SourceIcon kind={task.source.kind} />
+            </ExternalLink>
+          )}
           <TimerButton task={task} />
           {actual > 0 && <span class={`actual${running ? ' is-running' : ''}`} title="Actual time">{running ? formatClock(actual) : formatMinutes(actual)}</span>}
           {actual > 0 && <span class="slash">/</span>}

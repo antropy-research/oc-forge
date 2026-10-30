@@ -13,6 +13,7 @@ import { useUi } from '../lib/ui.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { RepeatSection } from './RepeatSection.tsx';
+import { MergedSection } from './MergedSection.tsx';
 import { LinearTaskSection } from './LinearPanel.tsx';
 import { AgentSection } from './Agents.tsx';
 import { GitHubTaskSection } from './GitHubPanel.tsx';
@@ -434,6 +435,7 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
         <GitHubTaskSection task={task} />
         <GoogleTaskSection task={task} />
         <LinkTaskSection task={task} />
+        <MergedSection task={task} />
         <RepeatSection task={task} />
         <ActualTime task={task} />
         <Activity task={task} />

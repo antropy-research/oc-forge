@@ -4,11 +4,12 @@ import { addDays, clockLabel, monthDay, zonedDateMinutes } from '../../src/domai
 import { taskForGoogleTask, taskForMail, type GoogleTaskItem, type MailItem } from '../../src/domain/google.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
-import { MAIL_SEARCHES, type GoogleDrag } from '../lib/google.ts';
+import type { GoogleDrag } from '../lib/google.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { PlanActions } from './PlanActions.tsx';
 import { TasksView } from './TasksView.tsx';
 import { CalendarOverlays } from './calendar/Overlays.tsx';
+import { GmailItems, GmailTaskSection } from './GmailPanel.tsx';
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -80,97 +81,8 @@ export const GoogleTasksItems = () => {
   );
 };
 
-const senderName = (from: string): string => /^\s*"?([^"<]+?)"?\s*</.exec(from)?.[1]?.trim() || from.replace(/[<>]/g, '').trim();
-
-const MailRow = ({ item }: { item: MailItem }) => {
-  const { google, host, client } = usePlanner();
-  const view = useView();
-  const { setUi } = useUi();
-  const linked = taskForMail(view.state, item);
-  const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const when = item.date ? zonedDateMinutes(item.date, zone) : null;
-  return (
-    <li class={`issue-row mail-row${item.unread ? ' is-unread' : ''}`} draggable aria-label={item.subject} onDragStart={(event) => dragStart(event, { kind: 'mail', item })}>
-      <span class="issue-main">
-        <span class="issue-title">{item.subject}</span>
-        <span class="issue-meta">
-          <span>{senderName(item.from)}</span>
-          {when && <span>{when.date === view.today ? clockLabel(when.minutes) : monthDay(when.date)}</span>}
-          <button class="link" onClick={() => void host.openUrl(item.url)} aria-label={`Open "${item.subject}" in Gmail`}>Open</button>
-        </span>
-        {item.snippet && <span class="item-snippet">{item.snippet}</span>}
-      </span>
-      {linked ? (
-        <button class="link issue-planned" onClick={() => setUi({ openTaskId: linked.id })} aria-label={`Open the task for ${item.subject} (${plannedLabel(linked, view.today)})`}>{plannedLabel(linked, view.today)}</button>
-      ) : (
-        <PlanActions label={item.subject} onPlan={(placement) => void google.planMail(item, placement)} />
-      )}
-      {google.allows(item.account, 'tasks') && (
-        <button
-          class="link mail-to-tasks"
-          aria-label={`Add "${item.subject}" to Google Tasks`}
-          title="Add to Tasks, as Gmail does: a task in your default list, with the email's link in its details"
-          onClick={() =>
-            void google
-              .addMailToTasks(item)
-              .then(() => client.notify(`Added to Google Tasks: ${item.subject}`))
-              .catch((error) => client.notify(`Google Tasks did not take it: ${error instanceof Error ? error.message : String(error)}`))
-          }
-        >
-          Add to Tasks
-        </button>
-      )}
-    </li>
-  );
-};
-
-/** Gmail messages to turn into tasks, as Sunsama does with email. */
-export const GmailItems = () => {
-  const { google } = usePlanner();
-  const gv = useGoogle();
-  const [term, setTerm] = useState('');
-  const accounts = gv.status ? google.accountsWith('mail') : [];
-  useEffect(() => {
-    if (gv.mailAccount && gv.mail.length === 0 && !gv.mailLoading && !gv.mailError) void google.searchMail();
-  }, [gv.mailAccount]);
-  if (!gv.status) return <p class="hint">Checking Google…</p>;
-  if (!accounts.length) return <NotConnected what="Gmail" />;
-  const preset = MAIL_SEARCHES.find((item) => item.query === gv.mailQuery);
-  return (
-    <div class="linear-issues">
-      <div class="linear-toolbar">
-        {accounts.length > 1 && (
-          <select aria-label="Gmail account" value={gv.mailAccount ?? ''} onChange={(event) => google.setMailAccount(event.currentTarget.value)}>
-            {accounts.map((account) => <option key={account.email} value={account.email}>{account.email}</option>)}
-          </select>
-        )}
-        <select aria-label="Messages to show" value={preset ? preset.query : ''} onChange={(event) => { setTerm(''); void google.searchMail(event.currentTarget.value); }}>
-          {MAIL_SEARCHES.map((item) => <option key={item.query} value={item.query}>{item.label}</option>)}
-          {!preset && <option value="">Search results</option>}
-        </select>
-        <button class="icon-button" aria-label="Refresh Gmail" onClick={() => void google.searchMail()}>↻</button>
-      </div>
-      <input
-        class="linear-search"
-        type="search"
-        aria-label="Search Gmail"
-        placeholder="Search mail, as in Gmail (from:ann has:attachment)"
-        value={term}
-        onInput={(event) => setTerm(event.currentTarget.value)}
-        onKeyDown={(event) => event.key === 'Enter' && term.trim() && void google.searchMail(term.trim())}
-      />
-      {gv.mailError && <p class="feed-errors" role="alert">{gv.mailError}</p>}
-      {gv.mailLoading && gv.mail.length === 0 && <p class="hint">Loading…</p>}
-      {!gv.mailLoading && gv.mail.length === 0 && !gv.mailError && <p class="hint">No messages here.</p>}
-      <ul class="issue-list">{gv.mail.map((item) => <MailRow key={item.id} item={item} />)}</ul>
-      {gv.mailNext && (
-        <button class="link load-more" disabled={gv.mailLoading} onClick={() => void google.searchMail(gv.mailQuery, true)}>
-          {gv.mailLoading ? 'Loading…' : 'Load more messages'}
-        </button>
-      )}
-    </div>
-  );
-};
+// Gmail's list and an email task's section live in GmailPanel.tsx (labels, filters, the thread, the actions).
+export { GmailItems } from './GmailPanel.tsx';
 
 export const GooglePage = () => {
   const { google } = usePlanner();
@@ -263,20 +175,7 @@ export const GoogleTaskSection = ({ task }: { task: Task }) => {
       </section>
     );
   }
-  if (source?.kind === 'email') {
-    return (
-      <section class="detail-section" aria-label="Gmail">
-        <h3>
-          Gmail
-          {source.account && <span class="ws-badge">{source.account}</span>}
-        </h3>
-        <div class="row">
-          <button class="link" onClick={() => void host.openUrl(source.url)}>Open in Gmail</button>
-          <button class="link danger" onClick={unlink}>Unlink</button>
-        </div>
-      </section>
-    );
-  }
+  if (source?.kind === 'email') return <GmailTaskSection task={task} />;
   if (source || !gv.lists.length || task.completedAt) return null;
   return <AddToGoogleTasks task={task} />;
 };

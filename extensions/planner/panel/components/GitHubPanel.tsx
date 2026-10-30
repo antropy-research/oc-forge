@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
-import { shortKey, taskForGitHub, type GitHubItem } from '../../src/domain/github.ts';
+import { repoOfSearch, shortKey, taskForGitHub, withRepo, type GitHubItem } from '../../src/domain/github.ts';
 import { GITHUB_DRAG_TYPE, useGitHub, usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import type { GitHubListKind } from '../lib/github.ts';
@@ -109,9 +109,19 @@ export const GitHubItems = () => {
     const timer = setTimeout(() => github.setText(text), 400);
     return () => clearTimeout(timer);
   }, [text]);
+  useEffect(() => {
+    if (gv.status?.available) void github.loadRepos();
+  }, [gv.status?.available]);
   if (!gv.status) return <p class="hint">Checking GitHub…</p>;
   if (!gv.status.available) return <GitHubSignIn />;
   const kindLabel = KINDS.find((kind) => kind.id === gv.kind)?.label ?? 'GitHub';
+  const repo = repoOfSearch(text);
+  // A repository chosen narrows the search to it (its repo: term), as typing one does.
+  const chooseRepo = (value: string) => {
+    const next = withRepo(text, value || null);
+    setText(next);
+    github.setText(next);
+  };
   return (
     <div class="linear-issues">
       <div class="linear-toolbar">
@@ -120,6 +130,13 @@ export const GitHubItems = () => {
         </select>
         <button class="icon-button" aria-label="Refresh GitHub" title="Refresh: reads again as many as are shown" onClick={() => void github.refresh()}>↻</button>
       </div>
+      {(gv.repos?.length || repo) && (
+        <select class="gh-repo" aria-label="Repository" title="Your repositories, the ones you most recently contributed to first" value={repo ?? ''} onChange={(event) => chooseRepo(event.currentTarget.value)}>
+          <option value="">All repositories</option>
+          {repo && !gv.repos?.some((name) => name.toLowerCase() === repo.toLowerCase()) && <option value={repo}>{repo}</option>}
+          {(gv.repos ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      )}
       <input
         class="gh-search"
         type="search"

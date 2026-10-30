@@ -3,8 +3,10 @@ import { BACKLOG_BUCKETS, type Placement } from '../../src/domain/types.ts';
 import { formatMinutes, monthDay } from '../../src/domain/dates.ts';
 import { parseQuickAdd, type QuickAdd } from '../../src/domain/quickAdd.ts';
 import { suggestFor } from '../../src/domain/suggest.ts';
+import { mergeTarget } from '../../src/domain/merge.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { addParsedTask, urlHint } from '../lib/addTask.ts';
+import { LinearUrlStatus, useLinearUrlStatus } from './LinearUrlStatus.tsx';
 
 const placementLabel = (placement: Placement): string =>
   placement.kind === 'day' ? monthDay(placement.date) : BACKLOG_BUCKETS.find((bucket) => bucket.id === placement.bucket)!.label;
@@ -18,6 +20,19 @@ const Chips = ({ parsed }: { parsed: QuickAdd }) => (
     {parsed.objective && <span class="chip">◎ {parsed.objective}</span>}
   </div>
 );
+
+/** Where `>` merges the new task (Sunsama's merge during task creation): the task found, or that none is. */
+export const MergeChip = ({ parsed, fallback }: { parsed: QuickAdd; fallback: Placement }) => {
+  const view = useView();
+  if (!parsed.merge) return null;
+  const placement = parsed.placement ?? fallback;
+  const target = mergeTarget(view.state, parsed.merge, placement.kind === 'day' ? placement.date : null, view.today);
+  return (
+    <p class={`hint merge-chip${target ? '' : ' danger'}`} role="status">
+      {target ? <>Merges into <strong>{target.title}</strong> as a subtask</> : <>No open task matches "{parsed.merge}": it is added as its own task</>}
+    </p>
+  );
+};
 
 /** What history would fill in for the fields left empty (when that setting is on). */
 const SuggestionChips = ({ parsed }: { parsed: QuickAdd }) => {
@@ -45,6 +60,7 @@ export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { place
   const [text, setText] = useState('');
   const input = useRef<HTMLInputElement>(null);
   const parsed = text.trim() ? parseQuickAdd(text, view.today, view.state.settings.weekStartsOn) : null;
+  const status = useLinearUrlStatus(parsed?.title ?? '');
 
   // The `autofocus` attribute is blocked in a cross-origin frame; focusing after the click is not.
   useEffect(() => {
@@ -53,7 +69,7 @@ export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { place
 
   const submit = () => {
     if (!parsed || !parsed.title.trim()) return;
-    void addParsedTask({ client, linear, github, google }, parsed, placement, edge, view.today, folderId);
+    void addParsedTask({ client, linear, github, google }, parsed, placement, edge, view.today, folderId, { linearStateId: status.chosen });
     setText('');
   };
 
@@ -84,7 +100,9 @@ export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { place
         }}
       />
       {parsed && <Chips parsed={parsed} />}
+      {parsed && <MergeChip parsed={parsed} fallback={placement} />}
       {parsed && urlHint(parsed.title) && <p class="hint url-hint" role="status">{urlHint(parsed.title)}</p>}
+      <LinearUrlStatus status={status} />
       {parsed && <SuggestionChips parsed={parsed} />}
     </div>
   );

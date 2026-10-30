@@ -12,6 +12,16 @@ import { GoogleError } from './google.ts';
 import type { GoogleData, TimeboxEvent } from './googleData.ts';
 import type { ExecuteResult, PersistListener } from './planner.ts';
 
+/**
+ * The calendar a task's new working sessions are written to: its channel's (Sunsama's "Timeboxing Channel", which
+ * overrides the default), else "Default for tasks"; null keeps them in the Planner.
+ */
+export const timeboxTarget = (state: PlannerState, taskId: string): { account: string; calendarId: string } | null => {
+  const channelId = state.tasks[taskId]?.channelId;
+  const channel = channelId && !state.channels[channelId]?.deletedAt ? state.settings.channelTimebox[channelId] : undefined;
+  return channel ?? state.settings.googleTimebox;
+};
+
 /** A working session's event, as read from its calendar. */
 export interface SessionEvent {
   blockId: string;
@@ -228,11 +238,12 @@ export class GoogleTimeboxes {
     while (this.queues.size) await Promise.all([...this.queues.values()]);
   }
 
-  /** The calendars linked sessions between two instants are in, plus the one new sessions go to. */
+  /** The calendars linked sessions between two instants are in, plus the ones new sessions go to (the default, the channels'). */
   calendarsFor(state: PlannerState, timeMin: string, timeMax: string): { account: string; calendarId: string }[] {
     const found = new Map<string, { account: string; calendarId: string }>();
-    const target = state.settings.googleTimebox;
-    if (target) found.set(calendarKey(target.account, target.calendarId), target);
+    for (const target of [state.settings.googleTimebox, ...Object.values(state.settings.channelTimebox)]) {
+      if (target) found.set(calendarKey(target.account, target.calendarId), { account: target.account, calendarId: target.calendarId });
+    }
     for (const block of Object.values(state.blocks)) {
       if (!block.google || block.start < timeMin || block.start >= timeMax) continue;
       found.set(calendarKey(block.google.account, block.google.calendarId), { account: block.google.account, calendarId: block.google.calendarId });
@@ -298,14 +309,13 @@ export class GoogleTimeboxes {
   }
 
   private observe(before: PlannerState, after: PlannerState): void {
-    const target = after.settings.googleTimebox;
     // Renamed, or planning a Google task whose visibility changed: its sessions are written again.
     const renamed = new Set(Object.values(after.tasks).filter((task) => before.tasks[task.id] && (before.tasks[task.id]!.title !== task.title || sessionVisibility(before, task.id) !== sessionVisibility(after, task.id))).map((task) => task.id));
     for (const block of Object.values(after.blocks)) {
       const previous = before.blocks[block.id];
       const moved = !previous || previous.start !== block.start || previous.end !== block.end;
       const linked = Boolean(block.google ?? this.created.get(block.id));
-      if (linked ? moved || renamed.has(block.taskId) : Boolean(target) && moved) this.enqueue(block.id, () => this.write(block.id));
+      if (linked ? moved || renamed.has(block.taskId) : Boolean(timeboxTarget(after, block.taskId)) && moved) this.enqueue(block.id, () => this.write(block.id));
     }
     for (const previous of Object.values(before.blocks)) {
       if (after.blocks[previous.id]) continue;
@@ -335,7 +345,7 @@ export class GoogleTimeboxes {
     // Gone meanwhile; its removal comes next in the queue.
     if (!block) return;
     const link = block.google ?? this.created.get(blockId) ?? null;
-    const target = link ?? state.settings.googleTimebox;
+    const target = link ?? timeboxTarget(state, block.taskId);
     if (!target) return;
     const visibility = sessionVisibility(state, block.taskId);
     const timebox: TimeboxEvent = { blockId, taskId: block.taskId, title: state.tasks[block.taskId]?.title ?? 'Planner', start: block.start, end: block.end, ...(visibility ? { visibility } : {}) };

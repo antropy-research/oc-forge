@@ -3,7 +3,7 @@
 // an item of a connected tool, imported as a task linked to it (a Linear
 // issue, a GitHub issue or pull request, a Gmail message), or any other page,
 // a task with that page as its backlink. A Google Calendar event, which
-// Sunsama links as a page, the Planner looks up and plans as "Plan as task"
+// Sunsama links as a page, the Planner looks up and adds as "Add to tasks"
 // does.
 import { parseGitHubUrl } from './github.ts';
 import { parseLinearUrl } from './linear.ts';

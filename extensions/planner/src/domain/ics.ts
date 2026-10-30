@@ -49,6 +49,8 @@ export interface CalendarEvent {
   pendingTasks?: GoogleTaskItem[];
   /** A Google Calendar event: where it lives, and what may be done with it. */
   google?: GoogleEventRef;
+  /** Marked free ("transparent"): it blocks no time even when it is timed (Sunsama's "non-blocking"). */
+  transparent?: boolean;
 }
 
 // Windows zone names that Outlook writes into TZID.

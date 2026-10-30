@@ -13,7 +13,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
 
-export const GOOGLE_FEATURES = ['calendar', 'tasks', 'mail', 'drive'] as const;
+export const GOOGLE_FEATURES = ['calendar', 'tasks', 'mail', 'drive', 'mailActions', 'contacts'] as const;
 export type GoogleFeature = (typeof GOOGLE_FEATURES)[number];
 
 /**
@@ -25,6 +25,10 @@ export const FEATURE_SCOPES: Record<GoogleFeature, readonly string[]> = {
   tasks: ['https://www.googleapis.com/auth/tasks'],
   mail: ['https://www.googleapis.com/auth/gmail.readonly'],
   drive: ['https://www.googleapis.com/auth/drive.metadata.readonly'],
+  // Acting on email from its task (archive, trash, read and unread, stars, labels): modify, never delete outright.
+  mailActions: ['https://www.googleapis.com/auth/gmail.modify'],
+  // Searching people to invite (Sunsama's Google Contacts integration): the contacts, and the people emailed, read only.
+  contacts: ['https://www.googleapis.com/auth/contacts.readonly', 'https://www.googleapis.com/auth/contacts.other.readonly'],
 };
 const IDENTITY_SCOPES = ['openid', 'email'];
 
@@ -34,7 +38,7 @@ const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 /** Who an account is (its work or school domain), for one connected before the Planner kept that. */
 const USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 /** The Google APIs the Planner calls; nothing else goes out with a token. */
-const API_ORIGINS = ['https://www.googleapis.com/', 'https://tasks.googleapis.com/', 'https://gmail.googleapis.com/'];
+const API_ORIGINS = ['https://www.googleapis.com/', 'https://tasks.googleapis.com/', 'https://gmail.googleapis.com/', 'https://people.googleapis.com/'];
 /** The host gives up on a service request after 20 seconds, and then restarts the service. */
 const TIMEOUT_MS = 12_000;
 const SIGN_IN_MS = 10 * 60_000;

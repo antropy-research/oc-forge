@@ -168,7 +168,7 @@ export const DELETE_CHOICES: { id: DeleteScope; label: string }[] = [
   { id: 'all', label: 'All tasks' },
 ];
 
-export type GoogleFeature = 'calendar' | 'tasks' | 'mail' | 'drive';
+export type GoogleFeature = 'calendar' | 'tasks' | 'mail' | 'drive' | 'mailActions' | 'contacts';
 
 export interface GoogleAccountView {
   email: string;
@@ -1638,6 +1638,8 @@ export class GoogleStore {
       .filter((calendar) => calendar.google && gone(calendar.google.account))
       .map((calendar) => ({ type: 'calendar.removed', calendarId: calendar.id }));
     if (state.settings.googleTimebox && gone(state.settings.googleTimebox.account)) bodies.push({ type: 'settings.updated', patch: { googleTimebox: null } });
+    const channels = Object.entries(state.settings.channelTimebox).filter(([, target]) => !gone(target.account));
+    if (channels.length !== Object.keys(state.settings.channelTimebox).length) bodies.push({ type: 'settings.updated', patch: { channelTimebox: Object.fromEntries(channels) } });
     if (bodies.length) await this.client.dispatch(bodies);
   }
 

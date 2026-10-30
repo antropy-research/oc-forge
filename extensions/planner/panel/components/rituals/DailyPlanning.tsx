@@ -19,6 +19,8 @@ import { LinearIssues } from '../LinearPanel.tsx';
 import { GitHubItems } from '../GitHubPanel.tsx';
 import { GmailItems, GoogleTasksItems } from '../GooglePanel.tsx';
 import { DayTargetsContext, planningTargets } from '../../lib/dayTargets.ts';
+import { MeetingsPrompt } from './MeetingsPrompt.tsx';
+import { addMeetingCommands, eventKey, taskForEvent } from '../../../src/domain/meetings.ts';
 
 const STEPS = ['Review yesterday', 'Add tasks', 'Estimate', 'Prioritize & timebox', 'Finalize'];
 
@@ -81,13 +83,19 @@ const Sources = ({ date }: { date: DateKey }) => {
       {tab === 'meetings' && (
         <ul class="source-list">
           {feed.events.filter((event) => !event.allDay).map((event) => {
-            const start = zonedDateMinutes(event.start, view.state.settings.timezone ?? 'UTC').minutes;
+            const zone = view.state.settings.timezone ?? 'UTC';
+            const start = zonedDateMinutes(event.start, zone).minutes;
             const minutes = Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60_000);
+            // A Google event becomes a task linked to it (Sunsama's "Add to tasks"); a feed's, a task with its title.
+            const key = eventKey(event);
+            const linked = key ? taskForEvent(view.state, key) : null;
+            const added = key ? Boolean(linked && !linked.deletedAt) : titles.has(event.title);
+            const add = () => (key ? void client.dispatch(addMeetingCommands(view.state, event, zone, newId), { undo: 'Added to tasks' }) : addTask(event.title, { plannedMinutes: minutes }));
             return (
               <li key={event.id}>
                 <span>{event.title}</span>
                 <span class="muted">{hhmm(Math.floor(start))} · {formatMinutes(minutes)}</span>
-                <button disabled={titles.has(event.title)} onClick={() => addTask(event.title, { plannedMinutes: minutes })}>{titles.has(event.title) ? 'Added' : 'Add'}</button>
+                <button disabled={added} onClick={add}>{added ? 'Added' : 'Add'}</button>
               </li>
             );
           })}
@@ -180,6 +188,7 @@ export const DailyPlanning = ({ onDone }: { onDone: () => void }) => {
       )}
       {step === 1 && (
         <div class="ritual-section">
+          <MeetingsPrompt date={date} />
           <DayColumn date={date} wide />
         </div>
       )}

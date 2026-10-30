@@ -6,7 +6,7 @@ import { EventStore } from '../service/store.ts';
 import { Planner } from '../service/planner.ts';
 import { GoogleError } from '../service/google.ts';
 import type { TimeboxEvent } from '../service/googleData.ts';
-import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes, calendarKey, type CalendarRead } from '../service/googleTimeboxes.ts';
+import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes, calendarKey, timeboxTarget, type CalendarRead } from '../service/googleTimeboxes.ts';
 import type { RawGoogleEvent } from '../src/domain/google.ts';
 
 const dirs: string[] = [];
@@ -119,6 +119,30 @@ describe('working sessions as Google Calendar events', () => {
     run({ type: 'block.deleted', blockId: 'b1' });
     await timeboxes.settled();
     expect(google.calls).toEqual([]);
+  });
+
+  test("a channel's sessions go to its calendar (Sunsama's Timeboxing Channel), over the default and without one; the rest to the default", async () => {
+    const { planner, google, timeboxes, run } = await setup(false);
+    const PERSONAL = { account: ME, calendarId: 'personal@group.calendar.google.com' };
+    run(
+      { type: 'channel.created', channel: { id: 'family', name: 'family', color: '#1c7ed6', context: 'personal' } },
+      { type: 'task.created', task: { id: 't2', title: 'Dentist', placement: { kind: 'day', date: '2026-10-26' }, position: 2048, channelId: 'family' } },
+      { type: 'settings.updated', patch: { channelTimebox: { family: PERSONAL } } },
+    );
+    // No default ("Default for tasks" off): only the channel's sessions are written, to its calendar.
+    run(block('b1', '2026-10-26T17:00:00.000Z', '2026-10-26T18:00:00.000Z'), { type: 'block.created', block: { id: 'b2', taskId: 't2', start: '2026-10-26T19:00:00.000Z', end: '2026-10-26T20:00:00.000Z' } });
+    await timeboxes.settled();
+    expect(planner.state.blocks.b1!.google).toBeUndefined();
+    expect(planner.state.blocks.b2!.google).toEqual({ ...PERSONAL, eventId: 'ev1' });
+    // With a default, the channel's still goes to its own; another task's to the default.
+    run({ type: 'settings.updated', patch: { googleTimebox: TARGET } }, { type: 'block.created', block: { id: 'b3', taskId: 't2', start: '2026-10-26T21:00:00.000Z', end: '2026-10-26T22:00:00.000Z' } }, block('b4', '2026-10-26T15:00:00.000Z', '2026-10-26T16:00:00.000Z'));
+    await timeboxes.settled();
+    expect([planner.state.blocks.b3!.google?.calendarId, planner.state.blocks.b4!.google?.calendarId]).toEqual([PERSONAL.calendarId, 'primary']);
+    expect([...google.events.values()].map((event) => [event.calendarId, event.timebox.title])).toEqual([[PERSONAL.calendarId, 'Dentist'], [PERSONAL.calendarId, 'Dentist'], ['primary', 'Write tests']]);
+    // Both calendars are read for sessions moved or deleted there; a deleted channel's link is not followed.
+    expect(timeboxes.calendarsFor(planner.state, '2026-10-26T07:00:00.000Z', '2026-10-27T07:00:00.000Z')).toEqual([TARGET, PERSONAL]);
+    run({ type: 'channel.deleted', channelId: 'family' });
+    expect(timeboxTarget(planner.state, 't2')).toEqual(TARGET);
   });
 
   test('an event deleted in Google, then its session moved here, is made again', async () => {

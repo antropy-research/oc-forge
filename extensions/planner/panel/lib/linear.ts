@@ -7,6 +7,7 @@
 // it (its own filter, plus what its display hides), page after page until
 // Linear has no more; temporary filters go to Linear as an IssueFilter, so the
 // answer is complete. The Linear page and the side panels keep a list each.
+import { mergedDone, mergedImports, planSubtaskSourceSync, subtaskSources } from '../../src/domain/merge.ts';
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 import type { Command, EventBody } from '../../src/domain/events.ts';
 import {
@@ -124,10 +125,13 @@ export type ListId = 'page' | 'side';
 export type LinearMode = 'issues' | 'projects' | 'planned';
 
 /** A question to ask before changing an issue in Linear. */
+/** Sunsama's "Show prompt to update status in Linear": after completing, planning (the Planner's) or importing an issue. */
 export interface LinearPrompt {
-  kind: 'complete' | 'start';
+  kind: 'complete' | 'start' | 'import';
   taskId: string;
   key: string;
+  /** An issue merged into the task (a subtask with its link), not the task's own. */
+  subtaskId?: string;
 }
 
 export interface LinearTeam {
@@ -284,7 +288,9 @@ const isSource = (value: unknown): value is LinearSource => {
 export const displayOf = (list: Pick<IssueList, 'display' | 'source'>, settings: Settings, listId: ListId = 'page'): IssueDisplay => {
   if (list.display) return list.display;
   const display = settingsDisplay({ ...settings, linearDisplay: { ...DEFAULT_SETTINGS.linearDisplay, ...settings.linearDisplay } });
-  return listId === 'side' ? { ...display, showCompleted: 'none' } : display;
+  // The panel beside a day is Sunsama's: its My issues keep completed issues for five days; a search, open ones.
+  const mine = list.source.kind === 'assigned' || list.source.kind === 'created' || list.source.kind === 'subscribed';
+  return listId === 'side' ? { ...display, showCompleted: mine ? '5days' : 'none' } : display;
 };
 
 /** Whether a changed issue still belongs in a list, judged as Linear would by its filter and display. */
@@ -758,6 +764,46 @@ export class LinearStore {
   }
 
   /** Move the issue behind `task` to its team's first completed or started state. */
+  /** The issue a prompt is about: the task's own, or one merged into it. */
+  promptSource(prompt: LinearPrompt, state: PlannerState = this.client.getView().state): TaskSourceRef | null {
+    const task = state.tasks[prompt.taskId];
+    const source = prompt.subtaskId ? task?.subtasks.find((subtask) => subtask.id === prompt.subtaskId)?.source : task?.source;
+    return source?.kind === 'linear' ? source : null;
+  }
+
+  /** The workflow states of a linked task's issue's team, in workflow order (the status prompt's choices). */
+  statesForTask(task: Task): Promise<LinearState[]> {
+    return this.statesForSource(task.source ?? null);
+  }
+
+  /** The workflow states of an issue's team, by its link (a task's, or a merged subtask's). */
+  async statesForSource(source: TaskSourceRef | null): Promise<LinearState[]> {
+    if (source?.kind !== 'linear') return [];
+    const workspaceId = this.workspaceOf(source);
+    if (!workspaceId || !this.workspace(workspaceId)) return [];
+    const teamId = source.teamId ?? (await this.issueIn(workspaceId, source.id))?.team.id;
+    return teamId ? this.statesOf(workspaceId, teamId) : [];
+  }
+
+  /** An issue's team's states (a pasted issue's, to choose its status before it is added). */
+  statesForIssue(issue: LinearIssue): Promise<LinearState[]> {
+    const workspaceId = issue.workspaceId ?? this.hostWorkspace?.id ?? null;
+    return workspaceId && this.workspace(workspaceId) ? this.statesOf(workspaceId, issue.team.id) : Promise.resolve([]);
+  }
+
+  /** Move the issue behind a linked task to one of its team's states (the status prompt's choice). */
+  setStatus(task: Task, stateId: string): Promise<boolean> {
+    const source = task.source;
+    if (source?.kind !== 'linear') return Promise.resolve(false);
+    return this.moveTo({ id: source.id, key: source.key, teamId: source.teamId, workspaceId: this.workspaceOf(source) }, { stateId }, task);
+  }
+
+  /** Move a merged issue (a subtask's link): to a state of its team, or to its first of a type; its subtask follows at the next sync. */
+  moveSource(source: TaskSourceRef, to: 'completed' | 'started' | { stateId: string }): Promise<boolean> {
+    if (source.kind !== 'linear') return Promise.resolve(false);
+    return this.moveTo({ id: source.id, key: source.key, teamId: source.teamId, workspaceId: this.workspaceOf(source) }, to, null);
+  }
+
   moveIssue(task: Task, type: 'completed' | 'started'): Promise<boolean> {
     const source = task.source;
     if (source?.kind !== 'linear') return Promise.resolve(false);
@@ -908,16 +954,24 @@ export class LinearStore {
     return this.view.workspaces.find((workspace) => workspace.id === id) ?? null;
   }
 
-  answerPrompt(answer: 'yes' | 'no' | 'always'): void {
+  /** The prompt's answer: the state chosen (or, without one, Done or In Progress); Always makes completing or planning do it by itself. */
+  answerPrompt(answer: 'yes' | 'no' | 'always', stateId?: string): void {
     const prompt = this.view.prompt;
     this.set({ prompt: null });
     if (!prompt || answer === 'no') return;
     const task = this.client.getView().state.tasks[prompt.taskId];
     if (!task) return;
-    if (answer === 'always') {
+    if (prompt.subtaskId) {
+      const source = this.promptSource(prompt);
+      if (answer === 'always' && prompt.kind === 'complete') void this.client.dispatch([{ type: 'settings.updated', patch: { linearOnComplete: 'complete' } }]);
+      if (source) void this.moveSource(source, stateId ? { stateId } : prompt.kind === 'complete' ? 'completed' : 'started');
+      return;
+    }
+    if (answer === 'always' && prompt.kind !== 'import') {
       void this.client.dispatch([{ type: 'settings.updated', patch: prompt.kind === 'complete' ? { linearOnComplete: 'complete' } : { linearOnPlan: 'start' } }]);
     }
-    void this.moveIssue(task, prompt.kind === 'complete' ? 'completed' : 'started');
+    if (stateId) void this.setStatus(task, stateId);
+    else void this.moveIssue(task, prompt.kind === 'complete' ? 'completed' : 'started');
   }
 
   /** What filters offer and boards need, for the given workspaces: read once, then kept for a while. */
@@ -978,7 +1032,7 @@ export class LinearStore {
     return index < 0 ? null : { index, total: this.order.length };
   }
 
-  private async moveTo(target: { id: string; key: string; teamId?: string; workspaceId: string | null }, type: string, task: Task | null): Promise<boolean> {
+  private async moveTo(target: { id: string; key: string; teamId?: string; workspaceId: string | null }, type: string | { stateId: string }, task: Task | null): Promise<boolean> {
     if (this.view.moving.has(target.id)) return false;
     this.set({ moving: new Set([...this.view.moving, target.id]) });
     try {
@@ -986,8 +1040,9 @@ export class LinearStore {
       if (!workspaceId || !this.workspace(workspaceId)) throw new Error('its Linear workspace is not connected');
       const teamId = target.teamId ?? (await this.issueIn(workspaceId, target.id))?.team.id;
       if (!teamId) throw new Error('the issue was not found');
-      const state = stateOfType(await this.statesOf(workspaceId, teamId), type);
-      if (!state) throw new Error(`its team has no ${STATE_WORDS[type] ?? type} state`);
+      const states = await this.statesOf(workspaceId, teamId);
+      const state = typeof type === 'string' ? stateOfType(states, type) : states.find((item) => item.id === type.stateId);
+      if (!state) throw new Error(typeof type === 'string' ? `its team has no ${STATE_WORDS[type] ?? type} state` : 'its team has no such state');
       const data = await this.graphqlIn<{ issueUpdate: { success: boolean; issue: LinearIssue | null } }>(workspaceId, SET_STATE_MUTATION, { id: target.id, stateId: state.id });
       if (!data.issueUpdate.success || !data.issueUpdate.issue) throw new Error('Linear did not accept the change');
       const issue = inWorkspace(data.issueUpdate.issue, workspaceId);
@@ -1042,12 +1097,34 @@ export class LinearStore {
       // Only surfaces with room for the question ask it.
       if (this.surface !== 'status') this.set({ prompt });
     };
+    const made = commands.flatMap((command) => (command.type === 'task.created' && command.task.source ? [command.task.source] : []));
     for (const command of commands) {
+      // Issues merged into a task stay integrated (Sunsama's merge): checking one off, or merging one straight in from
+      // the panel, asks as the task's own would.
+      if (command.type === 'task.updated' && command.patch.subtasks) {
+        for (const subtask of mergedDone(before.tasks[command.taskId], after.tasks[command.taskId])) {
+          const source = subtask.source!;
+          if (source.kind !== 'linear' || isClosedType(source.status?.type)) continue;
+          if (settings.linearOnComplete === 'complete') void this.moveSource(source, 'completed');
+          else if (settings.linearOnComplete === 'ask') ask({ kind: 'complete', taskId: command.taskId, key: source.key, subtaskId: subtask.id });
+        }
+        if (settings.linearImportPrompt) {
+          for (const subtask of mergedImports(before, after, command.taskId, made)) {
+            if (subtask.source?.kind === 'linear') ask({ kind: 'import', taskId: command.taskId, key: subtask.source.key, subtaskId: subtask.id });
+          }
+        }
+        continue;
+      }
       if (command.type === 'task.completed') {
         const task = after.tasks[command.taskId];
         if (task?.source?.kind !== 'linear' || isClosedType(task.source.status?.type)) continue;
         if (settings.linearOnComplete === 'complete') void this.moveIssue(task, 'completed');
         else if (settings.linearOnComplete === 'ask') ask({ kind: 'complete', taskId: task.id, key: task.source.key });
+        continue;
+      }
+      // Sunsama's import automation: right after an issue is imported, a prompt to update its status in Linear.
+      if (command.type === 'task.created' && command.task.source?.kind === 'linear' && settings.linearImportPrompt && !before.tasks[command.task.id]) {
+        ask({ kind: 'import', taskId: command.task.id, key: command.task.source.key });
         continue;
       }
       const plannedId = command.type === 'task.created' ? command.task.id : command.type === 'task.moved' ? command.taskId : null;
@@ -1064,7 +1141,8 @@ export class LinearStore {
 
   private async sync(linked: Record<string, LinearIssue>): Promise<void> {
     const { state, today } = this.client.getView();
-    const bodies = planLinearSync(state, new Map(Object.entries(linked)), { today, importCompletion: state.settings.linearImportCompletion });
+    const merged = new Map(Object.values(linked).map((issue) => [issue.id, { title: issue.title, status: { name: issue.state.name, type: issue.state.type, color: issue.state.color }, closed: isClosedType(issue.state.type) }]));
+    const bodies = [...planLinearSync(state, new Map(Object.entries(linked)), { today, importCompletion: state.settings.linearImportCompletion }), ...planSubtaskSourceSync(state, 'linear', merged)];
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'linear' });
   }
 
@@ -1396,7 +1474,15 @@ export class LinearStore {
 
   /** Issues behind open linked tasks, read from the workspace each lives in. */
   private async fetchLinked(): Promise<{ issues: Record<string, LinearIssue>; errors: Map<string, string>; asked: string[] }> {
-    const groups = [...linkedIssueIdsByWorkspace(this.client.getView().state, this.hostWorkspace?.id ?? null)].filter(([workspaceId]) => this.workspace(workspaceId));
+    const state = this.client.getView().state;
+    const fallback = this.hostWorkspace?.id ?? null;
+    // Linked tasks' issues, and issues merged into tasks (they stay synced, as in Sunsama), by workspace.
+    const byWorkspace = new Map(linkedIssueIdsByWorkspace(state, fallback));
+    for (const source of subtaskSources(state, 'linear')) {
+      const workspaceId = source.workspaceId ?? fallback;
+      if (workspaceId) byWorkspace.set(workspaceId, [...new Set([...(byWorkspace.get(workspaceId) ?? []), source.id])]);
+    }
+    const groups = [...byWorkspace].filter(([workspaceId]) => this.workspace(workspaceId));
     const issues: Record<string, LinearIssue> = {};
     const errors = new Map<string, string>();
     await Promise.all(

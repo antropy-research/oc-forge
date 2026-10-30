@@ -210,7 +210,7 @@ export const googleEvent = (event: RawGoogleEvent, calendarId: string, zone: str
   if (!event.id || event.status === 'cancelled') return null;
   if (event.extendedProperties?.private?.[PLANNER_BLOCK_KEY]) return null;
   const declined = Boolean(event.attendees?.some((attendee) => attendee.self && attendee.responseStatus === 'declined'));
-  const base = { id: `${calendarId}:${event.id}`, calendarId, title: event.summary?.trim() || '(No title)', location: event.location ?? '', ...(source ? { google: eventRef(event as RawGoogleEvent & { id: string }, source) } : {}) };
+  const base = { id: `${calendarId}:${event.id}`, calendarId, title: event.summary?.trim() || '(No title)', location: event.location ?? '', ...(source ? { google: eventRef(event as RawGoogleEvent & { id: string }, source) } : {}), ...(event.transparency === 'transparent' ? { transparent: true } : {}) };
   if (event.start?.date && isDateKey(event.start.date)) {
     const endDate = event.end?.date && isDateKey(event.end.date) && event.end.date > event.start.date ? event.end.date : null;
     const start = instantAt(event.start.date, 0, zone);

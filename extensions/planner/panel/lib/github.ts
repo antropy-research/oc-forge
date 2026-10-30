@@ -3,7 +3,8 @@
 // the list), planned as tasks, kept current while the panel is open; an issue
 // or a pull request found by its URL, pasted into a new task as in Sunsama.
 import type { EventBody } from '../../src/domain/events.ts';
-import { linkedGitHubIds, planGitHubSync, taskForGitHub, taskFromGitHub, type GitHubItem } from '../../src/domain/github.ts';
+import { linkedGitHubIds, planGitHubSync, taskForGitHub, taskFromGitHub, type GitHubItem, githubStatus } from '../../src/domain/github.ts';
+import { planSubtaskSourceSync, subtaskSourceIds } from '../../src/domain/merge.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import type { Placement } from '../../src/domain/types.ts';
@@ -34,6 +35,8 @@ export interface GitHubView {
   /** Words narrowing the list, in GitHub's search syntax (text, repo:owner/name, label:…). */
   text: string;
   loadingMore: boolean;
+  /** The repositories the viewer contributes to, most recently pushed first (null until read). */
+  repos: string[] | null;
 }
 
 /** One page of a list, as the service reads it. */
@@ -56,7 +59,7 @@ const REFRESH_MS = 5 * 60_000;
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export class GitHubStore {
-  private view: GitHubView = { status: null, kind: 'assigned', items: [], loading: false, error: null, total: 0, next: null, text: '', loadingMore: false };
+  private view: GitHubView = { status: null, kind: 'assigned', items: [], loading: false, error: null, total: 0, next: null, text: '', loadingMore: false, repos: null };
   /** The list being read: a newer kind or search makes an older answer moot. */
   private seq = 0;
   private readonly listeners = new Set<() => void>();
@@ -96,6 +99,17 @@ export class GitHubStore {
   }
 
   /** Words narrowing the list (GitHub's search syntax); the list is read again from its first page. */
+  /** The repositories to offer, read once (Sunsama surfaces the ones the viewer most recently contributed to). */
+  async loadRepos(): Promise<void> {
+    if (this.view.repos) return;
+    try {
+      const { repos } = await this.client.call<{ repos: string[] }>('GET', '/github/repos');
+      this.set({ repos });
+    } catch {
+      this.set({ repos: [] });
+    }
+  }
+
   setText(text: string): void {
     if (text === this.view.text) return;
     this.set({ text, items: [], total: 0, next: null });
@@ -158,13 +172,17 @@ export class GitHubStore {
 
   /** Linked tasks' items as GitHub has them now, all of them, a batch a request. */
   private async syncLinked(): Promise<void> {
-    const ids = linkedGitHubIds(this.client.getView().state);
+    // Linked tasks' items, and items merged into tasks (they stay synced, as in Sunsama).
+    const state = this.client.getView().state;
+    const ids = [...new Set([...linkedGitHubIds(state), ...subtaskSourceIds(state, 'github')])];
     const found = new Map<string, GitHubItem>();
     for (let index = 0; index < ids.length; index += LINKED_BATCH) {
       const answer = await this.client.call<{ items: GitHubItem[] }>('POST', '/github/items', { ids: ids.slice(index, index + LINKED_BATCH) });
       for (const item of answer.items) found.set(item.id, item);
     }
-    const bodies = planGitHubSync(this.client.getView().state, found);
+    const latest = this.client.getView().state;
+    const merged = new Map([...found].map(([id, item]) => [id, { title: item.title, status: githubStatus(item), closed: item.state !== 'OPEN' }]));
+    const bodies = [...planGitHubSync(latest, found), ...planSubtaskSourceSync(latest, 'github', merged)];
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'github' });
   }
 

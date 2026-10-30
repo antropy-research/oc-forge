@@ -22,12 +22,18 @@ export interface Subtask {
   id: string;
   title: string;
   done: boolean;
+  /** A task merged in (Sunsama's Merge tasks): what it kept, so Convert to task gives it back. */
+  notes?: string;
+  plannedMinutes?: number | null;
+  source?: TaskSourceRef;
 }
 
-/** An external object the task plans; the source stays authoritative for its state. */
-/** Where a linked task comes from, by name. */
-/** Where a task comes from; `link` is any other page, the task's backlink (Sunsama's "Tasks from URL"). */
-export const SOURCE_NAMES = { linear: 'Linear', github: 'GitHub', gtask: 'Google Tasks', email: 'Gmail', link: 'Link' } as const;
+/**
+ * Where a task comes from, by name: an external object the task plans (the source stays authoritative for its
+ * state); `link` is any other page, the task's backlink (Sunsama's "Tasks from URL"); `event` a Google Calendar
+ * event added to the tasks (Sunsama's meeting import).
+ */
+export const SOURCE_NAMES = { linear: 'Linear', github: 'GitHub', gtask: 'Google Tasks', email: 'Gmail', link: 'Link', event: 'Google Calendar' } as const;
 
 export interface TaskSourceRef {
   kind: keyof typeof SOURCE_NAMES;
@@ -54,6 +60,11 @@ export interface TaskSourceRef {
   /** A Google task's details and date last seen there: with `title`, what both sides last agreed on. */
   notes?: string;
   due?: DateKey | null;
+  /**
+   * A calendar event's times as last seen, whether other people are invited, its calendar, and whether the
+   * meeting import added it by itself (auto-sync) rather than the user.
+   */
+  event?: { calendarId: string; start: string; end: string; allDay: boolean; invitees: boolean; auto?: boolean };
 }
 
 /**
@@ -181,7 +192,8 @@ export type LinearGroupBy = (typeof LINEAR_GROUPS)[number];
 export const LINEAR_ORDERS = ['priority', 'updated', 'due', 'identifier', 'status', 'manual', 'created'] as const;
 export type LinearOrderBy = (typeof LINEAR_ORDERS)[number];
 /** Which completed and canceled issues a Linear list shows, as Linear's Display menu offers. */
-export const LINEAR_COMPLETED = ['all', 'day', 'week', 'month', '3months', '6months', 'year', 'none'] as const;
+/** Linear's windows for completed issues, and Sunsama's five days (its panel's My issues keep completed issues that long). */
+export const LINEAR_COMPLETED = ['all', 'day', '5days', 'week', 'month', '3months', '6months', 'year', 'none'] as const;
 export type LinearCompletedWindow = (typeof LINEAR_COMPLETED)[number];
 /** Issue properties a Linear row or card can show. */
 export const LINEAR_PROPERTIES = ['id', 'status', 'priority', 'assignee', 'labels', 'project', 'cycle', 'estimate', 'due', 'created', 'updated'] as const;
@@ -433,6 +445,19 @@ export interface CalendarSubscription {
   google?: { account: string; calendarId: string };
 }
 
+/** What the Planner can do to an email in Gmail: Sunsama's actions on an email task, and its import and completion automations. */
+export const GMAIL_ACTIONS = ['markRead', 'markUnread', 'archive', 'trash', 'star', 'unstar', 'addLabel', 'removeLabel'] as const;
+export type GmailActionKind = (typeof GMAIL_ACTIONS)[number];
+export interface GmailAction {
+  kind: GmailActionKind;
+  /** The label to apply or remove, by its name in Gmail (each account has its own ids). */
+  label?: string;
+}
+
+/** Kinds of calendar events Sunsama's meeting import leaves out ("Exclude certain types of events"). */
+export const MEETING_EXCLUSIONS = ['noAttendees', 'nonBlocking', 'oooHold', 'unconfirmed', 'multiDayAllDay'] as const;
+export type MeetingExclusion = (typeof MEETING_EXCLUSIONS)[number];
+
 export interface Settings {
   /** IANA zone that decides what "today" and midnight mean. Null until the panel reports one. */
   timezone: string | null;
@@ -466,6 +491,11 @@ export interface Settings {
   breakMinutes: number;
   /** Google calendar the Planner writes working sessions to, as events; null writes none. */
   googleTimebox: { account: string; calendarId: string } | null;
+  /**
+   * Sunsama's "Timeboxing Channel": a channel's tasks are timeboxed to its calendar instead of the default above (which
+   * is the fallback, and never overrides a channel's), by channel id.
+   */
+  channelTimebox: Record<string, { account: string; calendarId: string }>;
   /** Completing a task linked to a Google task: complete it there too, ask first, or leave it. */
   googleTasksOnComplete: 'ask' | 'complete' | 'nothing';
   /** Complete a task when its Google task is completed. */
@@ -494,6 +524,26 @@ export interface Settings {
   googleTaskListOrder?: string[];
   /** Named agents (an OpenCode agent and a model) to assign tasks to. */
   agentPresets: AgentPreset[];
+  /** Gmail: what is done to an email when it becomes a task, and when that task is completed (Sunsama's import and completion automations). */
+  gmailOnImport: GmailAction[];
+  gmailOnComplete: GmailAction[];
+  /** Ask which of them to do, email by email ("Show prompt"). */
+  gmailImportPrompt: boolean;
+  gmailCompletePrompt: boolean;
+  /** Where an email opens: Gmail, or Superhuman (Sunsama's "Custom email client"). */
+  emailClient: 'gmail' | 'superhuman';
+  /** Linear: right after an issue is imported, ask to update its status there (Sunsama's import automation). */
+  linearImportPrompt: boolean;
+  /** Meeting import: suggest the day's meetings in daily planning ("Show prompt"), or add them by themselves ahead of time ("Auto-sync"). */
+  meetingImport: 'prompt' | 'autoSync';
+  /** The calendars meetings come from (calendar subscription ids); none means the calendars shown. */
+  meetingCalendars: string[];
+  /** Kinds of events left out of the import (all of them at first, as in Sunsama). */
+  meetingExclusions: MeetingExclusion[];
+  /** A task added from an event is completed when the event ends: always, never, or only an event with other invitees. */
+  meetingAutoComplete: 'always' | 'never' | 'invitees';
+  /** The channel meetings from a calendar get ("Import channel"), by calendar subscription id. */
+  meetingChannels: Record<string, string>;
 }
 
 export interface PlannerState {
@@ -547,6 +597,18 @@ export const DEFAULT_SETTINGS: Settings = {
   googleTaskNotifications: true,
   googleCalendarsIntroduced: [],
   agentPresets: [],
+  gmailOnImport: [],
+  gmailOnComplete: [],
+  gmailImportPrompt: false,
+  gmailCompletePrompt: false,
+  emailClient: 'gmail',
+  linearImportPrompt: false,
+  meetingImport: 'prompt',
+  meetingCalendars: [],
+  meetingExclusions: [...MEETING_EXCLUSIONS],
+  meetingAutoComplete: 'always',
+  meetingChannels: {},
+  channelTimebox: {},
 };
 
 export const emptyState = (): PlannerState => ({

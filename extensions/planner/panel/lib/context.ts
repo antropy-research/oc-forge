@@ -6,6 +6,7 @@ import type { LinearStore, LinearView } from './linear.ts';
 import type { AgentStore, AgentView } from './agents.ts';
 import type { GitHubStore, GitHubView } from './github.ts';
 import type { GoogleStore, GoogleView } from './google.ts';
+import type { GmailStore, GmailView } from './gmail.ts';
 
 export interface PlannerContextValue {
   client: PlannerClient;
@@ -14,6 +15,7 @@ export interface PlannerContextValue {
   agents: AgentStore;
   github: GitHubStore;
   google: GoogleStore;
+  gmail: GmailStore;
 }
 
 export const PlannerContext = createContext<PlannerContextValue | null>(null);
@@ -57,6 +59,14 @@ export const useGitHub = (): GitHubView => {
   const { github } = usePlanner();
   const [view, setView] = useState(github.getView());
   useEffect(() => github.subscribe(() => setView(github.getView())), [github]);
+  return view;
+};
+
+/** Re-render on every Gmail change (labels, threads, actions under way, the automations' question). */
+export const useGmail = (): GmailView => {
+  const { gmail } = usePlanner();
+  const [view, setView] = useState(gmail.getView());
+  useEffect(() => gmail.subscribe(() => setView(gmail.getView())), [gmail]);
   return view;
 };
 

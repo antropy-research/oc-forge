@@ -26,6 +26,15 @@ const STATE_LOOK: Record<string, { name: string; color: string }> = {
 };
 
 /** Closed and merged count as done, like a completed Linear issue. */
+/** The repository a GitHub search names (`repo:owner/name`), or null for all of them. */
+export const repoOfSearch = (text: string): string | null => /(?:^|\s)repo:([\w.-]+\/[\w.-]+)(?=\s|$)/i.exec(text)?.[1] ?? null;
+
+/** The search narrowed to one repository (its `repo:` term first, any other taken off), or to none. */
+export const withRepo = (text: string, repo: string | null): string => {
+  const rest = text.replace(/(?:^|\s)repo:\S+/gi, ' ').replace(/\s+/g, ' ').trim();
+  return [repo ? `repo:${repo}` : '', rest].filter(Boolean).join(' ');
+};
+
 export const githubStatus = (item: GitHubItem): NonNullable<TaskSourceRef['status']> => {
   if (item.state === 'OPEN' && item.draft) return { name: 'Draft', type: 'open', color: '#6e7781' };
   const look = STATE_LOOK[item.state] ?? STATE_LOOK.OPEN!;

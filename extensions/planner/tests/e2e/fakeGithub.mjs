@@ -346,6 +346,15 @@ export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null,
       return { data: { resource: found ? itemNode(found) : null } };
     }
     if (/\bviewer\s*\{/.test(query)) data.viewer = viewerNode();
+    // The repositories the viewer works in (the panel's Repository choice): those of its items, the latest updated first,
+    // then the world's other repositories.
+    if (data.viewer && /\brepositoriesContributedTo\s*\(/.test(query)) {
+      const latest = new Map();
+      for (const item of [...(world.issues ?? []), ...world.pulls]) if ((latest.get(item.repo) ?? '') < item.updatedAt) latest.set(item.repo, item.updatedAt);
+      const names = [...latest].sort((a, b) => b[1].localeCompare(a[1])).map(([name]) => name);
+      for (const repo of world.repos) if (!names.includes(full(repo))) names.push(full(repo));
+      data.viewer.repositoriesContributedTo = { nodes: names.slice(0, Number(argsOf('repositoriesContributedTo').first) || 25).map((nameWithOwner) => ({ nameWithOwner })) };
+    }
     // The viewer's work of a day (Daily Highlights).
     if (data.viewer && /\bcontributionsCollection\s*\(/.test(query)) {
       const [from, to] = [Date.parse(variables.from ?? ''), Date.parse(variables.to ?? '')];

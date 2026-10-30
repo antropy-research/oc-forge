@@ -1,7 +1,7 @@
 // Round 12: a URL pasted alone as a new task's title, as Sunsama's "Add via URL" takes it
 // (https://help.sunsama.com/docs/usage-guides/tasks/add-via-url): a Linear issue, a GitHub issue or pull request
 // (https://help.sunsama.com/docs/integrations/github) and a Gmail message become a task linked to them; a Google
-// Calendar event is planned as "Plan as task" plans it; any other page is a task with it as its backlink. Review 11
+// Calendar event is added as "Add to tasks" adds it; any other page is a task with it as its backlink. Review 11
 // found a pasted GitHub issue URL made a task titled with the URL, linked to nothing.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
@@ -137,11 +137,13 @@ describe('Enter with a pasted URL', () => {
     expect(opaque.notes[0]).toContain("Gmail's own links can't be read by other apps");
   });
 
-  test('a Google Calendar event is planned as "Plan as task" plans it: its title, its length, linked back to it', async () => {
-    const detail = { account: ME, calendarId: 'me@gmail.com', id: 'abc123def456', title: 'Design review', start: { dateTime: '2026-10-30T17:00:00Z' }, end: { dateTime: '2026-10-30T18:30:00Z' }, allDay: false, htmlLink: 'https://www.google.com/calendar/event?eid=YWJj' };
+  test('a Google Calendar event is added as "Add to tasks" adds it: a task linked to the event, on its day, its length planned', async () => {
+    const detail = { account: ME, calendarId: 'me@gmail.com', id: 'abc123def456', title: 'Design review', location: '', start: { dateTime: '2026-10-30T17:00:00Z' }, end: { dateTime: '2026-10-30T18:30:00Z' }, allDay: false, htmlLink: 'https://www.google.com/calendar/event?eid=YWJj', recurringEventId: null, editable: true, response: 'accepted', transparency: 'opaque', attendees: [{ email: ME, name: '', response: 'accepted', self: true, organizer: true, optional: false, resource: false }, { email: 'ann@example.com', name: 'Ann', response: 'accepted', self: false, organizer: false, optional: false, resource: false }], meet: null };
     const fake = setup((_method, path) => (path.startsWith('/google/event?') && path.includes('id=abc123def456') && path.includes('calendar=me%40gmail.com') ? { event: detail } : new Error('This event is no longer in Google Calendar')));
     await fake.add(`https://calendar.google.com/calendar/event?eid=${eid('abc123def456 me@m')}`);
-    expect(fake.tasks().map((task) => [task.title, task.plannedMinutes, task.notes, task.source?.kind, task.source?.key, task.source?.url])).toEqual([['Design review', 90, '2026-10-30, from the calendar', 'link', 'Google Calendar', detail.htmlLink]]);
+    expect(fake.tasks().map((task) => [task.title, task.plannedMinutes, task.placement, task.source?.kind, task.source?.id, task.source?.url, task.source?.event])).toEqual([
+      ['Design review', 90, { kind: 'day', date: '2026-10-30' }, 'event', `${ME}|me@gmail.com|abc123def456`, detail.htmlLink, { calendarId: 'me@gmail.com', start: '2026-10-30T17:00:00.000Z', end: '2026-10-30T18:30:00.000Z', allDay: false, invitees: true }],
+    ]);
   });
 
   test('any other page: a task with it as its backlink (http too); a title that is no URL: a plain task', async () => {

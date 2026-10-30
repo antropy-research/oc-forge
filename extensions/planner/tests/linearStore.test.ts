@@ -5,7 +5,11 @@ import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
 import { LinearStore } from '../panel/lib/linear.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
-import { emptyState } from '../src/domain/types.ts';
+import { emptyState, type PlannerState, type TaskSourceRef } from '../src/domain/types.ts';
+import { applyEvents } from '../src/domain/reducer.ts';
+import type { EventBody, PlannerEvent } from '../src/domain/events.ts';
+import { addParsedTask, type AddSources } from '../panel/lib/addTask.ts';
+import { parseQuickAdd } from '../src/domain/quickAdd.ts';
 import { issueDetailMore, type LinearIssue, type LinearIssueDetail, type LinearState } from '../src/domain/linear.ts';
 import { partialNote } from '../src/domain/linearFilter.ts';
 
@@ -165,8 +169,8 @@ describe('the Linear store reads lists the way Linear lists them', () => {
     expect(store.list('side').source).toEqual({ kind: 'assigned' });
     expect(store.list('side').issues.map((item) => item.identifier)).toEqual(['HAR-1', 'HAR-2', 'HAR-3']);
     expect(store.list('page').issues.map((item) => item.identifier)).toEqual(['HAR-3']);
-    // The side panel lists open issues of mine: its display asks Linear for open ones.
-    expect(fake.calls.filter((call) => call.op === 'PlannerAssigned').at(-1)!.variables.filter).toEqual({ state: { type: { nin: ['completed', 'canceled'] } } });
+    // The side panel is Sunsama's: My issues are the open ones and those completed in the past five days.
+    expect(fake.calls.filter((call) => call.op === 'PlannerAssigned').at(-1)!.variables.filter).toEqual({ or: [{ state: { type: { nin: ['completed', 'canceled'] } } }, { completedAt: { gte: '-P5D' } }, { canceledAt: { gte: '-P5D' } }] });
   });
 });
 
@@ -329,5 +333,75 @@ describe('nothing of Linear is left out unsaid', () => {
     const detail = { ...issue(1, STATES[1]!), description: '', labels: { nodes: [], pageInfo: none }, comments: { nodes: [], pageInfo: more }, children: { nodes: [], pageInfo: more }, attachments: { nodes: [] }, history: { nodes: [], pageInfo: more } } as unknown as LinearIssueDetail;
     expect(issueDetailMore(detail)).toEqual(['sub-issues', 'comments', 'activity']);
     expect(issueDetailMore({ ...detail, comments: { nodes: [] }, children: { nodes: [] }, history: { nodes: [] } } as unknown as LinearIssueDetail)).toEqual([]);
+  });
+});
+
+describe("Sunsama's prompts to update the status in Linear (round 12)", () => {
+  let clock = Date.parse('2026-10-26T15:00:00Z');
+  const ev = (body: EventBody): PlannerEvent => ({ v: 1, id: `e${(clock += 1000)}`, at: new Date(clock).toISOString(), ...body }) as PlannerEvent;
+  const source = (n: number, state: LinearState): TaskSourceRef => ({ kind: 'linear', id: `i${n}`, key: `HAR-${n}`, url: `https://linear.app/x/issue/HAR-${n}`, title: `issue ${n}`, teamId: 'team-1', workspaceId: 'org-1', status: { name: state.name, type: state.type, color: state.color } });
+  const ready = async (settings: Partial<PlannerState['settings']> = {}) => {
+    const fake = fakeLinear();
+    let state = applyEvents(emptyState(), [ev({ type: 'settings.updated', patch: settings })]);
+    const client = { ...fake.client, getView: () => ({ state, today: '2026-10-26' }) } as unknown as PlannerClient;
+    const store = new LinearStore(fake.host, client, 'page');
+    store.setSource({ kind: 'view', id: 'v-open', workspaceId: 'org-1' });
+    await settle(store);
+    /** The user's change, as the client reports it once committed. */
+    const commit = (bodies: EventBody[]) => {
+      const before = state;
+      state = applyEvents(state, bodies.map(ev));
+      (store as unknown as { afterCommit: (...args: unknown[]) => void }).afterCommit(bodies.map((body, index) => ({ cmd: `c${index}`, ...body })), before, state, 'user');
+    };
+    const moves = () => fake.calls.filter((call) => call.op === 'PlannerSetState').map((call) => call.variables);
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 20));
+    return { fake, store, client, commit, moves, flush };
+  };
+  const created = (id: string, ref: TaskSourceRef): EventBody => ({ type: 'task.created', task: { id, title: ref.title!, placement: { kind: 'backlog', bucket: 'later' } as never, position: 1024, source: ref } });
+
+  test('the import automation asks right after an issue is imported; the state picked is the one it moves to', async () => {
+    const off = await ready();
+    off.commit([created('t1', source(1, STATES[1]!))]);
+    expect(off.store.getView().prompt).toBeNull();
+    const on = await ready({ linearImportPrompt: true });
+    on.commit([created('t1', source(1, STATES[1]!))]);
+    expect(on.store.getView().prompt).toEqual({ kind: 'import', taskId: 't1', key: 'HAR-1' });
+    on.store.answerPrompt('yes', 's-rev');
+    await on.flush();
+    expect(on.moves()).toEqual([{ id: 'i1', stateId: 's-rev' }]);
+  });
+
+  test('an issue merged into a task asks when it is checked off there, and moves that issue; with "complete", it just moves', async () => {
+    const triage: EventBody = { type: 'task.created', task: { id: 'triage', title: 'Triage', placement: { kind: 'day', date: '2026-10-26' }, position: 1024 } };
+    const merged = (done: boolean): EventBody => ({ type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 's1', title: 'issue 1', done, source: source(1, STATES[1]!) }] } });
+    const asking = await ready();
+    asking.commit([triage, merged(false)]);
+    asking.commit([merged(true)]);
+    const prompt = asking.store.getView().prompt!;
+    expect(prompt).toEqual({ kind: 'complete', taskId: 'triage', key: 'HAR-1', subtaskId: 's1' });
+    expect(asking.store.promptSource(prompt)?.id).toBe('i1');
+    expect((await asking.store.statesForSource(asking.store.promptSource(prompt))).map((state) => state.name)).toEqual(['Backlog', 'Todo', 'In Progress', 'In Review', 'Done']);
+    asking.store.answerPrompt('yes');
+    await asking.flush();
+    expect(asking.moves()).toEqual([{ id: 'i1', stateId: 's-done' }]);
+    const moving = await ready({ linearOnComplete: 'complete' });
+    moving.commit([triage, merged(false)]);
+    moving.commit([merged(true)]);
+    await moving.flush();
+    expect([moving.store.getView().prompt, moving.moves()]).toEqual([null, [{ id: 'i1', stateId: 's-done' }]]);
+  });
+
+  test("a pasted issue's status picked in the add field: the issue moves there as it is added", async () => {
+    const fake = await ready();
+    const linear = Object.assign(Object.create(fake.store), { issue: async () => fake.fake.small[0]! }) as LinearStore;
+    const dispatched: EventBody[] = [];
+    let state = emptyState();
+    const client = { ...fake.client, getView: () => ({ state, today: '2026-10-26' }), dispatch: async (bodies: EventBody[]) => { dispatched.push(...bodies); state = applyEvents(state, bodies.map(ev)); }, notify: () => {} } as unknown as PlannerClient;
+    (linear as unknown as { client: PlannerClient }).client = client;
+    const sources = { client, linear, github: { getView: () => ({ status: { available: false } }) }, google: {} } as unknown as AddSources;
+    await addParsedTask(sources, parseQuickAdd('https://linear.app/org/issue/HAR-1/issue-1', '2026-10-26'), { kind: 'day', date: '2026-10-26' }, 'bottom', '2026-10-26', null, { linearStateId: 's-prog' });
+    await fake.flush();
+    expect(dispatched.find((body) => body.type === 'task.created')).toMatchObject({ task: { title: 'issue 1', source: { kind: 'linear', id: 'i1' } } });
+    expect(fake.moves()).toEqual([{ id: 'i1', stateId: 's-prog' }]);
   });
 });

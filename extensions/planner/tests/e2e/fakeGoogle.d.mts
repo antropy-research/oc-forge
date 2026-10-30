@@ -22,8 +22,13 @@ export interface FakeWorld {
   hostedDomain?: string;
   /** The account's Drive, by name, type and address. */
   driveFiles?: { id: string; name: string; mimeType: string; webViewLink: string; modifiedTime?: string; trashed?: boolean }[];
-  /** The account's Gmail messages. */
-  mail?: { id: string; threadId: string; subject: string; from: string; date: string; snippet: string; unread?: boolean }[];
+  /** The account's Gmail messages: `labels` (Gmail's ids) once something changed them, else `unread` and the Inbox. */
+  mail?: { id: string; threadId: string; subject: string; from: string; date: string; snippet: string; unread?: boolean; body?: string; labels?: string[] }[];
+  /** The user's own Gmail labels. */
+  mailLabels?: { id: string; name: string }[];
+  /** The People API's contacts, and the people the account emailed ("other contacts"). */
+  contacts?: { name: string; email: string }[];
+  otherContacts?: { name: string; email: string }[];
 }
 
 export interface FakeGoogle {
@@ -41,6 +46,8 @@ export interface FakeGoogle {
 
 export const DEFAULT_SCOPES: string[];
 export const DRIVE_SCOPE: string;
+export const GMAIL_MODIFY_SCOPE: string;
+export const CONTACTS_SCOPES: string[];
 /** The code a sign-in's redirect carries in this fake: the scopes it asked for (its auth URL's `scope`). */
 export function fakeAuthCode(scope: string): string;
 export function defaultFakeWorld(options?: { account?: string; today?: string; zone?: string }): FakeWorld;

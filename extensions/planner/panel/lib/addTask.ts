@@ -2,9 +2,9 @@
 // alone as the title is taken as Sunsama's "Add via URL" takes it: a Linear
 // issue, a GitHub issue or pull request and a Gmail message become a task
 // linked to them (their title, state and address); a Google Calendar event is
-// planned as "Plan as task" plans it; any other page becomes a task with that
+// added as "Add to tasks" adds it; any other page becomes a task with that
 // page as its backlink. One that can't be looked up becomes the backlink task,
-// and the Planner says why.
+// and the Planner says why. `>` merges it into an open task as a subtask.
 import type { QuickAdd } from '../../src/domain/quickAdd.ts';
 import { linkTitle, pastedUrl, type PastedUrl } from '../../src/domain/pastedUrl.ts';
 import { zonedDateMinutes } from '../../src/domain/dates.ts';
@@ -17,6 +17,44 @@ import type { GitHubStore } from './github.ts';
 import type { GoogleStore } from './google.ts';
 import { eventDetail } from './gcal.ts';
 import { createTaskCommands } from './commands.ts';
+import { addMeetingCommands, eventKey } from '../../src/domain/meetings.ts';
+import { CANNOT_MERGE_EVENTS, mergeTarget, mergeTaskCommands } from '../../src/domain/merge.ts';
+import { applyEvents } from '../../src/domain/reducer.ts';
+import type { PlannerEvent } from '../../src/domain/events.ts';
+import { instantAt } from '../../src/domain/dates.ts';
+import { newId } from '../../src/domain/ids.ts';
+import type { CalendarEvent } from '../../src/domain/ics.ts';
+import type { GoogleEventDetail } from '../../src/domain/google.ts';
+
+/** An event's details as the calendar feed has the event: its times as instants, its Google reference, free or busy. */
+const feedEvent = (detail: GoogleEventDetail, zone: string): CalendarEvent | null => {
+  const start = detail.start.dateTime ?? (detail.start.date ? instantAt(detail.start.date, 0, zone) : null);
+  const end = detail.end.dateTime ?? (detail.end.date ? instantAt(detail.end.date, 0, zone) : null);
+  if (!start || !end) return null;
+  return {
+    id: `${detail.calendarId}:${detail.id}`,
+    calendarId: detail.calendarId,
+    title: detail.title,
+    location: detail.location,
+    start: new Date(start).toISOString(),
+    end: new Date(end).toISOString(),
+    allDay: detail.allDay,
+    busy: detail.transparency !== 'transparent' && !detail.allDay,
+    ...(detail.transparency === 'transparent' ? { transparent: true } : {}),
+    google: {
+      account: detail.account,
+      calendarId: detail.calendarId,
+      eventId: detail.id,
+      recurringEventId: detail.recurringEventId,
+      editable: detail.editable,
+      response: detail.response,
+      guests: detail.attendees.some((guest) => !guest.self && !guest.resource),
+      color: null,
+      htmlLink: detail.htmlLink,
+      meet: detail.meet?.url ?? null,
+    },
+  };
+};
 
 /** What a pasted URL is looked up in. */
 export interface AddSources {
@@ -71,21 +109,43 @@ const findEvent = async (sources: AddSources, url: Extract<PastedUrl, { kind: 'g
 };
 
 /** Add a parsed line; a URL pasted alone becomes the task Sunsama's "Add via URL" makes of it. */
-export const addParsedTask = async (sources: AddSources, parsed: QuickAdd, fallback: Placement, edge: 'top' | 'bottom', today: DateKey, folderId: string | null = null): Promise<void> => {
+export const addParsedTask = async (sources: AddSources, parsed: QuickAdd, fallback: Placement, edge: 'top' | 'bottom', today: DateKey, folderId: string | null = null, options: { linearStateId?: string } = {}): Promise<void> => {
   const { client } = sources;
   const url = pastedUrl(parsed.title);
   const placement = parsed.placement ?? fallback;
+  // `>`: the new task (or the item imported) is merged into an open task as a subtask, in the same step (Sunsama's).
+  const target = parsed.merge ? mergeTarget(client.getView().state, parsed.merge, placement.kind === 'day' ? placement.date : null, today) : null;
+  if (parsed.merge && !target) client.notify(`No open task matches "${parsed.merge}": added it as its own task`);
+  const into = (bodies: EventBody[], taskId: string | undefined): { bodies: EventBody[]; merged: boolean } => {
+    if (!target || !taskId) return { bodies, merged: false };
+    const made = applyEvents(client.getView().state, bodies.map((body, index) => ({ v: 1, id: `add-${index}`, at: new Date().toISOString(), ...body }) as PlannerEvent));
+    const merge = mergeTaskCommands(made, taskId, target.id, newId);
+    if (typeof merge === 'string') {
+      client.notify(`${merge}: added it as its own task`);
+      return { bodies, merged: false };
+    }
+    return { bodies: [...bodies, ...merge], merged: merge.length > 0 };
+  };
+  const send = (bodies: EventBody[], taskId: string | undefined, undo?: string) => {
+    const result = into(bodies, taskId);
+    return client.dispatch(result.bodies, result.merged ? { undo: `Merged into "${target!.title}"` } : undo ? { undo } : {});
+  };
   const plan = (bodies: EventBody[], taskId: string, undo: string) => {
     if (parsed.plannedMinutes) bodies.push({ type: 'task.updated', taskId, patch: { plannedMinutes: parsed.plannedMinutes } });
-    return client.dispatch(bodies, { undo });
+    return send(bodies, taskId, undo);
   };
+  const createdId = (bodies: EventBody[]): string | undefined => bodies.flatMap((body) => (body.type === 'task.created' ? [body.task.id] : [])).at(-1);
   if (url?.kind === 'linear' && sources.linear.available()) {
     try {
       // The URL names its workspace, so the issue is looked up there and nowhere else.
       const issue = await sources.linear.issue(url.key, url.urlKey);
       if (issue) {
         const { bodies, taskId } = sources.linear.importCommands(issue, placement);
-        return plan(bodies, taskId, `Planned ${issue.identifier}`);
+        await plan(bodies, taskId, `Planned ${issue.identifier}`);
+        // The status picked in the add field, as Sunsama updates it when adding via URL.
+        const task = client.getView().state.tasks[taskId];
+        if (options.linearStateId && task && options.linearStateId !== issue.state.id) await sources.linear.setStatus(task, options.linearStateId);
+        return;
       }
       client.notify(`${url.key} was not found in your connected Linear workspaces; added the link as a task`);
     } catch {
@@ -117,20 +177,26 @@ export const addParsedTask = async (sources: AddSources, parsed: QuickAdd, fallb
     }
   } else if (url?.kind === 'gmail') client.notify("Gmail's own links can't be read by other apps: added it as a link. Google → Gmail adds the email with its subject and sender");
   if (url?.kind === 'gcal') {
-    const event = await findEvent(sources, url).catch(() => null);
-    if (event) {
-      // As "Plan as task" plans an event: its title, its length as planned time, when it is in the details; linked back to it.
-      const zone = client.getView().state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const start = event.start.dateTime ?? (event.start.date ? `${event.start.date}T00:00:00Z` : null);
-      const end = event.end.dateTime ?? (event.end.date ? `${event.end.date}T00:00:00Z` : null);
-      const minutes = start && end && !event.allDay ? Math.min(24 * 60, Math.max(0, Math.round((Date.parse(end) - Date.parse(start)) / 60_000))) : null;
-      const when = start ? `${event.allDay ? event.start.date : `${zonedDateMinutes(start, zone).date}`}, from the calendar` : 'From the calendar';
-      const bodies = linkTaskCommands(client, parsed, event.htmlLink && /^https:\/\//.test(event.htmlLink) ? event.htmlLink : url.url, fallback, edge, today, folderId, { title: event.title, key: 'Google Calendar', notes: when, plannedMinutes: minutes || null });
-      return client.dispatch(bodies, { undo: 'Task added from the calendar' });
-    }
-    client.notify('This event is in none of your connected calendars; added the link as a task');
+    const detail = await findEvent(sources, url).catch(() => null);
+    if (detail) {
+      // As "Add to tasks" adds an event: a task linked to it on its day, by its start time, its length as planned time.
+      const state = client.getView().state;
+      const zone = state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const event = feedEvent(detail, zone);
+      const bodies = event ? addMeetingCommands(state, event, zone, newId) : [];
+      if (target && bodies.length) client.notify(`${CANNOT_MERGE_EVENTS}: added it to its day`);
+      if (bodies.length) return client.dispatch(bodies, { undo: 'Added to tasks' });
+      if (event && eventKey(event)) {
+        client.notify(`"${detail.title}" is in your tasks already`);
+        return;
+      }
+    } else client.notify('This event is in none of your connected calendars; added the link as a task');
   }
   // Any other page, or an item that could not be looked up: a task with the page as its backlink.
-  if (url) return client.dispatch(linkTaskCommands(client, parsed, url.kind === 'linear' ? parsed.title.trim() : url.url, fallback, edge, today, folderId), { undo: 'Link added as a task' });
-  await client.dispatch(createTaskCommands(client.getView().state, parsed, fallback, edge, today, folderId));
+  if (url) {
+    const bodies = linkTaskCommands(client, parsed, url.kind === 'linear' ? parsed.title.trim() : url.url, fallback, edge, today, folderId);
+    return send(bodies, createdId(bodies), 'Link added as a task');
+  }
+  const bodies = createTaskCommands(client.getView().state, parsed, fallback, edge, today, folderId);
+  await send(bodies, createdId(bodies));
 };

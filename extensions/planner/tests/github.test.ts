@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { GitHubStore } from '../panel/lib/github.ts';
 import { GitHubSource, LISTS, LIST_QUERY, NODES_QUERY, RESOURCE_QUERY, diagnose, listQuery, parseNodes, pickPull, type Runner } from '../service/github.ts';
-import { githubSource, githubStatus, isGitHubItem, parseGitHubUrl, planGitHubSync, shortKey, taskFromGitHub, type GitHubItem } from '../src/domain/github.ts';
+import { githubSource, githubStatus, isGitHubItem, parseGitHubUrl, planGitHubSync, repoOfSearch, shortKey, taskFromGitHub, withRepo, type GitHubItem } from '../src/domain/github.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import type { EventBody, PlannerEvent } from '../src/domain/events.ts';
 
@@ -41,6 +41,18 @@ describe('gh', () => {
     expect(calls[2]).toEqual(['api', 'graphql', '-f', `query=${NODES_QUERY}`, '-f', 'ids[]=I_1', '-f', 'ids[]=PR_1']);
     expect(linked.map((entry) => entry.state)).toEqual(['CLOSED']);
     expect(await source.items([])).toEqual([]);
+  });
+});
+
+describe("the panel's Repository choice (round 12, Sunsama's most relevant repositories)", () => {
+  test("a repository chosen is the search's repo: term, first; All repositories takes it off; typing one chooses it", () => {
+    expect(repoOfSearch('crash repo:acme/app label:bug')).toBe('acme/app');
+    expect(repoOfSearch('crash')).toBeNull();
+    expect(repoOfSearch('repo:acme')).toBeNull();
+    expect(withRepo('crash label:bug', 'acme/app')).toBe('repo:acme/app crash label:bug');
+    expect(withRepo('repo:acme/old crash', 'acme/app')).toBe('repo:acme/app crash');
+    expect(withRepo('repo:acme/app crash', null)).toBe('crash');
+    expect(withRepo('', 'acme/app')).toBe('repo:acme/app');
   });
 });
 

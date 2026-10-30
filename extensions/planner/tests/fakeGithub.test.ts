@@ -186,4 +186,20 @@ describe.skipIf(!GH)('the fake GitHub answers the real gh as GitHub would', () =
     expect((await run(GH!, ['pr', 'create', '--title', 'Nothing', '--body', 'x'])).err).toContain('No commits between main and planner/harness-empty');
     expect(fake.world.pulls.map((pull) => pull.headRefName)).toEqual(['planner/harness-one', 'planner/harness-two']);
   });
+
+  // Round 12: Sunsama surfaces "the most relevant repositories" (the ones the user most recently contributed to).
+  test('the repositories the viewer works in, the most recently updated first, then the rest; read again only after ten minutes', async () => {
+    const source = new GitHubSource(async (args) => {
+      const result = await run(GH!, args);
+      if (result.code !== 0) throw Object.assign(new Error(result.err), { stdout: result.out, stderr: result.err });
+      return result.out;
+    });
+    fake.world.pulls = [];
+    fake.world.issues = [fakeIssue('harness-org/older', 1, { updatedAt: '2026-10-01T00:00:00Z' }), fakeIssue('harness-org/newer', 2, { updatedAt: '2026-10-28T00:00:00Z' })];
+    expect(await source.repositories()).toEqual(['harness-org/newer', 'harness-org/older', 'harness-org/planner-pr-demo']);
+    const asked = fake.requests.filter((request) => request.operation === 'query PlannerGitHubRepos').length;
+    expect(asked).toBe(1);
+    await source.repositories();
+    expect(fake.requests.filter((request) => request.operation === 'query PlannerGitHubRepos').length).toBe(asked);
+  });
 });

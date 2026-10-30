@@ -46,6 +46,12 @@ export const SEARCH_MAX = 1000;
 /** Node ids GitHub reads in one `nodes(ids:)` call. */
 export const NODES_MAX = 100;
 
+/**
+ * The repositories the viewer contributes to (their own, and others they committed, opened issues or pull requests,
+ * or reviewed in), the most recently pushed first: Sunsama surfaces "the most relevant repositories" this way.
+ */
+export const REPOS_QUERY = `query PlannerGitHubRepos { viewer { repositoriesContributedTo(first: 25, includeUserRepositories: true, orderBy: { field: PUSHED_AT, direction: DESC }, contributionTypes: [COMMIT, ISSUE, PULL_REQUEST, PULL_REQUEST_REVIEW, REPOSITORY]) { nodes { nameWithOwner } } } }`;
+
 export const LIST_QUERY = `query PlannerGitHubList($q: String!, $after: String) { search(query: $q, type: ISSUE, first: ${PAGE_SIZE}, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ${ITEM_FIELDS} } } }`;
 export const NODES_QUERY = `query PlannerGitHubNodes($ids: [ID!]!) { nodes(ids: $ids) { ${ITEM_FIELDS} } }`;
 /** An issue or a pull request by its address on github.com. */
@@ -191,6 +197,18 @@ export class GitHubSource {
       return { available: false, login: null, message, reason, container: reason ? this.container() : null };
     }
   }
+
+  /** The repositories most relevant to the viewer (REPOS_QUERY), read again after ten minutes. */
+  async repositories(): Promise<string[]> {
+    if (this.repos && Date.now() - this.repos.at < 10 * 60_000) return this.repos.names;
+    const out = await this.graphql(['-f', `query=${REPOS_QUERY}`]);
+    const nodes = graphqlData<{ viewer?: { repositoriesContributedTo?: { nodes?: ({ nameWithOwner?: string } | null)[] } } }>(out).viewer?.repositoriesContributedTo?.nodes ?? [];
+    const names = nodes.flatMap((node) => (node?.nameWithOwner && /^[\w.-]+\/[\w.-]+$/.test(node.nameWithOwner) ? [node.nameWithOwner] : []));
+    this.repos = { at: Date.now(), names };
+    return names;
+  }
+
+  private repos: { at: number; names: string[] } | null = null;
 
   /** A page of a list, from `after` (the previous page's cursor), narrowed by `text`. */
   async list(kind: ListKind, options: { after?: string | null; text?: string } = {}): Promise<GitHubPage> {
