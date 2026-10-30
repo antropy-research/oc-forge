@@ -58,7 +58,7 @@ if (!forge) {
   $('status').textContent = 'stock OpenChamber: no oc-forge APIs';
 } else {
   const { hello } = forge;
-  $('status').textContent = `oc-forge v${hello.version}: ${hello.features.join(', ')}`;
+  $('status').textContent = `oc-forge v${hello.version}: ${hello.features.join(', ')}${hello.limits ? `; room for ${hello.limits.tabs} tabs, titles of ${hello.limits.title}` : ''}`;
   $('surface').textContent = `(${hello.surface}${forge.rail.own() ? ', own panel' : ''})`;
   document.body.dataset.surface = hello.surface;
 
@@ -81,6 +81,36 @@ if (!forge) {
   $('open-a').onclick = tabCall('opened a', () => forge.tabs.open({ id: 'a', title: 'Tab A', icon: 'file-code', route: '/tab/a' }, { activate: true }));
   $('open-b').onclick = tabCall('opened b', () => forge.tabs.open({ id: 'b', title: 'Tab B', dirty: true }, { activate: true }));
   $('close-a').onclick = tabCall('closed a', () => forge.tabs.close('a'));
+  // Many tabs (many-1…many-N, those still missing), the last one selected; then a tab more, and titles at and past the
+  // host's limit. Each says how long the host took, and what it refused and how fast.
+  const result = (line: string) => { $('many-result').textContent = line; log(line); };
+  $('open-many').onclick = () => {
+    const count = Number(($('many-count') as HTMLInputElement).value) || 70;
+    const started = performance.now();
+    const ms = () => Math.round(performance.now() - started);
+    void (async () => {
+      try {
+        const have = new Set(forge.tabs.state().list.map((tab) => tab.id));
+        for (let index = 1; index <= count; index += 1) {
+          if (!have.has(`many-${index}`)) await forge.tabs.open({ id: `many-${index}`, title: `Many ${index}`, icon: 'file-text', route: `/tab/many-${index}` });
+        }
+        await forge.tabs.activate(`many-${count}`);
+        result(`opened ${count} in ${ms()} ms`);
+      } catch (error) {
+        result(`failed after ${ms()} ms: ${(error as Error).message}`);
+      }
+    })();
+  };
+  const timed = (label: string, call: () => Promise<void>) => () => {
+    const started = performance.now();
+    void call().then(
+      () => result(`${label}: opened in ${Math.round(performance.now() - started)} ms`),
+      (error: Error) => result(`${label}: refused in ${Math.round(performance.now() - started)} ms: ${error.message}`),
+    );
+  };
+  $('open-one-more').onclick = timed('one more', () => forge.tabs.open({ id: `over-${Date.now()}`, title: 'One more' }));
+  $('open-long-title').onclick = timed('title 513', () => forge.tabs.open({ id: 'long-title', title: `${'L'.repeat(509)} end` }));
+  $('open-full-title').onclick = timed('title 512', () => forge.tabs.open({ id: 'full-title', title: `${'F'.repeat(508)} end` }));
   // Off until asked, so the plain close checks stay as they are: then an unsaved tab the user closes is left to this frame.
   let stopDeciding: (() => void) | null = null;
   $('decide-close').onclick = () => {

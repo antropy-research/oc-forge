@@ -314,7 +314,15 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   stays; without the reopening it closed at 3.6 s. "Back to chat" still
   closes it. R6 holds eight service requests open (more than a browser's six
   connections) and times a ninth: 3 ms on the adapted build, over the socket
-  with no service HTTP request, against 11.5 s on the release. The instances start like fresh installs: their own HOME and data dir,
+  with no service HTTP request, against 11.5 s on the release. A round of its
+  own (`many`) opens seventy tabs at each size: each gets its header tab, the
+  70th is selected and scrolled into view with the strip's fade at its start,
+  the strip's list holds the three chats and all seventy, choosing the 7th or a
+  chat there shows it; a title of 513 is refused in a few milliseconds saying
+  why, one of 512 is taken whole; at 1440 a thousand tabs open, and one more is
+  refused at once while the header keeps its thousand and its selection
+  (`4ac4898`'s host failed 16 of these 18). `OC_FORGE_E2E_PARTS` picks parts
+  (`compare,extensions,api,many`). The instances start like fresh installs: their own HOME and data dir,
   and none of the `OPENCODE*`/`OPENCHAMBER*` variables or credentials of the
   session that runs the check, so they cannot load its config or reach its
   services.

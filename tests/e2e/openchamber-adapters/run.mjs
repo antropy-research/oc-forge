@@ -7,6 +7,8 @@
 //   node tests/e2e/openchamber-adapters/run.mjs [outDir]
 //   node tests/e2e/openchamber-adapters/stack.mjs down
 //
+// OC_FORGE_E2E_PARTS=compare,extensions,api,many runs only those parts (all by default).
+//
 // On a host whose network interfaces change often (Docker builds), Chromium
 // aborts requests with ERR_NETWORK_CHANGED; run all three inside one private
 // network namespace then (README.md shows how). Never prints the UI password.
@@ -536,6 +538,122 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
   await reset(page);
 };
 
+// R2 with many tabs, in a window of its own (its tabs go with it): seventy, each with its header tab, the selected one
+// scrolled into view; the list of every tab at the strip's end, choosing from it; titles at and past the host's limit,
+// a refusal answered at once; and at 1440 the cap of a thousand, past which a tab is refused at once while the header
+// stays as it was.
+const tabBox = (page, id) => page.evaluate((selector) => {
+  const tab = document.querySelector(selector);
+  const scroller = tab?.closest('.session-tabs-scroll');
+  if (!tab || !scroller) return null;
+  const outer = scroller.getBoundingClientRect();
+  const inner = tab.getBoundingClientRect();
+  return {
+    inView: inner.left >= outer.left - 1 && inner.right <= outer.right + 1,
+    scrolled: Math.round(scroller.scrollLeft),
+    overflows: scroller.scrollWidth > scroller.clientWidth + 1,
+    fade: Boolean(scroller.style.maskImage || scroller.style.webkitMaskImage),
+    selected: tab.querySelector('[role="tab"]')?.getAttribute('aria-selected') === 'true',
+  };
+}, `[data-oc-forge-tab="${TEST}:${id}"]`);
+
+const manyTabsRound = async (browser, base, viewport, seeded, request) => {
+  const size = `${viewport.width}x${viewport.height}`;
+  await ready(request, base, seeded);
+  const { context, page, errors } = await open(browser, base, viewport, seeded);
+  try {
+    await setEntries(request, base, ENTRIES);
+    await until(async () => (await rail(page)).some((entry) => entry.id === `plugin:${TEST}--alpha`), 30_000);
+    await page.locator(`[data-context-surface="plugin:${TEST}--alpha"]`).click();
+    const right = zoneFrame(page, 'right');
+    await until(async () => (await text(right, '#entry')) === 'alpha');
+    const result = () => text(right, '#many-result');
+    const manyTabs = () => page.locator(`[data-oc-forge-tab^="${TEST}:many-"]`).count();
+    await right.locator('#many-count').fill('70');
+    await right.locator('#open-many').click();
+    const opened = await until(async () => (await result())?.startsWith('opened 70') || (await result())?.startsWith('failed'), 60_000);
+    check(`[${size}] R2 seventy extension tabs: each has its header tab`, opened && (await result())?.startsWith('opened 70') && await manyTabs() === 70,
+      `${await manyTabs()} tabs; ${await result()}`);
+    const last = await until(async () => {
+      const box = await tabBox(page, 'many-70');
+      return box?.selected && box.inView ? box : null;
+    }, 10_000) ?? await tabBox(page, 'many-70');
+    check(`[${size}] R2 the selected one, the 70th, is scrolled into view, with the strip's fade at its start`,
+      last?.selected && last.inView && last.overflows && last.fade && await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'many-70', JSON.stringify(last));
+    await shot(page, `${size}-r2-many-last`);
+    // The list of every tab, at the strip's end: the chats, then the extension's tabs, the selected one marked.
+    const allTabs = page.locator('[data-oc-forge-all-tabs]');
+    const listed = await allTabs.isVisible().catch(() => false);
+    if (listed) await allTabs.click();
+    const items = page.locator('[data-oc-forge-all-tabs-item]');
+    await items.first().waitFor({ timeout: 5_000 }).catch(() => undefined);
+    const itemCount = await items.count();
+    const sessionCount = await page.locator('[data-oc-forge-all-tabs-session]').count();
+    const current = await page.locator('[data-oc-forge-all-tabs-item][aria-current="true"]').getAttribute('data-oc-forge-all-tabs-item').catch(() => null);
+    const label = await allTabs.getAttribute('aria-label').catch(() => null);
+    // (The list fades in for 150 ms.)
+    await wait(400);
+    const inSight = await page.locator(`[data-oc-forge-all-tabs-item="${TEST}:many-70"]`).evaluate((item) => {
+      let list = item.parentElement;
+      while (list && getComputedStyle(list).overflowY !== 'auto') list = list.parentElement;
+      const outer = list?.getBoundingClientRect();
+      const inner = item.getBoundingClientRect();
+      return Boolean(outer) && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+    }).catch(() => false);
+    check(`[${size}] R2 the strip's list of every tab: the chats and all seventy, the selected one marked and in sight`,
+      listed && itemCount === 70 && sessionCount === CHATS.length && current === `${TEST}:many-70` && label === `All tabs (${70 + CHATS.length})` && inSight,
+      `${listed ? `"${label}": ${sessionCount} chats, ${itemCount} tabs, marked ${current}${inSight ? ', in sight' : ', NOT in sight'}` : 'no list button'}`);
+    await shot(page, `${size}-r2-many-list`);
+    if (itemCount > 0) await page.locator(`[data-oc-forge-all-tabs-item="${TEST}:many-7"]`).click();
+    const seventh = await until(async () => {
+      const box = await tabBox(page, 'many-7');
+      return box?.selected && box.inView && (await text(pageFrame(page), '#tab')) === 'many-7' ? box : null;
+    }, 10_000);
+    check(`[${size}] R2 choosing the 7th there shows the page on it, selected and scrolled into view`, seventh, JSON.stringify(seventh ?? await tabBox(page, 'many-7')));
+    await shot(page, `${size}-r2-many-7`);
+    if (listed) {
+      await allTabs.click();
+      await page.locator(`[data-oc-forge-all-tabs-session="${seeded.sessions[1]}"]`).click().catch(() => undefined);
+    }
+    check(`[${size}] R2 …and choosing a chat there shows that chat`, listed && await until(async () => !await pageShown(page) && page.url().includes(seeded.sessions[1])));
+    // The host's limits, said in its hello, and a refusal answered at once with why.
+    const status = await text(right, '#status');
+    await right.locator('#open-long-title').click();
+    await until(async () => (await result())?.startsWith('title 513'), 15_000);
+    const refusedLong = await result();
+    const longMs = Number(/refused in (\d+) ms/.exec(refusedLong ?? '')?.[1] ?? Infinity);
+    check(`[${size}] R2 a title past the host's limit is refused at once, saying why`, longMs < 1_000 && refusedLong?.endsWith('a title is 1–512 characters.'), refusedLong ?? '');
+    await right.locator('#open-full-title').click();
+    await until(async () => (await result())?.startsWith('title 512'), 15_000);
+    const fullTitle = await page.locator(`[data-oc-forge-tab="${TEST}:full-title"] [role="tab"]`).getAttribute('title').catch(() => null);
+    check(`[${size}] R2 a title of 512 (a file's whole name and more) is taken, all of it in the tab's tooltip`,
+      (await result())?.startsWith('title 512: opened') && fullTitle?.startsWith(`${'F'.repeat(508)} end`), `${await result()}; tooltip ${fullTitle?.length ?? 0} characters; ${status}`);
+    await page.locator(`[data-oc-forge-tab="${TEST}:full-title"]`).hover();
+    await page.locator(`[data-oc-forge-tab="${TEST}:full-title"]`).getByRole('button', { name: 'Close tab' }).click().catch(() => undefined);
+    if (viewport.width === 1440) {
+      // The cap: a thousand tabs, then one more is refused at once; the header keeps its thousand and its selection.
+      await right.locator('#many-count').fill('1000');
+      await right.locator('#open-many').click();
+      await until(async () => (await result())?.startsWith('opened 1000') || (await result())?.startsWith('failed'), 300_000);
+      const thousand = await manyTabs();
+      check(`[${size}] R2 a thousand tabs, the host's room for an extension`, (await result())?.startsWith('opened 1000') && thousand === 1000, `${thousand} tabs; ${await result()}`);
+      await right.locator('#open-one-more').click();
+      await until(async () => (await result())?.startsWith('one more'), 15_000);
+      const more = await result();
+      const moreMs = Number(/refused in (\d+) ms/.exec(more ?? '')?.[1] ?? Infinity);
+      const kept = await tabBox(page, 'many-1000');
+      check(`[${size}] R2 one more is refused at once, saying why, and the header keeps its thousand and its selection`,
+        moreMs < 1_000 && more?.includes('at most 1000 header tabs') && await manyTabs() === 1000 && kept?.selected && kept.inView,
+        `${more}; ${await manyTabs()} tabs; many-1000 ${JSON.stringify(kept)}`);
+      await shot(page, `${size}-r2-many-thousand`);
+    }
+  } catch (error) {
+    check(`[${size}] R2 the many-tabs check ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+  }
+  check(`[${size}] R2 many tabs: no page errors`, errors.length === 0, errors.slice(0, 3).join(' | '));
+  await context.close();
+};
+
 // The release vs the adapted build, with no extension using the APIs.
 const compare = async (browser, seeded, request, viewport) => {
   const size = `${viewport.width}x${viewport.height}`;
@@ -650,6 +768,7 @@ const plannerAndVscode = async (page, name) => {
   await page.screenshot({ path: join(out, `extensions-${name}-vscode.png`) });
 };
 
+const parts = new Set((process.env.OC_FORGE_E2E_PARTS ?? 'compare,extensions,api,many').split(','));
 const browser = await chromium.launch();
 const request = (await browser.newContext()).request;
 const seeded = {};
@@ -662,16 +781,19 @@ for (const base of Object.values(instances)) {
   await request.post(`${base}/auth/session`, { data: { password } });
   for (const id of usingTheApis) await setEnabled(request, base, id, false);
 }
-for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await compare(browser, seeded, request, viewport);
+if (parts.has('compare')) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await compare(browser, seeded, request, viewport);
 for (const base of Object.values(instances)) await setEnabled(request, base, 'oc-forge-vscode', true);
-for (const [name, base] of Object.entries(instances)) await realExtensions(browser, name, base, seeded[name], request);
+if (parts.has('extensions')) for (const [name, base] of Object.entries(instances)) await realExtensions(browser, name, base, seeded[name], request);
 
 // Every API, with the test extensions on.
 const base = instances.adapted;
 await request.post(`${base}/auth/session`, { data: { password } });
 for (const id of [TEST, ZONE]) await setEnabled(request, base, id, true);
-for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await apiRound(browser, base, viewport, seeded.adapted, request);
-check('R5 the deep link\'s late new-chat draft ran at one size at least', lateDraftChecked);
+if (parts.has('api')) {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await apiRound(browser, base, viewport, seeded.adapted, request);
+  check('R5 the deep link\'s late new-chat draft ran at one size at least', lateDraftChecked);
+}
+if (parts.has('many')) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await manyTabsRound(browser, base, viewport, seeded.adapted, request);
 
 await browser.close();
 writeFileSync(join(out, 'results.json'), `${JSON.stringify({ results, restarts }, null, 2)}\n`);
