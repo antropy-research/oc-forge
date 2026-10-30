@@ -48,6 +48,7 @@ import {
   type FileService,
   type KeybindingService,
   type LayoutService,
+  type NotificationService,
   type PaneCompositePartService,
   type Part,
   type QuickInputService,
@@ -86,7 +87,7 @@ const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const notify = (services: VscodeServices, message: string): void => {
   log(message);
   try {
-    services.get<{ info(message: string): void }>('notificationService').info(message);
+    services.get<NotificationService>('notificationService').info(message);
   } catch (error) {
     log('could not show a notification', error);
   }
@@ -265,9 +266,10 @@ const handoffOf = (editor: unknown, optionsOrGroup: unknown, titleMax: number): 
   const options = optionsOrGroup && !isGroup(optionsOrGroup) ? optionsOrGroup : undefined;
   let untyped: Record<string, unknown> | undefined;
   if (isEditorInput(editor)) {
-    // Editors with no resource to name them: the page opens them the way VS Code's own commands do.
-    const id = editor.extension?.identifier?.id;
-    if (editor.typeId === 'workbench.extensions.input2' && id) {
+    // Editors with no file to name them: the page opens them the way VS Code's own commands do. An extension's page
+    // names its extension in its resource, `extension:<publisher.name>/extension`.
+    const id = editor.typeId === 'workbench.extensions.input2' && editor.resource?.scheme === 'extension' ? /^\/?(.+)\/extension$/.exec(editor.resource.path)?.[1] : undefined;
+    if (id) {
       return { key: `open|${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, title: tabTitle(editor.getName(), titleMax), icon: 'puzzle', open: { kind: 'command', command: 'extension.open', args: [id] }, route: null };
     }
     try {
@@ -431,7 +433,7 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
       if (await views.openViewContainer(view, true).catch(() => null)) return true;
       await later(500);
     }
-    if (showing === entry) services.get<{ info(message: string): void }>('notificationService').info(`${title} isn't in this VS Code yet.`);
+    if (showing === entry) services.get<NotificationService>('notificationService').info(`${title} isn't in this VS Code yet.`);
     return false;
   };
   // "Additional Views", the containers the rail has no room for: the one shown last (or the first), and VS Code's

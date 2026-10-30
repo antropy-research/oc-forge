@@ -14,11 +14,11 @@ import { isConnectionToken, parseServerUrl, readOpenRequest, readSettings, type 
 import { roleOf, roleSettings, type Role } from '../src/surfaces.ts';
 import { isExternalAllowed, NARROW_FRAME_CSS, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
-import { persistentIndexedDB, IDBKeyRange, saveThroughService, type StateOp, type StateSnapshot } from './storage.ts';
+import { persistentIndexedDB, IDBKeyRange, saveInBackground, saveThroughService, watchForChanges, type StateOp, type StateSnapshot } from './storage.ts';
 import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceController, type SurfaceRole } from './surfaces.ts';
 import { keepLook, preferOpenChamberScheme } from './theme.ts';
 import { TunnelSocket, type TunnelService } from './tunnel.ts';
-import { VscodeServices, type InstantiationService, type StorageService } from './vscode.ts';
+import { VscodeServices, type EditorService, type InstantiationService, type StorageService } from './vscode.ts';
 
 const host = connectHost();
 // oc-forge's adapters answer at once; a stock OpenChamber never does, and the boot below takes longer than this anyway.
@@ -255,9 +255,12 @@ const boot = async (): Promise<void> => {
       const services = new VscodeServices(instantiation, ids);
       if (surfaceRole && focus) prepareSurface(surfaceRole, services, focus);
       try {
-        saveBeforeReload = saveThroughService(services.get<StorageService>('storageService'), storage.flush);
+        const storageService = services.get<StorageService>('storageService');
+        saveBeforeReload = saveThroughService(storageService, storage.flush);
+        // Without the focus too, VS Code's state is saved a few seconds after it changed (saveInBackground).
+        watchForChanges(services, window, saveInBackground(storageService, () => document.hasFocus()).changed);
       } catch (error) {
-        console.warn('[OpenChamber VS Code] VS Code saves its state before a reload without waiting for the service', error);
+        console.warn("[OpenChamber VS Code] VS Code saves its state before a reload without waiting for the service, and only while it has the focus", error);
       }
       markServices(services);
       if (settings.followTheme) {
@@ -346,7 +349,16 @@ const boot = async (): Promise<void> => {
   }
 
   // OpenChamber's own surfaces, once VS Code runs: this frame's part, and where the server keeps its extensions for the rail.
-  const openFileAt = (file: string, line?: number) => workbench?.commands.executeCommand('_workbench.open', remoteUri(authority, file), [undefined, { pinned: true, ...(line ? { selection: { startLineNumber: line, startColumn: 1 } } : {}) }]);
+  // Through IEditorService; on a release the surface patches don't fit (no services), VS Code's own open command.
+  let vscode: VscodeServices | null = null;
+  void servicesReady.then((ready) => {
+    vscode = ready;
+  });
+  const openFileAt = (file: string, line?: number) => {
+    const options = { pinned: true, ...(line ? { selection: { startLineNumber: line, startColumn: 1 } } : {}) };
+    if (vscode) return vscode.get<EditorService>('editorService').openEditor({ resource: vscode.uriClass().revive(remoteUri(authority, file)), options });
+    return workbench?.commands.executeCommand('_workbench.open', remoteUri(authority, file), [undefined, options]);
+  };
   let surface: SurfaceController = {};
   void Promise.all([servicesReady, running]).then(async ([services]) => {
     const serviceCall = <T>(path: string, body: Record<string, unknown> = {}): Promise<T> => call<T>(path, { ...server, ...body });
