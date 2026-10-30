@@ -9,6 +9,7 @@
 // the editor; what to open waits in the extension's service.
 import type { OcForgeClient, OcForgeLimits, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
 import { guardWebviews, type FocusGuard, type WebviewMaker } from '../src/focus.ts';
+import { guardLayout } from './layoutGuard.ts';
 import { followView, type RailEntry } from '../src/rail.ts';
 import {
   bounded,
@@ -98,34 +99,45 @@ const RAIL_FOLLOW_MS = 3_000;
 
 // ── Layout ──────────────────────────────────────────────────────────────
 
-const hide = (layout: LayoutService, part: Part): void => {
-  if (layout.isVisible(part)) layout.setPartHidden(true, part);
+const hide = (layout: LayoutService, part: Part, changed: string[]): void => {
+  if (!layout.isVisible(part)) return;
+  layout.setPartHidden(true, part);
+  changed.push(`${part.slice('workbench.parts.'.length)} hidden`);
 };
-const show = (layout: LayoutService, part: Part): void => {
-  if (!layout.isVisible(part)) layout.setPartHidden(false, part);
+const show = (layout: LayoutService, part: Part, changed: string[]): void => {
+  if (layout.isVisible(part)) return;
+  layout.setPartHidden(false, part);
+  changed.push(`${part.slice('workbench.parts.'.length)} shown`);
 };
 
 /**
- * The parts a role shows. For a view, the panel goes before the editor area:
- * hiding the panel while the editor area is hidden would bring it back (VS
- * Code un-maximizes the panel first), and the editor area hides with the
- * panel hidden only because of the `bare` patch.
+ * The parts a role shows: a view its view container alone, never an editor area or a panel (what opens there goes
+ * to the page, `handEditorsToPage`); the page its editor area alone, never a side bar or a panel (a side bar asked
+ * for there opens on the rail, `sideBarsToRail`); the terminal its panel, maximized. For a view, the panel goes
+ * before the editor area: hiding the panel while the editor area is hidden would bring it back (VS Code un-maximizes
+ * the panel first), and the editor area hides with the panel hidden only because of the `bare` patch. What changed.
  */
-export const applyRoleLayout = (role: SurfaceRole, services: VscodeServices, hasEditors = () => false): void => {
+export const applyRoleLayout = (role: SurfaceRole, services: VscodeServices): string[] => {
   const layout = services.get<LayoutService>('layoutService');
-  hide(layout, PARTS.auxiliarybar);
+  const changed: string[] = [];
+  hide(layout, PARTS.auxiliarybar, changed);
   if (role === 'view') {
-    hide(layout, PARTS.panel);
-    if (!hasEditors()) hide(layout, PARTS.editor);
-    show(layout, PARTS.sidebar);
+    hide(layout, PARTS.panel, changed);
+    hide(layout, PARTS.editor, changed);
+    show(layout, PARTS.sidebar, changed);
   } else if (role === 'editor') {
-    hide(layout, PARTS.sidebar);
-    hide(layout, PARTS.panel);
+    hide(layout, PARTS.sidebar, changed);
+    show(layout, PARTS.editor, changed);
+    hide(layout, PARTS.panel, changed);
   } else {
-    hide(layout, PARTS.sidebar);
-    show(layout, PARTS.panel);
-    if (!layout.isPanelMaximized()) layout.toggleMaximizedPanel();
+    hide(layout, PARTS.sidebar, changed);
+    show(layout, PARTS.panel, changed);
+    if (!layout.isPanelMaximized()) {
+      layout.toggleMaximizedPanel();
+      changed.push('panel maximized');
+    }
   }
+  return changed;
 };
 
 /** The role's settings above the user's, in memory: `undefined` removes one. */
@@ -135,25 +147,9 @@ const applySettings = async (services: VscodeServices, settings: Record<string, 
   for (const [key, value] of Object.entries(settings)) await configuration.updateValue(key, value, MEMORY_TARGET).catch((error) => log(`could not set ${key}`, error));
 };
 
-/** Keeps a view's or the terminal's layout: VS Code may bring parts back (a toggle, an editor opening). */
-const keepLayout = (role: SurfaceRole, services: VscodeServices, hasEditors: () => boolean): void => {
-  const layout = services.get<LayoutService>('layoutService');
-  const editors = services.get<EditorService>('editorService');
-  let queued = false;
-  const again = () => {
-    if (queued) return;
-    queued = true;
-    queueMicrotask(() => {
-      queued = false;
-      try {
-        applyRoleLayout(role, services, hasEditors);
-      } catch (error) {
-        log('could not keep the layout', error);
-      }
-    });
-  };
-  layout.onDidChangePartVisibility(again);
-  editors.onDidEditorsChange(again);
+/** Keeps a part's layout: VS Code brings parts back (a toggle, a terminal's reveal, an editor opening). */
+const keepLayout = (role: SurfaceRole, services: VscodeServices): void => {
+  guardLayout({ apply: () => applyRoleLayout(role, services), events: [services.get<LayoutService>('layoutService').onDidChangePartVisibility] });
 };
 
 // ── Keys ────────────────────────────────────────────────────────────────
@@ -372,8 +368,6 @@ const handEditorsToPage = (context: SurfaceContext): void => {
   });
 };
 
-const editorsOf = (services: VscodeServices): readonly EditorIdentifier[] => services.get<EditorService>('editorService').getEditors(1);
-
 /**
  * The page keeps the folder's tabs when the user closes its last one (OpenChamber keeps it a few seconds for that),
  * but a page still starting hears nothing yet: its VS Code isn't running, as after a reload the rail view brought the
@@ -426,7 +420,7 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
     if (chosen && showing === entry) context.focus.allow();
   };
   const open = async (entry: string, view: string, title: string, chosen = false): Promise<boolean> => {
-    applyRoleLayout('view', services, () => editorsOf(services).length > 0);
+    applyRoleLayout('view', services);
     take(entry, chosen);
     // An extension installed a moment ago registers its view container once its host has it.
     for (let attempt = 0; attempt < 30 && showing === entry; attempt++) {
@@ -1067,11 +1061,12 @@ export const startSurface = async (context: SurfaceContext): Promise<SurfaceCont
   // Restoring the last view container shows the side bar again: the role's layout once more, after.
   void services.get<LayoutService>('layoutService').whenRestored.then(() => {
     try {
-      applyRoleLayout(role, services, () => role === 'view' && editorsOf(services).length > 0);
+      applyRoleLayout(role, services);
     } catch (error) {
       log('could not lay the workbench out', error);
     }
   });
+  keepLayout(role, services);
   if (role === 'editor') {
     const area = new EditorArea(context);
     await area.start();
@@ -1079,7 +1074,6 @@ export const startSurface = async (context: SurfaceContext): Promise<SurfaceCont
   }
   handEditorsToPage(context);
   keepLastClose(context);
-  keepLayout(role, services, () => role === 'view' && editorsOf(services).length > 0);
   if (role === 'view') return startView(context);
   await startTerminal(context);
   return {};
