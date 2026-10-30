@@ -114,11 +114,38 @@ export const meetingTask = (state: PlannerState, event: CalendarEvent, options: 
   };
 };
 
+/** A calendar's import channel, when it is a live channel. */
+const calendarChannel = (state: PlannerState, calendarId: string): string | null => {
+  const channelId = state.settings.meetingChannels[calendarId];
+  return channelId && state.channels[channelId] && !state.channels[channelId]!.deletedAt ? channelId : null;
+};
+
 /** The channel meetings from an event's calendar get ("Import channel"), when it is a live channel. */
 const importChannel = (state: PlannerState, event: CalendarEvent): string | null => {
   const subscription = subscriptionOf(state, event);
-  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
-  return channelId && state.channels[channelId] && !state.channels[channelId]!.deletedAt ? channelId : null;
+  return subscription ? calendarChannel(state, subscription.id) : null;
+};
+
+/**
+ * A calendar's import channel chosen (or changed) with auto-sync on: the meetings auto-sync added from it that have no
+ * channel take it, those whose event is today or later and that are not done. The first import starts as the calendar
+ * is ticked, before its channel can be chosen. A channel given before (by hand, from another window, by an earlier
+ * choice) stays, and so does a past meeting, rolled over to today or not. Besides the import, this is the only time
+ * a meeting is given its calendar's channel: a sync never gives one again.
+ */
+export const planChannelFill = (state: PlannerState, calendarIds: readonly string[], today: DateKey, zone: string): EventBody[] => {
+  if (state.settings.meetingImport !== 'autoSync') return [];
+  return calendarIds.flatMap((calendarId) => {
+    const google = state.calendars[calendarId]?.google;
+    const channelId = calendarChannel(state, calendarId);
+    if (!google || !channelId || !state.settings.meetingCalendars.includes(calendarId)) return [];
+    return Object.values(state.tasks).flatMap((task): EventBody[] => {
+      const event = task.source?.kind === 'event' ? task.source.event : undefined;
+      if (!event?.auto || task.channelId || task.completedAt || task.deletedAt || task.archivedAt) return [];
+      if (task.source!.account !== google.account || event.calendarId !== google.calendarId || eventDay(event, zone) < today) return [];
+      return [{ type: 'task.updated', taskId: task.id, patch: { channelId } }];
+    });
+  });
 };
 
 /**
@@ -182,8 +209,10 @@ const hasTime = (state: PlannerState, taskId: string): boolean => Object.values(
 
 /**
  * Auto-sync for the days `from`..`from`+days-1: the qualifying events of the chosen calendars not yet in the plan
- * become tasks; the ones it added follow their event (day, title, times) and go when the event no longer qualifies or
- * is gone, unless they were completed or have time recorded; any task the user removed stays removed.
+ * become tasks, in their calendar's import channel; the ones it added follow their event (day, title, times) and go
+ * when the event no longer qualifies or is gone, unless they were completed or have time recorded; any task the user
+ * removed stays removed. A sync never gives a channel to one it added before: a channel cleared by hand stays cleared,
+ * and one chosen for its calendar later reaches it when chosen (planChannelFill).
  */
 export const planMeetingSync = (state: PlannerState, events: readonly CalendarEvent[], options: { from: DateKey; days: number; zone: string; newId: () => string; read?: ReadonlySet<string> }): EventBody[] => {
   if (state.settings.meetingImport !== 'autoSync') return [];
@@ -221,10 +250,6 @@ export const planMeetingSync = (state: PlannerState, events: readonly CalendarEv
       const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60_000));
       push({ type: 'task.updated', taskId: task.id, patch: { title: event.title, source, ...(minutes && minutes > 0 ? { plannedMinutes: minutes } : {}) } });
     }
-    // An import channel chosen after it was added (Settings shows the channel once its calendar is chosen); one the user
-    // gave a channel keeps it.
-    const channelId = importChannel(working, event);
-    if (channelId && !working.tasks[task.id]!.channelId) push({ type: 'task.updated', taskId: task.id, patch: { channelId } });
   }
   for (const task of Object.values(working.tasks)) {
     const event = task.source?.kind === 'event' ? task.source.event : undefined;

@@ -4422,10 +4422,31 @@ var meetingTask = (state, event, options) => {
     source
   };
 };
+var calendarChannel = (state, calendarId) => {
+  const channelId = state.settings.meetingChannels[calendarId];
+  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
+};
 var importChannel = (state, event) => {
   const subscription = subscriptionOf(state, event);
-  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
-  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
+  return subscription ? calendarChannel(state, subscription.id) : null;
+};
+var planChannelFill = (state, calendarIds, today, zone) => {
+  if (state.settings.meetingImport !== "autoSync")
+    return [];
+  return calendarIds.flatMap((calendarId) => {
+    const google = state.calendars[calendarId]?.google;
+    const channelId = calendarChannel(state, calendarId);
+    if (!google || !channelId || !state.settings.meetingCalendars.includes(calendarId))
+      return [];
+    return Object.values(state.tasks).flatMap((task) => {
+      const event = task.source?.kind === "event" ? task.source.event : undefined;
+      if (!event?.auto || task.channelId || task.completedAt || task.deletedAt || task.archivedAt)
+        return [];
+      if (task.source.account !== google.account || event.calendarId !== google.calendarId || eventDay(event, zone) < today)
+        return [];
+      return [{ type: "task.updated", taskId: task.id, patch: { channelId } }];
+    });
+  });
 };
 var hasTime = (state, taskId) => Object.values(state.entries).some((entry) => entry.taskId === taskId);
 var planMeetingSync = (state, events, options) => {
@@ -4467,9 +4488,6 @@ var planMeetingSync = (state, events, options) => {
       const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000));
       push({ type: "task.updated", taskId: task.id, patch: { title: event.title, source, ...minutes && minutes > 0 ? { plannedMinutes: minutes } : {} } });
     }
-    const channelId = importChannel(working, event);
-    if (channelId && !working.tasks[task.id].channelId)
-      push({ type: "task.updated", taskId: task.id, patch: { channelId } });
   }
   for (const task of Object.values(working.tasks)) {
     const event = task.source?.kind === "event" ? task.source.event : undefined;
@@ -4515,6 +4533,12 @@ class MeetingImport {
     this.calendars = calendars;
     this.log = log;
     this.now = now;
+    planner.onPersist((_events, before, after) => {
+      const channels = after.settings.meetingChannels;
+      const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== before.settings.meetingChannels[calendarId]);
+      if (changed.length)
+        queueMicrotask(() => this.fillChannels(changed));
+    });
   }
   apply(bodies) {
     if (!bodies.length)
@@ -4529,6 +4553,11 @@ class MeetingImport {
   complete(now = this.now()) {
     const zone = this.planner.state.settings.timezone;
     return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
+  }
+  fillChannels(calendarIds) {
+    const state = this.planner.state;
+    const zone = state.settings.timezone;
+    return zone ? this.apply(planChannelFill(state, calendarIds, todayIn(zone, new Date(this.now())), zone)) : 0;
   }
   run() {
     this.running ??= this.once().finally(() => {

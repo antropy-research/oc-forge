@@ -5,7 +5,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Planner } from './planner.ts';
 import type { GoogleCalendars } from './googleTimeboxes.ts';
-import { MEETING_SYNC_DAYS, importCalendars, planMeetingCompletion, planMeetingSync } from '../src/domain/meetings.ts';
+import { MEETING_SYNC_DAYS, importCalendars, planChannelFill, planMeetingCompletion, planMeetingSync } from '../src/domain/meetings.ts';
 import { addDays, instantAt, todayIn } from '../src/domain/dates.ts';
 import { newId } from '../src/domain/ids.ts';
 import type { EventBody } from '../src/domain/events.ts';
@@ -25,11 +25,20 @@ export class MeetingImport {
   private running: Promise<MeetingRun> | null = null;
 
   constructor(
-    private readonly planner: Pick<Planner, 'state' | 'execute'>,
+    private readonly planner: Pick<Planner, 'state' | 'execute' | 'onPersist'>,
     private readonly calendars: Pick<GoogleCalendars, 'read'>,
     private readonly log: (line: string) => void = () => {},
     private readonly now: () => number = Date.now,
-  ) {}
+  ) {
+    // A calendar's import channel chosen or changed, from any window: its meetings with none take it as soon as the
+    // change is written, in a write of their own just after it. Nothing to remember across a restart; no sync gives a
+    // channel again, so one cleared by hand stays cleared.
+    planner.onPersist((_events, before, after) => {
+      const channels = after.settings.meetingChannels;
+      const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== before.settings.meetingChannels[calendarId]);
+      if (changed.length) queueMicrotask(() => this.fillChannels(changed));
+    });
+  }
 
   /** Apply the changes as the service's own commands; a refused one is logged, never thrown. */
   private apply(bodies: readonly EventBody[]): number {
@@ -46,6 +55,13 @@ export class MeetingImport {
   complete(now = this.now()): number {
     const zone = this.planner.state.settings.timezone;
     return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
+  }
+
+  /** These calendars' meetings with no channel take their channel, by their ids, from the plan as it is now (planChannelFill). */
+  private fillChannels(calendarIds: readonly string[]): number {
+    const state = this.planner.state;
+    const zone = state.settings.timezone;
+    return zone ? this.apply(planChannelFill(state, calendarIds, todayIn(zone, new Date(this.now())), zone)) : 0;
   }
 
   /** Complete ended meetings, then (with auto-sync on and a calendar chosen) add, follow and remove the week's. One run at a time. */

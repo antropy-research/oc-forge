@@ -487,7 +487,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
         }
       }
       const path = decodeURIComponent(url.pathname);
-      requests.push({ method: req.method, path, query: Object.fromEntries(url.searchParams), body: text ? body : undefined, at: Date.now() });
+      const entry = { method: req.method, path, query: Object.fromEntries(url.searchParams), body: text ? body : undefined, at: Date.now() };
+      requests.push(entry);
       const held = slow.find((entry) => entry.times > 0 && entry.method === req.method && path.includes(entry.path));
       if (held) {
         held.times -= 1;
@@ -496,6 +497,8 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       const [status, payload] = answer(req.method, path, url.searchParams, body);
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(payload === null ? '' : JSON.stringify(payload));
+      // When it was answered: a held one, later than it came.
+      entry.answeredAt = Date.now();
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
