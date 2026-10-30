@@ -1,12 +1,18 @@
 // Human-readable activity lines for one task, like Sunsama's task history.
 import type { PlannerEvent } from './events.ts';
-import { BACKLOG_BUCKETS, type Placement, type PlannerState } from './types.ts';
+import { BACKLOG_BUCKETS, SOURCE_NAMES, type Placement, type PlannerState } from './types.ts';
 import { formatMinutes, monthDay } from './dates.ts';
 
 const where = (placement: Placement): string =>
   placement.kind === 'day' ? monthDay(placement.date) : BACKLOG_BUCKETS.find((bucket) => bucket.id === placement.bucket)!.label.toLowerCase();
 
 const PRIORITY = { urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' } as const;
+
+/** A subtask as its activity line names it: as the change saw it, else as it is now, else "a subtask" (deleted since). */
+const subtaskName = (state: PlannerState, taskId: string, subtaskId: string, seen?: string): string => {
+  const title = seen ?? state.tasks[taskId]?.subtasks.find((subtask) => subtask.id === subtaskId)?.title;
+  return title ? `“${title}”` : 'a subtask';
+};
 
 /** Does this event concern `taskId`? */
 export const touchesTask = (event: PlannerEvent, taskId: string): boolean => {
@@ -34,6 +40,18 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
       });
       return parts.join(', ');
     }
+    case 'subtask.added':
+      return `updated subtasks: added “${event.subtask.title}”`;
+    case 'subtask.updated': {
+      const name = subtaskName(state, event.taskId, event.subtaskId, event.seen?.title);
+      if (event.patch.title !== undefined) return `updated subtasks: renamed ${name} to “${event.patch.title}”`;
+      if (event.patch.done !== undefined) return `updated subtasks: ${event.patch.done ? 'checked off' : 'unchecked'} ${name}`;
+      return `updated subtasks: updated ${name}`;
+    }
+    case 'subtask.deleted':
+      return `updated subtasks: deleted ${subtaskName(state, event.taskId, event.subtaskId, event.seen?.title)}`;
+    case 'subtask.moved':
+      return `updated subtasks: moved ${subtaskName(state, event.taskId, event.subtaskId)}`;
     case 'task.moved':
       return `moved this to ${where(event.placement)}`;
     case 'task.completed':
@@ -47,12 +65,19 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
     case 'task.archived':
       return 'archived this';
     case 'task.sourceSynced':
-      return `${event.source.key} is ${event.source.status?.name ?? 'updated'} in ${event.source.kind === 'linear' ? 'Linear' : 'GitHub'}${event.title ? ', title updated' : ''}`;
+      return `${event.source.key} is ${event.source.status?.name ?? 'updated'} in ${SOURCE_NAMES[event.source.kind]}${event.title ? ', title updated' : ''}`;
     case 'tasks.rolledOver':
       if ((event.superseded ?? []).includes(taskId)) return 'replaced this with the next repeat';
       return event.archived.includes(taskId) ? 'archived this after repeated rollovers' : `rolled this over to ${monthDay(event.date)}`;
-    case 'run.started':
-      return event.run.worktree ? `started an agent in worktree ${event.run.worktree.branch ?? event.run.worktree.directory}` : 'started an agent';
+    case 'run.started': {
+      const inWorktree = event.run.worktree ? ` in worktree ${event.run.worktree.branch ?? event.run.worktree.directory}` : '';
+      return event.run.wantsPr ? `assigned this to an agent${inWorktree}` : `started an agent${inWorktree}`;
+    }
+    case 'run.pullRequest': {
+      const pr = event.pullRequest;
+      const what = pr.state === 'merged' ? 'was merged' : pr.state === 'closed' ? 'was closed' : pr.draft ? 'is open as a draft' : 'is open';
+      return `pull request ${pr.repo}#${pr.number} ${what}`;
+    }
     default:
       return event.type;
   }

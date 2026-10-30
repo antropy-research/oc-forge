@@ -1,6 +1,10 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, type CalendarSubscription, type Channel, type DateKey, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type Series, type Settings, type Subtask, type Task, type TaskRun, type TaskSourceRef, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, GMAIL_ACTIONS, LINEAR_GROUPS, LINEAR_ORDERS, MEETING_EXCLUSIONS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskAttachment, type TaskDecline, type TaskRun, type TaskSourceRef, type TaskVisibility, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
+import { parseRRule } from './rrule.ts';
+import { linearDisplayProblem } from './linearDisplay.ts';
+import { isAgentPreset, isRunAssignee } from './assignees.ts';
+import { EVENT_NO_SUBTASKS, isEventTask } from './merge.ts';
 
 export interface NewTask {
   id: string;
@@ -20,10 +24,27 @@ export interface NewTask {
   sessionRef?: Task['sessionRef'];
 }
 
-export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title'>;
+export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title' | 'wantsPr' | 'assignee'>;
 
-export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'subtasks', 'source'] as const;
+/** A pull request as gh shows it; the log adds when the Planner saw it. */
+export type SeenPullRequest = Omit<RunPullRequest, 'seenAt'>;
+
+export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'source'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
+
+/**
+ * What a `subtask.updated` sets; the subtask's other fields stay as the plan has them (a merged item keeps its notes,
+ * planned time and link, Sunsama's Merge tasks).
+ */
+export const SUBTASK_PATCH_FIELDS = ['title', 'done', 'notes', 'plannedMinutes', 'source'] as const;
+export type SubtaskPatch = Partial<Pick<Subtask, (typeof SUBTASK_PATCH_FIELDS)[number]>>;
+/** What the writer saw of the fields it sets (`subtaskConflict`). */
+export type SubtaskSeen = Partial<Pick<Subtask, 'title' | 'done'>>;
+
+/** What the service says to a whole subtask list from a window that predates subtask commands. */
+export const SUBTASKS_ONE_BY_ONE = 'Subtasks are changed one at a time now: reload the Planner and try again';
+/** What the service says when a subtask a command changes was changed elsewhere since (409, with `SubtaskConflict`). */
+export const SUBTASK_CHANGED = 'This subtask was changed in another window since';
 
 export type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
 export type ChannelPatch = Partial<Pick<Channel, 'name' | 'color' | 'context'>>;
@@ -37,13 +58,23 @@ export interface RolledTask {
 export type EventBody =
   | { type: 'task.created'; task: NewTask }
   | { type: 'task.updated'; taskId: string; patch: TaskPatch }
+  /**
+   * A task's subtasks, changed one at a time by identity: the service applies each to the plan as it has it then, so
+   * another window's change to another subtask, or to another field, stays. `after`: the subtask it goes after (null:
+   * first; none, or one no longer there: last). `seen`: what the writer saw (`subtaskConflict`). Logs from before
+   * these have `task.updated` with the whole list, replayed as it was.
+   */
+  | { type: 'subtask.added'; taskId: string; subtask: Subtask; after?: string | null }
+  | { type: 'subtask.updated'; taskId: string; subtaskId: string; patch: SubtaskPatch; seen?: SubtaskSeen }
+  | { type: 'subtask.deleted'; taskId: string; subtaskId: string; seen?: Pick<SubtaskSeen, 'title'> }
+  | { type: 'subtask.moved'; taskId: string; subtaskId: string; after: string | null }
   | { type: 'task.moved'; taskId: string; placement: Placement; position: number }
   | { type: 'task.completed'; taskId: string; on: DateKey }
   | { type: 'task.reopened'; taskId: string }
   | { type: 'task.deleted'; taskId: string }
   | { type: 'task.restored'; taskId: string }
   | { type: 'task.archived'; taskId: string }
-  | { type: 'task.sourceSynced'; taskId: string; source: TaskSourceRef; title?: string }
+  | { type: 'task.sourceSynced'; taskId: string; source: TaskSourceRef; title?: string; notes?: string; dueDate?: DateKey | null }
   | { type: 'tasks.rolledOver'; date: DateKey; moved: RolledTask[]; archived: string[]; superseded?: string[] }
   | { type: 'tasks.recurred'; instances: NewTask[] }
   | { type: 'series.created'; series: Pick<Series, 'id' | 'rule' | 'startDate' | 'template'>; taskId: string }
@@ -56,12 +87,15 @@ export type EventBody =
   | { type: 'block.created'; block: WorkBlock }
   | { type: 'block.updated'; blockId: string; start: string; end: string }
   | { type: 'block.deleted'; blockId: string }
+  | { type: 'block.linked'; blockId: string; google: GoogleEventLink | null }
   | { type: 'calendar.added'; calendar: Omit<CalendarSubscription, 'visible'> }
   | { type: 'calendar.updated'; calendarId: string; patch: Partial<Pick<CalendarSubscription, 'name' | 'color' | 'visible'>> }
   | { type: 'calendar.removed'; calendarId: string }
   | { type: 'objective.created'; objective: Pick<Objective, 'id' | 'weekStart' | 'title' | 'carriedFrom'> }
   | { type: 'objective.updated'; objectiveId: string; patch: { title?: string; completed?: boolean } }
   | { type: 'objective.deleted'; objectiveId: string }
+  /** A deleted objective back (Undo); the tasks aligned with it are aligned again by their own updates. */
+  | { type: 'objective.restored'; objectiveId: string }
   | { type: 'ritual.saved'; ritual: Ritual; date: DateKey; fields: RitualRecord }
   | { type: 'folder.created'; folder: Pick<Folder, 'id' | 'name'> }
   | { type: 'folder.renamed'; folderId: string; name: string }
@@ -70,10 +104,27 @@ export type EventBody =
   | { type: 'run.outcome'; runId: string; outcome: 'completed' | 'failed' }
   | { type: 'run.reviewed'; runId: string; verdict: 'accepted' | 'changes'; note?: string }
   | { type: 'run.removed'; runId: string }
+  | { type: 'run.pullRequest'; runId: string; taskId: string; pullRequest: SeenPullRequest }
   | { type: 'channel.created'; channel: NewChannel }
   | { type: 'channel.updated'; channelId: string; patch: ChannelPatch }
   | { type: 'channel.deleted'; channelId: string }
-  | { type: 'settings.updated'; patch: Partial<Settings> };
+  | { type: 'settings.updated'; patch: Partial<Settings> }
+  | { type: 'gtask.kept'; account: string; listId: string; taskId: string; patch: GoogleTaskKeptPatch }
+  | { type: 'gtask.moved'; account: string; taskId: string; listId: string; newTaskId?: string }
+  | { type: 'gtask.dropped'; account: string; taskId: string };
+
+/**
+ * What a user sets on a Google task that the Planner keeps (Google Tasks' API cannot): `starred` stars or unstars it;
+ * `busy` false makes it Free again, `visibility` 'default' gives it the calendar's default again, `color` null its
+ * list's color, `attachments` [] none, `doNotDisturb` false and `decline` null turn those off. A decline without
+ * `since` is on from when it is kept, or since it was turned on.
+ */
+export type GoogleTaskKeptPatch = Partial<
+  Pick<GoogleTaskKept, 'time' | 'duration' | 'deadline' | 'repeat'> & { starred: boolean; busy: boolean; visibility: TaskVisibility; color: string | null; attachments: TaskAttachment[]; doNotDisturb: boolean; decline: DeclineInput | null }
+>;
+
+/** "Automatically decline meetings" as it is set: since when it is on is the Planner's to keep. */
+export type DeclineInput = Omit<TaskDecline, 'since'> & { since?: string };
 
 export type EventType = EventBody['type'];
 
@@ -103,22 +154,168 @@ export const isPlacement = (value: unknown): value is Placement => {
   return false;
 };
 
-const isSubtasks = (value: unknown): value is Subtask[] =>
-  Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean');
+/** A task has at most this many subtasks. */
+export const SUBTASKS_MAX = 200;
+
+const isSubtask = (item: unknown): item is Subtask =>
+  isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean' &&
+  // A task merged in keeps its notes, planned time and source (Sunsama's Merge tasks).
+  (item.notes === undefined || (typeof item.notes === 'string' && item.notes.length <= NOTES_MAX)) &&
+  (item.plannedMinutes === undefined || item.plannedMinutes === null || (Number.isInteger(item.plannedMinutes) && (item.plannedMinutes as number) >= 0 && (item.plannedMinutes as number) <= 24 * 60)) &&
+  (item.source === undefined || isSource(item.source));
+
+const isSubtasks = (value: unknown): value is Subtask[] => Array.isArray(value) && value.length <= SUBTASKS_MAX && value.every(isSubtask);
+
+/** A subtask patch: some of its fields, each as a subtask has it. */
+const subtaskPatchProblem = (patch: unknown): string | null => {
+  if (!isRecord(patch) || !Object.keys(patch).length) return 'patch must set a field of the subtask';
+  const unknown = Object.keys(patch).find((key) => !(SUBTASK_PATCH_FIELDS as readonly string[]).includes(key));
+  if (unknown) return `unknown field ${unknown}`;
+  return isSubtask({ id: 'patch', title: 'patch', done: false, ...patch }) ? null : 'subtask patch is invalid';
+};
+
+const isSeen = (value: unknown, fields: readonly string[]): boolean =>
+  value === undefined || (isRecord(value) && Object.entries(value).every(([key, item]) => fields.includes(key) && (key === 'done' ? typeof item === 'boolean' : isShortText(item, TITLE_MAX))));
+
+/** One of Gmail's actions; applying or removing a label names it. */
+const isGmailAction = (value: unknown): boolean =>
+  isRecord(value) && (GMAIL_ACTIONS as readonly unknown[]).includes(value.kind) &&
+  (value.kind === 'addLabel' || value.kind === 'removeLabel' ? isShortText(value.label, 225) && (value.label as string).trim().length > 0 : value.label === undefined);
 
 const isShortText = (value: unknown, max: number): boolean => typeof value === 'string' && value.length <= max;
 const isSource = (value: unknown): value is TaskSourceRef =>
   isRecord(value) &&
-  (value.kind === 'linear' || value.kind === 'github') &&
+  typeof value.kind === 'string' && Object.hasOwn(SOURCE_NAMES, value.kind) &&
   isShortText(value.id, 200) && (value.id as string).length > 0 &&
   isShortText(value.key, 100) &&
-  isShortText(value.url, 2000) && /^https:\/\//.test(value.url as string) &&
+  isShortText(value.url, 2000) && (value.kind === 'link' ? /^https?:\/\// : /^https:\/\//).test(value.url as string) &&
   (value.title === undefined || isShortText(value.title, TITLE_MAX)) &&
   (value.teamId === undefined || isShortText(value.teamId, 200)) &&
   (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40))) &&
   (value.mirrors === undefined || (Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200)))) &&
   (value.workspaceId === undefined || (isShortText(value.workspaceId, 200) && (value.workspaceId as string).length > 0)) &&
-  (value.branch === undefined || isShortText(value.branch, 200));
+  (value.branch === undefined || isShortText(value.branch, 200)) &&
+  (value.account === undefined || (typeof value.account === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account))) &&
+  (value.listId === undefined || (isShortText(value.listId, 200) && (value.listId as string).length > 0)) &&
+  (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) &&
+  (value.due === undefined || value.due === null || isDateKey(value.due)) &&
+  (value.event === undefined || (isRecord(value.event) && isShortText(value.event.calendarId, 2000) && isInstant(value.event.start) && isInstant(value.event.end) &&
+    typeof value.event.allDay === 'boolean' && typeof value.event.invitees === 'boolean' && (value.event.auto === undefined || typeof value.event.auto === 'boolean')));
+
+/** Google Tasks keeps at most this much of a task's details. */
+export const GOOGLE_NOTES_MAX = 8192;
+
+const isGoogleTaskId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024;
+
+const GTASK_TEMPLATE_FIELDS = ['title', 'notes', 'time', 'duration', 'deadline', 'start', 'busy', 'visibility', 'color', 'doNotDisturb', 'decline', 'attachments'];
+
+/** Google Calendar attaches at most this many Drive files to a task. */
+export const ATTACHMENTS_MAX = 25;
+/** The longest message a declined meeting's organizer gets. */
+export const DECLINE_MESSAGE_MAX = 500;
+const ATTACHMENT_FIELDS = ['id', 'title', 'mimeType', 'url'];
+
+/** Drive files attached to a task: Drive's id for each, a name, a type and an https address, once each, at most 25. */
+const attachmentsProblem = (value: unknown): string | null => {
+  if (!Array.isArray(value) || value.length > ATTACHMENTS_MAX) return `attachments are at most ${ATTACHMENTS_MAX} Drive files`;
+  for (const file of value) {
+    if (!isRecord(file) || typeof file.id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(file.id)) return "an attachment needs Drive's id for the file";
+    if (typeof file.title !== 'string' || !file.title.trim() || file.title.length > 500) return "an attachment's name is 1-500 characters";
+    if (typeof file.mimeType !== 'string' || file.mimeType.length > 200) return "an attachment's type is text, at most 200 characters";
+    if (typeof file.url !== 'string' || file.url.length > 2000 || !/^https:\/\//.test(file.url)) return 'an attachment opens at an https address';
+    if (Object.keys(file).some((field) => !ATTACHMENT_FIELDS.includes(field))) return 'an attachment has an unknown field';
+  }
+  return new Set(value.map((file: { id: string }) => file.id)).size === value.length ? null : 'a file is attached once';
+};
+
+/** "Automatically decline meetings": new and existing ('all') or only new ('new') invitations, a message, and since when. */
+const declineProblem = (value: unknown): string | null => {
+  if (!isRecord(value)) return 'decline is an object, or null';
+  if (value.mode !== 'all' && value.mode !== 'new') return 'decline mode is all or new';
+  if (typeof value.message !== 'string' || value.message.length > DECLINE_MESSAGE_MAX) return `a decline message is text, at most ${DECLINE_MESSAGE_MAX} characters`;
+  if (value.since !== undefined && !(typeof value.since === 'string' && value.since.length <= 40 && !Number.isNaN(Date.parse(value.since)))) return 'decline since is an instant';
+  return Object.keys(value).some((field) => !['mode', 'message', 'since'].includes(field)) ? 'decline has an unknown field' : null;
+};
+
+/** A repeating Google task's template: Google's title and details, and what the Planner keeps, for each next occurrence. */
+const validateGtaskTemplate = (value: unknown): string | null => {
+  if (!isRecord(value)) return 'repeat template must be an object';
+  if (typeof value.title !== 'string' || value.title.length > 1024) return 'template title must be text, at most 1024 characters';
+  if (typeof value.notes !== 'string' || value.notes.length > GOOGLE_NOTES_MAX) return `template notes must be text, at most ${GOOGLE_NOTES_MAX} characters`;
+  if (!(value.time === null || (Number.isInteger(value.time) && (value.time as number) >= 0 && (value.time as number) < 24 * 60))) return 'template time must be minutes after midnight, or null';
+  if (!(value.duration === null || (Number.isInteger(value.duration) && (value.duration as number) >= 5 && (value.duration as number) <= 24 * 60))) return 'template duration must be 5 to 1440 minutes, or null';
+  if (!(value.deadline === null || (Number.isInteger(value.deadline) && Math.abs(value.deadline as number) <= 3660))) return 'template deadline must be days from the date, or null';
+  if (!isDateKey(value.start)) return 'template start must be a date';
+  if (value.busy !== undefined && value.busy !== true) return 'template busy is true, or left out (free)';
+  if (value.visibility !== undefined && value.visibility !== 'public' && value.visibility !== 'private') return 'template visibility is public or private, or left out (the default)';
+  if (value.color !== undefined && !isColor(value.color)) return 'template color must be #rrggbb';
+  if (value.doNotDisturb !== undefined && value.doNotDisturb !== true) return 'template doNotDisturb is true, or left out';
+  const problem = (value.decline !== undefined ? declineProblem(value.decline) : null) ?? (value.attachments !== undefined ? attachmentsProblem(value.attachments) : null);
+  if (problem) return `template: ${problem}`;
+  return Object.keys(value).some((field) => !GTASK_TEMPLATE_FIELDS.includes(field)) ? 'template has an unknown field' : null;
+};
+
+const GTASK_EXCEPTION_FIELDS = ['skip', 'title', 'notes', 'date', 'time', 'duration', 'deadline', 'attachments'];
+/** A series keeps at most this many of its occurrences changed on their own. */
+export const GTASK_EXCEPTIONS_MAX = 200;
+
+/** An occurrence of a series changed on its own: skipped, or its own title, details, date, time or deadline. */
+const validateGtaskException = (value: unknown): string | null => {
+  if (!isRecord(value)) return 'an occurrence change must be an object';
+  const fields = Object.keys(value);
+  if (!fields.length) return 'an occurrence change needs a field';
+  if (fields.some((field) => !GTASK_EXCEPTION_FIELDS.includes(field))) return 'an occurrence change has an unknown field';
+  if (value.skip !== undefined && (value.skip !== true || fields.length > 1)) return 'a skipped occurrence is skip: true alone';
+  if (value.title !== undefined && !(typeof value.title === 'string' && value.title.trim().length > 0 && value.title.length <= 1024)) return 'an occurrence title must be 1-1024 characters';
+  if (value.notes !== undefined && !(typeof value.notes === 'string' && value.notes.length <= GOOGLE_NOTES_MAX)) return `an occurrence's notes must be text, at most ${GOOGLE_NOTES_MAX} characters`;
+  if (value.date !== undefined && !isDateKey(value.date)) return 'an occurrence date must be a date';
+  if (value.time !== undefined && !(value.time === null || (Number.isInteger(value.time) && (value.time as number) >= 0 && (value.time as number) < 24 * 60))) return 'an occurrence time must be minutes after midnight, or null';
+  if (value.duration !== undefined && !(value.duration === null || (Number.isInteger(value.duration) && (value.duration as number) >= 5 && (value.duration as number) <= 24 * 60))) return 'an occurrence duration must be 5 to 1440 minutes, or null';
+  if (value.deadline !== undefined && !(value.deadline === null || isDateKey(value.deadline))) return 'an occurrence deadline must be a date or null';
+  const files = value.attachments !== undefined ? attachmentsProblem(value.attachments) : null;
+  return files ? `an occurrence's ${files}` : null;
+};
+
+/**
+ * What may be kept for a Google task: a time of day, a length, a deadline, a repeat rule (with its series' template), a
+ * star, Busy, a visibility, a color, Drive attachments, Do not disturb and declining meetings.
+ */
+const validateKeptPatch = (patch: unknown): string | null => {
+  if (!isRecord(patch)) return 'patch must be an object';
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'time' && !(value === null || (Number.isInteger(value) && (value as number) >= 0 && (value as number) < 24 * 60))) return 'time must be minutes after midnight, or null';
+    else if (key === 'duration' && !(value === null || (Number.isInteger(value) && (value as number) >= 5 && (value as number) <= 24 * 60))) return 'duration must be 5 to 1440 minutes, or null';
+    else if (key === 'deadline' && !(value === null || isDateKey(value))) return 'deadline must be a date or null';
+    else if ((key === 'starred' || key === 'busy' || key === 'doNotDisturb') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if (key === 'visibility' && value !== 'default' && value !== 'public' && value !== 'private') return 'visibility must be default, public or private';
+    else if (key === 'color' && !(value === null || isColor(value))) return "color must be #rrggbb, or null (its list's)";
+    else if (key === 'attachments' || key === 'decline') {
+      const problem = key === 'attachments' ? attachmentsProblem(value) : value === null ? null : declineProblem(value);
+      if (problem) return problem;
+    } else if (key === 'repeat') {
+      if (value === null) continue;
+      if (!isRecord(value) || typeof value.rule !== 'string' || value.rule.length > 500 || !parseRRule(value.rule)) return 'repeat needs an RRULE';
+      if (!isId(value.seriesId)) return 'repeat needs a series id';
+      if (!(Number.isInteger(value.index) && (value.index as number) >= 1 && (value.index as number) <= 100_000)) return 'repeat index must be a count';
+      if (!(value.next === null || isGoogleTaskId(value.next))) return 'repeat next must be a task id or null';
+      if (value.on !== undefined && !isDateKey(value.on)) return 'repeat on must be a date';
+      if (value.template !== undefined) {
+        const error = validateGtaskTemplate(value.template);
+        if (error) return error;
+      }
+      if (value.exceptions !== undefined) {
+        if (!isRecord(value.exceptions) || Object.keys(value.exceptions).length > GTASK_EXCEPTIONS_MAX) return `repeat exceptions must be at most ${GTASK_EXCEPTIONS_MAX} occurrences by date`;
+        for (const [date, change] of Object.entries(value.exceptions)) {
+          if (!isDateKey(date)) return 'repeat exceptions are by date';
+          const error = validateGtaskException(change);
+          if (error) return error;
+        }
+      }
+      if (Object.keys(value).some((field) => !['rule', 'seriesId', 'index', 'next', 'on', 'template', 'exceptions'].includes(field))) return 'repeat has an unknown field';
+    } else if (!['time', 'duration', 'deadline', 'starred', 'repeat', 'busy', 'visibility', 'color', 'attachments', 'doNotDisturb', 'decline'].includes(key)) return `unknown field ${key}`;
+  }
+  return null;
+};
 
 const PRIORITY_VALUES = new Set(['urgent', 'high', 'medium', 'low']);
 const isPriority = (value: unknown): boolean => value === null || (typeof value === 'string' && PRIORITY_VALUES.has(value));
@@ -136,7 +333,8 @@ const validatePatch = (patch: unknown, channels: Record<string, Channel>, object
     else if (key === 'channelId' && !(value === null || (isId(value) && channels[value as string]))) return 'unknown channel';
     else if (key === 'objectiveId' && !(value === null || (isId(value) && objectives[value as string]))) return 'unknown objective';
     else if (key === 'folderId' && !(value === null || (isId(value) && folders[value as string] && !folders[value as string]!.deletedAt))) return 'unknown folder';
-    else if (key === 'subtasks' && !isSubtasks(value)) return 'subtasks are invalid';
+    // A whole list from a window that read it earlier would put back what another window changed since (`subtask.*`).
+    else if (key === 'subtasks') return SUBTASKS_ONE_BY_ONE;
     else if (key === 'source' && !(value === null || isSource(value))) return 'source is invalid';
     else if (!(PATCH_FIELDS as readonly string[]).includes(key)) return `unknown field ${key}`;
   }
@@ -154,6 +352,20 @@ const validateChannelPatch = (patch: unknown): string | null => {
   return null;
 };
 
+const isGoogleAccount = (value: unknown): boolean => typeof value === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+
+/** A Google account and one of its calendars. */
+const isGoogleCalendarRef = (value: unknown): boolean =>
+  isRecord(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && (value.calendarId as string).length > 0;
+
+const isGoogleEventLink = (value: unknown): value is GoogleEventLink =>
+  isGoogleCalendarRef(value) && isShortText((value as Record<string, unknown>).eventId, 1024) && ((value as Record<string, unknown>).eventId as string).length > 0;
+
+/** A task list in the settings: its account and id, as `${account}\n${listId}`. */
+const isTaskListKey = (value: unknown): boolean => typeof value === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}\n[^\n]{1,1024}$/.test(value);
+/** At most this many task lists have a color, a place, or are hidden. */
+const TASK_LISTS_MAX = 500;
+
 const validateSettingsPatch = (patch: unknown): string | null => {
   if (!isRecord(patch)) return 'patch must be an object';
   for (const [key, value] of Object.entries(patch)) {
@@ -169,9 +381,27 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'linearLayout' && value !== 'list' && value !== 'board') return 'linearLayout must be list or board';
     else if (key === 'linearGroupBy' && !(LINEAR_GROUPS as readonly unknown[]).includes(value)) return `linearGroupBy must be one of ${LINEAR_GROUPS.join(', ')}`;
     else if (key === 'linearOrderBy' && !(LINEAR_ORDERS as readonly unknown[]).includes(value)) return `linearOrderBy must be one of ${LINEAR_ORDERS.join(', ')}`;
+    else if (key === 'linearDisplay') { const problem = linearDisplayProblem(value); if (problem) return problem; }
     else if (key === 'suggestFromHistory' && typeof value !== 'boolean') return 'suggestFromHistory must be true or false';
     else if ((key === 'pomodoroMinutes' || key === 'breakMinutes') && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 180)) return `${key} must be 1-180`;
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes'].includes(key)) return `unknown setting ${key}`;
+    else if (key === 'googleTimebox' && !(value === null || isGoogleCalendarRef(value))) return 'googleTimebox must be a Google account and calendar, or null';
+    else if (key === 'channelTimebox' && !(isRecord(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([channel, target]) => isId(channel) && isGoogleCalendarRef(target)))) return 'channelTimebox must map channel ids to a Google account and calendar';
+    else if (key === 'googleTasksOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'googleTasksOnComplete must be ask, complete or nothing';
+    else if ((key === 'googleTasksImportCompletion' || key === 'googleTasksDueFromPlan' || key === 'googleTasksOnCalendar' || key === 'googleTaskNotifications') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if (key === 'googleCalendarsIntroduced' && !(Array.isArray(value) && value.length <= 50 && value.every((email) => typeof email === 'string' && email.length <= 254 && email.includes('@')))) return 'googleCalendarsIntroduced must be at most 50 email addresses';
+    else if (key === 'googleTaskListColors' && !(isRecord(value) && Object.keys(value).length <= TASK_LISTS_MAX && Object.entries(value).every(([list, color]) => isTaskListKey(list) && isColor(color)))) return `googleTaskListColors must be at most ${TASK_LISTS_MAX} task lists, each a #rrggbb color`;
+    else if ((key === 'googleTaskListsHidden' || key === 'googleTaskListOrder') && !(Array.isArray(value) && value.length <= TASK_LISTS_MAX && value.every(isTaskListKey) && new Set(value).size === value.length)) return `${key} must be at most ${TASK_LISTS_MAX} task lists, once each`;
+    else if (key === 'agentPresets' && !(Array.isArray(value) && value.length <= 30 && value.every(isAgentPreset) && new Set(value.map((preset: { id: string }) => preset.id)).size === value.length)) return 'agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null';
+    else if (key === 'agentPresets') continue;
+    else if ((key === 'gmailOnImport' || key === 'gmailOnComplete') && !(Array.isArray(value) && value.length <= 12 && value.every(isGmailAction))) return `${key} must be at most 12 Gmail actions (a label with addLabel and removeLabel)`;
+    else if ((key === 'gmailImportPrompt' || key === 'gmailCompletePrompt' || key === 'linearImportPrompt') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if (key === 'emailClient' && value !== 'gmail' && value !== 'superhuman') return 'emailClient must be gmail or superhuman';
+    else if (key === 'meetingImport' && value !== 'prompt' && value !== 'autoSync') return 'meetingImport must be prompt or autoSync';
+    else if (key === 'meetingCalendars' && !(Array.isArray(value) && value.length <= 200 && value.every((id) => isShortText(id, 2000) && (id as string).length > 0))) return 'meetingCalendars must be calendar ids';
+    else if (key === 'meetingExclusions' && !(Array.isArray(value) && value.every((kind) => (MEETING_EXCLUSIONS as readonly unknown[]).includes(kind)) && new Set(value).size === value.length)) return `meetingExclusions must be some of ${MEETING_EXCLUSIONS.join(', ')}`;
+    else if (key === 'meetingAutoComplete' && !['always', 'never', 'invitees'].includes(value as string)) return 'meetingAutoComplete must be always, never or invitees';
+    else if (key === 'meetingChannels' && !(isRecord(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([calendar, channel]) => calendar.length > 0 && calendar.length <= 2000 && isId(channel)))) return 'meetingChannels must map calendar ids to channel ids';
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar', 'googleTaskNotifications', 'googleCalendarsIntroduced', 'googleTaskListColors', 'googleTaskListsHidden', 'googleTaskListOrder', 'gmailOnImport', 'gmailOnComplete', 'gmailImportPrompt', 'gmailCompletePrompt', 'emailClient', 'linearImportPrompt', 'meetingImport', 'meetingCalendars', 'meetingExclusions', 'meetingAutoComplete', 'meetingChannels', 'channelTimebox'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };
@@ -201,8 +431,21 @@ const isRunShape = (value: unknown): string | null => {
   if (!(value.projectId === null || isShortText(value.projectId, 1024))) return 'projectId is invalid';
   if (!(value.directory === null || isShortText(value.directory, 1024))) return 'directory is invalid';
   if (!(value.worktree === null || (isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))) return 'worktree is invalid';
+  if (value.wantsPr !== undefined && typeof value.wantsPr !== 'boolean') return 'wantsPr must be true or false';
+  if (!(value.assignee === undefined || value.assignee === null || isRunAssignee(value.assignee))) return 'assignee is invalid';
   return isShortText(value.title, TITLE_MAX) ? null : 'title is invalid';
 };
+
+const PULL_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/\d{1,9}$/;
+
+const isPullRequest = (value: unknown): value is SeenPullRequest =>
+  isRecord(value) &&
+  Number.isInteger(value.number) && (value.number as number) > 0 &&
+  typeof value.url === 'string' && PULL_URL.test(value.url) &&
+  ['open', 'closed', 'merged'].includes(value.state as string) &&
+  typeof value.draft === 'boolean' &&
+  isShortText(value.title, TITLE_MAX) &&
+  typeof value.repo === 'string' && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
 
 const isRule = (value: unknown): value is RecurrenceRule => {
   if (!isRecord(value)) return false;
@@ -245,6 +488,7 @@ const validateRitualFields = (ritual: Ritual, fields: unknown): string | null =>
       if (!Array.isArray(value) || value.length > 100) return 'items must be a list of at most 100';
       for (const item of value) {
         if (!isRecord(item) || !isId(item.id) || !(typeof item.text === 'string' && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== 'boolean' || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === 'boolean')) return 'a highlight is invalid';
+        if (!(item.url === undefined || (typeof item.url === 'string' && item.url.length <= 2000 && /^https:\/\/\S+$/.test(item.url))) || !(item.ref === undefined || (typeof item.ref === 'string' && item.ref.length > 0 && item.ref.length <= 300))) return 'a highlight is invalid';
       }
     }
   }
@@ -297,6 +541,24 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     }
     case 'task.updated':
       return needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+    case 'subtask.added': {
+      const error = needTask();
+      if (error) return error;
+      const task = tasks[command.taskId as string]!;
+      if (!isSubtask(command.subtask)) return 'subtask is invalid';
+      if (task.subtasks.some((item) => item.id === (command.subtask as Subtask).id)) return 'subtask id already exists';
+      if (!(command.after === undefined || command.after === null || isId(command.after))) return 'after must be a subtask id or null';
+      // A calendar event task has no subtasks at all (Sunsama): none is added to one; the ones it had before stay, to
+      // tick, rename, convert or remove.
+      if (isEventTask(task)) return EVENT_NO_SUBTASKS;
+      return task.subtasks.length < SUBTASKS_MAX ? null : `a task has at most ${SUBTASKS_MAX} subtasks`;
+    }
+    case 'subtask.updated':
+      return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? subtaskPatchProblem(command.patch) ?? (isSeen(command.seen, ['title', 'done']) ? null : 'seen is invalid');
+    case 'subtask.deleted':
+      return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? (isSeen(command.seen, ['title']) ? null : 'seen is invalid');
+    case 'subtask.moved':
+      return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? (command.after === null || isId(command.after) ? null : 'after must be a subtask id or null');
     case 'task.moved':
       if (!isPlacement(command.placement)) return 'placement is invalid';
       if (typeof command.position !== 'number' || !Number.isFinite(command.position)) return 'position must be a number';
@@ -311,6 +573,8 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     case 'task.sourceSynced':
       if (!isSource(command.source)) return 'source is invalid';
       if (command.title !== undefined && !isTitle(command.title)) return 'title must be 1-500 characters';
+      if (command.notes !== undefined && !(typeof command.notes === 'string' && command.notes.length <= NOTES_MAX)) return 'notes are too long';
+      if (command.dueDate !== undefined && !(command.dueDate === null || isDateKey(command.dueDate))) return 'dueDate must be a date or null';
       return needTask();
     case 'timer.started':
       return needTask();
@@ -339,12 +603,16 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return validateSpan(command.start, command.end);
     case 'block.deleted':
       return isId(command.blockId) && context.blocks[command.blockId as string] ? null : 'unknown block';
+    case 'block.linked':
+      if (!(isId(command.blockId) && context.blocks[command.blockId as string])) return 'unknown block';
+      return command.google === null || isGoogleEventLink(command.google) ? null : 'google must be an account, calendar and event, or null';
     case 'calendar.added': {
       const calendar = command.calendar;
       if (!isRecord(calendar) || !isId(calendar.id)) return 'calendar needs an id';
       if (context.calendars[calendar.id as string]) return 'calendar id already exists';
       if (!(typeof calendar.name === 'string' && calendar.name.trim() && calendar.name.length <= 80)) return 'calendar name must be 1-80 characters';
       if (!isFeedUrl(calendar.url)) return 'calendar URL must be http(s), webcal or file';
+      if (calendar.google !== undefined && !isGoogleCalendarRef(calendar.google)) return 'google must be an account and a calendar';
       return isColor(calendar.color) ? null : 'color must be #rrggbb';
     }
     case 'calendar.updated': {
@@ -381,6 +649,7 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return null;
     }
     case 'objective.deleted':
+    case 'objective.restored':
       return isId(command.objectiveId) && context.objectives[command.objectiveId as string] ? null : 'unknown objective';
     case 'series.created': {
       const series = command.series;
@@ -431,6 +700,12 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return command.note === undefined || isShortText(command.note, 4000) ? null : 'note is too long';
     case 'run.removed':
       return isId(command.runId) && context.runs[command.runId as string] ? null : 'unknown run';
+    case 'run.pullRequest': {
+      const run = isId(command.runId) ? context.runs[command.runId as string] : undefined;
+      if (!run) return 'unknown run';
+      if (command.taskId !== run.taskId) return "taskId must be the run's task";
+      return isPullRequest(command.pullRequest) ? null : 'pullRequest is invalid';
+    }
     case 'ritual.saved':
       if (!(RITUALS as readonly string[]).includes(command.ritual as string)) return 'unknown ritual';
       if (!isDateKey(command.date)) return 'date must be a date';
@@ -450,6 +725,14 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return needChannel();
     case 'settings.updated':
       return validateSettingsPatch(command.patch);
+    case 'gtask.kept':
+      if (!isGoogleAccount(command.account) || !isGoogleTaskId(command.listId) || !isGoogleTaskId(command.taskId)) return 'a Google account, list and task are required';
+      return validateKeptPatch(command.patch);
+    case 'gtask.moved':
+      if (!isGoogleAccount(command.account) || !isGoogleTaskId(command.taskId) || !isGoogleTaskId(command.listId)) return 'a Google account, task and list are required';
+      return command.newTaskId === undefined || isGoogleTaskId(command.newTaskId) ? null : 'newTaskId must be a task id';
+    case 'gtask.dropped':
+      return isGoogleAccount(command.account) && isGoogleTaskId(command.taskId) ? null : 'a Google account and task are required';
     default:
       return `unknown command type ${String(type)}`;
   }
@@ -459,4 +742,30 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
 export const commandBody = (command: Command): EventBody => {
   const { cmd: _cmd, ...body } = command;
   return body as EventBody;
+};
+
+/**
+ * A subtask command that can't apply as it was meant to the plan as it is: the subtask was deleted elsewhere since
+ * (`now` null), or a field it sets was changed since to a value other than the one it sets (`now`: the subtask as it
+ * is). The service writes nothing of its batch and answers 409 with this and the plan.
+ */
+export interface SubtaskConflict {
+  taskId: string;
+  subtaskId: string;
+  now: Subtask | null;
+}
+
+/**
+ * The conflict a subtask command meets in the plan as it is, if any. A rename, or a delete, of a subtask renamed since
+ * it was seen is one; a tick never is (it sets done, so done changed since is done as it sets it: two windows ticking
+ * the same subtask agree). Changing or moving a subtask deleted since is one; deleting it again is not (it is gone).
+ */
+export const subtaskConflict = (body: EventBody, context: Pick<CommandContext, 'tasks'>): SubtaskConflict | null => {
+  if (body.type !== 'subtask.updated' && body.type !== 'subtask.deleted' && body.type !== 'subtask.moved') return null;
+  const now = context.tasks[body.taskId]?.subtasks.find((subtask) => subtask.id === body.subtaskId) ?? null;
+  if (!now) return body.type === 'subtask.deleted' ? null : { taskId: body.taskId, subtaskId: body.subtaskId, now };
+  const seen: SubtaskSeen = body.type === 'subtask.moved' ? {} : (body.seen ?? {});
+  const sets: SubtaskPatch = body.type === 'subtask.updated' ? body.patch : {};
+  const changed = (['title', 'done'] as const).some((field) => seen[field] !== undefined && now[field] !== seen[field] && now[field] !== sets[field]);
+  return changed ? { taskId: body.taskId, subtaskId: body.subtaskId, now } : null;
 };

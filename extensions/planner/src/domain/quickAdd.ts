@@ -1,5 +1,6 @@
 // Sunsama's Add Task syntax: `@` start date or backlog bucket, `~` planned time,
-// `#` channel, `!` priority, `$` weekly objective. Unparsed tokens stay in the title.
+// `#` channel, `!` priority, `$` weekly objective, `>` the task to merge it into
+// (as a subtask). Unparsed tokens stay in the title.
 import type { BacklogBucket, DateKey, Placement, Priority } from './types.ts';
 import { addDays, isDateKey, monthIndex, nextWeekday, startOfWeek } from './dates.ts';
 
@@ -10,6 +11,8 @@ export interface QuickAdd {
   channel: string | null;
   priority: Priority | null;
   objective: string | null;
+  /** `>Inbox triage`: the open task, by the start of its title, to merge this one into as a subtask (Sunsama's `>`). */
+  merge?: string | null;
 }
 
 const PRIORITIES: Record<string, Priority> = {
@@ -107,6 +110,12 @@ export const parseQuickAdd = (input: string, today: DateKey, weekStartsOn: 0 | 1
       continue;
     } else if (rest && sigil === '$' && /^[\p{L}\p{N}_-]+$/u.test(rest)) {
       result.objective = rest;
+      continue;
+    } else if (sigil === '>' && /^[\p{L}\p{N}]/u.test(rest)) {
+      // The words after `>`, up to the next token, name the task (titles have spaces).
+      const name = [rest];
+      while (index + 1 < tokens.length && !/^[~@#!$>]./u.test(tokens[index + 1]!)) name.push(tokens[++index]!);
+      result.merge = name.join(' ');
       continue;
     }
     words.push(token);

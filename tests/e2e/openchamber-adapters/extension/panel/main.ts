@@ -1,0 +1,188 @@
+// One page for the test extension's panel, its entries' own panel and its
+// full page. It shows what the host told it and drives every oc-forge API, so
+// the end-to-end check can read results off the frame.
+import { connectHost, type HostReadyContext } from '@openchamber/sdk';
+import { connectOcForge } from '../../../../../adapters/openchamber/client/index.ts';
+
+const $ = (id: string) => document.getElementById(id) as HTMLElement;
+const log = (line: string) => {
+  $('log').textContent = `${new Date().toISOString().slice(11, 23)} ${line}\n${$('log').textContent ?? ''}`;
+};
+$('loaded').textContent = String(Date.now());
+
+// print() opens the print dialog only where the host sandboxes this frame with allow-modals (ocForge.modals); in an
+// allow-scripts frame Chrome ignores it, and no print event comes.
+let printing = false;
+addEventListener('beforeprint', () => { printing = true; log('beforeprint'); });
+addEventListener('afterprint', () => log('afterprint'));
+$('print').onclick = () => {
+  printing = false;
+  print();
+  $('printed').textContent = printing ? 'printed' : 'ignored';
+};
+
+const host = connectHost();
+let session: string | null = null;
+const applyTheme = (context: HostReadyContext) => {
+  const style = document.documentElement.style;
+  style.setProperty('--bg', context.theme.tokens.background);
+  style.setProperty('--fg', context.theme.tokens.foreground);
+  style.setProperty('--border', context.theme.tokens.border);
+  style.setProperty('--primary', context.theme.tokens.primary);
+  style.setProperty('--font', context.theme.tokens.font);
+  style.setProperty('--mono', context.theme.tokens.mono);
+  session = context.session?.id ?? null;
+};
+host.onReady(applyTheme);
+
+// Eight service requests held open, more than a browser's six HTTP connections per host, then a ninth: over HTTP
+// requests the ninth waits for a held one to end; over the window's service socket it answers at once.
+$('hold-many').onclick = () => {
+  $('ping-ms').textContent = '…';
+  for (let i = 0; i < 8; i += 1) {
+    void host.serviceRequest({ method: 'GET', path: '/hold?ms=12000' }).then(() => log(`hold ${i} answered`), () => log(`hold ${i} failed`));
+  }
+  setTimeout(() => {
+    const started = performance.now();
+    void host.serviceRequest({ method: 'GET', path: '/ping' }).then(
+      () => { $('ping-ms').textContent = String(Math.round(performance.now() - started)); },
+      (error: Error) => { $('ping-ms').textContent = `failed: ${error.message}`; },
+    );
+  }, 1_000);
+};
+host.onSession((snapshot) => { session = snapshot?.id ?? null; });
+
+const start = async () => {
+const forge = await connectOcForge();
+if (!forge) {
+  $('status').textContent = 'stock OpenChamber: no oc-forge APIs';
+} else {
+  const { hello } = forge;
+  $('status').textContent = `oc-forge v${hello.version}: ${hello.features.join(', ')}${hello.limits ? `; room for ${hello.limits.tabs} tabs, titles of ${hello.limits.title}` : ''}`;
+  $('surface').textContent = `(${hello.surface}${forge.rail.own() ? ', own panel' : ''})`;
+  document.body.dataset.surface = hello.surface;
+
+  const showEntry = (entry: string | null) => { $('entry').textContent = entry ?? '—'; };
+  showEntry(forge.rail.entry());
+  forge.rail.onEntry((entry) => { showEntry(entry); log(`rail-entry ${entry}`); });
+  $('report-beta').onclick = () => {
+    void forge.rail.setActive('beta').then(() => { showEntry('beta'); log('reported beta'); }, (error: Error) => log(`report failed: ${error.message}`));
+  };
+
+  const showTab = (id: string | null) => { $('tab').textContent = id ?? '—'; };
+  showTab(hello.tabs.shown ? hello.tabs.active : null);
+  forge.tabs.onActivate((id) => { showTab(id); log(`tab-activated ${id}`); });
+  forge.tabs.onClose((id) => log(`tab-closed ${id}`));
+  forge.tabs.onChange((state) => { if (!state.shown) showTab(null); });
+  const tabCall = (label: string, call: () => Promise<void>) => () => {
+    void call().then(() => log(label), (error: Error) => log(`${label} failed: ${error.message}`));
+  };
+  // Tab A has a place on the page (a Cmd/Ctrl+click opens it in a new browser tab); tab B has none.
+  $('open-a').onclick = tabCall('opened a', () => forge.tabs.open({ id: 'a', title: 'Tab A', icon: 'file-code', route: '/tab/a' }, { activate: true }));
+  $('open-b').onclick = tabCall('opened b', () => forge.tabs.open({ id: 'b', title: 'Tab B', dirty: true }, { activate: true }));
+  $('close-a').onclick = tabCall('closed a', () => forge.tabs.close('a'));
+  // Many tabs (many-1…many-N, those still missing), the last one selected; then a tab more, and titles at and past the
+  // host's limit. Each says how long the host took, and what it refused and how fast.
+  const result = (line: string) => { $('many-result').textContent = line; log(line); };
+  $('open-many').onclick = () => {
+    const count = Number(($('many-count') as HTMLInputElement).value) || 70;
+    const started = performance.now();
+    const ms = () => Math.round(performance.now() - started);
+    void (async () => {
+      try {
+        const have = new Set(forge.tabs.state().list.map((tab) => tab.id));
+        for (let index = 1; index <= count; index += 1) {
+          if (!have.has(`many-${index}`)) await forge.tabs.open({ id: `many-${index}`, title: `Many ${index}`, icon: 'file-text', route: `/tab/many-${index}` });
+        }
+        await forge.tabs.activate(`many-${count}`);
+        result(`opened ${count} in ${ms()} ms`);
+      } catch (error) {
+        result(`failed after ${ms()} ms: ${(error as Error).message}`);
+      }
+    })();
+  };
+  const timed = (label: string, call: () => Promise<void>) => () => {
+    const started = performance.now();
+    void call().then(
+      () => result(`${label}: opened in ${Math.round(performance.now() - started)} ms`),
+      (error: Error) => result(`${label}: refused in ${Math.round(performance.now() - started)} ms: ${error.message}`),
+    );
+  };
+  $('open-one-more').onclick = timed('one more', () => forge.tabs.open({ id: `over-${Date.now()}`, title: 'One more' }));
+  $('open-long-title').onclick = timed('title 513', () => forge.tabs.open({ id: 'long-title', title: `${'L'.repeat(509)} end` }));
+  $('open-full-title').onclick = timed('title 512', () => forge.tabs.open({ id: 'full-title', title: `${'F'.repeat(508)} end` }));
+  // Off until asked, so the plain close checks stay as they are: then an unsaved tab the user closes is left to this frame.
+  let stopDeciding: (() => void) | null = null;
+  $('decide-close').onclick = () => {
+    if (stopDeciding) {
+      stopDeciding();
+      stopDeciding = null;
+      log('stopped deciding');
+      return;
+    }
+    stopDeciding = forge.tabs.onCloseRequest((id) => { $('close-request').textContent = id; log(`close-request ${id}`); });
+    log('deciding');
+  };
+  // Closing the tab it was asked about ends the deciding too, so the next round starts as this one did.
+  $('confirm-close').onclick = tabCall('confirmed close', async () => {
+    await forge.tabs.close($('close-request').textContent ?? '');
+    stopDeciding?.();
+    stopDeciding = null;
+  });
+
+  // Every press OpenChamber binds to navigation goes to it; the rest stays here.
+  forge.keys.forwardHostShortcuts({
+    onForward: (action, outcome) => {
+      void outcome.then(
+        () => { $('key-result').textContent = `forwarded ${action}`; },
+        (error: Error) => { $('key-result').textContent = `refused: ${error.message}`; },
+      );
+    },
+  });
+  $('keys').addEventListener('keydown', (event) => {
+    // A chord OpenChamber does not let frames forward, asked for anyway: refused.
+    if ((event.ctrlKey || event.metaKey) && /^[a-z]$/.test(event.key)) {
+      event.preventDefault();
+      void forge.keys.forward(event).then(
+        (action) => { $('key-result').textContent = `forwarded ${action}`; },
+        (error: Error) => { $('key-result').textContent = `refused: ${error.message}`; },
+      );
+    }
+  });
+  $('late-key').onclick = () => {
+    // Long after the click: no user activation left, so the host must refuse.
+    setTimeout(() => {
+      void forge.keys.forward({ key: '1', code: 'Digit1', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false }).then(
+        (action) => { $('key-result').textContent = `late: forwarded ${action}`; },
+        (error: Error) => { $('key-result').textContent = `late: refused: ${error.message}`; },
+      );
+    }, 7000);
+  };
+
+  const showRoute = (route: string | null) => { $('route').textContent = route ?? '—'; };
+  showRoute(forge.links.route());
+  forge.links.onRoute((route) => { showRoute(route); log(`route ${route}`); });
+  const pageLink = $('page-link') as HTMLAnchorElement;
+  pageLink.href = forge.links.pageUrl('/item/42') ?? '#';
+  const sessionLink = $('session-link') as HTMLAnchorElement;
+  const linkSession = () => { sessionLink.href = session ? forge.links.sessionUrl(session) ?? '#' : '#'; };
+  linkSession();
+  host.onSession(() => linkSession());
+  // A plain click stays in this window: the page handles it. Modified clicks open a tab.
+  pageLink.addEventListener('click', (event) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+    event.preventDefault();
+    void forge.links.setRoute('/item/42', { push: true }).then(() => showRoute('/item/42'));
+  });
+  sessionLink.addEventListener('click', (event) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0 || !session) return;
+    event.preventDefault();
+    void host.openSession(session);
+  });
+  $('set-route').onclick = () => {
+    void forge.links.setRoute('/item/7', { push: true }).then(() => { showRoute('/item/7'); log('route set /item/7'); }, (error: Error) => log(`set route failed: ${error.message}`));
+  };
+}
+};
+
+void start();

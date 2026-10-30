@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { formatMinutes, monthDay } from '../../src/domain/dates.ts';
 import { parseQuickAdd } from '../../src/domain/quickAdd.ts';
 import { reorderCommands, sortTasks } from '../../src/domain/sort.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
 import { usePlanner, useView } from '../lib/context.ts';
-import { addParsedTask } from '../lib/addTask.ts';
+import { addParsedTask, urlHint } from '../lib/addTask.ts';
+import { LinearUrlStatus, useLinearUrlStatus } from './LinearUrlStatus.tsx';
+import { MergeChip } from './AddTask.tsx';
 import { useUi } from '../lib/ui.ts';
 import type { Route } from './Shell.tsx';
 
@@ -23,6 +25,21 @@ const where = (task: Task): string => {
   return task.placement.kind === 'day' ? monthDay(task.placement.date) : 'backlog';
 };
 
+/**
+ * Escape closes an overlay wherever the focus is in it, as it does the calendar's popovers. Attached before the
+ * overlay is painted, so an Escape pressed the moment it shows is not lost.
+ */
+const useEscape = (onClose: () => void) =>
+  useLayoutEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
 /** Cmd/Ctrl+K: jump anywhere, run an action, or find a task. */
 export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose: () => void; onRoute: (route: Route) => void; onAddTask: () => void; onAsk: (query: string) => void }) => {
   const { client } = usePlanner();
@@ -31,7 +48,8 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
   const input = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
-  useEffect(() => input.current?.focus(), []);
+  useLayoutEffect(() => input.current?.focus(), []);
+  useEscape(onClose);
 
   const go = (route: Route, label: string, hint: string): Item => ({ id: `go-${route}`, label: `Go to ${label}`, hint, run: () => onRoute(route) });
   const commands: Item[] = [
@@ -48,6 +66,7 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
     go('backlog', 'Backlog', ''),
     go('linear', 'Linear', ''),
     go('github', 'GitHub', ''),
+    go('google', 'Google', ''),
     go('agents', 'Agents', ''),
     go('archive', 'Archive', ''),
     go('stats', 'Stats', ''),
@@ -91,7 +110,6 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
             if (event.key === 'ArrowDown') setIndex((current) => Math.min(items.length - 1, current + 1));
             else if (event.key === 'ArrowUp') setIndex((current) => Math.max(0, current - 1));
             else if (event.key === 'Enter') run(items[active]);
-            else if (event.key === 'Escape') onClose();
             else return;
             event.preventDefault();
           }}
@@ -112,29 +130,32 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
 
 /** Sunsama's Add Task window (A): the same syntax as inline Add task, landing on today by default. */
 export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
-  const { client, linear } = usePlanner();
+  const { client, linear, github, google } = usePlanner();
   const view = useView();
   const input = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
-  useEffect(() => input.current?.focus(), []);
+  useLayoutEffect(() => input.current?.focus(), []);
+  useEscape(onClose);
   const parsed = text.trim() ? parseQuickAdd(text, view.today, view.state.settings.weekStartsOn) : null;
+  const status = useLinearUrlStatus(parsed?.title ?? '');
   return (
     <div class="modal-backdrop palette-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div class="palette" role="dialog" aria-modal="true" aria-label="Add task">
         <input
           ref={input}
           value={text}
-          placeholder="Task name  ~30m  @tomorrow  #channel  $objective  !high"
+          placeholder="Task name  ~30m  @tomorrow  #channel  $objective  !high  >merge into"
           aria-label="New task"
           onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') onClose();
             if (event.key !== 'Enter' || !parsed?.title.trim()) return;
-            void addParsedTask(client, linear, parsed, { kind: 'day', date: view.today }, 'bottom', view.today);
+            void addParsedTask({ client, linear, github, google }, parsed, { kind: 'day', date: view.today }, 'bottom', view.today, null, { linearStateId: status.chosen, linearStatusShown: status.states.length > 0 });
             onClose();
           }}
         />
-        <p class="hint palette-hint">Enter adds to {parsed?.placement ? 'the day or bucket you named' : 'today'}. Esc cancels.</p>
+        <p class="hint palette-hint">{(parsed && urlHint(parsed.title)) ?? `Enter adds to ${parsed?.placement ? 'the day or bucket you named' : 'today'}. Esc cancels.`}</p>
+        <LinearUrlStatus status={status} />
+        {parsed && <MergeChip parsed={parsed} fallback={{ kind: 'day', date: view.today }} />}
       </div>
     </div>
   );

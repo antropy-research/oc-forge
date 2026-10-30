@@ -6,10 +6,18 @@ import {
   MUTATION_INPUT_KEYS,
   UPDATE_ISSUE_MUTATION,
   commentThreads,
+  estimateChoices,
+  estimateLabel,
+  favoriteOrder,
+  favoritesOf,
+  groupViews,
+  historyText,
+  isIssueView,
+  isProjectView,
+  type LinearHistoryEntry,
+  type LinearSavedView,
   planTextSave,
   workflowOrder,
-  groupIssues,
-  groupProjects,
   inWorkspace,
   isLinearIssue,
   issueSource,
@@ -22,7 +30,6 @@ import {
   priorityFromLinear,
   priorityToLinear,
   readGraphql,
-  sortIssues,
   stateOfType,
   taskFromIssue,
   type LinearIssue,
@@ -30,6 +37,9 @@ import {
 } from '../src/domain/linear.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
+import { displayFilter, projectDisplayFilter, settingsDisplay } from '../src/domain/linearDisplay.ts';
+import { compileFilter, readFilter, type LinearFilterNode, type LinearFilterRule } from '../src/domain/linearFilter.ts';
+import { DEFAULT_SETTINGS } from '../src/domain/types.ts';
 
 const issue = (patch: Partial<LinearIssue> = {}): LinearIssue => ({
   id: 'iss-1',
@@ -151,6 +161,82 @@ describe.skipIf(!schemaPath || !existsSync(schemaPath))('Linear schema', () => {
     const schema = buildSchema(readFileSync(schemaPath!, 'utf8'), { assumeValidSDL: true });
     for (const document of ALL_DOCUMENTS) expect(validate(schema, parse(document)).map((error) => error.message)).toEqual([]);
   });
+  test('the filters the Planner sends are valid IssueFilter and ProjectFilter values', async () => {
+    const { buildSchema, coerceInputValue } = await import('graphql');
+    const schema = buildSchema(readFileSync(schemaPath!, 'utf8'), { assumeValidSDL: true });
+    const check = (typeName: string, value: unknown) => {
+      const errors: string[] = [];
+      coerceInputValue(value, schema.getType(typeName) as never, (path, _invalid, error) => errors.push(`${path.join('.')}: ${error.message}`));
+      return errors;
+    };
+    const context = { today: '2026-10-26', weekStartsOn: 1 as const };
+    const value = (v: string, label = v) => ({ value: v, label });
+    const rules: LinearFilterRule[][] = [
+      [{ field: 'status', op: 'is', values: [value('Todo'), value('In Progress')] }],
+      [{ field: 'status', op: 'isNot', values: [value('Done')] }],
+      [{ field: 'assignee', op: 'is', values: [value('u1'), value('', 'No assignee')] }],
+      [{ field: 'assignee', op: 'isNot', values: [value('u1'), value('', 'No assignee')] }],
+      [{ field: 'creator', op: 'isNot', values: [value('u1')] }],
+      [{ field: 'priority', op: 'is', values: [value('0'), value('1')] }],
+      [{ field: 'label', op: 'includesAny', values: [value('Bug')] }],
+      [{ field: 'label', op: 'includesAll', values: [value('Bug'), value('UI')] }],
+      [{ field: 'label', op: 'excludes', values: [value('Bug')] }],
+      [{ field: 'project', op: 'is', values: [value('p1'), value('', 'No project')] }],
+      [{ field: 'team', op: 'isNot', values: [value('t1')] }],
+      [{ field: 'cycle', op: 'is', values: [value('c1'), value('@active'), value('', 'No cycle')] }],
+      [{ field: 'cycle', op: 'isNot', values: [value('@next')] }],
+      [{ field: 'due', op: 'is', values: [value('overdue'), value('today'), value('thisWeek'), value('nextWeek'), value('none')] }],
+      [{ field: 'due', op: 'before', values: [value('2026-11-02')] }],
+      [{ field: 'due', op: 'after', values: [value('2026-11-02')] }],
+      // Linear's further properties.
+      [{ field: 'assignee', op: 'is', values: [value('u1'), value('@me', 'Me'), value('', 'No assignee')] }],
+      [{ field: 'creator', op: 'isNot', values: [value('u1'), value('@me', 'Me')] }],
+      [{ field: 'creator', op: 'isNot', values: [value('@me', 'Me'), value('', 'No creator')] }],
+      [{ field: 'content', op: 'contains', values: [value('login')] }],
+      [{ field: 'content', op: 'notContains', values: [value('login')] }],
+      [{ field: 'subscriber', op: 'includesAny', values: [value('@me', 'Me')] }],
+      [{ field: 'subscriber', op: 'includesAny', values: [value('u2'), value('@me', 'Me')] }],
+      [{ field: 'subscriber', op: 'includesAll', values: [value('u2'), value('@me', 'Me')] }],
+      [{ field: 'subscriber', op: 'excludes', values: [value('u2'), value('@me', 'Me')] }],
+      [{ field: 'relation', op: 'includesAny', values: [value('blocked'), value('blocking'), value('related'), value('duplicate'), value('parent'), value('children')] }],
+      [{ field: 'relation', op: 'includesAll', values: [value('blocked'), value('parent'), value('children')] }],
+      [{ field: 'relation', op: 'excludes', values: [value('duplicate'), value('parent'), value('children')] }],
+      [{ field: 'created', op: 'after', values: [value('-P1W')] }],
+      [{ field: 'updated', op: 'before', values: [value('2026-10-01')] }],
+      [{ field: 'completed', op: 'after', values: [value('-P3M')] }],
+      [{ field: 'estimate', op: 'is', values: [value('3'), value('', 'No estimate')] }],
+      [{ field: 'estimate', op: 'isNot', values: [value('3')] }],
+      [{ field: 'estimate', op: 'isNot', values: [value('3'), value('', 'No estimate')] }],
+      [{ field: 'estimate', op: 'atLeast', values: [value('5')] }],
+      [{ field: 'estimate', op: 'atMost', values: [value('2')] }],
+      [{ field: 'milestone', op: 'is', values: [value('m1'), value('', 'No milestone')] }],
+      [{ field: 'milestone', op: 'isNot', values: [value('m1')] }],
+      [{ field: 'cycle', op: 'isNot', values: [value('c1'), value('@active')] }],
+    ];
+    for (const set of rules) expect(check('IssueFilter', compileFilter(set, context))).toEqual([]);
+    // All or any at the top, and groups nested in groups, as Linear's advanced filter builds them.
+    const urgent: LinearFilterNode = { field: 'priority', op: 'is', values: [value('1', 'Urgent')] };
+    const mine: LinearFilterNode = { field: 'assignee', op: 'is', values: [value('@me', 'Me')] };
+    const bug: LinearFilterNode = { field: 'label', op: 'includesAny', values: [value('Bug')] };
+    const nested: LinearFilterNode[] = [{ join: 'or', items: [urgent, { join: 'and', items: [mine, { join: 'or', items: [bug, rules[20]![0]!] }] }] }, bug];
+    expect(check('IssueFilter', compileFilter(nested, context))).toEqual([]);
+    expect(check('IssueFilter', compileFilter([urgent, mine, bug], context, 'or'))).toEqual([]);
+    expect(check('IssueFilter', compileFilter(rules.flat(), context, 'or'))).toEqual([]);
+    expect(check('IssueFilter', compileFilter([{ join: 'and', items: rules.flat() }], context))).toEqual([]);
+    // A saved view's filter, read back and sent again (when its filters were changed here).
+    const saved = { or: [{ priority: { eq: 1 } }, { and: [{ assignee: { isMe: { eq: true } } }, { labels: { some: { name: { in: ['Bug'] } } } }] }, { slaStatus: { eq: 'Breached' } }] };
+    expect(check('IssueFilter', saved)).toEqual([]);
+    expect(check('IssueFilter', compileFilter(readFilter(saved, [], context), context))).toEqual([]);
+    const display = settingsDisplay(DEFAULT_SETTINGS);
+    for (const window of ['none', 'week', '3months', 'year'] as const) {
+      expect(check('IssueFilter', displayFilter({ ...display, showCompleted: window, showSubIssues: false, showTriage: false }))).toEqual([]);
+      expect(check('ProjectFilter', projectDisplayFilter({ showCompleted: window }))).toEqual([]);
+    }
+    expect(check('IssueFilter', { subscribers: { some: { isMe: { eq: true } } } })).toEqual([]);
+    expect(check('IssueFilter', { project: { id: { eq: 'p1' } } })).toEqual([]);
+    // The check itself catches a field Linear does not have.
+    expect(check('IssueFilter', { status: { name: { in: ['Todo'] } } }).length).toBeGreaterThan(0);
+  });
 });
 
 describe('workspaces', () => {
@@ -186,47 +272,6 @@ describe('workspaces', () => {
 });
 
 describe('views', () => {
-  const state = (type: string, name = type) => ({ id: `st-${type}`, name, type, color: '#888888' });
-  const make = (n: number, patch: Partial<LinearIssue>) => issue({ id: `i${n}`, identifier: `NEX-${n}`, updatedAt: `2026-10-${String(10 + n).padStart(2, '0')}T00:00:00.000Z`, ...patch });
-  const issues = [
-    make(1, { state: state('started'), priority: 0, project: { id: 'p2', name: 'Zeta' }, workspaceId: 'org-b', assignee: { id: 'u2', name: 'Bo' } }),
-    make(2, { state: state('unstarted'), priority: 1, project: null, workspaceId: 'org-a', assignee: null }),
-    make(10, { state: state('backlog'), priority: 3, project: { id: 'p1', name: 'Alpha' }, workspaceId: 'org-a', assignee: { id: 'u1', name: 'Al' } }),
-    make(9, { state: state('started'), priority: 3, dueDate: '2026-10-26', project: { id: 'p1', name: 'Alpha' }, workspaceId: 'org-b', team: { id: 'team-2', key: 'OPS', name: 'Ops' } }),
-  ];
-  const keys = (groups: { key: string; issues: LinearIssue[] }[]) => groups.map((group) => `${group.key}:${group.issues.map((item) => item.identifier).join(',')}`);
-  test('status groups: a list shows the non-empty ones, a board keeps its drop columns', () => {
-    expect(keys(groupIssues(issues, 'status'))).toEqual(['started:NEX-1,NEX-9', 'unstarted:NEX-2', 'backlog:NEX-10']);
-    const board = groupIssues(issues, 'status', { board: true });
-    expect(board.map((group) => group.key)).toEqual(['backlog', 'unstarted', 'started', 'completed']);
-    expect(board.find((group) => group.key === 'completed')).toMatchObject({ stateType: 'completed', issues: [] });
-  });
-  test('other groupings', () => {
-    expect(keys(groupIssues(issues, 'priority'))).toEqual(['p1:NEX-2', 'p3:NEX-10,NEX-9', 'p0:NEX-1']);
-    expect(keys(groupIssues(issues, 'project'))).toEqual(['p1:NEX-10,NEX-9', 'p2:NEX-1', ':NEX-2']);
-    expect(keys(groupIssues(issues, 'assignee'))).toEqual(['u1:NEX-10', 'u2:NEX-1', ':NEX-2,NEX-9']);
-    expect(groupIssues(issues, 'team').map((group) => group.label)).toEqual(['NEX · Nexus', 'OPS · Ops']);
-    const names = new Map([['org-a', 'Antropy'], ['org-b', 'Side']]);
-    expect(groupIssues(issues, 'workspace', { workspaceNames: names }).map((group) => `${group.label}:${group.issues.length}`)).toEqual(['Antropy:2', 'Side:2']);
-    expect(keys(groupIssues(issues, 'none'))).toEqual(['all:NEX-1,NEX-2,NEX-10,NEX-9']);
-    expect(groupIssues([], 'none')).toEqual([]);
-  });
-  test('orders', () => {
-    const ids = (by: Parameters<typeof sortIssues>[1]) => sortIssues(issues, by).map((item) => item.identifier).join(',');
-    // No priority sorts last; equal priorities put the most recently updated first.
-    expect(ids('priority')).toBe('NEX-2,NEX-10,NEX-9,NEX-1');
-    expect(ids('updated')).toBe('NEX-10,NEX-9,NEX-2,NEX-1');
-    expect(ids('due')).toBe('NEX-9,NEX-2,NEX-10,NEX-1');
-    expect(ids('identifier')).toBe('NEX-1,NEX-2,NEX-10,NEX-9');
-  });
-  test('projects by status, then priority and target date', () => {
-    const project = (id: string, type: string, patch: Partial<LinearProject> = {}): LinearProject => ({
-      id, name: id, url: `https://linear.app/a/project/${id}`, color: '#5e6ad2', icon: null, description: '', progress: 0.5, health: null, priority: 0,
-      startDate: null, targetDate: null, updatedAt: '2026-10-01T00:00:00.000Z', status: { id: type, name: type, type, color: '#888888' }, lead: null, teams: { nodes: [] }, ...patch,
-    });
-    const groups = groupProjects([project('later', 'backlog'), project('b', 'started', { targetDate: '2026-12-01' }), project('a', 'started', { targetDate: '2026-11-01' }), project('urgent', 'started', { priority: 1 }), project('odd', 'mystery')]);
-    expect(groups.map((group) => `${group.type}:${group.projects.map((item) => item.id).join(',')}`)).toEqual(['started:urgent,a,b', 'backlog:later', 'other:odd']);
-  });
   test('planned issues by when they are planned', () => {
     let planned = withLinked();
     planned = applyEvents(planned, [
@@ -242,7 +287,7 @@ describe('views', () => {
     const state = withLinked();
     expect(validateCommand({ cmd: 's1', type: 'settings.updated', patch: { linearLayout: 'board', linearGroupBy: 'workspace', linearOrderBy: 'due' } }, state)).toBeNull();
     expect(validateCommand({ cmd: 's2', type: 'settings.updated', patch: { linearLayout: 'grid' } }, state)).toContain('linearLayout');
-    expect(validateCommand({ cmd: 's3', type: 'settings.updated', patch: { linearGroupBy: 'cycle' } }, state)).toContain('linearGroupBy');
+    expect(validateCommand({ cmd: 's3', type: 'settings.updated', patch: { linearGroupBy: 'parent' } }, state)).toContain('linearGroupBy');
     expect(validateCommand({ cmd: 's4', type: 'settings.updated', patch: { linearOrderBy: 'random' } }, state)).toContain('linearOrderBy');
   });
 });
@@ -277,7 +322,7 @@ describe('editing', () => {
     expect(threads.map((item) => `${item.comment.id}${item.reply ? '↳' : ''}`)).toEqual(['c1', 'c3↳', 'c4↳', 'c2', 'c5']);
   });
   test('the service lets each mutation carry only the fields the Planner edits', () => {
-    expect(MUTATION_INPUT_KEYS.get(UPDATE_ISSUE_MUTATION)).toEqual(['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds']);
+    expect(MUTATION_INPUT_KEYS.get(UPDATE_ISSUE_MUTATION)).toEqual(['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds', 'projectId', 'cycleId', 'estimate']);
     expect(MUTATION_INPUT_KEYS.get(ADD_COMMENT_MUTATION)).toEqual(['issueId', 'body']);
     expect(ALL_DOCUMENTS).toEqual(expect.arrayContaining([...MUTATION_INPUT_KEYS.keys()]));
   });
@@ -300,5 +345,101 @@ describe('Linear issues synced with GitHub', () => {
     const viaGitHub = foldEvents([ev({ type: 'task.created', task: { id: 'tg', title: 'Crash', placement: { kind: 'day', date: '2026-10-24' }, position: 1, source: { kind: 'github', id: 'I_12', key: 'acme/app#12', url: 'https://github.com/acme/app/issues/12' } } })]);
     expect(linkedTask(viaGitHub, synced.id, ['acme/app#12'])?.id).toBe('tg');
     expect(linkedTask(viaGitHub, synced.id)).toBeNull();
+  });
+});
+
+describe('saved views', () => {
+  const view = (id: string, patch: Partial<LinearSavedView> = {}): LinearSavedView => ({
+    id,
+    name: id,
+    description: null,
+    icon: null,
+    color: null,
+    shared: true,
+    modelName: 'Issue',
+    slugId: `slug-${id}`,
+    updatedAt: '2026-10-20T00:00:00.000Z',
+    team: null,
+    owner: { id: 'u1', name: 'Al' },
+    workspaceId: 'org-a',
+    ...patch,
+  });
+  const nex = { id: 'team-1', key: 'NEX', name: 'Nexus' };
+  const ops = { id: 'team-2', key: 'OPS', name: 'Ops' };
+  test('views of issues and views of projects are both kept, told apart by what they list', () => {
+    expect(isIssueView(view('a'))).toBe(true);
+    expect(isProjectView(view('b', { modelName: 'Project' }))).toBe(true);
+    expect(isIssueView(view('b', { modelName: 'Project' }))).toBe(false);
+    expect(isIssueView(view('c', { modelName: 'initiative' }))).toBe(false);
+    expect(isProjectView(view('d', { modelName: 'FeedItem' }))).toBe(false);
+  });
+  test('favorites: views, projects and issues, in the sidebar order', () => {
+    const project = { id: 'p1', name: 'Planner', url: 'https://linear.app/a/project/p1', color: '#000', icon: null, description: '', progress: 0, health: null, priority: 0, startDate: null, targetDate: null, updatedAt: '', status: { id: 's', name: 'Started', type: 'started', color: '#000' }, lead: null, teams: { nodes: [] } };
+    const favorites = favoritesOf([
+      { type: 'project', sortOrder: 3, customView: null, project },
+      { type: 'customView', sortOrder: 1, customView: { id: 'v1' } },
+      { type: 'issue', sortOrder: 2, customView: null, issue: { id: 'i1', identifier: 'NEX-1', title: 'One', url: 'https://linear.app/a/issue/NEX-1', state: { id: 's', name: 'Todo', type: 'unstarted', color: '#ccc' }, team: { id: 't', key: 'NEX', name: 'Nexus' } } },
+      { type: 'cycle', sortOrder: 0, customView: null },
+    ], 'org-a');
+    expect(favorites.map((favorite) => `${favorite.kind}:${favorite.id}`)).toEqual(['view:v1', 'issue:i1', 'project:p1']);
+    expect(favorites.every((favorite) => favorite.workspaceId === 'org-a')).toBe(true);
+  });
+  test('favorites first in their sidebar order, then team, workspace and my views', () => {
+    const order = favoriteOrder([
+      { type: 'customView', sortOrder: 2, customView: { id: 'bugs' } },
+      { type: 'project', sortOrder: 0, customView: null },
+      { type: 'customView', sortOrder: 1, customView: { id: 'triage' } },
+    ]);
+    expect([...order]).toEqual([['bugs', 2], ['triage', 1]]);
+    const views = [
+      view('Ops board', { team: ops }),
+      view('bugs', { team: nex, favoriteOrder: order.get('bugs') }),
+      view('Mine', { shared: false }),
+      view('Nexus sprint', { team: nex }),
+      view('triage', { favoriteOrder: order.get('triage') }),
+      view('Company', {}),
+      view('Side', { workspaceId: 'org-b', shared: false }),
+    ];
+    const one = groupViews(views);
+    expect(one.map((group) => `${group.label}: ${group.views.map((item) => item.name).join(', ')}`)).toEqual([
+      'Favorites: triage, bugs',
+      'NEX · Nexus: Nexus sprint',
+      'OPS · Ops: Ops board',
+      'Workspace views: Company',
+      'My views: Mine',
+      'My views: Side',
+    ]);
+    const names = new Map([['org-a', 'Antropy'], ['org-b', 'Side Org']]);
+    expect(groupViews(views, names).map((group) => group.label)).toEqual(['Favorites', 'Antropy · NEX · Nexus', 'Antropy · OPS · Ops', 'Antropy · Workspace views', 'Antropy · My views', 'Side Org · My views']);
+  });
+  test('the Views section lists favorites in their own place when asked', () => {
+    const views = [view('fav', { favoriteOrder: 1 }), view('other')];
+    expect(groupViews(views, undefined, { favoritesFirst: false }).map((group) => `${group.label}: ${group.views.map((item) => item.name).join(', ')}`)).toEqual(['Workspace views: fav, other']);
+  });
+});
+
+describe('the issue view', () => {
+  test("estimates follow the team's scale", () => {
+    expect(estimateChoices({ type: 'fibonacci', allowZero: false, extended: false }).map((item) => item.value)).toEqual([1, 2, 3, 5, 8]);
+    expect(estimateChoices({ type: 'exponential', allowZero: true, extended: true }).map((item) => item.value)).toEqual([0, 1, 2, 4, 8, 16, 32, 64]);
+    expect(estimateChoices({ type: 'tShirt', allowZero: false, extended: false }).map((item) => item.label)).toEqual(['XS', 'S', 'M', 'L', 'XL']);
+    expect(estimateChoices({ type: 'notUsed', allowZero: false, extended: false })).toEqual([]);
+    expect(estimateLabel(3)).toBe('3 points');
+    expect(estimateLabel(5, { type: 'tShirt', allowZero: false, extended: false })).toBe('L');
+    expect(estimateLabel(null)).toBe('No estimate');
+  });
+  test('activity reads like Linear', () => {
+    const entry = (patch: Partial<LinearHistoryEntry>): LinearHistoryEntry => ({
+      id: 'h', createdAt: '2026-10-25T10:00:00.000Z', actor: { id: 'u', name: 'Al' }, botActor: null, fromState: null, toState: null, fromAssignee: null, toAssignee: null,
+      fromPriority: null, toPriority: null, fromTitle: null, toTitle: null, addedLabels: null, removedLabels: null, fromDueDate: null, toDueDate: null,
+      fromProject: null, toProject: null, fromCycle: null, toCycle: null, fromEstimate: null, toEstimate: null, updatedDescription: null, ...patch,
+    });
+    expect(historyText(entry({ fromState: { name: 'Todo', color: '', type: 'unstarted' }, toState: { name: 'In Progress', color: '', type: 'started' } }))).toBe('changed status from Todo to In Progress');
+    expect(historyText(entry({ toAssignee: { name: 'Bo' } }))).toBe('assigned Bo');
+    expect(historyText(entry({ fromPriority: 3, toPriority: 1 }))).toBe('changed priority from Medium to Urgent');
+    expect(historyText(entry({ addedLabels: [{ name: 'Bug', color: '' }] }))).toBe('added label Bug');
+    expect(historyText(entry({ toDueDate: '2026-11-02' }))).toBe('set the due date to 2026-11-02');
+    expect(historyText(entry({ updatedDescription: true }))).toBe('updated the description');
+    expect(historyText(entry({}))).toBeNull();
   });
 });

@@ -7,9 +7,27 @@ import { EventStore } from './store.ts';
 import { Planner } from './planner.ts';
 import { CalendarFeeds } from './calendars.ts';
 import { SyncManager } from './sync.ts';
-import { GitHubSource, LISTS, type ListKind } from './github.ts';
+import { GitHubSource, LISTS, NODES_MAX, type ListKind } from './github.ts';
+import { parseGitHubUrl } from '../src/domain/github.ts';
+import { ACTIVITY_SOURCES, type ActivitySource } from '../src/domain/githubActivity.ts';
 import { LinearWorkspaces, WorkspaceError } from './linear.ts';
-import { daysBetween, isDateKey } from '../src/domain/dates.ts';
+import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from './google.ts';
+import { GmailActions } from './gmail.ts';
+import { GoogleContacts } from './contacts.ts';
+import { MeetingImport } from './meetings.ts';
+import { GMAIL_ACTIONS, type GmailAction } from '../src/domain/types.ts';
+import { GoogleData } from './googleData.ts';
+import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
+import { googleWriteRoute } from './googleRoutes.ts';
+import { TaskNotifications } from './taskNotifications.ts';
+import { GoogleSeries } from './googleSeries.ts';
+import { MeetingDecliner } from './googleDecline.ts';
+import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
+import { deadlineGroups } from '../src/domain/gtaskKept.ts';
+import { CHANGED_SINCE, UNDO_GONE } from '../src/domain/undo.ts';
+import { pendingRange, pendingTasks } from '../src/domain/gtaskPending.ts';
+import { addDays, daysBetween, instantAt, isDateKey, todayIn } from '../src/domain/dates.ts';
+import { CommandFiles, OpenCodeInfo, agentRoute, opencodeConfigDir } from './agents.ts';
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -19,6 +37,8 @@ if (!port || !token) {
 }
 
 const BODY_LIMIT = 1_000_000;
+/** How long "Sync now" waits for the sync before answering; well inside the time OpenChamber waits for a service. */
+const SYNC_ANSWER_MS = 20_000;
 const dir = process.env.PLANNER_DATA_DIR || join(homedir(), '.local', 'share', 'openchamber-planner', 'data');
 const log = (message: string): void => console.error(`[planner] ${message}`);
 let sync: SyncManager | null = null;
@@ -33,10 +53,276 @@ const github = new GitHubSource();
 const feeds = new CalendarFeeds(join(dirname(dir), 'cache'));
 // Linear API keys stay on this machine: beside the data, never in its synced repository.
 const linearWorkspaces = new LinearWorkspaces(join(dirname(dir), 'linear-workspaces.json'), undefined, log);
+// Google's client secret and refresh tokens likewise stay beside the data, never in it.
+const google = new GoogleAccounts(join(dirname(dir), 'google-accounts.json'), undefined, undefined, log);
+const googleData = new GoogleData(google);
+const gmail = new GmailActions(google);
+const contacts = new GoogleContacts(google);
+const googleCalendars = new GoogleCalendars(googleData);
+// Sunsama's meeting import: ended meetings completed, auto-sync's meetings added, followed and removed.
+const meetings = new MeetingImport(planner, googleCalendars, log);
+const googleDueTasks = new GoogleDueTasks(googleData);
+const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleCalendars.forget() });
+const taskAccounts = async (): Promise<string[]> => (await google.status()).accounts.filter((account) => account.features.includes('tasks')).map((account) => account.email);
+// The task notifications given so far stay on this machine, beside the data, never in its synced repository.
+const taskNotifications = new TaskNotifications(join(dirname(dir), 'task-notifications.json'), () => planner.state, {
+  accounts: taskAccounts,
+  due: (accounts, from, to) => googleDueTasks.read(accounts, from, to, false),
+  byIds: (groups) => googleDueTasks.byIds(groups, false),
+});
+// Repeating Google tasks: one change of a series at a time, whichever window asks.
+const series = new GoogleSeries(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleDueTasks.forget() });
+// "Automatically decline meetings" for Busy tasks of work and school accounts; what was declined stays beside the data.
+const decliner = new MeetingDecliner(
+  join(dirname(dir), 'declined-meetings.json'),
+  () => planner.state,
+  {
+    accounts: async () => (await google.status()).accounts.filter((account) => account.workspace && account.features.includes('calendar') && account.features.includes('tasks')).map((account) => account.email),
+    byIds: (groups) => googleDueTasks.byIds(groups, true),
+  },
+  googleData,
+  { log, onDeclined: () => googleCalendars.forget() },
+);
+decliner.start(planner);
+// Agents to assign tasks to: one OpenCode command per preset, in OpenCode's own config folder.
+const opencodeConfig = opencodeConfigDir();
+const opencodeInfo = new OpenCodeInfo();
+const agentCommands = new CommandFiles(opencodeConfig, log);
+const syncAgentCommands = () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? []);
+syncAgentCommands();
+agentCommands.retireLeftovers();
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+};
+
+const PULL_LOOKUPS_PER_REQUEST = 4;
+
+/** A run's pull request to look up, as the panel sends it: by its URL once known, else by the run's branch. */
+const isLookup = (value: unknown): value is { runId: string; branch: string | null; directories: string[]; url?: string } => {
+  const lookup = value as { runId?: unknown; branch?: unknown; directories?: unknown; url?: unknown } | null;
+  return (
+    typeof lookup?.runId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) &&
+    (lookup.branch === null || (typeof lookup.branch === 'string' && lookup.branch.length <= 200)) &&
+    (lookup.url === undefined || (typeof lookup.url === 'string' && lookup.url.length <= 300)) &&
+    Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === 'string' && item.length <= 1024)
+  );
+};
+
+/** Map with at most `limit` calls in flight. */
+const mapLimited = async <T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> => {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index]!);
+      }
+    }),
+  );
+  return results;
+};
+
+const isEmail = (value: unknown): value is string => typeof value === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+const isGoogleId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024;
+
+/** Ask every account that has `feature`; one account's trouble stays its own. */
+const perAccount = async <T>(feature: GoogleFeature, ask: (account: string) => Promise<T[]>): Promise<{ items: T[]; errors: { account: string; message: string }[] }> => {
+  const accounts = (await google.status()).accounts.filter((account) => account.features.includes(feature));
+  const items: T[] = [];
+  const errors: { account: string; message: string }[] = [];
+  await Promise.all(
+    accounts.map(async (account) => {
+      try {
+        items.push(...(await ask(account.email)));
+      } catch (error) {
+        errors.push({ account: account.email, message: error instanceof Error ? error.message : String(error) });
+      }
+    }),
+  );
+  return { items, errors };
+};
+
+/** Google's routes; null when the path is not one of them. */
+const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ status: number; body: unknown } | null> => {
+  const path = url.pathname;
+  const ok = (body: unknown) => ({ status: 200, body });
+  // Google Calendar events and Google Tasks lists, as the calendar and Tasks views change them.
+  const written = await googleWriteRoute(req, url, { data: googleData, series, snapshot, readJson, zone: () => planner.state.settings.timezone ?? 'UTC', changed: (what) => (what === 'calendar' ? googleCalendars : googleDueTasks).forget() });
+  if (written) return written;
+  if (path === '/google/status' && req.method === 'GET') return ok({ ...(await google.status()), timeboxError: timeboxes.lastError });
+  if (path === '/google/client' && req.method === 'PUT') {
+    const body = (await readJson(req)) as { id?: unknown; secret?: unknown };
+    if (typeof body.id !== 'string' || typeof body.secret !== 'string') return { status: 400, body: { error: 'id and secret must be strings' } };
+    return ok(await google.setClient(body.id, body.secret));
+  }
+  if (path === '/google/client' && req.method === 'DELETE') return ok(await google.clearClient());
+  if (path === '/google/connect' && req.method === 'POST') {
+    const body = (await readJson(req)) as { features?: unknown };
+    const features = Array.isArray(body.features) ? GOOGLE_FEATURES.filter((feature) => (body.features as unknown[]).includes(feature)) : [];
+    return ok(await google.startSignIn(features));
+  }
+  const signIn = /^\/google\/connect\/([A-Za-z0-9_-]{8,40})(\/finish)?$/.exec(path);
+  if (signIn && !signIn[2] && req.method === 'GET') return ok(google.signIn(signIn[1]!));
+  if (signIn && signIn[2] && req.method === 'POST') {
+    const body = (await readJson(req)) as { url?: unknown };
+    if (typeof body.url !== 'string' || body.url.length > 4000) return { status: 400, body: { error: 'url must be the address the browser was sent to' } };
+    return ok(await google.finishSignIn(signIn[1]!, body.url));
+  }
+  const account = /^\/google\/accounts\/([^/]+)$/.exec(path);
+  if (account && req.method === 'DELETE') return ok({ removed: await google.remove(decodeURIComponent(account[1]!)) });
+  if (path === '/google/calendars' && req.method === 'GET') {
+    const { items, errors } = await perAccount('calendar', (email) => googleData.calendars(email));
+    return ok({ calendars: items, errors });
+  }
+  if (path === '/google/tasklists' && req.method === 'GET') {
+    const { items, errors } = await perAccount('tasks', (email) => googleData.taskLists(email));
+    return ok({ lists: items, errors });
+  }
+  if (path === '/google/tasks' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    const list = url.searchParams.get('list');
+    if (!isEmail(email) || !isGoogleId(list)) return { status: 400, body: { error: 'account and list are required' } };
+    return ok({ tasks: await googleData.tasks(email, list) });
+  }
+  if (path === '/google/tasks/pending' && req.method === 'GET') {
+    // Google Calendar's Pending tasks: the open tasks of every list dated in the past 365 days, latest first.
+    const today = todayIn(planner.state.settings.timezone ?? 'UTC');
+    const { from, to } = pendingRange(today);
+    const read = await googleDueTasks.read(await taskAccounts(), from, to, url.searchParams.get('refresh') === '1', true);
+    return ok({ tasks: pendingTasks(read.items, today), today, from, to, errors: read.errors });
+  }
+  if (path === '/google/tasks/notifications' && req.method === 'POST') {
+    // The task notifications come by now that no Planner surface has had yet; each is given once.
+    return ok(await taskNotifications.take());
+  }
+  if (path === '/google/tasks/decline' && req.method === 'POST') {
+    // "Automatically decline meetings" now, after a task's change: the meetings it declined, and where it carries on (`more`).
+    return ok(await decliner.run());
+  }
+  if (path === '/google/tasks/declined' && req.method === 'GET') {
+    const [email, task] = [url.searchParams.get('account'), url.searchParams.get('task')];
+    if (!isEmail(email) || !isGoogleId(task)) return { status: 400, body: { error: 'account and task are required' } };
+    // `more`: where the account's meetings are still to be looked at, while declining carries on after a bound.
+    return ok({ declined: await decliner.declinedFor(email, task), more: decliner.progress(email) });
+  }
+  if (path === '/google/drive/files' && req.method === 'GET') {
+    // Drive's files by name, to attach to a task, as Google Calendar's "Add a Google Drive attachment" finds them.
+    const [email, text, pageToken] = [url.searchParams.get('account'), url.searchParams.get('q') ?? '', url.searchParams.get('pageToken') ?? undefined];
+    if (!isEmail(email) || text.length > 200 || (pageToken !== undefined && pageToken.length > 500)) return { status: 400, body: { error: 'account is required, and the search must be at most 200 characters' } };
+    const account = (await google.status()).accounts.find((item) => item.email === email.toLowerCase());
+    if (!account?.features.includes('drive')) return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
+    // A page of them, and the next page's token ("More files").
+    return ok(await googleData.driveFiles(email, text, pageToken));
+  }
+  if (path === '/google/tasks/linked' && req.method === 'POST') {
+    // The tasks behind linked Planner tasks, to bring those up to date.
+    const body = (await readJson(req)) as { groups?: unknown };
+    const groups = (Array.isArray(body.groups) ? body.groups : [])
+      .filter((group): group is { account: string; listId: string; ids: string[] } => isEmail(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId));
+    // The panel sends them in parts this size, so the request ends in time; more is refused, not cut.
+    if (groups.length > 10 || groups.some((group) => group.ids.length > 50)) return { status: 400, body: { error: 'at most 10 lists of 50 tasks per request' } };
+    const tasks: unknown[] = [];
+    // Not in their list nor any other of the account's: deleted in Google.
+    const missing: { account: string; listId: string; id: string }[] = [];
+    const errors: { account: string; message: string }[] = [];
+    await Promise.all(
+      groups.map(async (group) => {
+        try {
+          const found = await googleData.linkedTasks(group.account, group.listId, group.ids);
+          tasks.push(...found.tasks);
+          missing.push(...found.missing.map((id) => ({ account: group.account, listId: group.listId, id })));
+        } catch (error) {
+          errors.push({ account: group.account, message: error instanceof Error ? error.message : String(error) });
+        }
+      }),
+    );
+    return ok({ tasks, missing, errors });
+  }
+  if (path === '/google/tasks' && (req.method === 'PATCH' || req.method === 'POST')) {
+    const body = (await readJson(req)) as { account?: unknown; listId?: unknown; id?: unknown; completed?: unknown; due?: unknown; title?: unknown; notes?: unknown; parent?: unknown; previous?: unknown; deleted?: unknown };
+    if (!isEmail(body.account) || !isGoogleId(body.listId)) return { status: 400, body: { error: 'account and listId are required' } };
+    if (body.due !== undefined && body.due !== null && !isDateKey(body.due)) return { status: 400, body: { error: 'due must be a date or null' } };
+    if (body.notes !== undefined && (typeof body.notes !== 'string' || body.notes.length > 8192)) return { status: 400, body: { error: 'notes must be text, at most 8192 characters (as Google Tasks keeps)' } };
+    if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 1024)) return { status: 400, body: { error: 'title must be 1 to 1024 characters' } };
+    if (req.method === 'PATCH') {
+      if (!isGoogleId(body.id)) return { status: 400, body: { error: 'id is required' } };
+      if (body.completed !== undefined && typeof body.completed !== 'boolean') return { status: 400, body: { error: 'completed must be true or false' } };
+      // Undo after Delete: Google undeletes a task it deleted a moment ago.
+      if (body.deleted !== undefined && body.deleted !== false) return { status: 400, body: { error: 'deleted can only be false (Undo); DELETE deletes' } };
+      const patch = { ...(body.completed !== undefined ? { completed: body.completed as boolean } : {}), ...(body.due !== undefined ? { due: body.due as string | null } : {}), ...(body.title !== undefined ? { title: (body.title as string).trim() } : {}), ...(body.notes !== undefined ? { notes: body.notes as string } : {}), ...(body.deleted === false ? { deleted: false as const } : {}) };
+      const task = await googleData.updateTask(body.account, body.listId, body.id, patch);
+      // Due dates and completion show on the calendar: read them again next time.
+      googleDueTasks.forget();
+      return ok({ task });
+    }
+    if (typeof body.title !== 'string') return { status: 400, body: { error: 'title is required' } };
+    if ((body.parent !== undefined && body.parent !== null && !isGoogleId(body.parent)) || (body.previous !== undefined && body.previous !== null && !isGoogleId(body.previous))) return { status: 400, body: { error: 'parent and previous must be task ids' } };
+    const task = await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...(body.notes ? { notes: body.notes as string } : {}), ...(body.due ? { due: body.due as string } : {}), parent: (body.parent as string | null | undefined) ?? null, previous: (body.previous as string | null | undefined) ?? null });
+    googleDueTasks.forget();
+    return ok({ task });
+  }
+  // Gmail beyond reading (Sunsama's actions on an email task and its automations): labels, a thread, and the actions.
+  if (path === '/google/mail/labels' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    if (!isEmail(email)) return { status: 400, body: { error: 'account is required' } };
+    return ok({ labels: await gmail.labels(email) });
+  }
+  if (path === '/google/mail/thread' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    const thread = url.searchParams.get('thread') ?? '';
+    if (!isEmail(email) || !/^[0-9a-zA-Z_-]{1,64}$/.test(thread)) return { status: 400, body: { error: 'account and thread are required' } };
+    const found = await gmail.thread(email, thread);
+    return found ? ok({ thread: found }) : { status: 404, body: { error: 'Gmail no longer has this email' } };
+  }
+  if (path === '/google/contacts' && req.method === 'GET') {
+    // People to invite, by name or address (Sunsama's Google Contacts integration); the account must allow Contacts.
+    const email = url.searchParams.get('account');
+    const query = (url.searchParams.get('q') ?? '').trim();
+    if (!isEmail(email) || !query || query.length > 100) return { status: 400, body: { error: 'account and a search of at most 100 characters are required' } };
+    const allowed = (await google.status()).accounts.find((account) => account.email === email)?.features.includes('contacts');
+    if (!allowed) return { status: 403, body: { error: `Google Contacts are not allowed for ${email}: allow them to search people to invite`, reason: 'not-allowed' } };
+    return ok({ contacts: await contacts.search(email, query) });
+  }
+  if (path === '/google/mail/act' && req.method === 'POST') {
+    const body = (await readJson(req)) as { account?: unknown; thread?: unknown; actions?: unknown };
+    const actions = Array.isArray(body.actions) ? body.actions : [];
+    const valid = actions.length > 0 && actions.length <= 12 && actions.every((action: Partial<GmailAction> | null) =>
+      Boolean(action) && (GMAIL_ACTIONS as readonly unknown[]).includes(action!.kind) &&
+      (action!.kind === 'addLabel' || action!.kind === 'removeLabel' ? typeof action!.label === 'string' && action!.label.trim().length > 0 && action!.label.length <= 225 : action!.label === undefined));
+    if (!isEmail(body.account) || typeof body.thread !== 'string' || !/^[0-9a-zA-Z_-]{1,64}$/.test(body.thread) || !valid) return { status: 400, body: { error: 'account, thread and one to twelve Gmail actions are required' } };
+    const allowed = (await google.status()).accounts.find((account) => account.email === body.account)?.features.includes('mailActions');
+    if (!allowed) return { status: 403, body: { error: `Gmail actions are not allowed for ${body.account}: allow them in Settings → Google`, reason: 'not-allowed' } };
+    return ok(await gmail.act(body.account, body.thread, actions as GmailAction[]));
+  }
+  if (path === '/google/mail/resolve' && req.method === 'POST') {
+    // A pasted Gmail address, as Sunsama imports one: its message, in the account it names first, else in each with Gmail.
+    const body = (await readJson(req)) as { thread?: unknown; message?: unknown; account?: unknown };
+    const id = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{1,32}$/.test(value);
+    if (!id(body.thread) && !id(body.message)) return { status: 400, body: { error: 'thread or message must be a Gmail API id' } };
+    const accounts = (await google.status()).accounts.filter((account) => account.features.includes('mail')).map((account) => account.email);
+    const named = isEmail(body.account) ? body.account.toLowerCase() : null;
+    const errors: string[] = [];
+    for (const account of [...accounts.filter((email) => email === named), ...accounts.filter((email) => email !== named)]) {
+      try {
+        const item = await googleData.mailItem(account, { thread: id(body.thread) ? body.thread : null, message: id(body.message) ? body.message : null });
+        if (item) return ok({ item });
+      } catch (error) {
+        errors.push(`${account}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { status: 404, body: { error: errors.length ? errors.join('; ') : accounts.length ? 'This message is in none of your Gmail accounts' : 'No Google account has Gmail' } };
+  }
+  if (path === '/google/mail' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    const query = url.searchParams.get('q') ?? 'in:inbox';
+    const pageToken = url.searchParams.get('pageToken') ?? undefined;
+    if (!isEmail(email) || query.length > 500 || (pageToken !== undefined && pageToken.length > 500)) return { status: 400, body: { error: 'account is required, and the search must be shorter' } };
+    return ok(await googleData.mail(email, query, pageToken));
+  }
+  return null;
 };
 
 const readJson = (req: http.IncomingMessage): Promise<unknown> =>
@@ -83,13 +369,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/github/list' && req.method === 'GET') {
+      // A page of a list: from `after` (the previous page's cursor), narrowed by `q`; its `next` reaches the rest.
       const kind = url.searchParams.get('kind') ?? 'assigned';
-      if (!(kind in LISTS)) {
-        json(res, 400, { error: 'kind must be assigned, review or mine' });
+      const after = url.searchParams.get('after');
+      const text = url.searchParams.get('q') ?? '';
+      if (!(kind in LISTS) || (after !== null && !/^[A-Za-z0-9+/=_-]{1,200}$/.test(after)) || text.length > 200) {
+        json(res, 400, { error: 'kind must be assigned, review or mine; after a cursor; q at most 200 characters' });
         return;
       }
       try {
-        json(res, 200, { items: await github.list(kind as ListKind) });
+        json(res, 200, await github.list(kind as ListKind, { after, text }));
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/repos' && req.method === 'GET') {
+      // The repositories the viewer contributes to, most recently pushed first (the panel's Repository choice).
+      try {
+        json(res, 200, { repos: await github.repositories() });
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -98,12 +396,98 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/github/items' && req.method === 'POST') {
       const body = (await readJson(req)) as { ids?: unknown };
       const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+      // One gh call a request: the panel sends its linked items 100 at a time; more is refused, not cut short.
+      if (ids.length > NODES_MAX) {
+        json(res, 400, { error: `at most ${NODES_MAX} ids a request` });
+        return;
+      }
       try {
         json(res, 200, { items: await github.items(ids) });
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
       return;
+    }
+    if (url.pathname === '/meetings/sync' && req.method === 'POST') {
+      // A meeting-import setting changed (or a check asks): ended meetings completed, auto-sync's applied now.
+      json(res, 200, await meetings.run());
+      return;
+    }
+    if (url.pathname === '/github/activity' && req.method === 'GET') {
+      // The day's GitHub work for Daily Highlights: the first page of each source, or the next page of one (`source`, `after`).
+      const from = url.searchParams.get('from') ?? '';
+      const to = url.searchParams.get('to') ?? '';
+      const source = url.searchParams.get('source');
+      const after = url.searchParams.get('after') ?? '';
+      const instant = (value: string) => /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+      const span = Date.parse(to) - Date.parse(from);
+      if (!instant(from) || !instant(to) || !(span > 0 && span <= 26 * 3_600_000) || (source !== null && !(ACTIVITY_SOURCES as readonly string[]).includes(source)) || !/^[A-Za-z0-9+/=_:-]{0,400}$/.test(after)) {
+        json(res, 400, { error: 'from and to must be the bounds of one day (ISO instants); source one of the activity sources; after a cursor' });
+        return;
+      }
+      try {
+        json(res, 200, source ? await github.activityPage(source as ActivitySource, from, to, after) : await github.activity(from, to));
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/resolve' && req.method === 'POST') {
+      // A pasted issue or pull request URL, as Sunsama imports one: the item GitHub has there.
+      const body = (await readJson(req)) as { url?: unknown };
+      if (typeof body.url !== 'string' || !parseGitHubUrl(body.url)) {
+        json(res, 400, { error: 'url must be a GitHub issue or pull request URL' });
+        return;
+      }
+      try {
+        const item = await github.byUrl(body.url);
+        json(res, item ? 200 : 404, item ? { item } : { error: `${parseGitHubUrl(body.url)!.key} was not found on GitHub, or this gh can't see it` });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/pulls' && req.method === 'POST') {
+      // Pull requests that agents opened from their runs' worktree branches. Four
+      // at a time, in parallel, so the request ends well within the host's 20 seconds.
+      const body = (await readJson(req)) as { runs?: unknown };
+      // The panel sends them PULL_LOOKUPS_PER_REQUEST at a time; more is refused, not cut short.
+      if (Array.isArray(body.runs) && body.runs.length > PULL_LOOKUPS_PER_REQUEST) {
+        json(res, 400, { error: `at most ${PULL_LOOKUPS_PER_REQUEST} runs a request` });
+        return;
+      }
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup) : [];
+      const results = await mapLimited(runs, 4, async (run) => {
+        try {
+          return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };
+        } catch (error) {
+          return { runId: run.runId, pullRequest: null, error: error instanceof Error ? error.message : String(error) };
+        }
+      });
+      json(res, 200, { results });
+      return;
+    }
+    if (url.pathname === '/agents' || url.pathname.startsWith('/agents/')) {
+      const answer = await agentRoute(req, url, { configDir: opencodeConfig, info: opencodeInfo, commands: agentCommands, readJson });
+      if (answer) {
+        json(res, answer.status, answer.body);
+        return;
+      }
+    }
+    if (url.pathname.startsWith('/google/')) {
+      try {
+        const answer = await googleRoute(req, url);
+        if (answer) {
+          json(res, answer.status, answer.body);
+          return;
+        }
+      } catch (error) {
+        if (error instanceof GoogleError) {
+          json(res, error.status, { error: error.message });
+          return;
+        }
+        throw error;
+      }
     }
     if (url.pathname.startsWith('/linear/')) {
       try {
@@ -161,8 +545,12 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST') {
-        const status = await sync!.run().catch((error) => ({ ...sync!.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        // Answer within the time OpenChamber waits for a service (a first push of a long history can take longer):
+        // a sync still running answers `syncing`, and the panel follows it to its end.
+        const done = sync!.run().catch((error) => ({ ...sync!.status(), lastError: error instanceof Error ? error.message : String(error) }));
+        const status = await Promise.race([done, new Promise<ReturnType<SyncManager['status']>>((resolve) => setTimeout(() => resolve(sync!.status()), SYNC_ANSWER_MS).unref?.())]);
         json(res, 200, { status, ...snapshot() });
+        syncAgentCommands();
         return;
       }
     }
@@ -174,7 +562,61 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const zone = planner.state.settings.timezone ?? 'UTC';
-      json(res, 200, await feeds.eventsFor(Object.values(planner.state.calendars), from, to, zone, url.searchParams.get('refresh') === '1'));
+      const refresh = url.searchParams.get('refresh') === '1';
+      const calendars = Object.values(planner.state.calendars);
+      // Google calendars are read through their accounts; the rest are ICS feeds.
+      const timeMin = instantAt(from, 0, zone);
+      const timeMax = instantAt(addDays(to, 1), 0, zone);
+      // Google tasks due in the range show on their day, as in Google Calendar, planned or not (the panel shows the link).
+      const shownAccounts = planner.state.settings.googleTasksOnCalendar ? await taskAccounts() : [];
+      const [feed, fromGoogle, due, deadlines] = await Promise.all([
+        feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
+        googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
+        googleDueTasks.read(shownAccounts, from, to, refresh),
+        // Tasks whose deadline (kept in the Planner) falls in the range show it there, as Google Calendar does, dated or not.
+        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, shownAccounts, from, to), refresh),
+      ]);
+      const dueEvents = due.items.flatMap((item) => (item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []));
+      json(res, 200, {
+        events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
+        deadlineTasks: deadlines.items,
+        errors: [...feed.errors, ...fromGoogle.errors, ...[...due.errors, ...deadlines.errors].map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))],
+      });
+      // Sessions moved or deleted in Google follow, once the answer is on its way.
+      if (fromGoogle.reads.size) void timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
+    // Google Calendar's search: the calendars shown, a year back and two ahead, in date order.
+    if (url.pathname === '/calendar/search' && req.method === 'GET') {
+      const query = (url.searchParams.get('q') ?? '').trim();
+      if (!query || query.length > 200) {
+        json(res, 400, { error: 'q must be 1-200 characters' });
+        return;
+      }
+      const zone = planner.state.settings.timezone ?? 'UTC';
+      const today = todayIn(zone);
+      const [from, to] = [addDays(today, -366), addDays(today, 731)];
+      const [timeMin, timeMax] = [instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone)];
+      const shown = Object.values(planner.state.calendars).filter((calendar) => calendar.visible);
+      const needle = query.toLocaleLowerCase();
+      const errors: { calendarId: string; message: string }[] = [];
+      let more = false;
+      const [feed, ...fromGoogle] = await Promise.all([
+        feeds.eventsFor(shown.filter((calendar) => !calendar.google), from, to, zone),
+        ...shown.filter((calendar) => calendar.google).map((calendar) =>
+          googleData.searchEvents(calendar.google!.account, calendar.google!.calendarId, query, timeMin, timeMax, zone, calendar.id).catch((error) => {
+            errors.push({ calendarId: calendar.id, message: error instanceof Error ? error.message : String(error) });
+            return { events: [], more: false };
+          }),
+        ),
+      ]);
+      errors.push(...feed.errors);
+      const events = feed.events.filter((event) => `${event.title}\n${event.location}`.toLocaleLowerCase().includes(needle));
+      for (const found of fromGoogle) {
+        events.push(...found.events);
+        more ||= found.more;
+      }
+      json(res, 200, { events: events.sort((a, b) => a.start.localeCompare(b.start)), from, to, more, errors });
       return;
     }
     if (url.pathname === '/activity' && req.method === 'GET') {
@@ -183,19 +625,42 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/commands' && req.method === 'POST') {
-      const body = (await readJson(req)) as { commands?: unknown };
+      const body = (await readJson(req)) as { commands?: unknown; undo?: unknown };
       if (!Array.isArray(body.commands)) {
         json(res, 400, { error: 'commands must be an array' });
         return;
       }
       // A sync may be merging events from another machine; let it finish first.
       await sync!.idle();
-      const result = planner.execute(body.commands);
+      // `undo`: the window offers Undo for this batch, so what takes it back is kept here (`/undo`).
+      const result = planner.execute(body.commands, { undo: body.undo === true });
       if (!result.ok) {
-        json(res, 400, { error: result.error, index: result.index });
+        // A subtask changed elsewhere since: 409 with what it is now and the plan as it is (theirs included), as a
+        // refused Undo answers.
+        if (result.conflict) json(res, 409, { error: result.error, index: result.index, conflict: result.conflict, ...snapshot() });
+        else json(res, 400, { error: result.error, index: result.index });
         return;
       }
       json(res, 200, { applied: result.applied, ...snapshot() });
+      syncAgentCommands();
+      return;
+    }
+    if (url.pathname === '/undo' && req.method === 'POST') {
+      // Undo a batch sent with `undo`, named by its first command: only what nobody has changed since (409 otherwise,
+      // with the plan as it is, theirs included); 410 once it can no longer be undone.
+      const body = (await readJson(req)) as { batch?: unknown };
+      if (typeof body.batch !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(body.batch)) {
+        json(res, 400, { error: 'batch must be the command id of a batch' });
+        return;
+      }
+      await sync!.idle();
+      const result = planner.undo(body.batch);
+      if (!result.ok) {
+        json(res, result.reason === 'gone' ? 410 : 409, { error: result.reason === 'gone' ? UNDO_GONE : CHANGED_SINCE, changed: result.reason === 'changed' ? result.changed : [], ...snapshot() });
+        return;
+      }
+      json(res, 200, { applied: result.applied, commands: result.commands, ...snapshot() });
+      syncAgentCommands();
       return;
     }
     json(res, 404, { error: 'not found' });
@@ -206,6 +671,7 @@ const server = http.createServer(async (req, res) => {
 
 const shutdown = async (): Promise<void> => {
   server.close();
+  await Promise.race([Promise.all([timeboxes.settled(), series.settled()]), new Promise((resolve) => setTimeout(resolve, 3000))]);
   await store.flush();
   process.exit(0);
 };
@@ -213,3 +679,4 @@ process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
 
 server.listen(port, '127.0.0.1');
+meetings.start();

@@ -1,6 +1,6 @@
 {
   "name": "@oc-forge/openchamber-planner",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "Sunsama-style daily planning inside OpenChamber.",
@@ -70,11 +70,16 @@
         "permissions": {
           "exec": [
             "git",
-            "gh"
+            "gh",
+            "opencode"
           ]
         }
       }
     }
+  },
+  "ocForge": {
+    "apiVersion": 1,
+    "modals": true
   },
   "scripts": {
     "check": "tsc -p .",
@@ -84,7 +89,7 @@
     "build:service": "openchamber-guest-bundle --node service/main.ts service/main.js"
   },
   "devDependencies": {
-    "@openchamber/sdk": "2.4.0",
+    "@openchamber/sdk": "2.5.3",
     "@types/bun": "^1.4.4",
     "@types/node": "^26.6.5",
     "graphql": "16",

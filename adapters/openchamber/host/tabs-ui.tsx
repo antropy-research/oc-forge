@@ -1,0 +1,262 @@
+import React from 'react';
+
+import { Icon } from '@/components/icon/Icon';
+import { GuestIcon } from '@/components/layout/GuestRailIcon';
+import { PluginPane } from '@/components/layout/PluginPane';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
+import { isGuestActive } from '@/lib/guests/capabilities';
+import { FALLBACK_GUEST_ICON, guestPackageIconSrc, resolveGuestIconName } from '@/lib/guests/icon';
+import { useGuestsStore } from '@/lib/guests/store';
+import type { InstalledGuest } from '@/lib/guests/types';
+import { useI18n } from '@/lib/i18n';
+import { getRuntimeUrlResolver } from '@/lib/runtime-url';
+import { cn } from '@/lib/utils';
+import { useUIStore } from '@/stores/useUIStore';
+
+import { ocForgeLinks } from './routes.ts';
+import { useOcForgeStore, type OcForgeHeaderTab } from './store.ts';
+import { activateOcForgeTab, requestCloseOcForgeTab, useOcForgeTabActive } from './tabs-state.ts';
+
+const stop = (event: React.SyntheticEvent) => event.stopPropagation();
+
+/** A tab's own icon, else its extension's. */
+const tabIcon = (tab: OcForgeHeaderTab, guest: InstalledGuest | undefined): { icon: ReturnType<typeof resolveGuestIconName>; iconSrc?: string } => {
+  const icon = tab.icon?.trim();
+  if (icon?.startsWith('<')) return { icon: FALLBACK_GUEST_ICON, iconSrc: `data:image/svg+xml,${encodeURIComponent(icon)}` };
+  if (icon) return { icon: resolveGuestIconName(icon) };
+  if (!guest) return { icon: FALLBACK_GUEST_ICON };
+  return {
+    icon: resolveGuestIconName(guest.icon),
+    iconSrc: guestPackageIconSrc(guest.id, guest.icon, getRuntimeUrlResolver().authenticatedAsset),
+  };
+};
+
+// Memoized: a strip of hundreds of tabs re-renders only the tab that changed.
+const HeaderTab = React.memo(function HeaderTab({ tab, guest, isActive }: { tab: OcForgeHeaderTab; guest: InstalledGuest | undefined; isActive: boolean }) {
+  const { t } = useI18n();
+  const select = () => activateOcForgeTab(tab.guestId, tab.id);
+  const close = () => requestCloseOcForgeTab(tab.guestId, tab.id);
+  // A Cmd/Ctrl+click on a tab with a route opens the page there in a new browser tab, as on a link, and this window
+  // stays as it is. Without a route it is a plain click, as on OpenChamber's own tabs.
+  const openInNewTab = (event: React.MouseEvent): boolean => {
+    const links = tab.route !== undefined && (event.metaKey || event.ctrlKey) ? ocForgeLinks(tab.guestId) : null;
+    if (!links) return false;
+    event.preventDefault();
+    window.open(`${links.page}${encodeURIComponent(tab.route ?? '')}`, '_blank', 'noopener');
+    return true;
+  };
+  const { icon, iconSrc } = tabIcon(tab, guest);
+  return (
+    <div
+      className="app-region-no-drag session-tab-slot flex h-7 w-44 shrink-0"
+      data-active={isActive ? 'true' : 'false'}
+      data-oc-forge-tab={`${tab.guestId}:${tab.id}`}
+      {...(isActive ? { 'data-active-session-tab': true } : {})}
+    >
+      <div
+        role="tab"
+        aria-selected={isActive}
+        tabIndex={isActive ? undefined : 0}
+        title={guest ? `${tab.title} — ${guest.name}` : tab.title}
+        onClick={(event) => {
+          if (!openInNewTab(event) && !isActive) select();
+        }}
+        onKeyDown={isActive ? undefined : (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            select();
+          }
+        }}
+        onAuxClick={(event) => {
+          if (event.button === 1) {
+            event.preventDefault();
+            close();
+          }
+        }}
+        className={cn(
+          'session-tab group/session-tab relative flex h-7 w-full min-w-0 select-none items-center rounded-md px-2',
+          isActive
+            ? 'bg-interactive-selection text-interactive-selection-foreground'
+            : 'cursor-pointer text-muted-foreground hover:bg-interactive-hover hover:text-foreground',
+        )}
+      >
+        <div className="flex min-w-0 flex-1 items-center group-hover/session-tab:pe-6">
+          <GuestIcon icon={icon} iconSrc={iconSrc} className="me-1.5 size-3.5 shrink-0" />
+          <span dir="auto" className="session-tab-title block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[0.8125rem] font-medium leading-4">
+            {tab.title}
+          </span>
+          {tab.dirty ? (
+            <span data-oc-forge-dirty aria-hidden="true" className="ms-1.5 size-2 shrink-0 rounded-full bg-current group-hover/session-tab:opacity-0" />
+          ) : null}
+        </div>
+        <div
+          onClick={stop}
+          onPointerDown={stop}
+          className="absolute inset-e-1 top-1/2 hidden -translate-y-1/2 items-center group-hover/session-tab:flex"
+        >
+          <button
+            type="button"
+            aria-label={t('header.sessionTabs.closeTab')}
+            onClick={close}
+            className="flex size-5 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+          >
+            <Icon name="close" className="size-4" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/** Extension tabs, after the session tabs in the header's strip. */
+export const OcForgeHeaderTabs: React.FC = () => {
+  const tabs = useOcForgeStore((state) => state.tabs);
+  const activeTab = useOcForgeStore((state) => state.activeTab);
+  const guests = useGuestsStore((state) => state.guests);
+  const page = useUIStore((state) => state.openGuestPageId);
+  const tabActive = useOcForgeTabActive();
+  const shown = tabs.filter((tab) => {
+    const guest = guests.find((entry) => entry.id === tab.guestId);
+    return Boolean(guest?.pageEntry && isGuestActive(guest));
+  });
+  if (shown.length === 0) return null;
+  return (
+    <>
+      {shown.map((tab) => (
+        <HeaderTab
+          key={`${tab.guestId}:${tab.id}`}
+          tab={tab}
+          guest={guests.find((entry) => entry.id === tab.guestId)}
+          isActive={tabActive && page === tab.guestId && activeTab[tab.guestId] === tab.id}
+        />
+      ))}
+    </>
+  );
+};
+
+/**
+ * Every tab of the strip in one list, as VS Code's "Show All Opened Editors" lists its editors: a button at the
+ * strip's end while it holds extension tabs and some of its tabs are scrolled out of view (`overflowing`). Choosing
+ * one selects it, and the strip scrolls it into view. The session tabs come first, as in the strip.
+ */
+export const OcForgeAllTabs: React.FC<{
+  overflowing: boolean;
+  sessions: ReadonlyArray<{ id: string; title: string; active: boolean }>;
+  onSelectSession: (id: string) => void;
+}> = ({ overflowing, sessions, onSelectSession }) => {
+  const tabs = useOcForgeStore((state) => state.tabs);
+  const activeTab = useOcForgeStore((state) => state.activeTab);
+  const guests = useGuestsStore((state) => state.guests);
+  const page = useUIStore((state) => state.openGuestPageId);
+  const tabActive = useOcForgeTabActive();
+  const shown = tabs.filter((tab) => {
+    const guest = guests.find((entry) => entry.id === tab.guestId);
+    return Boolean(guest?.pageEntry && isGuestActive(guest));
+  });
+  if (!overflowing || shown.length === 0) return null;
+  const count = sessions.length + shown.length;
+  // The marked one in sight when the list opens, as VS Code's list of its editors keeps the active one: once the
+  // popup has its place and size (it mounts before it is positioned, when there is nothing to scroll yet).
+  const reveal = (node: HTMLElement | null) => {
+    if (node) requestAnimationFrame(() => requestAnimationFrame(() => node.scrollIntoView({ block: 'nearest' })));
+  };
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          data-oc-forge-all-tabs
+          aria-label={`All tabs (${count})`}
+          title="All tabs"
+          className="app-region-no-drag ms-1 flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-interactive-hover hover:text-foreground"
+        >
+          <Icon name="arrow-down-s" className="size-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="max-h-[min(28rem,var(--available-height))] w-72 overflow-auto">
+        {sessions.map((session) => (
+          <DropdownMenuItem
+            key={session.id}
+            ref={session.active ? reveal : undefined}
+            data-oc-forge-all-tabs-session={session.id}
+            aria-current={session.active ? 'true' : undefined}
+            onClick={() => onSelectSession(session.id)}
+          >
+            <Icon name="chat-3" />
+            <span dir="auto" className="min-w-0 flex-1 truncate">{session.title}</span>
+            {session.active ? <Icon name="check" /> : null}
+          </DropdownMenuItem>
+        ))}
+        {sessions.length > 0 ? <DropdownMenuSeparator /> : null}
+        {shown.map((tab) => {
+          const guest = guests.find((entry) => entry.id === tab.guestId);
+          const { icon, iconSrc } = tabIcon(tab, guest);
+          const active = tabActive && page === tab.guestId && activeTab[tab.guestId] === tab.id;
+          return (
+            <DropdownMenuItem
+              key={`${tab.guestId}:${tab.id}`}
+              ref={active ? reveal : undefined}
+              data-oc-forge-all-tabs-item={`${tab.guestId}:${tab.id}`}
+              aria-current={active ? 'true' : undefined}
+              title={guest ? `${tab.title} — ${guest.name}` : tab.title}
+              onClick={() => activateOcForgeTab(tab.guestId, tab.id)}
+            >
+              <GuestIcon icon={icon} iconSrc={iconSrc} className="size-3.5 shrink-0" />
+              <span dir="auto" className="min-w-0 flex-1 truncate">{tab.title}</span>
+              {tab.dirty ? <span data-oc-forge-dirty aria-label="Unsaved" className="size-2 shrink-0 rounded-full bg-current" /> : null}
+              {active ? <Icon name="check" /> : null}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+};
+
+/**
+ * Extension pages in the main area. The open one shows; a page whose
+ * extension has header tabs stays mounted (hidden) while another tab or a
+ * chat is shown, so switching back does not restart it, and for a moment
+ * after its last tab closed (`lingering`), so its frame hears the close.
+ * Otherwise a page mounts and unmounts as in the release.
+ */
+export const OcForgeGuestPages: React.FC<{ openPage: InstalledGuest | null | undefined }> = ({ openPage }) => {
+  const tabs = useOcForgeStore((state) => state.tabs);
+  const lingering = useOcForgeStore((state) => state.lingering);
+  const guests = useGuestsStore((state) => state.guests);
+  const kept = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const guestId of [...tabs.map((tab) => tab.guestId), ...Object.keys(lingering)]) {
+      const guest = guests.find((entry) => entry.id === guestId);
+      if (guest?.pageEntry && isGuestActive(guest)) ids.add(guest.id);
+    }
+    return ids;
+  }, [guests, lingering, tabs]);
+  // In a fixed order: React moves a node whose place in the list changes, and a moved iframe reloads.
+  const ids = [...new Set([...kept, ...(openPage ? [openPage.id] : [])])].sort();
+  return (
+    <>
+      {ids.map((id) => {
+        const visible = id === openPage?.id;
+        return (
+          <div
+            key={id}
+            data-oc-forge-page={id}
+            aria-hidden={visible ? undefined : true}
+            className={cn('absolute inset-0 z-10 bg-background', !visible && 'invisible pointer-events-none')}
+          >
+            <ErrorBoundary>
+              <PluginPane
+                mode={`plugin:${id}`}
+                surface="page"
+                item={null}
+                onDismiss={() => useUIStore.getState().setOpenGuestPage(null)}
+              />
+            </ErrorBoundary>
+          </div>
+        );
+      })}
+    </>
+  );
+};

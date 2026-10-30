@@ -1,5 +1,7 @@
 [tools]
 bun = "1.4.4"
+# OpenChamber's web build (scripts/build-openchamber.py) runs Vite under Node, as its releases do.
+node = "24"
 python = "3.12.11"
 uv = "0.12.0"
 
@@ -35,6 +37,14 @@ description = "Run our adapter tests against upstream loaded through the adapter
 dir = "vendors/opencode/packages/core"
 run = "bun run script/test.ts --preload {{config_root}}/tests/preload.ts {{config_root}}/tests"
 
+[tasks."test:extensions"]
+description = "Type-check, test and rebuild the OpenChamber extensions; their committed bundles must match their sources"
+run = [
+  "cd extensions/planner && bun install --frozen-lockfile && bun run check && bun test tests/ && bun run build",
+  "cd extensions/vscode && bun install --frozen-lockfile && bun run check && bun test tests/ && bun run build",
+  "git diff --exit-code -- extensions/planner/panel/main.js extensions/planner/service/main.js extensions/vscode/workbench/main.js extensions/vscode/panel/main.js extensions/vscode/service/main.js extensions/vscode/webview/host.js",
+]
+
 [tasks.ci]
 description = "Run the same checks locally and in GitHub Actions (after setup)"
 run = [
@@ -42,11 +52,20 @@ run = [
   "mise run check",
   "mise run test:location",
   "mise run test:adapters",
+  "mise run test:extensions",
 ]
 
 [tasks.build]
 description = "Rebuild one release target with adapters, e.g. `mise run build opencode-linux-x64`"
 run = "uv run --locked python scripts/build.py"
+
+[tasks."build:openchamber"]
+description = "Build OpenChamber's web package from vendors/openchamber with the oc-forge adapters: dist/openchamber-web-<version>.tgz"
+run = "uv run --locked python scripts/build-openchamber.py"
+
+[tasks."check:openchamber"]
+description = "Apply the OpenChamber adapters to vendors/openchamber and type-check the result, without building a package"
+run = "uv run --locked python scripts/build-openchamber.py --check-only"
 
 [tasks."upstream:sync"]
 description = "Pin the submodule to the official latest V2 release if it is newer"

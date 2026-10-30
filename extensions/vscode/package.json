@@ -1,0 +1,71 @@
+{
+  "name": "@oc-forge/openchamber-vscode",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "VS Code inside OpenChamber: the compiled workbench of your own VS Code Server, rendered in OpenChamber's panel and page, or in OpenChamber's rail, header tabs and bottom with oc-forge's adapters.",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.5.1"
+    },
+    "contributes": {
+      "panel": {
+        "id": "oc-forge-vscode",
+        "name": "VS Code",
+        "icon": "code-box",
+        "entry": "workbench/index.html"
+      },
+      "page": {
+        "entry": "workbench/index.html",
+        "title": "VS Code"
+      },
+      "background": {
+        "entry": "panel/index.html"
+      },
+      "actions": [
+        {
+          "id": "open-in-vscode",
+          "label": "Open in VS Code",
+          "icon": "code-box",
+          "where": "session",
+          "mode": "background"
+        }
+      ],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host"
+      }
+    }
+  },
+  "ocForge": {
+    "apiVersion": 1,
+    "rail": {
+      "path": "/rail",
+      "interval": 2000
+    },
+    "page": {
+      "keepBottomZone": true
+    }
+  },
+  "scripts": {
+    "check": "tsc -p .",
+    "test": "bun test tests/",
+    "build": "bun run build:workbench && bun run build:panel && bun run build:service && bun run build:webview",
+    "build:workbench": "openchamber-guest-bundle workbench/main.ts workbench/main.js",
+    "build:panel": "openchamber-guest-bundle panel/main.ts panel/main.js",
+    "build:service": "openchamber-guest-bundle --node service/main.ts service/main.js",
+    "web-files": "bun scripts/web-files.ts",
+    "e2e": "node tests/e2e/run.mjs",
+    "build:webview": "bun scripts/build-webview.ts"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "2.5.3",
+    "@types/bun": "^1.4.4",
+    "@types/node": "^26.6.5",
+    "fake-indexeddb": "6.2.6",
+    "linkedom": "0.18.12",
+    "playwright-core": "1.63.0",
+    "typescript": "^7.0.2"
+  }
+}

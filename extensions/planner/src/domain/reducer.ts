@@ -1,5 +1,5 @@
 // Fold events into state. Pure apart from mutating the batch-local copy it creates.
-import { emptyState, ritualKey, type PlannerState, type Task } from './types.ts';
+import { emptyState, googleTaskKey, ritualKey, type GoogleTaskKept, type PlannerState, type Subtask, type Task } from './types.ts';
 import type { NewTask, PlannerEvent } from './events.ts';
 import { daysBetween, zonedDateMinutes } from './dates.ts';
 import { samePlacement } from './selectors.ts';
@@ -37,6 +37,23 @@ const touch = (state: PlannerState, taskId: string, at: string, change: (task: T
   if (!task) return;
   state.tasks[taskId] = { ...change(task), updatedAt: at };
 };
+
+/** A task's subtasks changed by identity; a list left as it was (a subtask no longer there) leaves the task as it was. */
+const changeSubtasks = (state: PlannerState, taskId: string, at: string, change: (subtasks: Subtask[]) => Subtask[]): void => {
+  const task = state.tasks[taskId];
+  if (!task) return;
+  const subtasks = change(task.subtasks);
+  if (subtasks !== task.subtasks) state.tasks[taskId] = { ...task, subtasks, updatedAt: at };
+};
+
+/** A subtask put after another (`after`), first (null), or last (undefined, or after one no longer there). */
+const placeSubtask = (subtasks: readonly Subtask[], subtask: Subtask, after: string | null | undefined): Subtask[] => {
+  if (after === null) return [subtask, ...subtasks];
+  const index = after === undefined ? -1 : subtasks.findIndex((item) => item.id === after);
+  return index < 0 ? [...subtasks, subtask] : [...subtasks.slice(0, index + 1), subtask, ...subtasks.slice(index + 1)];
+};
+
+const hasSubtask = (subtasks: readonly Subtask[], id: string): boolean => subtasks.some((item) => item.id === id);
 
 /** Close the running timer into a time entry ending at `at`. */
 const stopTimer = (state: PlannerState, at: string, entryId: string): void => {
@@ -88,11 +105,29 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       createTask(state, event.task, event.at);
       return;
     case 'task.updated':
+      // An old log's `subtasks` (the whole list, as subtasks were written before `subtask.*`) replaces the list, as then.
       touch(state, event.taskId, event.at, (task) => ({
         ...task,
         ...event.patch,
         ...(event.patch.title !== undefined ? { title: event.patch.title.trim() } : {}),
       }));
+      return;
+    case 'subtask.added':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => (hasSubtask(subtasks, event.subtask.id) ? subtasks : placeSubtask(subtasks, event.subtask, event.after)));
+      return;
+    case 'subtask.updated':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) =>
+        hasSubtask(subtasks, event.subtaskId) ? subtasks.map((item) => (item.id === event.subtaskId ? { ...item, ...event.patch } : item)) : subtasks,
+      );
+      return;
+    case 'subtask.deleted':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => (hasSubtask(subtasks, event.subtaskId) ? subtasks.filter((item) => item.id !== event.subtaskId) : subtasks));
+      return;
+    case 'subtask.moved':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => {
+        const subtask = subtasks.find((item) => item.id === event.subtaskId);
+        return subtask && event.after !== subtask.id ? placeSubtask(subtasks.filter((item) => item !== subtask), subtask, event.after) : subtasks;
+      });
       return;
     case 'task.moved': {
       // Dragging a card to another day drops its working sessions on the day it left;
@@ -132,7 +167,13 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       touch(state, event.taskId, event.at, (task) => ({ ...task, deletedAt: null, archivedAt: null }));
       return;
     case 'task.sourceSynced':
-      touch(state, event.taskId, event.at, (task) => ({ ...task, source: event.source, ...(event.title !== undefined ? { title: event.title.trim() } : {}) }));
+      touch(state, event.taskId, event.at, (task) => ({
+        ...task,
+        source: event.source,
+        ...(event.title !== undefined ? { title: event.title.trim() } : {}),
+        ...(event.notes !== undefined ? { notes: event.notes } : {}),
+        ...(event.dueDate !== undefined ? { dueDate: event.dueDate } : {}),
+      }));
       return;
     case 'task.archived':
       stopTimerFor(state, event.taskId, event);
@@ -167,6 +208,13 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       syncTaskToBlocks(state, block.taskId, event.at, event.start);
       return;
     }
+    case 'block.linked': {
+      const block = state.blocks[event.blockId];
+      if (!block) return;
+      const { google: _old, ...rest } = block;
+      state.blocks[event.blockId] = event.google ? { ...rest, google: event.google } : rest;
+      return;
+    }
     case 'block.deleted': {
       const block = state.blocks[event.blockId];
       if (!block) return;
@@ -197,6 +245,11 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       for (const task of Object.values(state.tasks)) {
         if (task.objectiveId === event.objectiveId) state.tasks[task.id] = { ...task, objectiveId: null, updatedAt: event.at };
       }
+      return;
+    }
+    case 'objective.restored': {
+      const objective = state.objectives[event.objectiveId];
+      if (objective) state.objectives[event.objectiveId] = { ...objective, deletedAt: null };
       return;
     }
     case 'ritual.saved': {
@@ -241,6 +294,11 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
     case 'run.removed':
       delete state.runs[event.runId];
       return;
+    case 'run.pullRequest': {
+      const run = state.runs[event.runId];
+      if (run) state.runs[event.runId] = { ...run, pullRequest: { ...event.pullRequest, seenAt: event.at } };
+      return;
+    }
     case 'calendar.added':
       if (!state.calendars[event.calendar.id]) state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
       return;
@@ -314,6 +372,62 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
     case 'settings.updated':
       state.settings = { ...state.settings, ...event.patch };
       return;
+    case 'gtask.kept': {
+      const key = googleTaskKey(event.account, event.taskId);
+      const { starred, busy, visibility, color, attachments, doNotDisturb, decline, ...patch } = event.patch;
+      const before = state.googleTasks[key] ?? { account: event.account, listId: event.listId, taskId: event.taskId, time: null, duration: null, deadline: null, repeat: null, starredAt: null, updatedAt: event.at };
+      const starredAt = starred === undefined ? before.starredAt : starred ? before.starredAt ?? event.at : null;
+      const next: GoogleTaskKept = { ...before, ...patch, listId: event.listId, starredAt, updatedAt: event.at };
+      if (busy !== undefined) {
+        if (busy) next.busy = true;
+        else delete next.busy;
+      }
+      if (visibility !== undefined) {
+        if (visibility === 'default') delete next.visibility;
+        else next.visibility = visibility;
+      }
+      if (color !== undefined) {
+        if (color) next.color = color;
+        else delete next.color;
+      }
+      if (attachments !== undefined) {
+        if (attachments.length) next.attachments = attachments;
+        else delete next.attachments;
+      }
+      if (doNotDisturb !== undefined) {
+        if (doNotDisturb) next.doNotDisturb = true;
+        else delete next.doNotDisturb;
+      }
+      // Declining is on since it was turned on: a new message or mode keeps that.
+      if (decline !== undefined) {
+        if (decline) next.decline = { mode: decline.mode, message: decline.message, since: decline.since ?? before.decline?.since ?? event.at };
+        else delete next.decline;
+      }
+      // As in Google Calendar, a task without a time is free and private: availability, visibility, Do not disturb and
+      // declining meetings go with the time; meetings are declined only while it is Busy.
+      if (next.time === null) {
+        delete next.busy;
+        delete next.visibility;
+        delete next.doNotDisturb;
+      }
+      if (!next.busy) delete next.decline;
+      // Nothing kept any more: the task is Google's alone again.
+      if (next.time === null && next.deadline === null && next.repeat === null && next.starredAt === null && !next.color && !next.attachments) delete state.googleTasks[key];
+      else state.googleTasks[key] = next;
+      return;
+    }
+    case 'gtask.moved': {
+      const key = googleTaskKey(event.account, event.taskId);
+      const kept = state.googleTasks[key];
+      if (!kept) return;
+      const taskId = event.newTaskId ?? event.taskId;
+      delete state.googleTasks[key];
+      state.googleTasks[googleTaskKey(event.account, taskId)] = { ...kept, listId: event.listId, taskId, updatedAt: event.at };
+      return;
+    }
+    case 'gtask.dropped':
+      delete state.googleTasks[googleTaskKey(event.account, event.taskId)];
+      return;
   }
 };
 
@@ -333,6 +447,8 @@ export const applyEvents = (state: PlannerState, events: readonly PlannerEvent[]
     runs: { ...state.runs },
     folders: { ...state.folders },
     settings: { ...state.settings },
+    // A state from before the Planner kept anything for Google tasks has none.
+    googleTasks: { ...state.googleTasks },
   };
   for (const event of events) applyInto(next, event);
   return next;

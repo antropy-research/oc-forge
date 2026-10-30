@@ -16,6 +16,8 @@ export interface UiState {
   playlist: boolean;
   /** Linear issue shown in the issue editor, above any task detail. */
   openIssue: { id: string; workspaceId: string | null } | null;
+  /** The agent form the task detail opens with: assign (worktree and pull request) or send (choose everything). */
+  agentForm: 'assign' | 'send' | null;
 }
 
 export interface UiContextValue {

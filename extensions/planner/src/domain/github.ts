@@ -26,6 +26,15 @@ const STATE_LOOK: Record<string, { name: string; color: string }> = {
 };
 
 /** Closed and merged count as done, like a completed Linear issue. */
+/** The repository a GitHub search names (`repo:owner/name`), or null for all of them. */
+export const repoOfSearch = (text: string): string | null => /(?:^|\s)repo:([\w.-]+\/[\w.-]+)(?=\s|$)/i.exec(text)?.[1] ?? null;
+
+/** The search narrowed to one repository (its `repo:` term first, any other taken off), or to none. */
+export const withRepo = (text: string, repo: string | null): string => {
+  const rest = text.replace(/(?:^|\s)repo:\S+/gi, ' ').replace(/\s+/g, ' ').trim();
+  return [repo ? `repo:${repo}` : '', rest].filter(Boolean).join(' ');
+};
+
 export const githubStatus = (item: GitHubItem): NonNullable<TaskSourceRef['status']> => {
   if (item.state === 'OPEN' && item.draft) return { name: 'Draft', type: 'open', color: '#6e7781' };
   const look = STATE_LOOK[item.state] ?? STATE_LOOK.OPEN!;
@@ -35,6 +44,21 @@ export const githubStatus = (item: GitHubItem): NonNullable<TaskSourceRef['statu
 export const githubSource = (item: GitHubItem): TaskSourceRef => ({ kind: 'github', id: item.id, key: item.key, url: item.url, title: item.title, status: githubStatus(item) });
 
 export const taskFromGitHub = (item: GitHubItem, id: string, placement: Placement, position: number): NewTask => ({ id, title: item.title, placement, position, source: githubSource(item) });
+
+/** An issue's or a pull request's address on GitHub, pasted from the browser (a comment's or a tab's address too). */
+const ITEM_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/(issues|pull)\/(\d{1,9})(?:[/?#]\S*)?$/;
+
+/**
+ * A GitHub issue or pull request URL, as Sunsama imports one pasted into a new task's title: its repository, number
+ * and kind, and its address without what follows the number (a comment, the files tab). Null for anything else.
+ */
+export const parseGitHubUrl = (text: string): { repo: string; number: number; kind: GitHubItem['kind']; key: string; url: string } | null => {
+  const match = ITEM_URL.exec(text.trim());
+  if (!match) return null;
+  const [, owner, name, path, number] = match;
+  const repo = `${owner}/${name}`;
+  return { repo, number: Number(number), kind: path === 'pull' ? 'pull' : 'issue', key: `${repo}#${Number(number)}`, url: `https://github.com/${repo}/${path}/${Number(number)}` };
+};
 
 /** A short label for a GitHub key: name#12 instead of owner/name#12. */
 export const shortKey = (key: string): string => key.replace(/^[^/]+\//, '');

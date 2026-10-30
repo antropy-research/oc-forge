@@ -1,4 +1,7 @@
-"""Pin official stable releases: OpenCode V2 npm latest, others GitHub latest."""
+"""Pin official stable releases: OpenCode V2 npm latest, others GitHub latest.
+
+A vendor without releases names a branch in vendors.json and follows its head.
+"""
 
 import json
 import os
@@ -6,6 +9,7 @@ import re
 from pathlib import Path
 import subprocess
 import sys
+from typing import Optional
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,24 +46,39 @@ def main() -> None:
     candidates = {}
     for name, pin in pins.items():
         path = ROOT / "vendors" / name
-        if subprocess.check_output(["git", "-C", str(path), "status", "--porcelain"], text=True).strip():
+        if path.exists() and subprocess.check_output(["git", "-C", str(path), "status", "--porcelain"], text=True).strip():
             raise SystemExit(f"{name}: submodule must be pristine before sync")
+        if "branch" in pin:
+            # A repository CI cannot read yet (e.g. private, no token) is skipped
+            # rather than failing the sync of every other vendor.
+            if commit := branch_commit(name, pin):
+                candidates[name] = (pin["branch"], commit)
+            continue
         tag = latest_tag(name, pin)
         commit = tag_commit(pin["repository"], tag)
         if tag == pin["release"] and commit != pin["commit"]:
             raise SystemExit(f"{name}: pinned tag {tag} moved upstream")
         candidates[name] = (tag, commit)
     for name, pin in pins.items():
-        tag, commit = candidates[name]
-        if tag == pin["release"] and commit == pin["commit"]:
-            print(f"{name}: up to date at {tag} ({commit})")
+        if name not in candidates:
+            continue
+        ref, commit = candidates[name]
+        updated = {**pin, "commit": commit} if "branch" in pin else {**pin, "release": ref, "commit": commit}
+        if updated == pin:
+            print(f"{name}: up to date at {ref} ({commit})")
             continue
         path = ROOT / "vendors" / name
-        subprocess.run(["git", "-C", str(path), "fetch", "--depth=1", "origin", f"refs/tags/{tag}:refs/tags/{tag}"], check=True)
+        if not path.exists():
+            # A vendor new to vendors.json becomes a submodule here, so only CI adds one.
+            subprocess.run(["git", "-C", str(ROOT), "submodule", "add", pin["repository"], f"vendors/{name}"], check=True)
+        elif "branch" in pin:
+            subprocess.run(["git", "-C", str(path), "fetch", "--depth=1", "origin", commit], check=True)
+        else:
+            subprocess.run(["git", "-C", str(path), "fetch", "--depth=1", "origin", f"refs/tags/{ref}:refs/tags/{ref}"], check=True)
         subprocess.run(["git", "-C", str(path), "checkout", "--detach", commit], check=True)
-        pins[name] = {**pin, "release": tag, "commit": commit}
+        pins[name] = updated
         changed = True
-        print(f"{name}: updated to {tag} ({commit})")
+        print(f"{name}: updated to {ref} ({commit})")
     if changed:
         PINS.write_text(json.dumps(pins, indent=2) + "\n")
         (ROOT / "upstream.json").write_text(json.dumps({
@@ -83,6 +102,19 @@ def tag_commit(repository: str, tag: str) -> str:
     if not commit:
         raise SystemExit(f"formal release {tag} has no git tag in {repository}")
     return commit
+
+
+def branch_commit(name: str, pin: dict) -> Optional[str]:
+    listing = subprocess.run(
+        ["git", "ls-remote", pin["repository"], f"refs/heads/{pin['branch']}"],
+        capture_output=True, text=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if listing.returncode != 0:
+        print(f"{name}: cannot read {pin['repository']}; skipped", file=sys.stderr)
+        return None
+    if not listing.stdout.strip():
+        raise SystemExit(f"{name}: branch {pin['branch']} not found in {pin['repository']}")
+    return listing.stdout.split()[0]
 
 
 if __name__ == "__main__":
