@@ -343,6 +343,8 @@ const sunsamaLinear = async (size, { importKey, urlKey, mergeKey }) => {
   check(`${size}: the state picked is the one the issue moves to`, Boolean(await until(() => moves(issueId).includes('st-h-review'))), moves(issueId).join(','));
   // The completion automation: completing it asks too, Done picked to start with.
   const title = world.issues.find((item) => item.identifier === importKey).title;
+  const linearIcon = card(title).locator('a.source-open');
+  check(`${size}: the imported issue's card shows Linear's icon, which opens the issue in Linear`, (await linearIcon.getAttribute('aria-label')) === `Open ${importKey} in Linear` && (await linearIcon.getAttribute('href')) === world.issues.find((item) => item.identifier === importKey).url, await linearIcon.getAttribute('href'));
   await card(title).getByRole('button', { name: 'Mark complete' }).click();
   await prompt.getByRole('combobox', { name: 'Status in Linear' }).waitFor({ timeout: 15_000 });
   const picked = await prompt.getByRole('combobox', { name: 'Status in Linear' }).evaluate((select) => select.selectedOptions[0]?.textContent ?? '');

@@ -13,6 +13,7 @@ import { Planner } from '../service/planner.ts';
 import { MeetingImport } from '../service/meetings.ts';
 import { addMeetingCommands, addMeetingsCommands, eventKey, excludedBy, importCalendars, meetingSuggestions, planMeetingCompletion, planMeetingSync, taskForEvent } from '../src/domain/meetings.ts';
 import { instantAt } from '../src/domain/dates.ts';
+import { actualMinutes } from '../src/domain/selectors.ts';
 import { applyEvents } from '../src/domain/reducer.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { emptyState, MEETING_EXCLUSIONS, type PlannerState } from '../src/domain/types.ts';
@@ -190,6 +191,17 @@ describe('auto-sync', () => {
     state = run(state, [{ type: 'settings.updated', patch: { meetingCalendars: ['home'] } }]);
     state = synced(state, [], new Set(['home']));
     expect(state.tasks[task.id]!.deletedAt).not.toBeNull();
+  });
+});
+
+describe("the day's stats", () => {
+  test('a meeting checked off without its timer counts its length as time spent ("planned as actual", on at first)', () => {
+    let state = base();
+    state = run(state, addMeetingCommands(state, planning, ZONE, newId));
+    const task = taskForEvent(state, eventKey(planning)!)!;
+    state = run(state, [{ type: 'task.completed', taskId: task.id, on: TODAY }]);
+    expect(state.settings.plannedAsActual).toBe(true);
+    expect(actualMinutes(state, state.tasks[task.id]!, Date.parse(at(TODAY, 16)))).toBe(60);
   });
 });
 
