@@ -962,10 +962,16 @@ const meetingsPart = async (viewport) => {
     // Settings → Meeting import: Auto-sync from the calendars chosen, with an import channel.
     await go('Settings');
     const settings = f.locator('fieldset', { has: f.locator('legend', { hasText: 'Meeting import' }) });
-    await settings.getByRole('combobox', { name: /Configure how meetings get added/ }).selectOption('autoSync');
+    const importMode = settings.getByRole('combobox', { name: /Configure how meetings get added/ });
+    await importMode.selectOption('autoSync');
     check(`${size}: Auto-sync says calendars must be chosen first`, await settings.getByRole('alert').filter({ hasText: 'You must select Calendars to import from' }).isVisible({ timeout: 5000 }).catch(() => false));
+    // The calendar and its import channel are chosen under Show prompt, then Auto-sync goes on. Ticked under Auto-sync,
+    // a calendar syncs at once, while its channel's menu is only just showing: a meeting that sync imports keeps no
+    // channel (the run of 2026-10-30, at 1024, lost that race; every run before won it).
+    await importMode.selectOption('prompt');
     await settings.getByRole('group', { name: 'Calendars to import from' }).getByRole('checkbox', { name: /Harness work/ }).check();
     await settings.getByRole('combobox', { name: 'Import channel for Harness work' }).selectOption('work');
+    await importMode.selectOption('autoSync');
     let demo = null;
     await until(async () => Boolean((demo = await eventTask('hdemo'))), 20_000);
     check(`${size}: Auto-sync adds the week's meetings by itself, in the calendar's import channel`, demo?.placement?.date === inThree && demo.channelId === 'work' && demo.source.event?.auto === true, JSON.stringify(demo ? { date: demo.placement.date, channel: demo.channelId, auto: demo.source.event?.auto } : null));
