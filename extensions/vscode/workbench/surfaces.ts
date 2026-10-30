@@ -8,6 +8,7 @@
 // view or the terminal becomes a header tab, which shows the page, which opens
 // the editor; what to open waits in the extension's service.
 import type { OcForgeClient, OcForgeLimits, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
+import type { FocusGuard } from '../src/focus.ts';
 import { followView, type RailEntry } from '../src/rail.ts';
 import {
   bounded,
@@ -72,6 +73,10 @@ export interface SurfaceContext {
   /** The service's rail entries (`GET /rail`), with the view container each shows. */
   railEntries: () => Promise<RailEntry[]>;
   openUrl: (url: string) => void;
+  /** The frame's keyboard focus: it takes it only for the user (`src/focus.ts`); `allow` when the user chose what it shows. */
+  focus: FocusGuard;
+  /** This start is a reload the frame made to follow the folder, not OpenChamber opening it. */
+  reloaded: boolean;
 }
 
 const log = (message: string, error?: unknown): void => console.warn(`[OpenChamber VS Code] ${message}`, error ?? '');
@@ -411,8 +416,16 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   let showing: string | null = null;
   /** The container behind "Additional Views" shown last. */
   let lastMore: string | null = null;
-  const open = async (entry: string, view: string, title: string): Promise<boolean> => {
+  /**
+   * An entry the user chose (a rail click, a digit), still the one to show: what it opens takes the focus, as VS Code's
+   * activity bar gives it, though the rail's list took a moment to read. Not one shown for any other reason.
+   */
+  const take = (entry: string, chosen: boolean): void => {
+    if (chosen && showing === entry) context.focus.allow();
+  };
+  const open = async (entry: string, view: string, title: string, chosen = false): Promise<boolean> => {
     applyRoleLayout('view', services, () => editorsOf(services).length > 0);
+    take(entry, chosen);
     // An extension installed a moment ago registers its view container once its host has it.
     for (let attempt = 0; attempt < 30 && showing === entry; attempt++) {
       if (await views.openViewContainer(view, true).catch(() => null)) return true;
@@ -423,34 +436,36 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   };
   // "Additional Views", the containers the rail has no room for: the one shown last (or the first), and VS Code's
   // quick pick of them all, as its activity bar lists them behind "…".
-  const openMore = async (entry: RailEntry): Promise<void> => {
+  const openMore = async (entry: RailEntry, chosen: boolean): Promise<void> => {
     const items = (entry.more ?? []).map((item) => ({ label: item.title, view: item.view }));
     const current = items.find((item) => item.view === lastMore) ?? items[0];
-    if (!current || !(await open(entry.id, current.view, current.label)) || showing !== entry.id) return;
+    if (!current || !(await open(entry.id, current.view, current.label, chosen)) || showing !== entry.id) return;
     lastMore = current.view;
+    take(entry.id, chosen);
     const picked = await services.get<QuickInputService>('quickInputService').pick(items, { title: entry.title, placeHolder: 'Open a view container', activeItem: current });
     if (!picked || showing !== entry.id) return;
     lastMore = picked.view;
-    await open(entry.id, picked.view, picked.label);
+    await open(entry.id, picked.view, picked.label, chosen);
   };
   /** Entries being opened (their container, VS Code's quick pick): until they are, the rail lights the one chosen. */
   let opening = 0;
   /** The container shown that the last read left out, when the read before listed it (`followView`). */
   let missing: string | null = null;
-  const showEntry = async (entry: string): Promise<void> => {
+  const showEntry = async (entry: string, chosen = false): Promise<void> => {
     showing = entry;
     missing = null;
     opening++;
     try {
       const target = (await refresh()).find((item) => item.id === entry);
       if (showing !== entry) return;
-      if (target?.more) await openMore(target);
-      else if (target?.view) await open(entry, target.view, target.title);
+      if (target?.more) await openMore(target, chosen);
+      else if (target?.view) await open(entry, target.view, target.title, chosen);
     } finally {
       opening--;
     }
   };
-  forge.rail.onEntry((entry) => void showEntry(entry));
+  // The user chose an entry on the rail (OpenChamber tells only then).
+  forge.rail.onEntry((entry) => void showEntry(entry, true));
   // The rail lights the entry that shows the container VS Code shows: after VS Code switched by itself (Ctrl+Shift+F,
   // "Reveal in Explorer", the default container when the one shown was uninstalled), and when that container moved
   // behind "Additional Views" or out from it, or got an entry, as others came and went. An entry chosen meanwhile wins.
@@ -511,6 +526,9 @@ const startTerminal = async (context: SurfaceContext): Promise<void> => {
   // later start reconnected and replayed too. A reconnection that hangs still gets its terminal, after a while.
   const reconnected = (async () => context.services.get<TerminalService>('terminalService').whenConnected)();
   await Promise.race([reconnected, later(20_000)]).catch(() => undefined);
+  // Opened, it takes the focus, as OpenChamber's own terminal does when it shows; not when it reloads to follow the
+  // folder, which happens while the user is elsewhere ("Open in VS Code" on a chat).
+  if (!context.reloaded) context.focus.allow();
   // Its active terminal, or a new one when the folder has none.
   await context.services.get<CommandService>('commandService').executeCommand('workbench.action.terminal.focus').catch((error) => log('could not open the terminal', error));
 };
@@ -594,14 +612,16 @@ class EditorArea {
       }
       this.schedule();
     });
+    // A tab activated (a click in the header, an editor a rail view or the terminal handed over): OpenChamber shows the
+    // page on it, and its editor takes the focus as it opens (`show`).
     forge.tabs.onActivate((id) => {
       this.chosen = true;
-      void this.show(id).catch((error) => log('could not show the tab', error));
+      void this.show(id, null, true).catch((error) => log('could not show the tab', error));
     });
     forge.tabs.onClose((id) => void this.closeFromHeader(id).catch((error) => log('could not close the editor', error)));
     // An unsaved tab the user closes stays until VS Code's own close, with its save prompt, has run here.
     forge.tabs.onCloseRequest((id) => void this.closeAsked(id).catch((error) => log('could not close the editor', error)));
-    forge.links.onRoute((route) => void this.openRoute(route));
+    forge.links.onRoute((route) => void this.openRoute(route, true));
     await this.ready;
     this.editorService.onDidEditorsChange(() => this.schedule());
     this.editorService.onDidActiveEditorChange(() => this.schedule());
@@ -617,7 +637,7 @@ class EditorArea {
     const state = forge.tabs.state();
     if (handed && active) await this.show(active, handed);
     else if ((!this.linked || this.chosen) && state.active && (state.shown || !this.strip)) await this.show(state.active);
-    // Started: the page follows VS Code now, and its first file has opened (it took the focus then).
+    // Started: the page follows VS Code now, and its first file has opened (and took the focus, if the user chose it).
     document.documentElement.dataset.ocVscodePageStarted = 'true';
   }
 
@@ -855,8 +875,11 @@ class EditorArea {
     this.hostTabs.delete(old);
   }
 
-  /** OpenChamber shows the page on this tab: its editor, maybe one another frame asked for (`handed`: taken already). */
-  private async show(id: string, handed: OpenRequest | null = null): Promise<void> {
+  /**
+   * OpenChamber shows the page on this tab: its editor, maybe one another frame asked for (`handed`: taken already).
+   * One `chosen` takes the focus, while the page still shows it.
+   */
+  private async show(id: string, handed: OpenRequest | null = null, chosen = false): Promise<void> {
     this.showing += 1;
     try {
       await this.ready;
@@ -865,6 +888,8 @@ class EditorArea {
       const selected = this.context.forge.tabs.state().active;
       if (selected && selected !== id) return;
       const request = handed ?? await this.take(id);
+      // As it opens, while the page still shows it (it may have taken a while to start): what the user is at.
+      if (chosen && this.context.forge.tabs.state().shown && this.context.forge.tabs.state().active === id) this.context.focus.allow();
       if (request) {
         await this.open(request, id);
         return;
@@ -920,10 +945,12 @@ class EditorArea {
     return true;
   }
 
-  private async openRoute(route: string | null): Promise<void> {
+  private async openRoute(route: string | null, followed = false): Promise<void> {
     const target = readEditorRoute(route);
     if (!target) return;
     await this.ready;
+    // A link the user followed: its editor takes the focus as it opens.
+    if (followed) this.context.focus.allow();
     // By its key, or by the hash of one too long for a route (pageRoute): an editor VS Code has open.
     const key = [...this.current().keys()].find((open) => routeNames(target.key, open)) ?? target.key;
     const found = this.current().get(key);
@@ -996,6 +1023,8 @@ class EditorArea {
    */
   private async closeAsked(id: string): Promise<void> {
     await this.ready;
+    // VS Code's save prompt takes the keys, while the page shows it (OpenChamber shows the page on the tab to close).
+    if (this.context.forge.tabs.state().shown) this.context.focus.allow();
     const editors = this.editorService.getEditors(1).filter((identifier) => keyOfEditor(identifier.editor) === id);
     for (const identifier of editors) await this.editorService.closeEditor(identifier);
     if (this.current().has(id)) return;

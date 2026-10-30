@@ -8,6 +8,7 @@
 import { connectHost, type HostReadyContext, type JsonValue } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 import { connectOcForge } from '../../../adapters/openchamber/client/index.ts';
+import { guardFocus } from '../src/focus.ts';
 import type { RailEntry } from '../src/rail.ts';
 import { isConnectionToken, parseServerUrl, readOpenRequest, readSettings, type OpenRequest, type VscodeSettings } from '../src/settings.ts';
 import { roleOf, roleSettings, type Role } from '../src/surfaces.ts';
@@ -23,6 +24,8 @@ const host = connectHost();
 const forgeReady = connectOcForge({ timeoutMs: 1_000 }).catch(() => null);
 /** The rail entry "Open in VS Code" shows: the chat's folder in the Explorer. */
 const EXPLORER_ENTRY = 'explorer';
+/** The window's name while this frame reloads to follow the folder (`reloadWith`): a window keeps its name across a reload. */
+const FOLLOW_RELOAD = 'oc-vscode-follow-reload';
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 installBasicShims((url) => void host.openUrl(url).catch(() => {}));
@@ -124,6 +127,8 @@ const modeOf = (ctx: HostReadyContext): ThemeMode => (ctx.theme.mode === 'dark' 
 const pendingOpen = async (): Promise<OpenRequest | null> => readOpenRequest(await host.storage.get('open-request').catch(() => undefined));
 
 const boot = async (): Promise<void> => {
+  const reloaded = window.name === FOLLOW_RELOAD;
+  if (reloaded) window.name = '';
   context = await ready;
   applyHostReady(context, document.documentElement);
   if (context.surface === 'background') return;
@@ -165,6 +170,10 @@ const boot = async (): Promise<void> => {
   const strip = forge?.tabs.state().strip ?? true;
   // For the end-to-end check's measurements: which part this frame is, and (below) when its workbench ran.
   document.documentElement.dataset.ocVscodeRole = role;
+  // In OpenChamber's own surfaces the frame takes the keyboard focus only for the user (src/focus.ts): from before
+  // VS Code runs, whose start focuses a part. How many focus calls it kept from moving the focus, for the check.
+  let focusKept = 0;
+  const focus = surfaceRole ? guardFocus(window, { kept: () => (document.documentElement.dataset.ocVscodeFocusKept = String(++focusKept)) }) : null;
 
   // Storage first: VS Code reads its settings from IndexedDB as it starts. Each part keeps its own layout.
   const stateRole = surfaceRole ? { role: surfaceRole } : {};
@@ -217,6 +226,7 @@ const boot = async (): Promise<void> => {
     if (nextFolder) await host.storage.set('folder', nextFolder).catch(() => {});
     else await host.storage.delete('folder').catch(() => {});
     if (request) await host.storage.set('open-request', request as unknown as JsonValue).catch(() => {});
+    window.name = FOLLOW_RELOAD;
     location.reload();
   };
   let workbench: { commands: { executeCommand: (id: string, ...args: unknown[]) => Promise<unknown> }; window: { showInformationMessage: (message: string, ...items: string[]) => Promise<string | undefined> } } | null = null;
@@ -330,7 +340,7 @@ const boot = async (): Promise<void> => {
   void Promise.all([servicesReady, running]).then(async ([services]) => {
     const serviceCall = <T>(path: string, body: Record<string, unknown> = {}): Promise<T> => call<T>(path, { ...server, ...body });
     void reportExtensionsPath(services, serviceCall).catch(() => {});
-    if (!surfaceRole || !forge) return;
+    if (!surfaceRole || !forge || !focus) return;
     surface = await startSurface({
       role: surfaceRole,
       forge,
@@ -343,12 +353,16 @@ const boot = async (): Promise<void> => {
         return ((JSON.parse(answer.body || '{}') as { entries?: RailEntry[] }).entries ?? []);
       },
       openUrl: (url) => void host.openUrl(url).catch(() => {}),
+      focus,
+      reloaded,
     });
     // "Open in VS Code" from a chat: the rail view shows that folder in the Explorer, and hands a file to the page.
     if (surfaceRole === 'view' && fresh) {
       await surface.showEntry?.(EXPLORER_ENTRY);
       if (fresh.file) await openFileAt(fresh.file, fresh.line);
     }
+    // For the end-to-end check: this part has started (what it shows is open).
+    document.documentElement.dataset.ocVscodeSurfaceStarted = 'true';
   }).catch((error) => console.warn('[OpenChamber VS Code] the surface did not start', error));
 
   // OpenChamber's look follows into VS Code when it changes; its folder is offered.

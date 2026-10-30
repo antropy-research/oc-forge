@@ -136,6 +136,27 @@ the shell, as VS Code's own navigation keys do (`terminal.integrated.commandsToS
 them, and the rest stay the shell's (Alt+W is Esc w for Emacs, Ctrl+[ is Esc, Ctrl+B is readline's and tmux's).
 Keys Chrome keeps in a normal tab (Ctrl+Tab, Cmd+W, Cmd+Option+←/→) reach VS Code only in an installed app window.
 
+**Focus.** A frame takes the keyboard focus only for the user (`src/focus.ts`). VS Code focuses a part as it starts
+(`Layout.restoreParts`), and each part focused what it showed, so a frame that started or reloaded while the user was
+elsewhere in OpenChamber took the focus from them. After "Open in VS Code" the rail view, the page and the terminal
+reload on the new folder, and a folder's rail panel starts when one of its chats shows. Before this guard, every
+"Open in VS Code" round trip saw 3–5 such grabs. The focus left the menu the user had just opened (OpenChamber's
+menus close when they lose it) or the composer they were typing in. Now, from before VS Code runs, a focus call
+(`element.focus()`, `window.focus()`) takes effect only:
+- while the frame has the focus already;
+- within 2 s of the user acting on it: a click, a touch, a key or a drop in it;
+- when the user chose something in it through OpenChamber, as it opens:
+  - a rail entry: its view container, as VS Code's activity bar focuses it, and the quick pick behind Additional Views;
+  - a header tab, while the page still shows it;
+  - an unsaved tab being closed: VS Code's save prompt;
+  - a link followed.
+
+That moment ends early when the frame loses the focus. The terminal takes the focus when it is opened, as
+OpenChamber's own terminal does, but not when it reloads to follow the folder (the frame marks that reload in
+`window.name`). A view or a page that OpenChamber starts by itself (a rail panel opening, a chat in another folder, a
+reload) takes the focus only on a click. The "OpenChamber is now in …" notification shows at the bottom of the rail
+view and takes no focus.
+
 **Tunnels.** Each workbench holds 2 of the service's tunnels (its management connection and its extension host's).
 A browser window runs up to 3 workbenches, so 6, and 12 for the 45 s a reloaded frame's old tunnels linger; past
 `MAX_TUNNELS` the least recently polled one is closed, which ends a live workbench. The limit is 128 (was 32): room
@@ -158,7 +179,7 @@ a tab or is opened.
 
 **Limits.**
 - A file a rail view or the terminal hands to a page that is still starting (VS Code restoring, the page closing
-  editors closed before) opens once the page is ready, and takes the focus then.
+  editors closed before) opens once the page is ready, and takes the focus then if the page still shows it.
 - The adapted OpenChamber sends a window's service requests over one WebSocket (its transport, which Chrome pools
   apart from the six connections), so two browser tabs each run VS Code's parts. Where they go over plain HTTP
   instead (an adapted build before the transport, or with it off, `oc-forge:service-socket` in localStorage), a
@@ -178,7 +199,7 @@ a tab or is opened.
 
 | Path | Role |
 |---|---|
-| `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`), the rail entries (`rail.ts`), the roles and editors between frames (`surfaces.ts`) |
+| `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`), the rail entries (`rail.ts`), the roles and editors between frames (`surfaces.ts`), the frames' keyboard focus (`focus.ts`) |
 | `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`), the rail (`rail.ts`), editors handed to the page and its saved tabs (`editors.ts`) |
 | `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB; the roles in OpenChamber's own surfaces (`surfaces.ts`) and the VS Code services they use (`vscode.ts`) |
 | `panel/` | The background frame: "Open in VS Code" on a chat |
