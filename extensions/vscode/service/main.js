@@ -493,6 +493,10 @@ class EditorRequests {
     while (this.pending.size > REQUESTS_MAX)
       this.pending.delete(this.pending.keys().next().value);
   }
+  keys() {
+    this.prune();
+    return [...this.pending.keys()];
+  }
   take(key) {
     this.prune();
     const request = this.pending.get(key);
@@ -1530,6 +1534,7 @@ var routes = {
       throw new ServerError("key is required", 400);
     return { open: editorRequests.take(body.key) };
   },
+  "/editors/pending": async () => ({ keys: editorRequests.keys() }),
   "/tabs/save": async (body) => {
     const server = serverOf(body);
     const key = SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder);

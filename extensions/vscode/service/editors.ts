@@ -31,6 +31,12 @@ export class EditorRequests {
     while (this.pending.size > REQUESTS_MAX) this.pending.delete(this.pending.keys().next().value!);
   }
 
+  /** The tabs with a request waiting (at most REQUESTS_MAX), for a page that didn't see them selected. */
+  keys(): string[] {
+    this.prune();
+    return [...this.pending.keys()];
+  }
+
   /** The request waiting for this tab, once. */
   take(key: string): unknown {
     this.prune();

@@ -378,6 +378,11 @@ const boot = async (): Promise<void> => {
       openUrl: (url) => void host.openUrl(url).catch(() => {}),
       focus,
       reloaded,
+      storage: {
+        get: (key) => host.storage.get(key),
+        set: (key, value) => host.storage.set(key, value as JsonValue),
+        delete: (key) => host.storage.delete(key),
+      },
     });
     // "Open in VS Code" from a chat: the rail view shows that folder in the Explorer, and hands a file to the page.
     if (surfaceRole === 'view' && fresh) {

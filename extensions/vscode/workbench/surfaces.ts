@@ -9,7 +9,9 @@
 // the editor; what to open waits in the extension's service.
 import type { OcForgeClient, OcForgeLimits, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
 import { guardWebviews, type FocusGuard, type WebviewMaker } from '../src/focus.ts';
+import { commandHandoff, ELSEWHERE, showingCommands, WALKTHROUGH_INPUT } from './handoff.ts';
 import { guardLayout } from './layoutGuard.ts';
+import { entryOfView, readViewRequest, REVEAL, sideBarsToRail, takeViewRequest, viewRequestKey, type FrameStorage, type ViewRequest } from './sideBars.ts';
 import { followView, type RailEntry } from '../src/rail.ts';
 import {
   bounded,
@@ -79,6 +81,8 @@ export interface SurfaceContext {
   focus: FocusGuard;
   /** This start is a reload the frame made to follow the folder, not OpenChamber opening it. */
   reloaded: boolean;
+  /** The extension's storage, which every frame in the browser reads (`sideBars.ts`). */
+  storage: FrameStorage;
 }
 
 const log = (message: string, error?: unknown): void => console.warn(`[OpenChamber VS Code] ${message}`, error ?? '');
@@ -257,17 +261,25 @@ const selectionLine = (options: unknown): number | undefined => {
   return typeof line === 'number' && line > 0 ? line : undefined;
 };
 
-/** What the page should open instead of this frame, or null to open it here; titles as long as the host takes (`titleMax`). */
-const handoffOf = (editor: unknown, optionsOrGroup: unknown, titleMax: number): Handoff | null => {
+/** A key of a tab whose editor the page names once it opens it. */
+const oneOff = (): string => `open|${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+/**
+ * What the page should open instead of this frame, or null when it can't; titles as long as the host takes
+ * (`titleMax`). Editors with no file to name them open in the page by VS Code's own commands (`handoff.ts`), under
+ * the key the page gives the editor they open (an extension's page by its extension: a second choice reuses its tab).
+ */
+const handoffOf = (editor: unknown, optionsOrGroup: unknown, titleMax: number): Handoff | Promise<Handoff> | null => {
   const options = optionsOrGroup && !isGroup(optionsOrGroup) ? optionsOrGroup : undefined;
+  const byCommand = commandHandoff(editor, options);
+  if (byCommand) {
+    const key = isEditorInput(editor) ? keyOfEditor(editor) : editorKeyOf(editor, WALKTHROUGH_INPUT) ?? oneOff();
+    // A search editor is named by its query, read with the rest of its configuration.
+    const handoff = (open: OpenRequest): Handoff => ({ key, title: tabTitle(isEditorInput(editor) ? editor.getName() : 'Welcome', titleMax), icon: tabIcon(key), open, route: null });
+    return byCommand instanceof Promise ? byCommand.then(handoff) : handoff(byCommand);
+  }
   let untyped: Record<string, unknown> | undefined;
   if (isEditorInput(editor)) {
-    // Editors with no file to name them: the page opens them the way VS Code's own commands do. An extension's page
-    // names its extension in its resource, `extension:<publisher.name>/extension`.
-    const id = editor.typeId === 'workbench.extensions.input2' && editor.resource?.scheme === 'extension' ? /^\/?(.+)\/extension$/.exec(editor.resource.path)?.[1] : undefined;
-    if (id) {
-      return { key: `open|${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, title: tabTitle(editor.getName(), titleMax), icon: 'puzzle', open: { kind: 'command', command: 'extension.open', args: [id] }, route: null };
-    }
     try {
       untyped = editor.toUntyped() as Record<string, unknown> | undefined;
     } catch {
@@ -306,8 +318,10 @@ const modifiedClicks = (): (() => boolean) => {
 /**
  * In a view or the terminal, editors open in the page: the frame's
  * openEditor/openEditors hand them over (the editor, its selection) and open
- * their header tab, which shows the page. What can't be handed over (a
- * webview, an extension's own editor) opens here.
+ * their header tab, which shows the page. A view never shows an editor area:
+ * what can't be handed over doesn't open there (Markdown's preview opens in
+ * the page by its command, `showingCommands`); the terminal opens it itself
+ * (a terminal moved into the editor area).
  */
 const handEditorsToPage = (context: SurfaceContext): void => {
   const editorService = context.services.get<EditorService>('editorService');
@@ -315,6 +329,7 @@ const handEditorsToPage = (context: SurfaceContext): void => {
   const openEditors = editorService.openEditors.bind(editorService);
   const modified = modifiedClicks();
   const limits = context.forge.limits();
+  const showing = showingCommands(context.services.get<CommandService>('commandService'));
   const hand = async (handoff: Handoff): Promise<void> => {
     const url = handoff.route && modified() ? context.forge.links.pageUrl(handoff.route) : null;
     if (url) {
@@ -323,7 +338,9 @@ const handEditorsToPage = (context: SurfaceContext): void => {
     }
     try {
       await context.call('/editors/request', { key: handoff.key, open: handoff.open });
-      await context.forge.tabs.open(withRoute({ id: handoff.key, title: handoff.title, icon: handoff.icon }), { activate: true });
+      // An editor opened by command may not open, or open named otherwise: the page selects its tab once it has it.
+      const deferred = handoff.open.kind === 'command' && handoff.open.show === true;
+      await context.forge.tabs.open(withRoute({ id: handoff.key, title: handoff.title, icon: handoff.icon }), { activate: !deferred });
     } catch (error) {
       log('could not hand the editor to the page', error);
       // Nothing opened (the page takes an editor with its tab): the user hears why. A full header refuses a tab
@@ -334,23 +351,42 @@ const handEditorsToPage = (context: SurfaceContext): void => {
         : `${handoff.title} didn't open in the page: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
+  const handOver = (handoff: Handoff | Promise<Handoff>): void => {
+    void Promise.resolve(handoff).then(hand, (error) => log('could not hand the editor to the page', error));
+  };
+  /** A view's editor that can't move to the page: by the command that just showed it (once), else not at all. */
+  let shown: OpenRequest | null = null;
+  const keepFromView = (editor: unknown): void => {
+    const recent = showing();
+    const title = tabTitle(isEditorInput(editor) ? editor.getName() : requestTitle(editor, limits.title), limits.title);
+    if (recent && recent !== shown) handOver({ key: oneOff(), title, icon: 'file-code', open: recent, route: null });
+    else if (!recent) notify(context.services, `${title} can't open from the rail: VS Code opens it only where it was made, and the rail shows VS Code's views alone. Open it from VS Code's page.`);
+    shown = recent ?? shown;
+  };
   editorService.openEditor = (editor, optionsOrGroup, group) => {
     const handoff = handoffOf(editor, optionsOrGroup, limits.title);
-    if (!handoff) return openEditor(editor, optionsOrGroup, group);
-    void hand(handoff);
-    return Promise.resolve(undefined);
+    if (!handoff) {
+      if (context.role !== 'view') return openEditor(editor, optionsOrGroup, group);
+      keepFromView(editor);
+      return Promise.resolve(ELSEWHERE);
+    }
+    handOver(handoff);
+    // VS Code's callers go on with the pane of an editor opened by command (`ELSEWHERE`).
+    return Promise.resolve(handoff instanceof Promise || handoff.open.kind === 'command' ? ELSEWHERE : undefined);
   };
   editorService.openEditors = (editors, group, options) => {
     const here: unknown[] = [];
     for (const item of editors) {
       const typed = (item as { editor?: unknown }).editor;
       const handoff = isEditorInput(typed) ? handoffOf(typed, (item as { options?: unknown }).options, limits.title) : handoffOf(item, undefined, limits.title);
-      if (handoff) void hand(handoff);
+      if (handoff) handOver(handoff);
+      else if (context.role === 'view') keepFromView(isEditorInput(typed) ? typed : item);
       else here.push(item);
     }
     return here.length > 0 ? openEditors(here, group, options) : Promise.resolve([]);
   };
-  // An editor opened past openEditor (straight into a group): handed over all the same.
+  // An editor opened past openEditor (straight into a group, or restored): handed over all the same; in a view, closed
+  // when it can't be, as no one would see it there.
   let queued = false;
   editorService.onDidEditorsChange(() => {
     if (queued) return;
@@ -360,8 +396,8 @@ const handEditorsToPage = (context: SurfaceContext): void => {
       for (const identifier of editorService.getEditors(1)) {
         if (identifier.editor.isDirty()) continue;
         const handoff = handoffOf(identifier.editor, undefined, limits.title);
-        if (!handoff) continue;
-        void hand(handoff);
+        if (handoff) handOver(handoff);
+        else if (context.role !== 'view') continue;
         void editorService.closeEditor(identifier, { preserveFocus: true }).catch(() => undefined);
       }
     });
@@ -431,12 +467,14 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
     return false;
   };
   // "Additional Views", the containers the rail has no room for: the one shown last (or the first), and VS Code's
-  // quick pick of them all, as its activity bar lists them behind "…".
-  const openMore = async (entry: RailEntry, chosen: boolean): Promise<void> => {
+  // quick pick of them all, as its activity bar lists them behind "…". One the page asked for (`view`) alone.
+  const openMore = async (entry: RailEntry, chosen: boolean, view?: string): Promise<void> => {
     const items = (entry.more ?? []).map((item) => ({ label: item.title, view: item.view }));
-    const current = items.find((item) => item.view === lastMore) ?? items[0];
+    const asked = items.find((item) => item.view === view);
+    const current = asked ?? items.find((item) => item.view === lastMore) ?? items[0];
     if (!current || !(await open(entry.id, current.view, current.label, chosen)) || showing !== entry.id) return;
     lastMore = current.view;
+    if (asked) return;
     take(entry.id, chosen);
     const picked = await services.get<QuickInputService>('quickInputService').pick(items, { title: entry.title, placeHolder: 'Open a view container', activeItem: current });
     if (!picked || showing !== entry.id) return;
@@ -447,21 +485,43 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   let opening = 0;
   /** The container shown that the last read left out, when the read before listed it (`followView`). */
   let missing: string | null = null;
-  const showEntry = async (entry: string, chosen = false): Promise<void> => {
+  const showEntry = async (entry: string, chosen = false, view?: string): Promise<void> => {
     showing = entry;
     missing = null;
     opening++;
     try {
       const target = (await refresh()).find((item) => item.id === entry);
       if (showing !== entry) return;
-      if (target?.more) await openMore(target, chosen);
+      if (target?.more) await openMore(target, chosen, view);
       else if (target?.view) await open(entry, target.view, target.title, chosen);
     } finally {
       opening--;
     }
   };
-  // The user chose an entry on the rail (OpenChamber tells only then).
-  forge.rail.onEntry((entry) => void showEntry(entry, true));
+  // What the page asked the entry to show (`sideBars.ts`): its container, and the file to reveal in the Explorer.
+  const revealOf = async (request: ViewRequest | null): Promise<void> => {
+    if (request?.reveal) await services.get<CommandService>('commandService').executeCommand(REVEAL, services.uriClass().revive(request.reveal)).catch((error) => log('could not reveal the file', error));
+  };
+  const viewFor = (entry: string, request: ViewRequest | null): string | undefined => (request && entryOfView(entries, request.view)?.id === entry ? request.view : undefined);
+  // The user chose an entry on the rail, or the page opened it (OpenChamber tells only when the entry changes).
+  forge.rail.onEntry((entry) => void (async () => {
+    const request = await takeViewRequest(forge, context.storage);
+    await showEntry(entry, true, viewFor(entry, request));
+    await revealOf(request);
+  })());
+  // The page asked for the entry already shown: no word from OpenChamber, the request waits for this look.
+  setInterval(() => {
+    if (opening || document.visibilityState !== 'visible' || innerWidth === 0) return;
+    void (async () => {
+      const pending = readViewRequest(await context.storage.get(viewRequestKey(forge)).catch(() => null));
+      const target = pending ? entryOfView(entries, pending.view) : undefined;
+      if (!target || forge.rail.entry() !== target.id || opening) return;
+      const request = await takeViewRequest(forge, context.storage);
+      if (!request) return;
+      if (panes.getActivePaneComposite(SIDEBAR)?.getId() !== request.view) await showEntry(target.id, false, request.view);
+      await revealOf(request);
+    })();
+  }, 500);
   // The rail lights the entry that shows the container VS Code shows: after VS Code switched by itself (Ctrl+Shift+F,
   // "Reveal in Explorer", the default container when the one shown was uninstalled), and when that container moved
   // behind "Additional Views" or out from it, or got an entry, as others came and went. An entry chosen meanwhile wins.
@@ -494,7 +554,12 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   }, RAIL_FOLLOW_MS);
   await services.get<EditorGroupsService>('editorGroupsService').whenRestored;
   const entry = forge.rail.entry();
-  if (entry) await showEntry(entry);
+  if (entry) {
+    // Started by the page's request (the panel was closed): what it asked for.
+    const request = await takeViewRequest(forge, context.storage);
+    await showEntry(entry, false, viewFor(entry, request));
+    await revealOf(request);
+  }
   // From here on: before, VS Code restoring its last container would light it over the entry chosen to open the panel.
   following = true;
   // After OpenChamber reloads, the page's tabs come back with the rail view, which starts the page behind them.
@@ -587,6 +652,7 @@ class EditorArea {
     // A file opened in a rail view or the terminal starts the page with its tab: that is what the user asked for. Only
     // otherwise does the page's route count as a link, as OpenChamber keeps it after the page went with its last tab.
     const active = forge.tabs.state().active;
+    if (active) this.asked.add(active);
     const handed = active ? await this.take(active) : null;
     const route = handed ? null : forge.links.route();
     this.linked = readEditorRoute(route)?.key ?? null;
@@ -595,22 +661,30 @@ class EditorArea {
       await services.get<FileService>('fileService').activateProvider('vscode-remote').catch(() => undefined);
       await this.dropClosedEditors(restored).catch((error) => log('could not close the editors closed before', error));
     })();
-    this.settings = roleSettings('editor', this.strip);
+    const groups = services.get<EditorGroupsService>('editorGroupsService');
+    this.settings = roleSettings('editor', this.strip, groups.count);
     await applySettings(services, this.settings);
+    // The settings follow the header's strip and the editor groups (split, each group names its editor).
+    const settle = () => {
+      const next = roleSettings('editor', this.strip, groups.count);
+      if (JSON.stringify(next) === JSON.stringify(this.settings)) return;
+      void applySettings(services, next, this.settings);
+      this.settings = next;
+    };
+    groups.onDidAddGroup(settle);
+    groups.onDidRemoveGroup(settle);
     forge.tabs.onChange((state) => {
       this.hostTabs = new Map(state.list.map((tab) => [tab.id, tab]));
       this.shown = state.shown;
-      if (state.strip !== this.strip) {
-        this.strip = state.strip;
-        const next = roleSettings('editor', this.strip);
-        void applySettings(services, next, this.settings);
-        this.settings = next;
-      }
+      this.strip = state.strip;
+      settle();
       this.schedule();
+      void this.ready.then(() => this.takeWaiting()).catch((error) => log('could not open what another part handed over', error));
     });
     // A tab activated (a click in the header, an editor a rail view or the terminal handed over): OpenChamber shows the
     // page on it, and its editor takes the focus as it opens (`show`).
     forge.tabs.onActivate((id) => {
+      this.asked.add(id);
       this.chosen = true;
       void this.show(id, null, true).catch((error) => log('could not show the tab', error));
     });
@@ -633,6 +707,7 @@ class EditorArea {
     const state = forge.tabs.state();
     if (handed && active) await this.show(active, handed);
     else if ((!this.linked || this.chosen) && state.active && (state.shown || !this.strip)) await this.show(state.active);
+    void this.takeWaiting().catch((error) => log('could not open what another part handed over', error));
     // Started: the page follows VS Code now, and its first file has opened (and took the focus, if the user chose it).
     document.documentElement.dataset.ocVscodePageStarted = 'true';
   }
@@ -907,10 +982,76 @@ class EditorArea {
     }
   }
 
+  /**
+   * A frame's command, its URIs revived. When it fails, the one it names next (`or`): an extension not installed here
+   * opens through the gallery. As the page starts, its installed extensions may not be listed yet: a few tries first.
+   */
+  private async run(request: Extract<OpenRequest, { kind: 'command' }>): Promise<void> {
+    const commands = this.context.services.get<CommandService>('commandService');
+    const uri = this.context.services.uriClass();
+    const exec = (command: string, args: unknown[]) => commands.executeCommand(command, ...args.map((arg) => unmarshal(arg, (components) => uri.revive(components))));
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await exec(request.command, request.args);
+        return;
+      } catch (error) {
+        if (!request.or) throw error;
+        if (attempt < 4) {
+          await later(750);
+          continue;
+        }
+        await exec(request.or.command, request.or.args);
+        return;
+      }
+    }
+  }
+
+  /** The editor a frame asked to see (`show`), open now: its tab selected, and the page on it. */
+  private async reveal(): Promise<void> {
+    const { forge } = this.context;
+    const key = this.activeKey();
+    const item = key ? this.current().get(key) : undefined;
+    if (!key || !item || (forge.tabs.state().active === key && forge.tabs.state().shown)) return;
+    const tab = withRoute({ id: key, title: item.title, icon: tabIcon(key), dirty: item.dirty });
+    this.adopted.add(key);
+    try {
+      await forge.tabs.open(tab, { activate: true });
+      this.hostTabs.set(key, tab);
+      this.lastActive = key;
+    } catch (error) {
+      log('could not show the editor\'s tab', error);
+    }
+  }
+
+  /** Tabs this page has asked the service about (`takeWaiting`). */
+  private readonly asked = new Set<string>();
+
+  /**
+   * Tabs a rail view or the terminal opened without selecting them, their editors waiting in the service (`show`): each
+   * opens here, then shows. One request for all the tabs new to the page (after a reload, every tab the rail brought back).
+   */
+  private async takeWaiting(): Promise<void> {
+    const fresh = [...this.hostTabs.keys()].filter((id) => !this.asked.has(id) && !this.adopted.has(id));
+    if (fresh.length === 0) return;
+    for (const id of fresh) this.asked.add(id);
+    const waiting = await this.context.call<{ keys?: string[] }>('/editors/pending').catch(() => ({ keys: [] as string[] }));
+    for (const key of (waiting.keys ?? []).filter((id) => fresh.includes(id))) {
+      const request = await this.take(key);
+      if (!request) continue;
+      const title = this.hostTabs.get(key)?.title ?? 'The editor';
+      await this.open(request, key).catch(async (error) => {
+        log('could not open what another part handed over', error);
+        await this.context.forge.tabs.close(key).catch(() => undefined);
+        this.hostTabs.delete(key);
+        notify(this.context.services, `${title} didn't open: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  }
+
   private async open(request: OpenRequest, key: string): Promise<void> {
     const { services } = this.context;
     if (request.kind === 'command') {
-      await services.get<CommandService>('commandService').executeCommand(request.command, ...request.args);
+      await this.run(request);
     } else {
       const uri = services.uriClass();
       const editor = unmarshal(request.editor, (components) => uri.revive(components)) as { options?: Record<string, unknown> };
@@ -919,11 +1060,12 @@ class EditorArea {
       if (found) await this.openEditor(found.identifier.editor, { ...editor.options, preserveFocus: false }, found.identifier.groupId);
       else await this.openEditor(editor);
     }
-    // The editor it became may be named otherwise (an extension's page): its own tab replaces this one.
+    // The editor it became may be named otherwise (a search editor): its own tab replaces this one.
     if (this.activeKey() !== key && !this.adopted.has(key)) {
       await this.context.forge.tabs.close(key).catch(() => undefined);
       this.hostTabs.delete(key);
     }
+    if (request.kind === 'command' && request.show) await this.reveal();
     this.schedule();
   }
 
@@ -1068,6 +1210,8 @@ export const startSurface = async (context: SurfaceContext): Promise<SurfaceCont
   });
   keepLayout(role, services);
   if (role === 'editor') {
+    // A side bar VS Code opens in the page opens on the rail; not one VS Code restores as it starts.
+    void services.get<LayoutService>('layoutService').whenRestored.then(() => sideBarsToRail(context.forge, services, context.storage, context.railEntries));
     const area = new EditorArea(context);
     await area.start();
     return { beforeFolderChange: () => area.closeAllTabs() };

@@ -107,6 +107,8 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
     if (typeof body.key !== 'string') throw new ServerError('key is required', 400);
     return { open: editorRequests.take(body.key) };
   },
+  // The tabs whose editors wait: a frame opened them without selecting them, and the page selects each once it is open.
+  '/editors/pending': async () => ({ keys: editorRequests.keys() }),
   // The page's header tabs for a folder, so a frame can bring them back after OpenChamber reloads. More than one
   // request takes come in parts (`part`: the list's revision, this part's index, how many).
   '/tabs/save': async (body) => {

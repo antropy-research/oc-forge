@@ -71,6 +71,10 @@ export interface EditorGroup {
 export interface EditorGroupsService {
   readonly whenRestored: Promise<void>;
   readonly activeGroup: EditorGroup;
+  /** How many groups the editor area is split into. */
+  readonly count: number;
+  readonly onDidAddGroup: Event<EditorGroup>;
+  readonly onDidRemoveGroup: Event<EditorGroup>;
   getGroup(id: number): EditorGroup | undefined;
 }
 
@@ -186,8 +190,15 @@ export interface FileService {
   hasProvider(resource: Uri): boolean;
 }
 
+/** `ICommandEvent`: a command about to run, wherever from (a key, a menu, the command palette, an extension). */
+export interface CommandEvent {
+  readonly commandId: string;
+  readonly args: unknown[];
+}
+
 /** `ICommandService`. */
 export interface CommandService {
+  readonly onWillExecuteCommand: Event<CommandEvent>;
   executeCommand(id: string, ...args: unknown[]): Promise<unknown>;
 }
 

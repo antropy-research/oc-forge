@@ -47,6 +47,7 @@ const REVIEWED: Record<string, Reviewed> = {
   RemoteAgentEnvironment: { name: 'IRemoteAgentEnvironment', file: 'platform/remote/common/remoteAgentEnvironment.ts' },
   RemoteAgentService: { name: 'IRemoteAgentService', file: 'workbench/services/remote/common/remoteAgentService.ts' },
   FileService: { name: 'IFileService', file: 'platform/files/common/files.ts' },
+  CommandEvent: { name: 'ICommandEvent', file: 'platform/commands/common/commands.ts' },
   CommandService: { name: 'ICommandService', file: 'platform/commands/common/commands.ts' },
   EnvironmentService: { name: 'IEnvironmentService', file: 'platform/environment/common/environment.ts' },
   TerminalService: { name: 'ITerminalService', file: 'workbench/contrib/terminal/browser/terminal.ts' },

@@ -33,12 +33,14 @@ export const roleOf = (hello: HostHello | null, surfaces: boolean): Role => {
  * Settings that make a workbench its part. They are its defaults from the
  * start, and they are set again in memory once it runs (VS Code's MEMORY
  * target), so the user's own settings.json can't undo the layout and nothing
- * is written there. `strip`: OpenChamber's header shows its tab strip.
+ * is written there. `strip`: OpenChamber's header shows its tab strip; `groups`: the page's editor groups.
  */
-export const roleSettings = (role: Role, strip = true): Record<string, unknown> => {
+export const roleSettings = (role: Role, strip = true, groups = 1): Record<string, unknown> => {
   if (role === 'classic') return {};
-  // OpenChamber's rail is the activity bar now; the layout buttons would bring back parts that live elsewhere.
-  const common: Record<string, unknown> = { 'workbench.activityBar.location': 'hidden', 'workbench.layoutControl.enabled': false };
+  // OpenChamber's rail is the activity bar now; the layout buttons would bring back parts that live elsewhere. No
+  // editor opens as a modal over a part (Settings, Keyboard Shortcuts): a rail view hands it to the page, which shows
+  // it as an editor with its header tab.
+  const common: Record<string, unknown> = { 'workbench.activityBar.location': 'hidden', 'workbench.layoutControl.enabled': false, 'workbench.editor.useModal': 'off' };
   // A view or the terminal is one part alone: no title bar (its command centre, its back and forward) and no status bar.
   const part: Record<string, unknown> = { ...common, 'workbench.statusBar.visible': false, 'window.commandCenter': false, 'workbench.navigationControl.enabled': false };
   // The parts are one workspace (one folder), whose terminals VS Code reconnects each window to as it starts: only the
@@ -53,9 +55,17 @@ export const roleSettings = (role: Role, strip = true): Record<string, unknown> 
       'workbench.panel.alignment': 'center',
     };
   }
-  // The editor area: its editors are OpenChamber's header tabs, which have no preview state.
+  // The editor area: its editors are OpenChamber's header tabs, which have no preview state, in zen mode too. Split
+  // into groups, each group names the editor it shows (one tab each), or nothing would say which editor is where.
   return strip
-    ? { ...common, ...noTerminals, 'workbench.editor.showTabs': 'none', 'workbench.editor.enablePreview': false, 'workbench.editor.enablePreviewFromQuickOpen': false }
+    ? {
+      ...common,
+      ...noTerminals,
+      'workbench.editor.showTabs': groups > 1 ? 'single' : 'none',
+      'zenMode.showTabs': 'none',
+      'workbench.editor.enablePreview': false,
+      'workbench.editor.enablePreviewFromQuickOpen': false,
+    }
     : { ...common, ...noTerminals };
 };
 
@@ -216,24 +226,35 @@ const ICONS: [RegExp, string][] = [
 /** A Remixicon for a header tab, by its key: diffs, settings and files by type. */
 export const tabIcon = (key: string): string => {
   if (key.startsWith('diff:') || key.startsWith('changes:')) return 'git-commit';
+  if (key.startsWith('workbench.extensions.input2|')) return 'puzzle';
+  if (key.startsWith('workbench.editorinputs.searchEditorInput|')) return 'search';
   if (/settings|keybindings/i.test(key.split(':')[0] ?? '')) return 'settings-3';
   const path = key.replace(/[?#].*$/, '');
   for (const [pattern, icon] of ICONS) if (pattern.test(path)) return icon;
   return 'file-code';
 };
 
-/** What another frame asks the page to open: an editor (marshalled) or a command (an extension's page, Settings). */
+/**
+ * What another frame asks the page to open: an editor (marshalled), or a command (an extension's page, Settings) and
+ * the one to run when that one fails (`or`). `show`: the frame left the tab unselected, and the page selects the
+ * editor's tab once it is open (it may not open, or be named otherwise).
+ */
 export type OpenRequest =
   | { kind: 'editor'; editor: unknown }
-  | { kind: 'command'; command: string; args: unknown[] };
+  | { kind: 'command'; command: string; args: unknown[]; or?: { command: string; args: unknown[] }; show?: boolean };
+
+const readCommand = (value: unknown): { command: string; args: unknown[] } | null => {
+  const request = value as Record<string, unknown> | null;
+  return typeof request?.command === 'string' && /^[\w.-]{1,200}$/.test(request.command) && Array.isArray(request.args) ? { command: request.command, args: request.args } : null;
+};
 
 export const readOpenRequest = (value: unknown): OpenRequest | null => {
   const request = value as Record<string, unknown> | null;
   if (request?.kind === 'editor' && typeof request.editor === 'object' && request.editor !== null) return { kind: 'editor', editor: request.editor };
-  if (request?.kind === 'command' && typeof request.command === 'string' && /^[\w.-]{1,200}$/.test(request.command) && Array.isArray(request.args)) {
-    return { kind: 'command', command: request.command, args: request.args };
-  }
-  return null;
+  const command = request?.kind === 'command' ? readCommand(request) : null;
+  if (!command) return null;
+  const or = readCommand(request!.or);
+  return { kind: 'command', ...command, ...(or ? { or } : {}), ...(request!.show === true ? { show: true } : {}) };
 };
 
 /** The page's place, as a route in OpenChamber's address bar (`?extension=oc-forge-vscode&route=…`): its editor. */
