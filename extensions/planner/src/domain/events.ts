@@ -1,5 +1,5 @@
 // Planner events: the append-only log is the source of truth, state is a fold over it.
-import { BACKLOG_BUCKETS, LINEAR_GROUPS, LINEAR_ORDERS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskAttachment, type TaskDecline, type TaskRun, type TaskSourceRef, type TaskVisibility, type WorkBlock } from './types.ts';
+import { BACKLOG_BUCKETS, GMAIL_ACTIONS, LINEAR_GROUPS, LINEAR_ORDERS, MEETING_EXCLUSIONS, RITUALS, SOURCE_NAMES, type CalendarSubscription, type Channel, type DateKey, type GoogleEventLink, type GoogleTaskKept, type Folder, type Objective, type Placement, type RecurrenceRule, type Ritual, type RitualRecord, type RunPullRequest, type Series, type Settings, type Subtask, type Task, type TaskAttachment, type TaskDecline, type TaskRun, type TaskSourceRef, type TaskVisibility, type WorkBlock } from './types.ts';
 import { isDateKey, isValidTimeZone } from './dates.ts';
 import { parseRRule } from './rrule.ts';
 import { linearDisplayProblem } from './linearDisplay.ts';
@@ -130,7 +130,17 @@ export const isPlacement = (value: unknown): value is Placement => {
 };
 
 const isSubtasks = (value: unknown): value is Subtask[] =>
-  Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean');
+  Array.isArray(value) && value.length <= 200 && value.every((item) =>
+    isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean' &&
+    // A task merged in keeps its notes, planned time and source (Sunsama's Merge tasks).
+    (item.notes === undefined || (typeof item.notes === 'string' && item.notes.length <= NOTES_MAX)) &&
+    (item.plannedMinutes === undefined || item.plannedMinutes === null || (Number.isInteger(item.plannedMinutes) && (item.plannedMinutes as number) >= 0 && (item.plannedMinutes as number) <= 24 * 60)) &&
+    (item.source === undefined || isSource(item.source)));
+
+/** One of Gmail's actions; applying or removing a label names it. */
+const isGmailAction = (value: unknown): boolean =>
+  isRecord(value) && (GMAIL_ACTIONS as readonly unknown[]).includes(value.kind) &&
+  (value.kind === 'addLabel' || value.kind === 'removeLabel' ? isShortText(value.label, 225) && (value.label as string).trim().length > 0 : value.label === undefined);
 
 const isShortText = (value: unknown, max: number): boolean => typeof value === 'string' && value.length <= max;
 const isSource = (value: unknown): value is TaskSourceRef =>
@@ -138,7 +148,7 @@ const isSource = (value: unknown): value is TaskSourceRef =>
   typeof value.kind === 'string' && Object.hasOwn(SOURCE_NAMES, value.kind) &&
   isShortText(value.id, 200) && (value.id as string).length > 0 &&
   isShortText(value.key, 100) &&
-  isShortText(value.url, 2000) && /^https:\/\//.test(value.url as string) &&
+  isShortText(value.url, 2000) && (value.kind === 'link' ? /^https?:\/\// : /^https:\/\//).test(value.url as string) &&
   (value.title === undefined || isShortText(value.title, TITLE_MAX)) &&
   (value.teamId === undefined || isShortText(value.teamId, 200)) &&
   (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40))) &&
@@ -148,7 +158,9 @@ const isSource = (value: unknown): value is TaskSourceRef =>
   (value.account === undefined || (typeof value.account === 'string' && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account))) &&
   (value.listId === undefined || (isShortText(value.listId, 200) && (value.listId as string).length > 0)) &&
   (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) &&
-  (value.due === undefined || value.due === null || isDateKey(value.due));
+  (value.due === undefined || value.due === null || isDateKey(value.due)) &&
+  (value.event === undefined || (isRecord(value.event) && isShortText(value.event.calendarId, 2000) && isInstant(value.event.start) && isInstant(value.event.end) &&
+    typeof value.event.allDay === 'boolean' && typeof value.event.invitees === 'boolean' && (value.event.auto === undefined || typeof value.event.auto === 'boolean')));
 
 /** Google Tasks keeps at most this much of a task's details. */
 export const GOOGLE_NOTES_MAX = 8192;
@@ -332,6 +344,7 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if (key === 'suggestFromHistory' && typeof value !== 'boolean') return 'suggestFromHistory must be true or false';
     else if ((key === 'pomodoroMinutes' || key === 'breakMinutes') && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 180)) return `${key} must be 1-180`;
     else if (key === 'googleTimebox' && !(value === null || isGoogleCalendarRef(value))) return 'googleTimebox must be a Google account and calendar, or null';
+    else if (key === 'channelTimebox' && !(isRecord(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([channel, target]) => isId(channel) && isGoogleCalendarRef(target)))) return 'channelTimebox must map channel ids to a Google account and calendar';
     else if (key === 'googleTasksOnComplete' && !['ask', 'complete', 'nothing'].includes(value as string)) return 'googleTasksOnComplete must be ask, complete or nothing';
     else if ((key === 'googleTasksImportCompletion' || key === 'googleTasksDueFromPlan' || key === 'googleTasksOnCalendar' || key === 'googleTaskNotifications') && typeof value !== 'boolean') return `${key} must be true or false`;
     else if (key === 'googleCalendarsIntroduced' && !(Array.isArray(value) && value.length <= 50 && value.every((email) => typeof email === 'string' && email.length <= 254 && email.includes('@')))) return 'googleCalendarsIntroduced must be at most 50 email addresses';
@@ -339,7 +352,15 @@ const validateSettingsPatch = (patch: unknown): string | null => {
     else if ((key === 'googleTaskListsHidden' || key === 'googleTaskListOrder') && !(Array.isArray(value) && value.length <= TASK_LISTS_MAX && value.every(isTaskListKey) && new Set(value).size === value.length)) return `${key} must be at most ${TASK_LISTS_MAX} task lists, once each`;
     else if (key === 'agentPresets' && !(Array.isArray(value) && value.length <= 30 && value.every(isAgentPreset) && new Set(value.map((preset: { id: string }) => preset.id)).size === value.length)) return 'agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null';
     else if (key === 'agentPresets') continue;
-    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar', 'googleTaskNotifications', 'googleCalendarsIntroduced', 'googleTaskListColors', 'googleTaskListsHidden', 'googleTaskListOrder'].includes(key)) return `unknown setting ${key}`;
+    else if ((key === 'gmailOnImport' || key === 'gmailOnComplete') && !(Array.isArray(value) && value.length <= 12 && value.every(isGmailAction))) return `${key} must be at most 12 Gmail actions (a label with addLabel and removeLabel)`;
+    else if ((key === 'gmailImportPrompt' || key === 'gmailCompletePrompt' || key === 'linearImportPrompt') && typeof value !== 'boolean') return `${key} must be true or false`;
+    else if (key === 'emailClient' && value !== 'gmail' && value !== 'superhuman') return 'emailClient must be gmail or superhuman';
+    else if (key === 'meetingImport' && value !== 'prompt' && value !== 'autoSync') return 'meetingImport must be prompt or autoSync';
+    else if (key === 'meetingCalendars' && !(Array.isArray(value) && value.length <= 200 && value.every((id) => isShortText(id, 2000) && (id as string).length > 0))) return 'meetingCalendars must be calendar ids';
+    else if (key === 'meetingExclusions' && !(Array.isArray(value) && value.every((kind) => (MEETING_EXCLUSIONS as readonly unknown[]).includes(kind)) && new Set(value).size === value.length)) return `meetingExclusions must be some of ${MEETING_EXCLUSIONS.join(', ')}`;
+    else if (key === 'meetingAutoComplete' && !['always', 'never', 'invitees'].includes(value as string)) return 'meetingAutoComplete must be always, never or invitees';
+    else if (key === 'meetingChannels' && !(isRecord(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([calendar, channel]) => calendar.length > 0 && calendar.length <= 2000 && isId(channel)))) return 'meetingChannels must map calendar ids to channel ids';
+    else if (!['timezone', 'workloadMinutes', 'archiveAfterRollovers', 'weekStartsOn', 'plannedAsActual', 'workdayStart', 'workdayEnd', 'linearOnComplete', 'linearOnPlan', 'linearImportCompletion', 'linearLayout', 'linearGroupBy', 'linearOrderBy', 'suggestFromHistory', 'pomodoroMinutes', 'breakMinutes', 'googleTimebox', 'googleTasksOnComplete', 'googleTasksImportCompletion', 'googleTasksDueFromPlan', 'googleTasksOnCalendar', 'googleTaskNotifications', 'googleCalendarsIntroduced', 'googleTaskListColors', 'googleTaskListsHidden', 'googleTaskListOrder', 'gmailOnImport', 'gmailOnComplete', 'gmailImportPrompt', 'gmailCompletePrompt', 'emailClient', 'linearImportPrompt', 'meetingImport', 'meetingCalendars', 'meetingExclusions', 'meetingAutoComplete', 'meetingChannels', 'channelTimebox'].includes(key)) return `unknown setting ${key}`;
   }
   return null;
 };
@@ -426,6 +447,7 @@ const validateRitualFields = (ritual: Ritual, fields: unknown): string | null =>
       if (!Array.isArray(value) || value.length > 100) return 'items must be a list of at most 100';
       for (const item of value) {
         if (!isRecord(item) || !isId(item.id) || !(typeof item.text === 'string' && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== 'boolean' || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === 'boolean')) return 'a highlight is invalid';
+        if (!(item.url === undefined || (typeof item.url === 'string' && item.url.length <= 2000 && /^https:\/\/\S+$/.test(item.url))) || !(item.ref === undefined || (typeof item.ref === 'string' && item.ref.length > 0 && item.ref.length <= 300))) return 'a highlight is invalid';
       }
     }
   }

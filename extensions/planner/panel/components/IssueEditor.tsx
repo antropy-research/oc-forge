@@ -7,6 +7,7 @@ import {
   estimateLabel,
   githubMirrors,
   historyText,
+  issueDetailMore,
   linkedTask,
   parseLinearUrl,
   type IssueInput,
@@ -424,6 +425,11 @@ export const IssueEditor = ({ issueRef }: { issueRef: IssueRef }) => {
                   )}
                 </div>
               </section>
+              {issueDetailMore(issue).length > 0 && (
+                <p class="hint iv-more" role="note">
+                  Linear has more {issueDetailMore(issue).join(', ')} than shown here: <button class="link" onClick={() => void host.openUrl(issue.url)}>Open in Linear ↗</button>
+                </p>
+              )}
               {(issue.children?.nodes.length ?? 0) > 0 && (
                 <section class="iv-section" aria-label="Sub-issues">
                   <h3>Sub-issues <span class="count">{issue.children!.nodes.filter((child) => child.state.type === 'completed').length}/{issue.children!.nodes.length}</span></h3>

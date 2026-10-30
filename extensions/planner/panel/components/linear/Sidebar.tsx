@@ -158,6 +158,7 @@ export const LinearSidebar = ({
         {favorites.length > 0 && (
           <div class="lin-nav-section" role="group" aria-label="Favorites">
             <h2 class="lin-nav-heading">Favorites</h2>
+            {lv.favoritesCut && <p class="hint lin-nav-note" role="note">Linear has more favorites than the Planner lists</p>}
             {favorites.map((favorite) => {
               const workspace = workspaceLabel(lv, favorite.workspaceId);
               if (favorite.kind === 'view') {
@@ -195,6 +196,11 @@ export const LinearSidebar = ({
               ))}
             </div>
           ))}
+          {lv.viewsLoaded && Object.keys(lv.viewsMore).length > 0 && (
+            <p class="hint lin-nav-note" role="status">
+              Linear has more views: <button type="button" class="link" onClick={() => void linear.loadMoreViews()}>Load more views</button>
+            </p>
+          )}
         </div>
         <div class="lin-nav-section" role="group" aria-label="Projects">
           <h2 class="lin-nav-heading">Projects <Kbd>G P</Kbd></h2>

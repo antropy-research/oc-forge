@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'preact/hooks';
+import { GmailSettings } from './GmailSettings.tsx';
+import { MeetingSettings } from './MeetingSettings.tsx';
 import { CHANNEL_COLORS, type Settings as PlannerSettings } from '../../src/domain/types.ts';
 import { liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { useGoogle, useLinear, usePlanner, useView } from '../lib/context.ts';
 import type { GoogleFeature } from '../lib/google.ts';
+import type { GoogleCalendarInfo } from '../../src/domain/google.ts';
 import { AgentSettings } from './AgentSettings.tsx';
 
 
@@ -166,12 +169,16 @@ const LinearSettings = () => {
       <legend>Linear</legend>
       <LinearWorkspaceList />
       <label>
-        When I complete a Linear task
+        When I complete a Linear task (completion automation)
         <select value={settings.linearOnComplete} onChange={(event) => update({ linearOnComplete: event.currentTarget.value as PlannerSettings['linearOnComplete'] })}>
-          <option value="ask">Ask me</option>
+          <option value="ask">Show prompt to update status in Linear</option>
           <option value="complete">Move the issue to Done</option>
           <option value="nothing">Leave Linear alone</option>
         </select>
+      </label>
+      <label>
+        Import automations: Show prompt to update status in Linear (right after an issue is imported, from the panel or by its URL)
+        <input type="checkbox" checked={settings.linearImportPrompt} onChange={(event) => update({ linearImportPrompt: event.currentTarget.checked })} />
       </label>
       <label>
         When I plan a Linear issue for a day
@@ -189,7 +196,7 @@ const LinearSettings = () => {
   );
 };
 
-const FEATURE_LABELS: Record<GoogleFeature, string> = { calendar: 'Calendar', tasks: 'Tasks', mail: 'Gmail', drive: 'Drive' };
+const FEATURE_LABELS: Record<GoogleFeature, string> = { calendar: 'Calendar', tasks: 'Tasks', mail: 'Gmail', drive: 'Drive', mailActions: 'Gmail actions', contacts: 'Contacts' };
 
 /** Signing in an account: Google's page opens; its redirect comes back here, or its address is pasted. */
 const GoogleSignIn = () => {
@@ -262,6 +269,46 @@ export const SignInPending = () => {
   );
 };
 
+/**
+ * Sunsama's "Timeboxing Channel": a channel's working sessions go to a calendar of its own, over the default ("Default
+ * for tasks" is the fallback, and never overrides a channel's).
+ */
+const ChannelTimeboxes = ({ writable, several }: { writable: GoogleCalendarInfo[]; several: boolean }) => {
+  const { client } = usePlanner();
+  const view = useView();
+  const channels = liveChannels(view.state);
+  if (!channels.length || !writable.length) return null;
+  const linked = view.state.settings.channelTimebox;
+  const choose = (channelId: string, value: string) => {
+    if (value === 'current') return;
+    const next = { ...linked };
+    const calendar = writable[Number(value)];
+    if (value === '' || !calendar) delete next[channelId];
+    else next[channelId] = { account: calendar.account, calendarId: calendar.id };
+    void client.dispatch([{ type: 'settings.updated', patch: { channelTimebox: next } }]);
+  };
+  return (
+    <div class="channel-timeboxes" role="group" aria-label="Timeboxing channels">
+      <h4>Timeboxing channels</h4>
+      <p class="hint">A channel's working sessions go to its own calendar instead of the default: #personal to a personal calendar keeps personal tasks off the work calendar.</p>
+      {channels.map((channel) => {
+        const target = linked[channel.id];
+        const index = target ? writable.findIndex((calendar) => calendar.account === target.account && calendar.id === target.calendarId) : -1;
+        return (
+          <label key={channel.id}>
+            #{channel.name}
+            <select aria-label={`Calendar for #${channel.name} working sessions`} value={index >= 0 ? String(index) : target ? 'current' : ''} onChange={(event) => choose(channel.id, event.currentTarget.value)}>
+              <option value="">Default for tasks</option>
+              {target && index < 0 && <option value="current">{target.calendarId} · {target.account}</option>}
+              {writable.map((calendar, position) => <option key={`${calendar.account}:${calendar.id}`} value={String(position)}>{several ? `${calendar.name} · ${calendar.account}` : calendar.name}</option>)}
+            </select>
+          </label>
+        );
+      })}
+    </div>
+  );
+};
+
 /** Which Google calendars show beside the plan, and where working sessions are written. */
 const GoogleCalendarChoices = () => {
   const { google } = usePlanner();
@@ -291,7 +338,7 @@ const GoogleCalendarChoices = () => {
         {gv.calendars.length === 0 && !gv.calendarErrors.length && <li class="muted">Loading calendars…</li>}
       </ul>
       <label>
-        Write working sessions to
+        Write working sessions to (default for tasks)
         <select
           aria-label="Google calendar for working sessions"
           value={selected >= 0 ? String(selected) : target ? 'current' : ''}
@@ -308,6 +355,7 @@ const GoogleCalendarChoices = () => {
         </select>
       </label>
       <p class="hint">Each timeboxed session becomes an event there, and moves or goes with it; move or delete that event in Google Calendar and the session follows.</p>
+      <ChannelTimeboxes writable={writable} several={several} />
       {gv.status?.timeboxError && <p class="danger" role="alert">The last session could not be written: {gv.status.timeboxError}</p>}
     </div>
   );
@@ -531,6 +579,8 @@ export const Settings = () => {
         <Channels />
         <Calendars />
         <GoogleSettings />
+        <GmailSettings />
+        <MeetingSettings />
         <LinearSettings />
         <AgentSettings />
         <SyncSettings />

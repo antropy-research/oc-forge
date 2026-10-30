@@ -17,12 +17,14 @@ var BACKLOG_BUCKETS = [
   { id: "someday", label: "Someday" },
   { id: "never", label: "Never" }
 ];
-var SOURCE_NAMES = { linear: "Linear", github: "GitHub", gtask: "Google Tasks", email: "Gmail" };
+var SOURCE_NAMES = { linear: "Linear", github: "GitHub", gtask: "Google Tasks", email: "Gmail", link: "Link", event: "Google Calendar" };
 var LINEAR_GROUPS = ["status", "priority", "project", "team", "assignee", "workspace", "none", "cycle", "label"];
 var LINEAR_ORDERS = ["priority", "updated", "due", "identifier", "status", "manual", "created"];
-var LINEAR_COMPLETED = ["all", "day", "week", "month", "3months", "6months", "year", "none"];
+var LINEAR_COMPLETED = ["all", "day", "5days", "week", "month", "3months", "6months", "year", "none"];
 var LINEAR_PROPERTIES = ["id", "status", "priority", "assignee", "labels", "project", "cycle", "estimate", "due", "created", "updated"];
 var RITUALS = ["planning", "shutdown", "highlights", "weeklyPlanning", "weeklyReview"];
+var GMAIL_ACTIONS = ["markRead", "markUnread", "archive", "trash", "star", "unstar", "addLabel", "removeLabel"];
+var MEETING_EXCLUSIONS = ["noAttendees", "nonBlocking", "oooHold", "unconfirmed", "multiDayAllDay"];
 var googleTaskKey = (account, taskId) => `${account}
 ${taskId}`;
 var ritualKey = (ritual, date) => `${ritual}:${date}`;
@@ -51,7 +53,19 @@ var DEFAULT_SETTINGS = {
   googleTasksOnCalendar: true,
   googleTaskNotifications: true,
   googleCalendarsIntroduced: [],
-  agentPresets: []
+  agentPresets: [],
+  gmailOnImport: [],
+  gmailOnComplete: [],
+  gmailImportPrompt: false,
+  gmailCompletePrompt: false,
+  emailClient: "gmail",
+  linearImportPrompt: false,
+  meetingImport: "prompt",
+  meetingCalendars: [],
+  meetingExclusions: [...MEETING_EXCLUSIONS],
+  meetingAutoComplete: "always",
+  meetingChannels: {},
+  channelTimebox: {}
 };
 var emptyState = () => ({
   version: 0,
@@ -1080,9 +1094,10 @@ var isPlacement = (value) => {
     return typeof value.bucket === "string" && BUCKET_IDS.has(value.bucket);
   return false;
 };
-var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
+var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean" && (item.notes === undefined || typeof item.notes === "string" && item.notes.length <= NOTES_MAX) && (item.plannedMinutes === undefined || item.plannedMinutes === null || Number.isInteger(item.plannedMinutes) && item.plannedMinutes >= 0 && item.plannedMinutes <= 24 * 60) && (item.source === undefined || isSource(item.source)));
+var isGmailAction = (value) => isRecord2(value) && GMAIL_ACTIONS.includes(value.kind) && (value.kind === "addLabel" || value.kind === "removeLabel" ? isShortText(value.label, 225) && value.label.trim().length > 0 : value.label === undefined);
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
-var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due));
+var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && (value.kind === "link" ? /^https?:\/\// : /^https:\/\//).test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due)) && (value.event === undefined || isRecord2(value.event) && isShortText(value.event.calendarId, 2000) && isInstant(value.event.start) && isInstant(value.event.end) && typeof value.event.allDay === "boolean" && typeof value.event.invitees === "boolean" && (value.event.auto === undefined || typeof value.event.auto === "boolean"));
 var GOOGLE_NOTES_MAX = 8192;
 var isGoogleTaskId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
 var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start", "busy", "visibility", "color", "doNotDisturb", "decline", "attachments"];
@@ -1319,6 +1334,8 @@ var validateSettingsPatch = (patch) => {
       return `${key} must be 1-180`;
     else if (key === "googleTimebox" && !(value === null || isGoogleCalendarRef(value)))
       return "googleTimebox must be a Google account and calendar, or null";
+    else if (key === "channelTimebox" && !(isRecord2(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([channel, target]) => isId(channel) && isGoogleCalendarRef(target))))
+      return "channelTimebox must map channel ids to a Google account and calendar";
     else if (key === "googleTasksOnComplete" && !["ask", "complete", "nothing"].includes(value))
       return "googleTasksOnComplete must be ask, complete or nothing";
     else if ((key === "googleTasksImportCompletion" || key === "googleTasksDueFromPlan" || key === "googleTasksOnCalendar" || key === "googleTaskNotifications") && typeof value !== "boolean")
@@ -1333,7 +1350,23 @@ var validateSettingsPatch = (patch) => {
       return "agentPresets must be at most 30 presets with distinct ids, each a name, an agent and a model or null";
     else if (key === "agentPresets")
       continue;
-    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar", "googleTaskNotifications", "googleCalendarsIntroduced", "googleTaskListColors", "googleTaskListsHidden", "googleTaskListOrder"].includes(key))
+    else if ((key === "gmailOnImport" || key === "gmailOnComplete") && !(Array.isArray(value) && value.length <= 12 && value.every(isGmailAction)))
+      return `${key} must be at most 12 Gmail actions (a label with addLabel and removeLabel)`;
+    else if ((key === "gmailImportPrompt" || key === "gmailCompletePrompt" || key === "linearImportPrompt") && typeof value !== "boolean")
+      return `${key} must be true or false`;
+    else if (key === "emailClient" && value !== "gmail" && value !== "superhuman")
+      return "emailClient must be gmail or superhuman";
+    else if (key === "meetingImport" && value !== "prompt" && value !== "autoSync")
+      return "meetingImport must be prompt or autoSync";
+    else if (key === "meetingCalendars" && !(Array.isArray(value) && value.length <= 200 && value.every((id) => isShortText(id, 2000) && id.length > 0)))
+      return "meetingCalendars must be calendar ids";
+    else if (key === "meetingExclusions" && !(Array.isArray(value) && value.every((kind) => MEETING_EXCLUSIONS.includes(kind)) && new Set(value).size === value.length))
+      return `meetingExclusions must be some of ${MEETING_EXCLUSIONS.join(", ")}`;
+    else if (key === "meetingAutoComplete" && !["always", "never", "invitees"].includes(value))
+      return "meetingAutoComplete must be always, never or invitees";
+    else if (key === "meetingChannels" && !(isRecord2(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([calendar, channel]) => calendar.length > 0 && calendar.length <= 2000 && isId(channel))))
+      return "meetingChannels must map calendar ids to channel ids";
+    else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar", "googleTaskNotifications", "googleCalendarsIntroduced", "googleTaskListColors", "googleTaskListsHidden", "googleTaskListOrder", "gmailOnImport", "gmailOnComplete", "gmailImportPrompt", "gmailCompletePrompt", "emailClient", "linearImportPrompt", "meetingImport", "meetingCalendars", "meetingExclusions", "meetingAutoComplete", "meetingChannels", "channelTimebox"].includes(key))
       return `unknown setting ${key}`;
   }
   return null;
@@ -1415,6 +1448,8 @@ var validateRitualFields = (ritual, fields) => {
         return "items must be a list of at most 100";
       for (const item of value) {
         if (!isRecord2(item) || !isId(item.id) || !(typeof item.text === "string" && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== "boolean" || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === "boolean"))
+          return "a highlight is invalid";
+        if (!(item.url === undefined || typeof item.url === "string" && item.url.length <= 2000 && /^https:\/\/\S+$/.test(item.url)) || !(item.ref === undefined || typeof item.ref === "string" && item.ref.length > 0 && item.ref.length <= 300))
           return "a highlight is invalid";
       }
     }
@@ -2779,12 +2814,236 @@ import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync3 } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute } from "node:path";
+
+// src/domain/github.ts
+var ITEM_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/(issues|pull)\/(\d{1,9})(?:[/?#]\S*)?$/;
+var parseGitHubUrl = (text) => {
+  const match = ITEM_URL.exec(text.trim());
+  if (!match)
+    return null;
+  const [, owner, name, path, number] = match;
+  const repo = `${owner}/${name}`;
+  return { repo, number: Number(number), kind: path === "pull" ? "pull" : "issue", key: `${repo}#${Number(number)}`, url: `https://github.com/${repo}/${path}/${Number(number)}` };
+};
+
+// src/domain/githubActivity.ts
+var ACTIVITY_SOURCES = ["opened", "merged", "mergedReviewed", "mergedInvolved", "reviewed", "commented", "discussions", "discussionComments"];
+var searchInstant = (iso) => `${new Date(iso).toISOString().slice(0, 19)}+00:00`;
+var searchRange = (from, to) => `${searchInstant(from)}..${searchInstant(new Date(Date.parse(to) - 1000).toISOString())}`;
+var activitySearches = (from, to) => {
+  const day = searchRange(from, to);
+  return {
+    opened: `is:pr author:@me created:${day}`,
+    merged: `is:pr is:merged author:@me merged:${day}`,
+    mergedReviewed: `is:pr is:merged -author:@me reviewed-by:@me merged:${day}`,
+    mergedInvolved: `is:pr is:merged -author:@me involves:@me merged:${day}`
+  };
+};
+
+// service/githubActivity.ts
+var ACTIVITY_PAGE_SIZE = 50;
+var PAGE_INFO = "pageInfo { hasNextPage endCursor }";
+var BOTH_WAYS = "pageInfo { hasNextPage endCursor hasPreviousPage startCursor }";
+var PR = "... on PullRequest { id number title url createdAt mergedAt mergedBy { login } author { login } repository { nameWithOwner } }";
+var REVIEW = "occurredAt pullRequestReview { id url state } pullRequest { id number title url repository { nameWithOwner } }";
+var COMMENT = "id url createdAt updatedAt issue { id number title url repository { nameWithOwner } } pullRequest { id number title url repository { nameWithOwner } }";
+var DISCUSSION = "id number title url createdAt repository { nameWithOwner }";
+var DISCUSSION_COMMENT = "id url createdAt discussion { id number title url repository { nameWithOwner } }";
+var N = ACTIVITY_PAGE_SIZE;
+var search = (alias, variable) => `${alias}: search(query: $${variable}, type: ISSUE, first: ${N}) { issueCount ${PAGE_INFO} nodes { ${PR} } }`;
+var ACTIVITY_QUERY = `query PlannerGitHubActivity($opened: String!, $merged: String!, $mergedReviewed: String!, $mergedInvolved: String!, $from: DateTime!, $to: DateTime!) {
+  viewer {
+    login
+    contributionsCollection(from: $from, to: $to) { pullRequestReviewContributions(first: ${N}) { ${PAGE_INFO} nodes { ${REVIEW} } } }
+    issueComments(first: ${N}, orderBy: { field: UPDATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${COMMENT} } }
+    repositoryDiscussions(first: ${N}, orderBy: { field: CREATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${DISCUSSION} } }
+    repositoryDiscussionComments(last: ${N}) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } }
+  }
+  ${search("opened", "opened")}
+  ${search("merged", "merged")}
+  ${search("mergedReviewed", "mergedReviewed")}
+  ${search("mergedInvolved", "mergedInvolved")}
+}`;
+var ACTIVITY_SEARCH_QUERY = `query PlannerGitHubActivitySearch($q: String!, $after: String) { viewer { login } search(query: $q, type: ISSUE, first: ${N}, after: $after) { issueCount ${PAGE_INFO} nodes { ${PR} } } }`;
+var ACTIVITY_REVIEWS_QUERY = `query PlannerGitHubActivityReviews($from: DateTime!, $to: DateTime!, $after: String) { viewer { login contributionsCollection(from: $from, to: $to) { pullRequestReviewContributions(first: ${N}, after: $after) { ${PAGE_INFO} nodes { ${REVIEW} } } } } }`;
+var ACTIVITY_COMMENTS_QUERY = `query PlannerGitHubActivityComments($after: String) { viewer { login issueComments(first: ${N}, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${COMMENT} } } } }`;
+var ACTIVITY_DISCUSSIONS_QUERY = `query PlannerGitHubActivityDiscussions($after: String) { viewer { login repositoryDiscussions(first: ${N}, after: $after, orderBy: { field: CREATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${DISCUSSION} } } } }`;
+var ACTIVITY_DISCUSSION_COMMENTS_BACK_QUERY = `query PlannerGitHubActivityDiscussionCommentsBack($cursor: String) { viewer { login repositoryDiscussionComments(last: ${N}, before: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
+var ACTIVITY_DISCUSSION_COMMENTS_ON_QUERY = `query PlannerGitHubActivityDiscussionCommentsOn($cursor: String) { viewer { login repositoryDiscussionComments(first: ${N}, after: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
+var dataOf = (out) => {
+  const parsed = JSON.parse(out);
+  if (!parsed.data && parsed.errors?.length)
+    throw new Error(parsed.errors[0]?.message ?? "GitHub returned an error");
+  return parsed.data ?? {};
+};
+var nodesOf = (page) => (page?.nodes ?? []).filter((node) => Boolean(node));
+var targetOf = (node, type) => node?.id && Number.isInteger(node.number) && typeof node.title === "string" && typeof node.url === "string" && node.repository?.nameWithOwner ? { id: node.id, repo: node.repository.nameWithOwner, number: node.number, title: node.title, url: node.url, type } : null;
+var same = (a, b) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
+var dayOf2 = (from, to) => {
+  const start = Date.parse(from);
+  const end = Date.parse(to);
+  return { start, inDay: (at) => typeof at === "string" && Date.parse(at) >= start && Date.parse(at) < end };
+};
+var pullItems = (source, page, login, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node, "pull");
+  if (!target)
+    return [];
+  if (source === "opened")
+    return day.inDay(node.createdAt) ? [{ id: `opened:${target.id}`, kind: "opened", target, url: target.url, at: node.createdAt }] : [];
+  if (!day.inDay(node.mergedAt))
+    return [];
+  const mergedBy = node.mergedBy?.login ?? null;
+  const mergedByMe = same(mergedBy, login);
+  const mine = same(node.author?.login, login);
+  if (!mine && !mergedByMe)
+    return [];
+  return [{ id: `merged:${target.id}`, kind: "merged", target, url: target.url, at: node.mergedAt, mergedBy, mergedByMe, mine }];
+});
+var reviewItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node.pullRequest, "pull");
+  const review = node.pullRequestReview;
+  if (!target || !review?.id || !day.inDay(node.occurredAt))
+    return [];
+  return [{ id: `reviewed:${review.id}`, kind: "reviewed", target, url: review.url ?? target.url, at: node.occurredAt, ...review.state ? { state: review.state } : {} }];
+});
+var commentItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node.pullRequest, "pull") ?? targetOf(node.issue, "issue");
+  if (!target || !node.id || !node.url || !day.inDay(node.createdAt))
+    return [];
+  return [{ id: `commented:${node.id}`, kind: "commented", target, url: node.url, at: node.createdAt }];
+});
+var discussionItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node, "discussion");
+  return target && day.inDay(node.createdAt) ? [{ id: `discussion:${target.id}`, kind: "discussion", target, url: target.url, at: node.createdAt }] : [];
+});
+var discussionCommentItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node.discussion, "discussion");
+  if (!target || !node.id || !node.url || !day.inDay(node.createdAt))
+    return [];
+  return [{ id: `discussionComment:${node.id}`, kind: "discussionComment", target, url: node.url, at: node.createdAt }];
+});
+var nextOf = (page) => page?.pageInfo?.hasNextPage && page.pageInfo.endCursor ? page.pageInfo.endCursor : null;
+var nextWhileRecent = (page, field, day) => {
+  const last = nodesOf(page).at(-1);
+  return nextOf(page) && last && Date.parse(last[field] ?? "") >= day.start ? nextOf(page) : null;
+};
+var nextDiscussionComments = (page, read, day) => {
+  const nodes = nodesOf(page);
+  const info = page?.pageInfo ?? {};
+  const first = Date.parse(nodes[0]?.createdAt ?? "");
+  const last = Date.parse(nodes.at(-1)?.createdAt ?? "");
+  if (!nodes.length)
+    return null;
+  if (read === "back") {
+    if (nodes.length > 1 && first > last)
+      return info.hasPreviousPage ? "on:" : null;
+    return info.hasPreviousPage && info.startCursor && first >= day.start ? `back:${info.startCursor}` : null;
+  }
+  return info.hasNextPage && info.endCursor && last >= day.start ? `on:${info.endCursor}` : null;
+};
+var lastSecond = (to) => new Date(Date.parse(to) - 1000).toISOString();
+var page = (login, items, more, totals = {}) => ({
+  login,
+  items,
+  more: Object.fromEntries(Object.entries(more).filter(([, cursor]) => typeof cursor === "string")),
+  totals
+});
+var readActivity = async (graphql, from, to) => {
+  const searches = activitySearches(from, to);
+  const out = await graphql([
+    "-f",
+    `query=${ACTIVITY_QUERY}`,
+    "-f",
+    `opened=${searches.opened}`,
+    "-f",
+    `merged=${searches.merged}`,
+    "-f",
+    `mergedReviewed=${searches.mergedReviewed}`,
+    "-f",
+    `mergedInvolved=${searches.mergedInvolved}`,
+    "-f",
+    `from=${new Date(from).toISOString()}`,
+    "-f",
+    `to=${lastSecond(to)}`
+  ]);
+  const data = dataOf(out);
+  const login = data.viewer?.login ?? "";
+  const day = dayOf2(from, to);
+  const viewer = data.viewer ?? {};
+  const reviews = viewer.contributionsCollection?.pullRequestReviewContributions;
+  const items = [
+    ...pullItems("opened", data.opened, login, day),
+    ...pullItems("merged", data.merged, login, day),
+    ...pullItems("mergedReviewed", data.mergedReviewed, login, day),
+    ...pullItems("mergedInvolved", data.mergedInvolved, login, day),
+    ...reviewItems(reviews, day),
+    ...commentItems(viewer.issueComments, day),
+    ...discussionItems(viewer.repositoryDiscussions, day),
+    ...discussionCommentItems(viewer.repositoryDiscussionComments, day)
+  ];
+  const more = {
+    opened: nextOf(data.opened),
+    merged: nextOf(data.merged),
+    mergedReviewed: nextOf(data.mergedReviewed),
+    mergedInvolved: nextOf(data.mergedInvolved),
+    reviewed: nextOf(reviews),
+    commented: nextWhileRecent(viewer.issueComments, "updatedAt", day),
+    discussions: nextWhileRecent(viewer.repositoryDiscussions, "createdAt", day),
+    discussionComments: nextDiscussionComments(viewer.repositoryDiscussionComments, "back", day)
+  };
+  const totals = {};
+  for (const source of ["opened", "merged", "mergedReviewed", "mergedInvolved"]) {
+    const count = data[source]?.issueCount;
+    if (typeof count === "number" && Number.isInteger(count))
+      totals[source] = count;
+  }
+  return page(login, items, more, totals);
+};
+var readActivityPage = async (graphql, source, from, to, after) => {
+  const day = dayOf2(from, to);
+  const cursor = (value) => value ? ["-f", `after=${value}`] : [];
+  switch (source) {
+    case "opened":
+    case "merged":
+    case "mergedReviewed":
+    case "mergedInvolved": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_SEARCH_QUERY}`, "-f", `q=${activitySearches(from, to)[source]}`, ...cursor(after)]));
+      const login = data.viewer?.login ?? "";
+      const count = data.search?.issueCount;
+      return page(login, pullItems(source, data.search, login, day), { [source]: nextOf(data.search) }, typeof count === "number" ? { [source]: count } : {});
+    }
+    case "reviewed": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_REVIEWS_QUERY}`, "-f", `from=${new Date(from).toISOString()}`, "-f", `to=${lastSecond(to)}`, ...cursor(after)]));
+      const reviews = data.viewer?.contributionsCollection?.pullRequestReviewContributions;
+      return page(data.viewer?.login ?? "", reviewItems(reviews, day), { reviewed: nextOf(reviews) });
+    }
+    case "commented": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_COMMENTS_QUERY}`, ...cursor(after)]));
+      return page(data.viewer?.login ?? "", commentItems(data.viewer?.issueComments, day), { commented: nextWhileRecent(data.viewer?.issueComments, "updatedAt", day) });
+    }
+    case "discussions": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_DISCUSSIONS_QUERY}`, ...cursor(after)]));
+      return page(data.viewer?.login ?? "", discussionItems(data.viewer?.repositoryDiscussions, day), { discussions: nextWhileRecent(data.viewer?.repositoryDiscussions, "createdAt", day) });
+    }
+    case "discussionComments": {
+      const split = after.indexOf(":");
+      const read = after.slice(0, split) === "on" ? "on" : "back";
+      const at = split >= 0 ? after.slice(split + 1) : after;
+      const query = read === "on" ? ACTIVITY_DISCUSSION_COMMENTS_ON_QUERY : ACTIVITY_DISCUSSION_COMMENTS_BACK_QUERY;
+      const data = dataOf(await graphql(["-f", `query=${query}`, ...at ? ["-f", `cursor=${at}`] : []]));
+      const comments = data.viewer?.repositoryDiscussionComments;
+      return page(data.viewer?.login ?? "", discussionCommentItems(comments, day), { discussionComments: nextDiscussionComments(comments, read, day) });
+    }
+  }
+};
+
+// service/github.ts
 var GH_TIMEOUT_MS = 15000;
 var ghRunner = (args, options) => new Promise((resolve, reject) => {
   execFile2("gh", args, { timeout: options?.timeoutMs ?? GH_TIMEOUT_MS, maxBuffer: 8000000, ...options?.cwd ? { cwd: options.cwd } : {} }, (error, stdout, stderr) => {
     if (error)
       reject(Object.assign(new Error(`${error.message}
-${stderr}`), { code: error.code, stderr: String(stderr) }));
+${stderr}`), { code: error.code, stderr: String(stderr), stdout: String(stdout) }));
     else
       resolve(stdout);
   });
@@ -2792,12 +3051,26 @@ ${stderr}`), { code: error.code, stderr: String(stderr) }));
 var ITEM_FIELDS = `__typename
   ... on Issue { id number title url state updatedAt repository { nameWithOwner } }
   ... on PullRequest { id number title url state isDraft updatedAt repository { nameWithOwner } }`;
-var LIST_QUERY = `query PlannerGitHubList($q: String!) { search(query: $q, type: ISSUE, first: 50) { nodes { ${ITEM_FIELDS} } } }`;
+var PAGE_SIZE = 50;
+var NODES_MAX = 100;
+var REPOS_QUERY = `query PlannerGitHubRepos { viewer { repositoriesContributedTo(first: 25, includeUserRepositories: true, orderBy: { field: PUSHED_AT, direction: DESC }, contributionTypes: [COMMIT, ISSUE, PULL_REQUEST, PULL_REQUEST_REVIEW, REPOSITORY]) { nodes { nameWithOwner } } } }`;
+var LIST_QUERY = `query PlannerGitHubList($q: String!, $after: String) { search(query: $q, type: ISSUE, first: ${PAGE_SIZE}, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ${ITEM_FIELDS} } } }`;
 var NODES_QUERY = `query PlannerGitHubNodes($ids: [ID!]!) { nodes(ids: $ids) { ${ITEM_FIELDS} } }`;
+var RESOURCE_QUERY = `query PlannerGitHubResource($url: URI!) { resource(url: $url) { ${ITEM_FIELDS} } }`;
 var LISTS = {
   assigned: "is:open is:issue assignee:@me archived:false sort:updated-desc",
   review: "is:open is:pr review-requested:@me archived:false sort:updated-desc",
   mine: "is:open is:pr author:@me archived:false sort:updated-desc"
+};
+var listQuery = (kind, text = "") => {
+  const words = text.replace(/\s+/g, " ").trim();
+  return words ? `${LISTS[kind]} ${words}` : LISTS[kind];
+};
+var graphqlData = (out) => {
+  const parsed = JSON.parse(out);
+  if (!parsed.data && parsed.errors?.length)
+    throw new Error(parsed.errors[0]?.message ?? "GitHub returned an error");
+  return parsed.data ?? {};
 };
 var parseNodes = (nodes) => nodes.flatMap((node) => {
   if (!node?.id || !node.number || !node.title || !node.url || !node.repository?.nameWithOwner)
@@ -2856,6 +3129,16 @@ class GitHubSource {
     this.run = run;
     this.container = container;
   }
+  async graphql(args) {
+    try {
+      return await this.run(["api", "graphql", ...args]);
+    } catch (error) {
+      const printed = error.stdout;
+      if (printed && /^\s*\{[\s\S]*"data"\s*:\s*\{/.test(printed))
+        return printed;
+      throw new Error(explain(error));
+    }
+  }
   async status() {
     try {
       const login = (await this.run(["api", "user", "--jq", ".login"])).trim();
@@ -2865,11 +3148,32 @@ class GitHubSource {
       return { available: false, login: null, message, reason, container: reason ? this.container() : null };
     }
   }
-  async list(kind) {
-    const out = await this.run(["api", "graphql", "-f", `query=${LIST_QUERY}`, "-f", `q=${LISTS[kind]}`]).catch((error) => {
-      throw new Error(explain(error));
-    });
-    return parseNodes(JSON.parse(out).data?.search?.nodes ?? []);
+  async repositories() {
+    if (this.repos && Date.now() - this.repos.at < 10 * 60000)
+      return this.repos.names;
+    const out = await this.graphql(["-f", `query=${REPOS_QUERY}`]);
+    const nodes = graphqlData(out).viewer?.repositoriesContributedTo?.nodes ?? [];
+    const names = nodes.flatMap((node) => node?.nameWithOwner && /^[\w.-]+\/[\w.-]+$/.test(node.nameWithOwner) ? [node.nameWithOwner] : []);
+    this.repos = { at: Date.now(), names };
+    return names;
+  }
+  repos = null;
+  async list(kind, options = {}) {
+    const out = await this.graphql(["-f", `query=${LIST_QUERY}`, "-f", `q=${listQuery(kind, options.text)}`, ...options.after ? ["-f", `after=${options.after}`] : []]);
+    const search = graphqlData(out).search;
+    const items = parseNodes(search?.nodes ?? []);
+    const next = search?.pageInfo?.hasNextPage && search.pageInfo.endCursor ? search.pageInfo.endCursor : null;
+    return { items, total: Math.max(search?.issueCount ?? 0, items.length), next };
+  }
+  async byUrl(url) {
+    const parsed = parseGitHubUrl(url);
+    if (!parsed)
+      throw new Error("not a GitHub issue or pull request URL");
+    const out = await this.graphql(["-f", `query=${RESOURCE_QUERY}`, "-f", `url=${parsed.url}`]);
+    const parsedAnswer = JSON.parse(out);
+    if (!parsedAnswer.data?.resource && parsedAnswer.errors?.length && !parsedAnswer.errors.every((error) => error.type === "NOT_FOUND"))
+      throw new Error(parsedAnswer.errors[0]?.message ?? "GitHub returned an error");
+    return parseNodes([parsedAnswer.data?.resource ?? null])[0] ?? null;
   }
   async pullRequestFor(branch, directories) {
     if (!BRANCH.test(branch))
@@ -2898,12 +3202,18 @@ class GitHubSource {
     return pickPull([JSON.parse(out)]);
   }
   async items(ids) {
-    if (ids.length === 0)
-      return [];
-    const out = await this.run(["api", "graphql", "-f", `query=${NODES_QUERY}`, ...ids.slice(0, 100).flatMap((id) => ["-f", `ids[]=${id}`])]).catch((error) => {
-      throw new Error(explain(error));
-    });
-    return parseNodes(JSON.parse(out).data?.nodes ?? []);
+    const found = [];
+    for (let index = 0;index < ids.length; index += NODES_MAX) {
+      const out = await this.graphql(["-f", `query=${NODES_QUERY}`, ...ids.slice(index, index + NODES_MAX).flatMap((id) => ["-f", `ids[]=${id}`])]);
+      found.push(...parseNodes(graphqlData(out).nodes ?? []));
+    }
+    return found;
+  }
+  activity(from, to) {
+    return readActivity((args) => this.graphql(args), from, to);
+  }
+  activityPage(source, from, to, after) {
+    return readActivityPage((args) => this.graphql(args), source, from, to, after);
   }
 }
 
@@ -2922,7 +3232,7 @@ var ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrder
     cycle { id number name isActive isNext }
     projectMilestone { id name }
     parent { id identifier title }
-    labels(first: 25) { nodes { id name color } }
+    labels(first: 25) { nodes { id name color } pageInfo { hasNextPage } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 var PAGE = "pageInfo { hasNextPage endCursor }";
 var PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate createdAt updatedAt sortOrder
@@ -2963,14 +3273,15 @@ var VIEWS_QUERY = `query PlannerViews($after: String) {
     ${PAGE}
   }
 }`;
-var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
-  favorites(first: 250) {
+var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews($after: String) {
+  favorites(first: 250, after: $after) {
     nodes {
       id type sortOrder
       customView { id }
       project { ${PROJECT_FIELDS} }
       issue { id identifier title url state { id name type color } team { id key name } }
     }
+    ${PAGE}
   }
 }`;
 var VIEW_QUERY = `query PlannerView($id: String!) {
@@ -3013,9 +3324,9 @@ var ISSUE_QUERY = `query PlannerIssue($id: String!) {
 var TEAM_STATES_QUERY = `query PlannerTeamStates($id: String!) {
   team(id: $id) { id states(first: 100) { nodes { id name type color position } } }
 }`;
-var TEAMS_QUERY = `query PlannerTeams {
+var TEAMS_QUERY = `query PlannerTeams($after: String) {
   viewer { id }
-  teams(first: 100) { nodes { id key name } }
+  teams(first: 100, after: $after) { nodes { id key name } ${PAGE} }
 }`;
 var WHOAMI_QUERY = `query PlannerWhoAmI {
   viewer { id name }
@@ -3031,13 +3342,13 @@ var PROJECT_QUERY = `query PlannerProject($id: String!) {
   project(id: $id) {
     ${PROJECT_FIELDS}
     content
-    projectMilestones(first: 25) { nodes { id name targetDate progress sortOrder } }
+    projectMilestones(first: 100) { nodes { id name targetDate progress sortOrder } pageInfo { hasNextPage } }
     lastUpdate { id body health createdAt url user { id name } }
   }
 }`;
 var FILTER_TEAMS_QUERY = `query PlannerFilterTeams($after: String) {
   teams(first: 50, after: $after) {
-    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } } }
+    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } pageInfo { hasNextPage } } }
     ${PAGE}
   }
 }`;
@@ -3082,10 +3393,10 @@ var HISTORY_FIELDS = `id createdAt actor { id name } botActor { name }
       fromEstimate toEstimate updatedDescription`;
 var DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
-    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }
-    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } }
-    attachments(first: 25) { nodes { id title subtitle url sourceType } }
-    history(first: 50) { nodes { ${HISTORY_FIELDS} } }`;
+    comments(first: 100) { nodes { ${COMMENT_FIELDS} } pageInfo { hasNextPage } }
+    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } pageInfo { hasNextPage } }
+    attachments(first: 25) { nodes { id title subtitle url sourceType } pageInfo { hasNextPage } }
+    history(first: 50) { nodes { ${HISTORY_FIELDS} } pageInfo { hasNextPage } }`;
 var ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
   issue(id: $id) { ${DETAIL_FIELDS} }
 }`;
@@ -3096,13 +3407,23 @@ var TEAM_OPTIONS_QUERY = `query PlannerTeamOptions($id: String!) {
     issueEstimationType
     issueEstimationAllowZero
     issueEstimationExtended
-    states(first: 100) { nodes { id name type color position } }
-    members(first: 250) { nodes { id name displayName active } }
-    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } }
-    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } }
-    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } }
+    states(first: 100) { nodes { id name type color position } ${PAGE} }
+    members(first: 250) { nodes { id name displayName active } ${PAGE} }
+    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }
+    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }
   }
-  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } }
+  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+}`;
+var TEAM_OPTION_PAGES = {
+  states: `states(first: 250, after: $after) { nodes { id name type color position } ${PAGE} }`,
+  members: `members(first: 250, after: $after) { nodes { id name displayName active } ${PAGE} }`,
+  labels: `labels(first: 250, after: $after, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }`,
+  cycles: `cycles(first: 250, after: $after, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }`,
+  projects: `projects(first: 250, after: $after, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }`
+};
+var WORKSPACE_LABELS_QUERY = `query PlannerWorkspaceLabels($after: String) {
+  issueLabels(first: 250, after: $after, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
 }`;
 var UPDATE_ISSUE_MUTATION = `mutation PlannerUpdateIssue($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success issue { ${DETAIL_FIELDS} } }
@@ -3308,19 +3629,21 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmod as chmod2, mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
 import http from "node:http";
 import { dirname as dirname2 } from "node:path";
-var GOOGLE_FEATURES = ["calendar", "tasks", "mail", "drive"];
+var GOOGLE_FEATURES = ["calendar", "tasks", "mail", "drive", "mailActions", "contacts"];
 var FEATURE_SCOPES = {
   calendar: ["https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events"],
   tasks: ["https://www.googleapis.com/auth/tasks"],
   mail: ["https://www.googleapis.com/auth/gmail.readonly"],
-  drive: ["https://www.googleapis.com/auth/drive.metadata.readonly"]
+  drive: ["https://www.googleapis.com/auth/drive.metadata.readonly"],
+  mailActions: ["https://www.googleapis.com/auth/gmail.modify"],
+  contacts: ["https://www.googleapis.com/auth/contacts.readonly", "https://www.googleapis.com/auth/contacts.other.readonly"]
 };
 var IDENTITY_SCOPES = ["openid", "email"];
 var AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 var TOKEN_URL = "https://oauth2.googleapis.com/token";
 var REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 var USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
-var API_ORIGINS = ["https://www.googleapis.com/", "https://tasks.googleapis.com/", "https://gmail.googleapis.com/"];
+var API_ORIGINS = ["https://www.googleapis.com/", "https://tasks.googleapis.com/", "https://gmail.googleapis.com/", "https://people.googleapis.com/"];
 var TIMEOUT_MS3 = 12000;
 var SIGN_IN_MS = 10 * 60000;
 var MAX_ACCOUNTS = 10;
@@ -3352,7 +3675,7 @@ var loopbackListen = (onRequest) => new Promise((resolve, reject) => {
   server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port, close: () => server.close() }));
 });
 var base64url = (bytes) => bytes.toString("base64url");
-var page = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font:15px system-ui;margin:3em;max-width:36em"><h1 style="font-size:20px">${title}</h1><p>${text}</p>`;
+var page2 = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font:15px system-ui;margin:3em;max-width:36em"><h1 style="font-size:20px">${title}</h1><p>${text}</p>`;
 var featuresOf = (scopes) => GOOGLE_FEATURES.filter((feature) => FEATURE_SCOPES[feature].every((scope) => scopes.includes(scope)));
 var domainOf = (value) => typeof value === "string" && /^[a-z0-9.-]{1,253}$/i.test(value) ? value.toLowerCase() : null;
 var identityFromIdToken = (idToken) => {
@@ -3563,24 +3886,24 @@ class GoogleAccounts {
   async callback(id, url) {
     const signIn = this.signIns.get(id);
     if (!signIn || signIn.result.status !== "pending")
-      return page("Planner", "This sign-in is already over. You can close this tab.");
+      return page2("Planner", "This sign-in is already over. You can close this tab.");
     if (url.searchParams.get("state") !== signIn.state) {
-      return page("Planner", "This page does not belong to the sign-in the Planner is waiting for.");
+      return page2("Planner", "This page does not belong to the sign-in the Planner is waiting for.");
     }
     const error = url.searchParams.get("error");
     const code = url.searchParams.get("code");
     if (error || !code) {
       this.endSignIn(id, { status: "failed", message: error === "access_denied" ? "Access was not allowed" : `Google said: ${error ?? "no code"}` });
-      return page("Not connected", "Google did not let the Planner in. You can close this tab and try again.");
+      return page2("Not connected", "Google did not let the Planner in. You can close this tab and try again.");
     }
     try {
       const account = await this.exchange(code, signIn);
       this.endSignIn(id, { status: "connected", email: account.email, features: featuresOf(account.scopes) });
-      return page("Connected", `The Planner can now use ${account.email}. You can close this tab.`);
+      return page2("Connected", `The Planner can now use ${account.email}. You can close this tab.`);
     } catch (failure) {
       const message = failure instanceof Error ? failure.message : String(failure);
       this.endSignIn(id, { status: "failed", message });
-      return page("Not connected", `${message.replace(/[<>&]/g, "")}. You can close this tab.`);
+      return page2("Not connected", `${message.replace(/[<>&]/g, "")}. You can close this tab.`);
     }
   }
   async exchange(code, signIn) {
@@ -3703,6 +4026,410 @@ class GoogleAccounts {
   }
 }
 
+// src/domain/gmail.ts
+var SYSTEM_LABELS = { inbox: "INBOX", starred: "STARRED", important: "IMPORTANT", unread: "UNREAD", spam: "SPAM", trash: "TRASH", sent: "SENT", drafts: "DRAFT" };
+var gmailChanges = (actions, labels) => {
+  const add = new Set;
+  const remove = new Set;
+  const missing = [];
+  let trash = false;
+  const idOf = (name) => SYSTEM_LABELS[name.trim().toLowerCase()] ?? labels.find((label) => label.name.toLowerCase() === name.trim().toLowerCase())?.id ?? null;
+  const put = (into, from, id) => {
+    from.delete(id);
+    into.add(id);
+  };
+  for (const action of actions) {
+    switch (action.kind) {
+      case "markRead":
+        put(remove, add, "UNREAD");
+        break;
+      case "markUnread":
+        put(add, remove, "UNREAD");
+        break;
+      case "archive":
+        put(remove, add, "INBOX");
+        break;
+      case "star":
+        put(add, remove, "STARRED");
+        break;
+      case "unstar":
+        put(remove, add, "STARRED");
+        break;
+      case "trash":
+        trash = true;
+        break;
+      case "addLabel":
+      case "removeLabel": {
+        const id = action.label ? idOf(action.label) : null;
+        if (!id)
+          missing.push(action.label ?? "");
+        else if (action.kind === "addLabel")
+          put(add, remove, id);
+        else
+          put(remove, add, id);
+        break;
+      }
+    }
+  }
+  return { add: [...add], remove: [...remove], trash, missing };
+};
+var decode = (data) => {
+  const base64 = data.replace(/-/g, "+").replace(/_/g, "/");
+  const bytes = Uint8Array.from(atob(base64 + "=".repeat((4 - base64.length % 4) % 4)), (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+};
+var htmlText = (html) => html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, "").replace(/<br\s*\/?>|<\/(p|div|li|tr|h\d)>/gi, `
+`).replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\n{3,}/g, `
+
+`).trim();
+var messageText = (part) => {
+  if (!part)
+    return "";
+  const find = (node, type) => {
+    if (node.mimeType === type && node.body?.data)
+      return decode(node.body.data);
+    for (const child of node.parts ?? []) {
+      const found = find(child, type);
+      if (found !== null)
+        return found;
+    }
+    return null;
+  };
+  const plain = find(part, "text/plain");
+  if (plain !== null)
+    return plain.replace(/\r\n/g, `
+`).trim();
+  const html = find(part, "text/html");
+  return html !== null ? htmlText(html) : "";
+};
+
+// service/gmail.ts
+var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+var enc = encodeURIComponent;
+var SYSTEM_NAMES = { INBOX: "Inbox", STARRED: "Starred", IMPORTANT: "Important", UNREAD: "Unread", SENT: "Sent", DRAFT: "Drafts", SPAM: "Spam", TRASH: "Trash" };
+
+class GmailActions {
+  accounts;
+  constructor(accounts) {
+    this.accounts = accounts;
+  }
+  async labels(account) {
+    const answer = await this.accounts.request(account, "GET", `${GMAIL}/labels`);
+    const all = (answer?.labels ?? []).flatMap((label) => {
+      if (!label.id || !label.name)
+        return [];
+      if (label.type === "system")
+        return SYSTEM_NAMES[label.id] ? [{ id: label.id, name: SYSTEM_NAMES[label.id], type: "system" }] : [];
+      return [{ id: label.id, name: label.name, type: "user" }];
+    });
+    const order = Object.keys(SYSTEM_NAMES);
+    return [
+      ...all.filter((label) => label.type === "system").sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)),
+      ...all.filter((label) => label.type === "user").sort((a, b) => a.name.localeCompare(b.name))
+    ];
+  }
+  async thread(account, threadId) {
+    let raw;
+    try {
+      raw = await this.accounts.request(account, "GET", `${GMAIL}/threads/${enc(threadId)}?format=full`);
+    } catch (error) {
+      if (error instanceof GoogleError && error.status === 404)
+        return null;
+      throw error;
+    }
+    if (!raw)
+      return null;
+    const messages = (raw.messages ?? []).flatMap((message) => {
+      if (!message.id)
+        return [];
+      const header = (name) => message.payload?.headers?.find((item) => item.name?.toLowerCase() === name)?.value ?? "";
+      const internal = Number(message.internalDate);
+      const date = Number.isFinite(internal) && internal > 0 ? new Date(internal).toISOString() : header("date") ? new Date(header("date")).toISOString() : "";
+      return [{ id: message.id, from: header("from"), to: header("to"), date, subject: header("subject"), snippet: message.snippet ?? "", text: messageText(message.payload).slice(0, 20000), unread: (message.labelIds ?? []).includes("UNREAD") }];
+    });
+    const labelIds = [...new Set((raw.messages ?? []).flatMap((message) => message.labelIds ?? []))];
+    return { id: threadId, account, messages, labelIds };
+  }
+  async act(account, threadId, actions) {
+    const needsLabels = actions.some((action) => action.kind === "addLabel" || action.kind === "removeLabel");
+    const labels = needsLabels ? await this.labels(account).then((known) => known.filter((label) => label.type === "user")) : [];
+    const changes = gmailChanges(actions, labels);
+    if (changes.missing.length)
+      throw new GoogleError(400, `Gmail has no label ${changes.missing.map((name) => `"${name}"`).join(", ")} in ${account}: make it in Gmail first`);
+    let labelIds = [];
+    if (changes.add.length || changes.remove.length) {
+      const answer = await this.accounts.request(account, "POST", `${GMAIL}/threads/${enc(threadId)}/modify`, { addLabelIds: changes.add, removeLabelIds: changes.remove });
+      labelIds = [...new Set((answer?.messages ?? []).flatMap((message) => message.labelIds ?? []))];
+    }
+    if (changes.trash) {
+      const answer = await this.accounts.request(account, "POST", `${GMAIL}/threads/${enc(threadId)}/trash`);
+      labelIds = [...new Set((answer?.messages ?? []).flatMap((message) => message.labelIds ?? []))];
+    }
+    return { labelIds };
+  }
+}
+
+// service/contacts.ts
+var PEOPLE = "https://people.googleapis.com/v1";
+var enc2 = encodeURIComponent;
+
+class GoogleContacts {
+  accounts;
+  warmed = new Set;
+  constructor(accounts) {
+    this.accounts = accounts;
+  }
+  async search(account, query) {
+    const read = (path, words) => this.accounts.request(account, "GET", `${PEOPLE}/${path}?query=${enc2(words)}&readMask=names,emailAddresses&pageSize=10`);
+    if (!this.warmed.has(account)) {
+      await Promise.allSettled([read("people:searchContacts", ""), read("otherContacts:search", "")]);
+      this.warmed.add(account);
+    }
+    const answers = await Promise.all([read("people:searchContacts", query), read("otherContacts:search", query)]);
+    const found = new Map;
+    for (const answer of answers) {
+      for (const result of answer?.results ?? []) {
+        const name = result.person?.names?.[0]?.displayName?.trim() ?? "";
+        for (const address of result.person?.emailAddresses ?? []) {
+          const email = address.value?.trim();
+          if (email && !found.has(email.toLowerCase()))
+            found.set(email.toLowerCase(), { name: name || email, email });
+        }
+      }
+    }
+    return [...found.values()].slice(0, 10);
+  }
+}
+
+// service/meetings.ts
+import { randomBytes as randomBytes2 } from "node:crypto";
+
+// src/domain/meetings.ts
+var MEETING_SYNC_DAYS = 7;
+var eventKey = (event) => event.google ? `${event.google.account}|${event.google.calendarId}|${event.google.eventId}` : null;
+var DAY_MS = 86400000;
+var excludedBy = (event, exclusions) => {
+  const response = event.google?.response ?? null;
+  if (response === "declined")
+    return "declined";
+  if (exclusions.includes("noAttendees") && !event.google?.guests)
+    return "noAttendees";
+  if (exclusions.includes("nonBlocking") && event.transparent)
+    return "nonBlocking";
+  if (exclusions.includes("oooHold") && /\b(OOO|HOLD)\b/i.test(event.title))
+    return "oooHold";
+  if (exclusions.includes("unconfirmed") && (response === "needsAction" || response === "tentative"))
+    return "unconfirmed";
+  if (exclusions.includes("multiDayAllDay") && event.allDay && Date.parse(event.end) - Date.parse(event.start) > DAY_MS + 3600000)
+    return "multiDayAllDay";
+  return null;
+};
+var importCalendars = (state, mode) => {
+  const google = Object.values(state.calendars).filter((calendar) => calendar.google);
+  const chosen = state.settings.meetingCalendars;
+  if (chosen.length)
+    return google.filter((calendar) => chosen.includes(calendar.id));
+  return mode === "suggest" ? google.filter((calendar) => calendar.visible) : [];
+};
+var subscriptionOf = (state, event) => Object.values(state.calendars).find((calendar) => calendar.google && event.google && calendar.google.account === event.google.account && calendar.google.calendarId === event.google.calendarId);
+var taskForEvent = (state, key) => Object.values(state.tasks).find((task) => task.source?.kind === "event" && task.source.id === key) ?? null;
+var eventSource = (event, auto) => {
+  const key = eventKey(event);
+  if (!key || !event.google || key.length > 200)
+    return null;
+  return {
+    kind: "event",
+    id: key,
+    key: "Google Calendar",
+    url: event.google.htmlLink || "https://calendar.google.com/calendar/r",
+    title: event.title,
+    account: event.google.account,
+    event: { calendarId: event.google.calendarId, start: event.start, end: event.end, allDay: event.allDay, invitees: event.google.guests, ...auto ? { auto: true } : {} }
+  };
+};
+var eventDay = (event, zone) => zonedDateMinutes(event.start, zone).date;
+var startOf = (task) => task.source?.kind === "event" && task.source.event ? Date.parse(task.source.event.start) : null;
+var meetingPosition = (state, date, start) => {
+  const list = tasksForDay(state, date).filter((task) => !task.deletedAt);
+  const later = list.findIndex((task) => (startOf(task) ?? -Infinity) > start);
+  if (later >= 0) {
+    const before = list[later - 1]?.position;
+    const at = list[later].position;
+    return before === undefined ? at - 1024 : (before + at) / 2;
+  }
+  const meetings = list.map((task, index) => ({ task, index })).filter(({ task }) => startOf(task) !== null);
+  const last = meetings.at(-1);
+  if (last) {
+    const next = list[last.index + 1]?.position;
+    return next === undefined ? last.task.position + 1024 : (last.task.position + next) / 2;
+  }
+  return list.length ? list[0].position - 1024 : 1024;
+};
+var meetingTask = (state, event, options) => {
+  const source = eventSource(event, options.auto);
+  if (!source)
+    return null;
+  const date = eventDay(event, options.zone);
+  const minutes = event.allDay ? null : Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000);
+  const channelId = importChannel(state, event);
+  return {
+    id: options.id,
+    title: event.title,
+    placement: { kind: "day", date },
+    position: options.position ?? meetingPosition(state, date, Date.parse(event.start)),
+    ...minutes && minutes > 0 ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {},
+    ...channelId ? { channelId } : {},
+    source
+  };
+};
+var importChannel = (state, event) => {
+  const subscription = subscriptionOf(state, event);
+  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
+  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
+};
+var hasTime = (state, taskId) => Object.values(state.entries).some((entry) => entry.taskId === taskId);
+var planMeetingSync = (state, events, options) => {
+  if (state.settings.meetingImport !== "autoSync")
+    return [];
+  const calendars = new Set(importCalendars(state, "autoSync").map((calendar) => calendar.id));
+  const read = options.read ?? calendars;
+  const days = new Set(Array.from({ length: options.days }, (_, index) => addDays(options.from, index)));
+  const bodies = [];
+  let working = state;
+  const qualifying = new Map;
+  for (const event of [...events].sort((a, b) => a.start.localeCompare(b.start))) {
+    const key = eventKey(event);
+    const subscription = subscriptionOf(state, event);
+    if (!key || !subscription || !calendars.has(subscription.id) || !days.has(eventDay(event, options.zone)) || excludedBy(event, state.settings.meetingExclusions))
+      continue;
+    qualifying.set(key, event);
+  }
+  const push = (body) => {
+    bodies.push(body);
+    working = applyLocally(working, body);
+  };
+  for (const [key, event] of qualifying) {
+    const task = taskForEvent(working, key);
+    if (!task) {
+      const made = meetingTask(working, event, { id: options.newId(), zone: options.zone, auto: true });
+      if (made)
+        push({ type: "task.created", task: made });
+      continue;
+    }
+    if (task.deletedAt || task.completedAt || !task.source?.event?.auto)
+      continue;
+    const date = eventDay(event, options.zone);
+    const source = eventSource(event, true);
+    const changed = task.title !== event.title || task.source.event.start !== event.start || task.source.event.end !== event.end;
+    if (task.placement.kind !== "day" || task.placement.date !== date)
+      push({ type: "task.moved", taskId: task.id, placement: { kind: "day", date }, position: meetingPosition(working, date, Date.parse(event.start)) });
+    if (changed) {
+      const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000));
+      push({ type: "task.updated", taskId: task.id, patch: { title: event.title, source, ...minutes && minutes > 0 ? { plannedMinutes: minutes } : {} } });
+    }
+    const channelId = importChannel(working, event);
+    if (channelId && !working.tasks[task.id].channelId)
+      push({ type: "task.updated", taskId: task.id, patch: { channelId } });
+  }
+  for (const task of Object.values(working.tasks)) {
+    const event = task.source?.kind === "event" ? task.source.event : undefined;
+    if (!event?.auto || task.deletedAt || task.completedAt || qualifying.has(task.source.id))
+      continue;
+    if (task.placement.kind !== "day" || !days.has(task.placement.date) || hasTime(working, task.id))
+      continue;
+    const calendar = Object.values(state.calendars).find((item) => item.google && task.source.account === item.google.account && item.google.calendarId === event.calendarId);
+    if (calendar && calendars.has(calendar.id) && !read.has(calendar.id))
+      continue;
+    push({ type: "task.deleted", taskId: task.id });
+  }
+  return bodies;
+};
+var planMeetingCompletion = (state, now, zone, mode = state.settings.meetingAutoComplete) => {
+  if (mode === "never")
+    return [];
+  return Object.values(state.tasks).flatMap((task) => {
+    const event = task.source?.kind === "event" ? task.source.event : undefined;
+    if (!event || task.completedAt || task.deletedAt || task.archivedAt || Date.parse(event.end) > now)
+      return [];
+    if (mode === "invitees" && !event.invitees)
+      return [];
+    if (state.timer?.taskId === task.id)
+      return [];
+    return [{ type: "task.completed", taskId: task.id, on: zonedDateMinutes(Math.min(Date.parse(event.end), now) - 1, zone).date }];
+  });
+};
+var applyLocally = (state, body) => applyEvents(state, [{ v: 1, id: `meeting-sync-${state.version}-${body.type}`, at: new Date().toISOString(), ...body }]);
+
+// service/meetings.ts
+var COMPLETE_MS = 60000;
+var SYNC_MS = 5 * 60000;
+
+class MeetingImport {
+  planner;
+  calendars;
+  log;
+  now;
+  running = null;
+  constructor(planner, calendars, log = () => {}, now = Date.now) {
+    this.planner = planner;
+    this.calendars = calendars;
+    this.log = log;
+    this.now = now;
+  }
+  apply(bodies) {
+    if (!bodies.length)
+      return 0;
+    const result = this.planner.execute(bodies.map((body) => ({ cmd: `meetings-${randomBytes2(8).toString("hex")}`, ...body })));
+    if (!result.ok) {
+      this.log(`Meeting import: ${result.error}`);
+      return 0;
+    }
+    return result.applied;
+  }
+  complete(now = this.now()) {
+    const zone = this.planner.state.settings.timezone;
+    return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
+  }
+  run() {
+    this.running ??= this.once().finally(() => {
+      this.running = null;
+    });
+    return this.running;
+  }
+  async once() {
+    const outcome = { added: 0, moved: 0, removed: 0, completed: this.complete(), errors: [] };
+    const state = this.planner.state;
+    const zone = state.settings.timezone;
+    if (!zone || state.settings.meetingImport !== "autoSync")
+      return outcome;
+    const calendars = importCalendars(state, "autoSync");
+    if (!calendars.length)
+      return outcome;
+    const today = todayIn(zone, new Date(this.now()));
+    const timeMin = instantAt(today, 0, zone);
+    const timeMax = instantAt(addDays(today, MEETING_SYNC_DAYS), 0, zone);
+    const { events, errors } = await this.calendars.read(calendars.map((calendar) => ({ ...calendar, visible: true })), [], timeMin, timeMax, zone, true);
+    outcome.errors = errors.map((error) => error.message);
+    const failed = new Set(errors.map((error) => error.calendarId));
+    const read = new Set(calendars.map((calendar) => calendar.id).filter((id) => !failed.has(id)));
+    const bodies = planMeetingSync(this.planner.state, events, { from: today, days: MEETING_SYNC_DAYS, zone, newId, read });
+    const applied = this.apply(bodies);
+    if (applied) {
+      outcome.added = bodies.filter((body) => body.type === "task.created").length;
+      outcome.moved = bodies.filter((body) => body.type === "task.moved" || body.type === "task.updated").length;
+      outcome.removed = bodies.filter((body) => body.type === "task.deleted").length;
+    }
+    if (outcome.errors.length)
+      this.log(`Meeting import: ${outcome.errors.join("; ")}`);
+    return outcome;
+  }
+  start() {
+    setInterval(() => this.complete(), COMPLETE_MS).unref?.();
+    setInterval(() => void this.run().catch((error) => this.log(`Meeting import: ${error instanceof Error ? error.message : String(error)}`)), SYNC_MS).unref?.();
+    this.run().catch(() => {});
+  }
+}
+
 // src/domain/google.ts
 var PLANNER_BLOCK_KEY = "plannerBlockId";
 var RESPONSES = ["needsAction", "declined", "tentative", "accepted"];
@@ -3752,7 +4479,7 @@ var googleEvent = (event, calendarId, zone, source) => {
   if (event.extendedProperties?.private?.[PLANNER_BLOCK_KEY])
     return null;
   const declined = Boolean(event.attendees?.some((attendee) => attendee.self && attendee.responseStatus === "declined"));
-  const base = { id: `${calendarId}:${event.id}`, calendarId, title: event.summary?.trim() || "(No title)", location: event.location ?? "", ...source ? { google: eventRef(event, source) } : {} };
+  const base = { id: `${calendarId}:${event.id}`, calendarId, title: event.summary?.trim() || "(No title)", location: event.location ?? "", ...source ? { google: eventRef(event, source) } : {}, ...event.transparency === "transparent" ? { transparent: true } : {} };
   if (event.start?.date && isDateKey(event.start.date)) {
     const endDate = event.end?.date && isDateKey(event.end.date) && event.end.date > event.start.date ? event.end.date : null;
     const start = instantAt(event.start.date, 0, zone);
@@ -4554,13 +5281,13 @@ var meetingsToDecline = (windows, events, declined = new Set) => events.flatMap(
 // service/googleData.ts
 var CALENDAR = "https://www.googleapis.com/calendar/v3";
 var TASKS = "https://tasks.googleapis.com/tasks/v1";
-var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+var GMAIL2 = "https://gmail.googleapis.com/gmail/v1/users/me";
 var DRIVE = "https://www.googleapis.com/drive/v3";
 var DRIVE_PAGE = 30;
 var EVENT_FIELDS = "accessRole,nextPageToken,items(id,status,summary,location,transparency,colorId,eventType,start,end,recurringEventId,originalStartTime,attendees(email,self,organizer,resource,responseStatus),organizer(email,self),guestsCanModify,locked,privateCopy,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),extendedProperties,htmlLink)";
 var LIMITS = { calendars: 10, events: 8, lists: 5, tasks: 40, due: 20 };
 var MAIL_MAX = 25;
-var enc = encodeURIComponent;
+var enc3 = encodeURIComponent;
 var mapLimited = async (items, limit, fn) => {
   const results = new Array(items.length);
   let next = 0;
@@ -4589,7 +5316,7 @@ var toTaskItem = (raw, account, listId) => {
     ...raw.status === "completed" ? { completedAt: raw.completed ?? null } : {},
     parent: raw.parent ?? null,
     position: raw.position ?? "",
-    url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc(raw.id)}`,
+    url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc3(raw.id)}`,
     updated: raw.updated ?? "",
     ...originsOf(raw)
   };
@@ -4675,7 +5402,7 @@ ${item.id}`, item.accessRole);
   async events(account, calendarId, timeMin, timeMax, zone, subscriptionId) {
     const events = [];
     const sessions = [];
-    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "2500", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, LIMITS.events);
+    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc3(calendarId)}/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "2500", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, LIMITS.events);
     if (!complete)
       throw new GoogleError(502, `More than ${LIMITS.events * 2500} events in this range; the Planner reads at most that many`);
     const accessRole = typeof first?.accessRole === "string" ? first.accessRole : undefined;
@@ -4694,7 +5421,7 @@ ${calendarId}`, accessRole);
     return { events, sessions };
   }
   async searchEvents(account, calendarId, query, timeMin, timeMax, zone, subscriptionId) {
-    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events?${new URLSearchParams({ q: query, singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, 2);
+    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc3(calendarId)}/events?${new URLSearchParams({ q: query, singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, 2);
     const accessRole = typeof first?.accessRole === "string" ? first.accessRole : this.roles.get(`${account}
 ${calendarId}`);
     const events = [];
@@ -4714,15 +5441,15 @@ ${calendarId}`);
       ...timebox.visibility ? { visibility: timebox.visibility } : {},
       extendedProperties: { private: { [PLANNER_BLOCK_KEY]: timebox.blockId, plannerTaskId: timebox.taskId } }
     };
-    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
-    const data = eventId ? await this.accounts.request(account, "PATCH", `${base}/${enc(eventId)}`, body) : await this.accounts.request(account, "POST", base, { ...body, reminders: { useDefault: false } });
+    const base = `${CALENDAR}/calendars/${enc3(calendarId)}/events`;
+    const data = eventId ? await this.accounts.request(account, "PATCH", `${base}/${enc3(eventId)}`, body) : await this.accounts.request(account, "POST", base, { ...body, reminders: { useDefault: false } });
     if (!data?.id)
       throw new Error("Google did not return the event");
     return data.id;
   }
   async deleteTimebox(account, calendarId, eventId) {
     try {
-      await this.accounts.request(account, "DELETE", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(eventId)}`);
+      await this.accounts.request(account, "DELETE", `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(eventId)}`);
     } catch (error) {
       if (!isGone(error))
         throw error;
@@ -4730,7 +5457,7 @@ ${calendarId}`);
   }
   async event(account, calendarId, eventId) {
     try {
-      const raw = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(eventId)}`);
+      const raw = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(eventId)}`);
       return raw && raw.status !== "cancelled" ? raw : null;
     } catch (error) {
       if (isGone(error))
@@ -4767,7 +5494,7 @@ ${calendarId}`;
       throw new GoogleError(400, problem);
     const { body, conference } = eventBody(input, null, newId());
     const query = new URLSearchParams({ sendUpdates, ...conference ? { conferenceDataVersion: "1" } : {} });
-    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc(calendarId)}/events?${query}`, body);
+    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc3(calendarId)}/events?${query}`, body);
     if (!raw?.id)
       throw new GoogleError(502, "Google did not return the event");
     return eventDetail(raw, { account, calendarId, accessRole: await this.role(account, calendarId) }, null);
@@ -4777,7 +5504,7 @@ ${calendarId}`;
     const from = series.start?.dateTime ?? (series.start?.date ? `${series.start.date}T00:00:00Z` : null);
     if (!before || !from)
       throw new GoogleError(502, "Google did not say when this series starts");
-    const { items, complete } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(series.id)}/instances?${new URLSearchParams({ timeMin: new Date(Date.parse(from) - 1000).toISOString(), timeMax: new Date(Date.parse(before)).toISOString(), showDeleted: "true", maxResults: "2500", fields: "nextPageToken,items(id,originalStartTime)", ...token ? { pageToken: token } : {} })}`, LIMITS.events);
+    const { items, complete } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(series.id)}/instances?${new URLSearchParams({ timeMin: new Date(Date.parse(from) - 1000).toISOString(), timeMax: new Date(Date.parse(before)).toISOString(), showDeleted: "true", maxResults: "2500", fields: "nextPageToken,items(id,originalStartTime)", ...token ? { pageToken: token } : {} })}`, LIMITS.events);
     if (!complete)
       throw new GoogleError(502, "This series is too long to split here");
     return items.filter((item) => Date.parse(item.originalStartTime?.dateTime ?? `${item.originalStartTime?.date ?? ""}T00:00:00Z`) < Date.parse(before)).length;
@@ -4785,7 +5512,7 @@ ${calendarId}`;
   async run(account, calendarId, plan, sendUpdates) {
     if ("error" in plan)
       throw new GoogleError(400, plan.error);
-    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
+    const base = `${CALENDAR}/calendars/${enc3(calendarId)}/events`;
     const created = [];
     for (const op of plan.ops) {
       const query = new URLSearchParams({ sendUpdates, ...op.conference ? { conferenceDataVersion: "1" } : {} });
@@ -4796,10 +5523,10 @@ ${calendarId}`;
             throw new GoogleError(502, "Google did not return the new series");
           created.push(raw.id);
         } else if (op.method === "PATCH")
-          await this.accounts.request(account, "PATCH", `${base}/${enc(op.eventId)}?${query}`, op.body);
+          await this.accounts.request(account, "PATCH", `${base}/${enc3(op.eventId)}?${query}`, op.body);
         else {
           try {
-            await this.accounts.request(account, "DELETE", `${base}/${enc(op.eventId)}?${query}`);
+            await this.accounts.request(account, "DELETE", `${base}/${enc3(op.eventId)}?${query}`);
           } catch (error) {
             if (!isGone(error))
               throw error;
@@ -4807,7 +5534,7 @@ ${calendarId}`;
         }
       } catch (error) {
         for (const id of created)
-          await this.accounts.request(account, "DELETE", `${base}/${enc(id)}?sendUpdates=none`).catch(() => {});
+          await this.accounts.request(account, "DELETE", `${base}/${enc3(id)}?sendUpdates=none`).catch(() => {});
         throw error;
       }
     }
@@ -4855,9 +5582,9 @@ ${calendarId}`;
     if (!entry || Date.now() - entry.at > UNDO_MS)
       throw new GoogleError(410, "This deletion can no longer be undone");
     const { account, calendarId, resource, sendUpdates } = entry;
-    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
+    const base = `${CALENDAR}/calendars/${enc3(calendarId)}/events`;
     if (resource.recurringEventId) {
-      await this.accounts.request(account, "PATCH", `${base}/${enc(resource.id)}?${new URLSearchParams({ sendUpdates })}`, { status: "confirmed" });
+      await this.accounts.request(account, "PATCH", `${base}/${enc3(resource.id)}?${new URLSearchParams({ sendUpdates })}`, { status: "confirmed" });
       return;
     }
     const body = {};
@@ -4866,7 +5593,7 @@ ${calendarId}`;
         body[field] = resource[field];
     const query = new URLSearchParams({ sendUpdates, ...body.conferenceData ? { conferenceDataVersion: "1" } : {} });
     try {
-      await this.accounts.request(account, "PUT", `${base}/${enc(resource.id)}?${query}`, { ...body, status: "confirmed" });
+      await this.accounts.request(account, "PUT", `${base}/${enc3(resource.id)}?${query}`, { ...body, status: "confirmed" });
     } catch (error) {
       if (!(error instanceof GoogleError) || error.status < 400 || error.status >= 500)
         throw error;
@@ -4890,7 +5617,7 @@ ${calendarId}`;
   async moveEvent(account, calendarId, eventId, destination, sendUpdates) {
     const instance = await this.mustEvent(account, calendarId, eventId);
     const target = instance.recurringEventId ?? instance.id;
-    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(target)}/move?${new URLSearchParams({ destination, sendUpdates })}`);
+    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(target)}/move?${new URLSearchParams({ destination, sendUpdates })}`);
     if (!raw?.id)
       throw new GoogleError(502, "Google did not return the event");
     return eventDetail(raw, { account, calendarId: destination, accessRole: await this.role(account, destination) }, raw.recurrence ?? null);
@@ -4911,25 +5638,25 @@ ${calendarId}`;
     return { account, id: raw.id, title: raw.title?.trim() || title, isDefault: false };
   }
   async renameTaskList(account, listId, title) {
-    const raw = await this.accounts.request(account, "PATCH", `${TASKS}/users/@me/lists/${enc(listId)}`, { title });
+    const raw = await this.accounts.request(account, "PATCH", `${TASKS}/users/@me/lists/${enc3(listId)}`, { title });
     return { account, id: listId, title: raw?.title?.trim() || title };
   }
   async deleteTaskList(account, listId) {
     try {
-      await this.accounts.request(account, "DELETE", `${TASKS}/users/@me/lists/${enc(listId)}`);
+      await this.accounts.request(account, "DELETE", `${TASKS}/users/@me/lists/${enc3(listId)}`);
     } catch (error) {
       if (!isGone(error))
         throw error;
     }
   }
   async tasks(account, listId) {
-    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(listId)}/tasks?${new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
+    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc3(listId)}/tasks?${new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
     if (!complete)
       throw new GoogleError(502, `This list has more than ${LIMITS.tasks * 100} open tasks; the Planner reads at most that many`);
     return items.map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item)).sort((a, b) => a.position.localeCompare(b.position));
   }
   async allTasks(account, listId) {
-    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(listId)}/tasks?${new URLSearchParams({ showCompleted: "true", showHidden: "true", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
+    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc3(listId)}/tasks?${new URLSearchParams({ showCompleted: "true", showHidden: "true", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
     const tasks = items.map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item));
     return { tasks: tasks.sort((a, b) => a.position.localeCompare(b.position)), complete };
   }
@@ -4937,7 +5664,7 @@ ${calendarId}`;
     const lists = await this.taskLists(account);
     const range = { showCompleted: open ? "false" : "true", showHidden: open ? "false" : "true", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` };
     const perList = await mapLimited(lists, 4, async (list) => {
-      const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(list.id)}/tasks?${new URLSearchParams({ ...range, ...token ? { pageToken: token } : {} })}`, LIMITS.due);
+      const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc3(list.id)}/tasks?${new URLSearchParams({ ...range, ...token ? { pageToken: token } : {} })}`, LIMITS.due);
       if (!complete)
         throw new GoogleError(502, `"${list.title}" has more than ${LIMITS.due * 100} tasks due in these days; the Planner reads at most that many`);
       return items.map((raw) => toTaskItem(raw, account, list.id)).filter((item) => Boolean(item && item.due && item.due >= from && item.due <= to));
@@ -4947,7 +5674,7 @@ ${calendarId}`;
   async tasksById(account, listId, ids) {
     const found = await mapLimited(ids, 5, async (id) => {
       try {
-        const raw = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`);
+        const raw = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc3(listId)}/tasks/${enc3(id)}`);
         return raw ? toTaskItem(raw, account, listId) : null;
       } catch (error) {
         if (isGone(error))
@@ -4984,7 +5711,7 @@ ${calendarId}`;
     if (patch.deleted === false)
       body.deleted = false;
     const write = async (list) => {
-      const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc(list)}/tasks/${enc(id)}`, body);
+      const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc3(list)}/tasks/${enc3(id)}`, body);
       return raw ? toTaskItem(raw, account, list) : null;
     };
     try {
@@ -5000,7 +5727,7 @@ ${calendarId}`;
   }
   async createTask(account, listId, task) {
     const query = new URLSearchParams({ ...task.parent ? { parent: task.parent } : {}, ...task.previous ? { previous: task.previous } : {} });
-    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks${query.size ? `?${query}` : ""}`, {
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc3(listId)}/tasks${query.size ? `?${query}` : ""}`, {
       title: task.title,
       ...task.notes ? { notes: task.notes } : {},
       ...task.due ? { due: `${task.due}T00:00:00.000Z` } : {}
@@ -5009,7 +5736,7 @@ ${calendarId}`;
   }
   async deleteTask(account, listId, id) {
     try {
-      await this.accounts.request(account, "DELETE", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`);
+      await this.accounts.request(account, "DELETE", `${TASKS}/lists/${enc3(listId)}/tasks/${enc3(id)}`);
     } catch (error) {
       if (!isGone(error))
         throw error;
@@ -5021,14 +5748,32 @@ ${calendarId}`;
       ...target.previous ? { previous: target.previous } : {},
       ...target.destination && target.destination !== listId ? { destinationTasklist: target.destination } : {}
     });
-    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}/move${query.size ? `?${query}` : ""}`);
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc3(listId)}/tasks/${enc3(id)}/move${query.size ? `?${query}` : ""}`);
     return raw ? toTaskItem(raw, account, target.destination ?? listId) : null;
   }
+  async mailItem(account, which) {
+    const metadata = "format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date";
+    try {
+      if (which.message) {
+        const raw = await this.accounts.request(account, "GET", `${GMAIL2}/messages/${enc3(which.message)}?${metadata}`);
+        return raw ? toMailItem(raw, account) : null;
+      }
+      if (!which.thread)
+        return null;
+      const thread = await this.accounts.request(account, "GET", `${GMAIL2}/threads/${enc3(which.thread)}?${metadata}`);
+      const latest = thread?.messages?.at(-1);
+      return latest ? toMailItem(latest, account) : null;
+    } catch (error) {
+      if (error instanceof GoogleError && (error.status === 404 || error.status === 400))
+        return null;
+      throw error;
+    }
+  }
   async mail(account, query, pageToken) {
-    const list = await this.accounts.request(account, "GET", `${GMAIL}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX), ...pageToken ? { pageToken } : {} })}`);
+    const list = await this.accounts.request(account, "GET", `${GMAIL2}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX), ...pageToken ? { pageToken } : {} })}`);
     const ids = (list?.messages ?? []).flatMap((message) => message.id ? [message.id] : []);
     const metadata = "format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date";
-    const messages = await mapLimited(ids, 5, (id) => this.accounts.request(account, "GET", `${GMAIL}/messages/${enc(id)}?${metadata}`));
+    const messages = await mapLimited(ids, 5, (id) => this.accounts.request(account, "GET", `${GMAIL2}/messages/${enc3(id)}?${metadata}`));
     return {
       messages: messages.map((raw) => raw ? toMailItem(raw, account) : null).filter((item) => Boolean(item)).sort((a, b) => b.date.localeCompare(a.date)),
       nextPageToken: list?.nextPageToken ?? null
@@ -5037,6 +5782,11 @@ ${calendarId}`;
 }
 
 // service/googleTimeboxes.ts
+var timeboxTarget = (state, taskId) => {
+  const channelId = state.tasks[taskId]?.channelId;
+  const channel = channelId && !state.channels[channelId]?.deletedAt ? state.settings.channelTimebox[channelId] : undefined;
+  return channel ?? state.settings.googleTimebox;
+};
 var calendarKey = (account, calendarId) => `${account}
 ${calendarId}`;
 var messageOf = (error) => error instanceof Error ? error.message : String(error);
@@ -5204,9 +5954,10 @@ class GoogleTimeboxes {
   }
   calendarsFor(state, timeMin, timeMax) {
     const found = new Map;
-    const target = state.settings.googleTimebox;
-    if (target)
-      found.set(calendarKey(target.account, target.calendarId), target);
+    for (const target of [state.settings.googleTimebox, ...Object.values(state.settings.channelTimebox)]) {
+      if (target)
+        found.set(calendarKey(target.account, target.calendarId), { account: target.account, calendarId: target.calendarId });
+    }
     for (const block of Object.values(state.blocks)) {
       if (!block.google || block.start < timeMin || block.start >= timeMax)
         continue;
@@ -5270,13 +6021,12 @@ class GoogleTimeboxes {
     return this.queues.has(blockId) || (this.written.get(blockId) ?? 0) >= readAt - SLACK_MS || this.planner.reloadedAt >= readAt - SLACK_MS;
   }
   observe(before, after) {
-    const target = after.settings.googleTimebox;
     const renamed = new Set(Object.values(after.tasks).filter((task) => before.tasks[task.id] && (before.tasks[task.id].title !== task.title || sessionVisibility(before, task.id) !== sessionVisibility(after, task.id))).map((task) => task.id));
     for (const block of Object.values(after.blocks)) {
       const previous = before.blocks[block.id];
       const moved = !previous || previous.start !== block.start || previous.end !== block.end;
       const linked = Boolean(block.google ?? this.created.get(block.id));
-      if (linked ? moved || renamed.has(block.taskId) : Boolean(target) && moved)
+      if (linked ? moved || renamed.has(block.taskId) : Boolean(timeboxTarget(after, block.taskId)) && moved)
         this.enqueue(block.id, () => this.write(block.id));
     }
     for (const previous of Object.values(before.blocks)) {
@@ -5305,7 +6055,7 @@ class GoogleTimeboxes {
     if (!block)
       return;
     const link = block.google ?? this.created.get(blockId) ?? null;
-    const target = link ?? state.settings.googleTimebox;
+    const target = link ?? timeboxTarget(state, block.taskId);
     if (!target)
       return;
     const visibility = sessionVisibility(state, block.taskId);
@@ -6601,13 +7351,13 @@ var orderAgents = (agents) => {
   return agents.sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
 };
 var parseModels = (out) => [...new Set(out.split(/\r?\n/).map((line) => line.trim()).filter((line) => isModelRef(line) && !line.includes("#")))].sort((a, b) => a.localeCompare(b));
-var dataOf = (json) => {
+var dataOf2 = (json) => {
   const data = json?.data;
   return Array.isArray(data) ? data : [];
 };
 var parseModelDetails = (json) => {
   const details = new Map;
-  for (const item of dataOf(json)) {
+  for (const item of dataOf2(json)) {
     const model = item;
     if (typeof model.id !== "string" || typeof model.providerID !== "string")
       continue;
@@ -6622,7 +7372,7 @@ var parseModelDetails = (json) => {
   }
   return details;
 };
-var parseLiveAgents = (json) => dataOf(json).flatMap((item) => {
+var parseLiveAgents = (json) => dataOf2(json).flatMap((item) => {
   const agent = item;
   if (!isAgentName(agent.id) || agent.mode === "subagent" || agent.hidden === true)
     return [];
@@ -6637,7 +7387,7 @@ var parseLiveAgents = (json) => dataOf(json).flatMap((item) => {
     source: "global"
   }];
 });
-var parseCommandNames = (json) => dataOf(json).flatMap((item) => {
+var parseCommandNames = (json) => dataOf2(json).flatMap((item) => {
   const name = item?.name;
   return typeof name === "string" ? [name] : [];
 });
@@ -6897,7 +7647,10 @@ var feeds = new CalendarFeeds(join4(dirname5(dir), "cache"));
 var linearWorkspaces = new LinearWorkspaces(join4(dirname5(dir), "linear-workspaces.json"), undefined, log);
 var google = new GoogleAccounts(join4(dirname5(dir), "google-accounts.json"), undefined, undefined, log);
 var googleData = new GoogleData(google);
+var gmail = new GmailActions(google);
+var contacts = new GoogleContacts(google);
 var googleCalendars = new GoogleCalendars(googleData);
+var meetings = new MeetingImport(planner, googleCalendars, log);
 var googleDueTasks = new GoogleDueTasks(googleData);
 var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
 var taskAccounts = async () => (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email);
@@ -7077,6 +7830,60 @@ var googleRoute = async (req, url) => {
     googleDueTasks.forget();
     return ok({ task });
   }
+  if (path === "/google/mail/labels" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    if (!isEmail2(email))
+      return { status: 400, body: { error: "account is required" } };
+    return ok({ labels: await gmail.labels(email) });
+  }
+  if (path === "/google/mail/thread" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    const thread = url.searchParams.get("thread") ?? "";
+    if (!isEmail2(email) || !/^[0-9a-zA-Z_-]{1,64}$/.test(thread))
+      return { status: 400, body: { error: "account and thread are required" } };
+    const found = await gmail.thread(email, thread);
+    return found ? ok({ thread: found }) : { status: 404, body: { error: "Gmail no longer has this email" } };
+  }
+  if (path === "/google/contacts" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    const query = (url.searchParams.get("q") ?? "").trim();
+    if (!isEmail2(email) || !query || query.length > 100)
+      return { status: 400, body: { error: "account and a search of at most 100 characters are required" } };
+    const allowed = (await google.status()).accounts.find((account) => account.email === email)?.features.includes("contacts");
+    if (!allowed)
+      return { status: 403, body: { error: `Google Contacts are not allowed for ${email}: allow them to search people to invite`, reason: "not-allowed" } };
+    return ok({ contacts: await contacts.search(email, query) });
+  }
+  if (path === "/google/mail/act" && req.method === "POST") {
+    const body = await readJson(req);
+    const actions = Array.isArray(body.actions) ? body.actions : [];
+    const valid = actions.length > 0 && actions.length <= 12 && actions.every((action) => Boolean(action) && GMAIL_ACTIONS.includes(action.kind) && (action.kind === "addLabel" || action.kind === "removeLabel" ? typeof action.label === "string" && action.label.trim().length > 0 && action.label.length <= 225 : action.label === undefined));
+    if (!isEmail2(body.account) || typeof body.thread !== "string" || !/^[0-9a-zA-Z_-]{1,64}$/.test(body.thread) || !valid)
+      return { status: 400, body: { error: "account, thread and one to twelve Gmail actions are required" } };
+    const allowed = (await google.status()).accounts.find((account) => account.email === body.account)?.features.includes("mailActions");
+    if (!allowed)
+      return { status: 403, body: { error: `Gmail actions are not allowed for ${body.account}: allow them in Settings → Google`, reason: "not-allowed" } };
+    return ok(await gmail.act(body.account, body.thread, actions));
+  }
+  if (path === "/google/mail/resolve" && req.method === "POST") {
+    const body = await readJson(req);
+    const id = (value) => typeof value === "string" && /^[0-9a-f]{1,32}$/.test(value);
+    if (!id(body.thread) && !id(body.message))
+      return { status: 400, body: { error: "thread or message must be a Gmail API id" } };
+    const accounts = (await google.status()).accounts.filter((account) => account.features.includes("mail")).map((account) => account.email);
+    const named = isEmail2(body.account) ? body.account.toLowerCase() : null;
+    const errors = [];
+    for (const account of [...accounts.filter((email) => email === named), ...accounts.filter((email) => email !== named)]) {
+      try {
+        const item = await googleData.mailItem(account, { thread: id(body.thread) ? body.thread : null, message: id(body.message) ? body.message : null });
+        if (item)
+          return ok({ item });
+      } catch (error) {
+        errors.push(`${account}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { status: 404, body: { error: errors.length ? errors.join("; ") : accounts.length ? "This message is in none of your Gmail accounts" : "No Google account has Gmail" } };
+  }
   if (path === "/google/mail" && req.method === "GET") {
     const email = url.searchParams.get("account");
     const query = url.searchParams.get("q") ?? "in:inbox";
@@ -7130,12 +7937,22 @@ var server = http2.createServer(async (req, res) => {
     }
     if (url.pathname === "/github/list" && req.method === "GET") {
       const kind = url.searchParams.get("kind") ?? "assigned";
-      if (!(kind in LISTS)) {
-        json(res, 400, { error: "kind must be assigned, review or mine" });
+      const after = url.searchParams.get("after");
+      const text = url.searchParams.get("q") ?? "";
+      if (!(kind in LISTS) || after !== null && !/^[A-Za-z0-9+/=_-]{1,200}$/.test(after) || text.length > 200) {
+        json(res, 400, { error: "kind must be assigned, review or mine; after a cursor; q at most 200 characters" });
         return;
       }
       try {
-        json(res, 200, { items: await github.list(kind) });
+        json(res, 200, await github.list(kind, { after, text }));
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === "/github/repos" && req.method === "GET") {
+      try {
+        json(res, 200, { repos: await github.repositories() });
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -7144,6 +7961,10 @@ var server = http2.createServer(async (req, res) => {
     if (url.pathname === "/github/items" && req.method === "POST") {
       const body = await readJson(req);
       const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === "string" && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+      if (ids.length > NODES_MAX) {
+        json(res, 400, { error: `at most ${NODES_MAX} ids a request` });
+        return;
+      }
       try {
         json(res, 200, { items: await github.items(ids) });
       } catch (error) {
@@ -7151,9 +7972,49 @@ var server = http2.createServer(async (req, res) => {
       }
       return;
     }
+    if (url.pathname === "/meetings/sync" && req.method === "POST") {
+      json(res, 200, await meetings.run());
+      return;
+    }
+    if (url.pathname === "/github/activity" && req.method === "GET") {
+      const from = url.searchParams.get("from") ?? "";
+      const to = url.searchParams.get("to") ?? "";
+      const source = url.searchParams.get("source");
+      const after = url.searchParams.get("after") ?? "";
+      const instant = (value) => /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+      const span = Date.parse(to) - Date.parse(from);
+      if (!instant(from) || !instant(to) || !(span > 0 && span <= 26 * 3600000) || source !== null && !ACTIVITY_SOURCES.includes(source) || !/^[A-Za-z0-9+/=_:-]{0,400}$/.test(after)) {
+        json(res, 400, { error: "from and to must be the bounds of one day (ISO instants); source one of the activity sources; after a cursor" });
+        return;
+      }
+      try {
+        json(res, 200, source ? await github.activityPage(source, from, to, after) : await github.activity(from, to));
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === "/github/resolve" && req.method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.url !== "string" || !parseGitHubUrl(body.url)) {
+        json(res, 400, { error: "url must be a GitHub issue or pull request URL" });
+        return;
+      }
+      try {
+        const item = await github.byUrl(body.url);
+        json(res, item ? 200 : 404, item ? { item } : { error: `${parseGitHubUrl(body.url).key} was not found on GitHub, or this gh can't see it` });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
     if (url.pathname === "/github/pulls" && req.method === "POST") {
       const body = await readJson(req);
-      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
+      if (Array.isArray(body.runs) && body.runs.length > PULL_LOOKUPS_PER_REQUEST) {
+        json(res, 400, { error: `at most ${PULL_LOOKUPS_PER_REQUEST} runs a request` });
+        return;
+      }
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup) : [];
       const results = await mapLimited2(runs, 4, async (run) => {
         try {
           return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };
@@ -7360,3 +8221,4 @@ var shutdown = async () => {
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 server.listen(port, "127.0.0.1");
+meetings.start();

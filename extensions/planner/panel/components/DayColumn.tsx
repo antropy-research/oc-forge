@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { showCalendarDay } from '../lib/sourcePanel.ts';
 import type { DateKey, Task } from '../../src/domain/types.ts';
 import { playlistTimes } from '../../src/domain/schedule.ts';
 import { busyTaskEvents } from '../../src/domain/gtaskKept.ts';
@@ -74,7 +75,10 @@ export const DayColumn = ({ date, wide = false }: { date: DateKey; wide?: boolea
     <section class={classes} aria-label={`${dayLabel(date, view.today)}, ${monthDay(date)}`}>
       <header class="day-header">
         <div>
-          <div class="day-name">{dayLabel(date, view.today)}</div>
+          {/* Sunsama: the name of a date at the top of its list shows that day's calendar in the panel. */}
+          <button class="day-name" aria-label={`Show the calendar of ${weekdayName(date)}, ${monthDay(date)}`} title="Show this day's calendar in the panel" onClick={() => showCalendarDay(date)}>
+            {dayLabel(date, view.today)}
+          </button>
           <div class="day-date">{weekdayName(date)}, {monthDay(date)}</div>
         </div>
         <div class="day-tools">

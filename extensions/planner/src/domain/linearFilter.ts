@@ -545,7 +545,35 @@ export interface FilterCatalog {
   cycles: { id: string; number: number; name: string | null; isActive?: boolean; isNext?: boolean; startsAt?: string; endsAt?: string; team: { id: string; key: string } }[];
   /** Project milestones, with their project. */
   milestones?: { id: string; name: string; targetDate?: string | null; project: { id: string; name: string } }[];
+  /** What Linear has more of than the catalog read (its bound of pages, or a team's first 50 states): said in the filter menu. */
+  partial?: CatalogPart[];
 }
+
+/** A catalog's lists, as `FilterCatalog.partial` names them. */
+export type CatalogPart = 'teams' | 'states' | 'users' | 'labels' | 'projects' | 'cycles' | 'milestones';
+
+/** The catalog part a property's values come from. */
+const FIELD_PARTS: Partial<Record<LinearFilterField, CatalogPart>> = {
+  status: 'states',
+  assignee: 'users',
+  creator: 'users',
+  subscriber: 'users',
+  label: 'labels',
+  project: 'projects',
+  milestone: 'milestones',
+  team: 'teams',
+  cycle: 'cycles',
+  estimate: 'teams',
+};
+
+const PART_NOUNS: Record<CatalogPart, string> = { teams: 'teams', states: 'workflow states', users: 'people', labels: 'labels', projects: 'projects', cycles: 'cycles', milestones: 'milestones' };
+
+/** What a property's values menu says when Linear has more of them than the catalog read; null when it lists them all. */
+export const partialNote = (field: LinearFilterField, catalogs: readonly FilterCatalog[]): string | null => {
+  const part = FIELD_PARTS[field];
+  if (!part || !catalogs.some((catalog) => catalog.partial?.includes(part))) return null;
+  return `Linear has more ${PART_NOUNS[part]} than this menu lists; a view saved in Linear filters by any of them`;
+};
 
 export interface FilterOption extends FilterValue {
   /** A second line or a short note, such as the teams a state belongs to. */

@@ -42,8 +42,8 @@ export interface LinearIssue {
   projectMilestone?: { id: string; name: string } | null;
   /** The issue this one is a sub-issue of. */
   parent?: { id: string; identifier: string; title: string } | null;
-  /** Its labels, for filtering; absent on issues read before lists carried them. */
-  labels?: { nodes: LinearLabel[] };
+  /** Its labels, for filtering; absent on issues read before lists carried them. The first 25: `pageInfo` says when it has more. */
+  labels?: { nodes: LinearLabel[]; pageInfo?: { hasNextPage: boolean } };
   /** External items Linear keeps in sync with this issue (its GitHub Issues sync). */
   syncedWith?: { service: string; metadata?: { owner?: string | null; repo?: string | null; number?: number | null } | null }[] | null;
   /** The workspace the Planner read it from; the Planner sets this, Linear does not. */
@@ -155,12 +155,25 @@ export interface LinearAttachment {
 /** An issue as the issue view shows it: description, sub-issues, links, activity and comments. */
 export interface LinearIssueDetail extends LinearIssue {
   description: string | null;
-  labels: { nodes: LinearLabel[] };
-  comments: { nodes: LinearComment[] };
-  children?: { nodes: LinearSubIssue[] };
-  attachments?: { nodes: LinearAttachment[] };
-  history?: { nodes: LinearHistoryEntry[] };
+  labels: { nodes: LinearLabel[]; pageInfo?: { hasNextPage: boolean } };
+  comments: { nodes: LinearComment[]; pageInfo?: { hasNextPage: boolean } };
+  children?: { nodes: LinearSubIssue[]; pageInfo?: { hasNextPage: boolean } };
+  attachments?: { nodes: LinearAttachment[]; pageInfo?: { hasNextPage: boolean } };
+  history?: { nodes: LinearHistoryEntry[]; pageInfo?: { hasNextPage: boolean } };
 }
+
+/**
+ * What an issue's page shows the first of while Linear has more (its labels, sub-issues, links, comments and
+ * activity are read with it, a page of each), so the page says so instead of leaving the rest out unsaid.
+ */
+export const issueDetailMore = (issue: LinearIssueDetail): string[] =>
+  ([
+    [issue.labels.pageInfo, 'labels'],
+    [issue.children?.pageInfo, 'sub-issues'],
+    [issue.attachments?.pageInfo, 'links'],
+    [issue.comments.pageInfo, 'comments'],
+    [issue.history?.pageInfo, 'activity'],
+  ] as const).filter(([page]) => page?.hasNextPage).map(([, name]) => name);
 
 export interface LinearCycle {
   id: string;
@@ -205,7 +218,8 @@ export const ISSUE_INPUT_KEYS: readonly (keyof IssueInput)[] = ['title', 'descri
 
 export interface LinearProjectDetail extends LinearProject {
   content: string | null;
-  projectMilestones: { nodes: { id: string; name: string; targetDate: string | null; progress: number; sortOrder: number }[] };
+  /** The first 100; `pageInfo` says when the project has more. */
+  projectMilestones: { nodes: { id: string; name: string; targetDate: string | null; progress: number; sortOrder: number }[]; pageInfo?: { hasNextPage: boolean } };
   lastUpdate: { id: string; body: string; health: string; createdAt: string; url: string; user: { id: string; name: string } } | null;
 }
 
@@ -218,7 +232,7 @@ const ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrd
     cycle { id number name isActive isNext }
     projectMilestone { id name }
     parent { id identifier title }
-    labels(first: 25) { nodes { id name color } }
+    labels(first: 25) { nodes { id name color } pageInfo { hasNextPage } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 
 const PAGE = 'pageInfo { hasNextPage endCursor }';
@@ -275,14 +289,15 @@ export const VIEWS_QUERY = `query PlannerViews($after: String) {
 }`;
 
 /** My favorites in Linear's sidebar: views, projects and issues, in its order. */
-export const FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
-  favorites(first: 250) {
+export const FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews($after: String) {
+  favorites(first: 250, after: $after) {
     nodes {
       id type sortOrder
       customView { id }
       project { ${PROJECT_FIELDS} }
       issue { id identifier title url state { id name type color } team { id key name } }
     }
+    ${PAGE}
   }
 }`;
 
@@ -341,9 +356,9 @@ export const TEAM_STATES_QUERY = `query PlannerTeamStates($id: String!) {
   team(id: $id) { id states(first: 100) { nodes { id name type color position } } }
 }`;
 
-export const TEAMS_QUERY = `query PlannerTeams {
+export const TEAMS_QUERY = `query PlannerTeams($after: String) {
   viewer { id }
-  teams(first: 100) { nodes { id key name } }
+  teams(first: 100, after: $after) { nodes { id key name } ${PAGE} }
 }`;
 
 /** Which workspace a connection or key reaches, and as whom. */
@@ -365,7 +380,7 @@ export const PROJECT_QUERY = `query PlannerProject($id: String!) {
   project(id: $id) {
     ${PROJECT_FIELDS}
     content
-    projectMilestones(first: 25) { nodes { id name targetDate progress sortOrder } }
+    projectMilestones(first: 100) { nodes { id name targetDate progress sortOrder } pageInfo { hasNextPage } }
     lastUpdate { id body health createdAt url user { id name } }
   }
 }`;
@@ -375,7 +390,7 @@ export const PROJECT_QUERY = `query PlannerProject($id: String!) {
 // page by page.
 export const FILTER_TEAMS_QUERY = `query PlannerFilterTeams($after: String) {
   teams(first: 50, after: $after) {
-    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } } }
+    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } pageInfo { hasNextPage } } }
     ${PAGE}
   }
 }`;
@@ -429,10 +444,10 @@ const HISTORY_FIELDS = `id createdAt actor { id name } botActor { name }
 // ISSUE_FIELDS carries the labels already.
 const DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
-    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }
-    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } }
-    attachments(first: 25) { nodes { id title subtitle url sourceType } }
-    history(first: 50) { nodes { ${HISTORY_FIELDS} } }`;
+    comments(first: 100) { nodes { ${COMMENT_FIELDS} } pageInfo { hasNextPage } }
+    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } pageInfo { hasNextPage } }
+    attachments(first: 25) { nodes { id title subtitle url sourceType } pageInfo { hasNextPage } }
+    history(first: 50) { nodes { ${HISTORY_FIELDS} } pageInfo { hasNextPage } }`;
 
 /** One issue with its description, sub-issues, links, activity and comments, for the issue view. */
 export const ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
@@ -447,13 +462,33 @@ export const TEAM_OPTIONS_QUERY = `query PlannerTeamOptions($id: String!) {
     issueEstimationType
     issueEstimationAllowZero
     issueEstimationExtended
-    states(first: 100) { nodes { id name type color position } }
-    members(first: 250) { nodes { id name displayName active } }
-    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } }
-    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } }
-    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } }
+    states(first: 100) { nodes { id name type color position } ${PAGE} }
+    members(first: 250) { nodes { id name displayName active } ${PAGE} }
+    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }
+    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }
   }
-  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } }
+  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+}`;
+
+/** The rest of one of a team's options, after TEAM_OPTIONS_QUERY's first page of it, with the same filter. */
+const TEAM_OPTION_PAGES = {
+  states: `states(first: 250, after: $after) { nodes { id name type color position } ${PAGE} }`,
+  members: `members(first: 250, after: $after) { nodes { id name displayName active } ${PAGE} }`,
+  labels: `labels(first: 250, after: $after, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }`,
+  cycles: `cycles(first: 250, after: $after, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }`,
+  projects: `projects(first: 250, after: $after, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }`,
+} as const;
+
+export type TeamOptionField = keyof typeof TEAM_OPTION_PAGES;
+
+export const teamOptionPageQuery = (field: TeamOptionField): string => `query PlannerTeamOptionPage($id: String!, $after: String) {
+  team(id: $id) { id ${TEAM_OPTION_PAGES[field]} }
+}`;
+
+/** The rest of the workspace's own labels (no team's), after TEAM_OPTIONS_QUERY's first page of them. */
+export const WORKSPACE_LABELS_QUERY = `query PlannerWorkspaceLabels($after: String) {
+  issueLabels(first: 250, after: $after, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
 }`;
 
 export const UPDATE_ISSUE_MUTATION = `mutation PlannerUpdateIssue($id: String!, $input: IssueUpdateInput!) {

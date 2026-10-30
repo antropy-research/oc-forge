@@ -7,9 +7,15 @@ import { EventStore } from './store.ts';
 import { Planner } from './planner.ts';
 import { CalendarFeeds } from './calendars.ts';
 import { SyncManager } from './sync.ts';
-import { GitHubSource, LISTS, type ListKind } from './github.ts';
+import { GitHubSource, LISTS, NODES_MAX, type ListKind } from './github.ts';
+import { parseGitHubUrl } from '../src/domain/github.ts';
+import { ACTIVITY_SOURCES, type ActivitySource } from '../src/domain/githubActivity.ts';
 import { LinearWorkspaces, WorkspaceError } from './linear.ts';
 import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from './google.ts';
+import { GmailActions } from './gmail.ts';
+import { GoogleContacts } from './contacts.ts';
+import { MeetingImport } from './meetings.ts';
+import { GMAIL_ACTIONS, type GmailAction } from '../src/domain/types.ts';
 import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
 import { googleWriteRoute } from './googleRoutes.ts';
@@ -50,7 +56,11 @@ const linearWorkspaces = new LinearWorkspaces(join(dirname(dir), 'linear-workspa
 // Google's client secret and refresh tokens likewise stay beside the data, never in it.
 const google = new GoogleAccounts(join(dirname(dir), 'google-accounts.json'), undefined, undefined, log);
 const googleData = new GoogleData(google);
+const gmail = new GmailActions(google);
+const contacts = new GoogleContacts(google);
 const googleCalendars = new GoogleCalendars(googleData);
+// Sunsama's meeting import: ended meetings completed, auto-sync's meetings added, followed and removed.
+const meetings = new MeetingImport(planner, googleCalendars, log);
 const googleDueTasks = new GoogleDueTasks(googleData);
 const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync!.idle(), log, onWrite: () => googleCalendars.forget() });
 const taskAccounts = async (): Promise<string[]> => (await google.status()).accounts.filter((account) => account.features.includes('tasks')).map((account) => account.email);
@@ -254,6 +264,57 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     googleDueTasks.forget();
     return ok({ task });
   }
+  // Gmail beyond reading (Sunsama's actions on an email task and its automations): labels, a thread, and the actions.
+  if (path === '/google/mail/labels' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    if (!isEmail(email)) return { status: 400, body: { error: 'account is required' } };
+    return ok({ labels: await gmail.labels(email) });
+  }
+  if (path === '/google/mail/thread' && req.method === 'GET') {
+    const email = url.searchParams.get('account');
+    const thread = url.searchParams.get('thread') ?? '';
+    if (!isEmail(email) || !/^[0-9a-zA-Z_-]{1,64}$/.test(thread)) return { status: 400, body: { error: 'account and thread are required' } };
+    const found = await gmail.thread(email, thread);
+    return found ? ok({ thread: found }) : { status: 404, body: { error: 'Gmail no longer has this email' } };
+  }
+  if (path === '/google/contacts' && req.method === 'GET') {
+    // People to invite, by name or address (Sunsama's Google Contacts integration); the account must allow Contacts.
+    const email = url.searchParams.get('account');
+    const query = (url.searchParams.get('q') ?? '').trim();
+    if (!isEmail(email) || !query || query.length > 100) return { status: 400, body: { error: 'account and a search of at most 100 characters are required' } };
+    const allowed = (await google.status()).accounts.find((account) => account.email === email)?.features.includes('contacts');
+    if (!allowed) return { status: 403, body: { error: `Google Contacts are not allowed for ${email}: allow them to search people to invite`, reason: 'not-allowed' } };
+    return ok({ contacts: await contacts.search(email, query) });
+  }
+  if (path === '/google/mail/act' && req.method === 'POST') {
+    const body = (await readJson(req)) as { account?: unknown; thread?: unknown; actions?: unknown };
+    const actions = Array.isArray(body.actions) ? body.actions : [];
+    const valid = actions.length > 0 && actions.length <= 12 && actions.every((action: Partial<GmailAction> | null) =>
+      Boolean(action) && (GMAIL_ACTIONS as readonly unknown[]).includes(action!.kind) &&
+      (action!.kind === 'addLabel' || action!.kind === 'removeLabel' ? typeof action!.label === 'string' && action!.label.trim().length > 0 && action!.label.length <= 225 : action!.label === undefined));
+    if (!isEmail(body.account) || typeof body.thread !== 'string' || !/^[0-9a-zA-Z_-]{1,64}$/.test(body.thread) || !valid) return { status: 400, body: { error: 'account, thread and one to twelve Gmail actions are required' } };
+    const allowed = (await google.status()).accounts.find((account) => account.email === body.account)?.features.includes('mailActions');
+    if (!allowed) return { status: 403, body: { error: `Gmail actions are not allowed for ${body.account}: allow them in Settings → Google`, reason: 'not-allowed' } };
+    return ok(await gmail.act(body.account, body.thread, actions as GmailAction[]));
+  }
+  if (path === '/google/mail/resolve' && req.method === 'POST') {
+    // A pasted Gmail address, as Sunsama imports one: its message, in the account it names first, else in each with Gmail.
+    const body = (await readJson(req)) as { thread?: unknown; message?: unknown; account?: unknown };
+    const id = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{1,32}$/.test(value);
+    if (!id(body.thread) && !id(body.message)) return { status: 400, body: { error: 'thread or message must be a Gmail API id' } };
+    const accounts = (await google.status()).accounts.filter((account) => account.features.includes('mail')).map((account) => account.email);
+    const named = isEmail(body.account) ? body.account.toLowerCase() : null;
+    const errors: string[] = [];
+    for (const account of [...accounts.filter((email) => email === named), ...accounts.filter((email) => email !== named)]) {
+      try {
+        const item = await googleData.mailItem(account, { thread: id(body.thread) ? body.thread : null, message: id(body.message) ? body.message : null });
+        if (item) return ok({ item });
+      } catch (error) {
+        errors.push(`${account}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { status: 404, body: { error: errors.length ? errors.join('; ') : accounts.length ? 'This message is in none of your Gmail accounts' : 'No Google account has Gmail' } };
+  }
   if (path === '/google/mail' && req.method === 'GET') {
     const email = url.searchParams.get('account');
     const query = url.searchParams.get('q') ?? 'in:inbox';
@@ -308,13 +369,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/github/list' && req.method === 'GET') {
+      // A page of a list: from `after` (the previous page's cursor), narrowed by `q`; its `next` reaches the rest.
       const kind = url.searchParams.get('kind') ?? 'assigned';
-      if (!(kind in LISTS)) {
-        json(res, 400, { error: 'kind must be assigned, review or mine' });
+      const after = url.searchParams.get('after');
+      const text = url.searchParams.get('q') ?? '';
+      if (!(kind in LISTS) || (after !== null && !/^[A-Za-z0-9+/=_-]{1,200}$/.test(after)) || text.length > 200) {
+        json(res, 400, { error: 'kind must be assigned, review or mine; after a cursor; q at most 200 characters' });
         return;
       }
       try {
-        json(res, 200, { items: await github.list(kind as ListKind) });
+        json(res, 200, await github.list(kind as ListKind, { after, text }));
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/repos' && req.method === 'GET') {
+      // The repositories the viewer contributes to, most recently pushed first (the panel's Repository choice).
+      try {
+        json(res, 200, { repos: await github.repositories() });
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -323,8 +396,52 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/github/items' && req.method === 'POST') {
       const body = (await readJson(req)) as { ids?: unknown };
       const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+      // One gh call a request: the panel sends its linked items 100 at a time; more is refused, not cut short.
+      if (ids.length > NODES_MAX) {
+        json(res, 400, { error: `at most ${NODES_MAX} ids a request` });
+        return;
+      }
       try {
         json(res, 200, { items: await github.items(ids) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/meetings/sync' && req.method === 'POST') {
+      // A meeting-import setting changed (or a check asks): ended meetings completed, auto-sync's applied now.
+      json(res, 200, await meetings.run());
+      return;
+    }
+    if (url.pathname === '/github/activity' && req.method === 'GET') {
+      // The day's GitHub work for Daily Highlights: the first page of each source, or the next page of one (`source`, `after`).
+      const from = url.searchParams.get('from') ?? '';
+      const to = url.searchParams.get('to') ?? '';
+      const source = url.searchParams.get('source');
+      const after = url.searchParams.get('after') ?? '';
+      const instant = (value: string) => /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+      const span = Date.parse(to) - Date.parse(from);
+      if (!instant(from) || !instant(to) || !(span > 0 && span <= 26 * 3_600_000) || (source !== null && !(ACTIVITY_SOURCES as readonly string[]).includes(source)) || !/^[A-Za-z0-9+/=_:-]{0,400}$/.test(after)) {
+        json(res, 400, { error: 'from and to must be the bounds of one day (ISO instants); source one of the activity sources; after a cursor' });
+        return;
+      }
+      try {
+        json(res, 200, source ? await github.activityPage(source as ActivitySource, from, to, after) : await github.activity(from, to));
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/resolve' && req.method === 'POST') {
+      // A pasted issue or pull request URL, as Sunsama imports one: the item GitHub has there.
+      const body = (await readJson(req)) as { url?: unknown };
+      if (typeof body.url !== 'string' || !parseGitHubUrl(body.url)) {
+        json(res, 400, { error: 'url must be a GitHub issue or pull request URL' });
+        return;
+      }
+      try {
+        const item = await github.byUrl(body.url);
+        json(res, item ? 200 : 404, item ? { item } : { error: `${parseGitHubUrl(body.url)!.key} was not found on GitHub, or this gh can't see it` });
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -334,7 +451,12 @@ const server = http.createServer(async (req, res) => {
       // Pull requests that agents opened from their runs' worktree branches. Four
       // at a time, in parallel, so the request ends well within the host's 20 seconds.
       const body = (await readJson(req)) as { runs?: unknown };
-      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
+      // The panel sends them PULL_LOOKUPS_PER_REQUEST at a time; more is refused, not cut short.
+      if (Array.isArray(body.runs) && body.runs.length > PULL_LOOKUPS_PER_REQUEST) {
+        json(res, 400, { error: `at most ${PULL_LOOKUPS_PER_REQUEST} runs a request` });
+        return;
+      }
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup) : [];
       const results = await mapLimited(runs, 4, async (run) => {
         try {
           return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };
@@ -554,3 +676,4 @@ process.on('SIGTERM', () => void shutdown());
 process.on('SIGINT', () => void shutdown());
 
 server.listen(port, '127.0.0.1');
+meetings.start();

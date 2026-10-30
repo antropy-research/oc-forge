@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
-import { githubMirrors, groupViews, isClosedType, isIssueView, linkedTask, type LinearIssue } from '../../src/domain/linear.ts';
+import { githubMirrors, groupViews, isClosedType, isIssueView, linkedTask, viewUrl, type LinearIssue, type LinearState } from '../../src/domain/linear.ts';
+import { ExternalLink } from './ExternalLink.tsx';
 import { groupIssues, sortIssues } from '../../src/domain/linearDisplay.ts';
 import { LINEAR_DRAG_TYPE, usePlanner, useLinear, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
@@ -126,13 +127,19 @@ export const LinearIssues = (_props: { page?: boolean }) => {
   const view = useView();
   const [term, setTerm] = useState('');
   const [filterOpen, setFilterOpen] = useState(false);
+  // Sunsama's "Filter by already imported": issues already planned shown (with where they are) or left out.
+  const [imported, setImported] = useState(true);
   useEffect(() => linear.use('side'), [linear]);
   if (needsConnect(lv)) return <ConnectLinear />;
   const list = lv.lists.side;
   const display = displayOf(list, view.state.settings, 'side');
+  const shownIssues = imported ? list.issues : list.issues.filter((issue) => !linkedTask(view.state, issue.id, githubMirrors(issue)));
+  const hiddenImported = list.issues.length - shownIssues.length;
+  const viewWorkspace = list.source.kind === 'view' ? lv.workspaces.find((workspace) => workspace.id === (list.source as { workspaceId: string }).workspaceId) : null;
+  const firstWorkspace = lv.workspaces.find((workspace) => lv.scope === 'all' || workspace.id === lv.scope) ?? null;
   const views = lv.views.filter((item) => isIssueView(item) && (lv.scope === 'all' || item.workspaceId === lv.scope));
   const names = lv.scope === 'all' ? workspaceNames(lv) : undefined;
-  const groups = groupIssues(sortIssues(list.issues, display.orderBy, display.orderReverse), display.groupBy, { layout: 'list', workspaceNames: workspaceNames(lv) });
+  const groups = groupIssues(sortIssues(shownIssues, display.orderBy, display.orderReverse), display.groupBy, { layout: 'list', workspaceNames: workspaceNames(lv) });
   const more = Object.keys(list.more).length > 0;
   return (
     <div class="linear-issues">
@@ -170,6 +177,17 @@ export const LinearIssues = (_props: { page?: boolean }) => {
         }}
       />
       <FilterBar listId="side" open={filterOpen} onOpenChange={setFilterOpen} compact />
+      <div class="row linear-side-options">
+        <label class="grow">
+          <input type="checkbox" checked={imported} onChange={(event) => setImported(event.currentTarget.checked)} /> Show already imported
+        </label>
+        {list.view && viewWorkspace ? (
+          <ExternalLink className="link" href={viewUrl(viewWorkspace.urlKey, list.view)} label="Edit view in Linear">Edit view in Linear ↗</ExternalLink>
+        ) : firstWorkspace ? (
+          <ExternalLink className="link" href={`https://linear.app/${firstWorkspace.urlKey}/views`} label="Create a view in Linear">Create a view in Linear ↗</ExternalLink>
+        ) : null}
+      </div>
+      {hiddenImported > 0 && <p class="hint" role="status">{hiddenImported} already imported, not shown</p>}
       <LinearErrors error={list.error ?? lv.error} workspaceIds={linear.workspacesOf(list)} />
       {list.loading && list.issues.length === 0 && <p class="hint">Loading issues…</p>}
       {!list.loading && list.issues.length === 0 && !list.error && <p class="hint">{list.filters.length ? 'No issues match these filters.' : 'No open issues here.'}</p>}
@@ -193,20 +211,51 @@ export const LinearIssues = (_props: { page?: boolean }) => {
 export const LinearPromptBar = () => {
   const { linear } = usePlanner();
   const lv = useLinear();
+  const view = useView();
   const prompt = lv.prompt;
+  const [states, setStates] = useState<LinearState[]>([]);
+  const [chosen, setChosen] = useState('');
   useEffect(() => {
     if (!prompt) return;
     // An unanswered question goes away on its own; the task detail can still move the issue.
-    const timer = setTimeout(() => linear.answerPrompt('no'), 20_000);
+    const timer = setTimeout(() => linear.answerPrompt('no'), 30_000);
     return () => clearTimeout(timer);
   }, [prompt, linear]);
+  // Sunsama's prompt lets one pick the status: the team's states, Done (completing) or In Progress (planning, importing) first picked.
+  useEffect(() => {
+    setStates([]);
+    setChosen('');
+    const source = prompt ? linear.promptSource(prompt, view.state) : null;
+    if (!prompt || !source) return;
+    let live = true;
+    const want = prompt.kind === 'complete' ? 'completed' : 'started';
+    void linear
+      .statesForSource(source)
+      .then((found) => {
+        if (!live) return;
+        setStates(found);
+        setChosen((found.find((state) => state.type === want) ?? found[0])?.id ?? '');
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [prompt?.taskId, prompt?.kind, prompt?.subtaskId]);
   if (!prompt) return null;
-  const target = prompt.kind === 'complete' ? 'Done' : 'In Progress';
+  const now = linear.promptSource(prompt, view.state)?.status?.name;
+  const target = states.find((state) => state.id === chosen)?.name ?? (prompt.kind === 'complete' ? 'Done' : 'In Progress');
   return (
     <div class="linear-prompt" role="alertdialog" aria-label={`Update ${prompt.key} in Linear`}>
-      <span>Move <strong>{prompt.key}</strong> to {target} in Linear?</span>
-      <button class="primary" onClick={() => linear.answerPrompt('yes')}>Move</button>
-      <button onClick={() => linear.answerPrompt('always')}>Always</button>
+      <span>
+        {prompt.kind === 'import' ? 'Imported' : prompt.kind === 'complete' ? 'Completed' : 'Planned'} <strong>{prompt.key}</strong>: update its status in Linear{now ? ` (now ${now})` : ''}?
+      </span>
+      {states.length > 0 && (
+        <select aria-label="Status in Linear" value={chosen} onChange={(event) => setChosen(event.currentTarget.value)}>
+          {states.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}
+        </select>
+      )}
+      <button class="primary" onClick={() => linear.answerPrompt('yes', chosen || undefined)}>Move to {target}</button>
+      {prompt.kind !== 'import' && <button title={prompt.kind === 'complete' ? 'Always move a completed issue to Done' : 'Always move a planned issue to In Progress'} onClick={() => linear.answerPrompt('always')}>Always</button>}
       <button class="link" onClick={() => linear.answerPrompt('no')}>Not now</button>
     </div>
   );
@@ -244,6 +293,7 @@ const CreateIssue = ({ task }: { task: Task }) => {
           return <option key={item.id} value={item.id}>{workspace ? `${workspace} · ` : ''}{item.key} · {item.name}</option>;
         })}
       </select>
+      {linear.teamsCut.size > 0 && <span class="hint" role="note">Linear has more teams than listed here</span>}
       <button
         class="link"
         disabled={busy || !team}

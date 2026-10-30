@@ -5,7 +5,9 @@
 // and J / K, and a board of two teams' exact workflow states; Linear's advanced filters (all /
 // any, nested groups, content, subscribers, relations) built from the UI, a saved view whose
 // filter is an "or" of groups, and the page at 1024×768 with OpenChamber's sidebar open (its
-// own sidebar behind a toggle, "/" into the header's search).
+// own sidebar behind a toggle, "/" into the header's search); and, at 1440 and 1024, Sunsama's Linear integration in the
+// panel beside Today (sunsamaLinear: five days of completed issues, Show already imported, the view links, the import and
+// completion prompts moving to the state picked, a pasted issue's status, an issue merged into a task).
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/linear.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { makeFilters, page } from './linearFake.mjs';
@@ -283,6 +285,106 @@ const openFromSidebar = async (name) => {
   await frame.locator('.lin-head h1', { hasText: name }).waitFor({ timeout: 10_000 });
 };
 const heading = async () => (await frame.locator('.lin-head h1').first().innerText().catch(() => '')).trim();
+
+// Round 12: Sunsama's Linear integration (help.sunsama.com/docs/integrations/linear) in the panel beside Today, at the
+// size the page is: My issues keep completed issues five days; Show already imported; Create a view / Edit view in
+// Linear; the import automation's prompt (Show prompt to update status in Linear) and the completion one, each moving
+// the issue to the state picked; a pasted issue's status chosen in the add field; an issue merged into a task.
+const sunsamaLinear = async (size, { importKey, urlKey, mergeKey }) => {
+  // What these checks move in Linear is put back at the end: the steps after them read the same issues.
+  const saved = world.issues.map((item) => [item, item.state, item.completedAt, item.updatedAt]);
+  const go = async (name) => {
+    if (!(await h.nav(name).isVisible().catch(() => false))) await frame.getByRole('button', { name: 'Planner menu' }).click();
+    await h.nav(name).click();
+  };
+  const state = async () => (await h.call('GET', '/state')).json.state;
+  const taskOf = async (key) => Object.values((await state()).tasks).find((task) => task.source?.key === key && !task.deletedAt) ?? null;
+  const side = frame.locator('aside.side-panel');
+  const sideRow = (key) => side.locator(`li.issue-row[aria-label^="${key} "]`).first();
+  const card = (title) => frame.locator('li.task-card', { has: frame.locator('.task-title', { hasText: title }) }).first();
+  const day = () => frame.locator('section.day-column').first();
+  const moves = (id) => calls('PlannerSetState').filter((call) => call.variables.id === id).map((call) => call.variables.stateId);
+  await go('Settings');
+  await frame.getByRole('checkbox', { name: /Import automations: Show prompt to update status in Linear/ }).check();
+  await until(async () => (await state()).settings.linearImportPrompt === true);
+  await go('Today');
+  await frame.getByRole('tab', { name: 'Linear' }).click();
+  await side.locator('li.issue-row').first().waitFor({ timeout: 15_000 });
+  if (await side.getByRole('button', { name: 'Clear filters' }).isVisible().catch(() => false)) await side.getByRole('button', { name: 'Clear filters' }).click();
+  await side.getByRole('combobox', { name: 'Linear issues to show' }).selectOption('assigned');
+  await until(async () => (await side.locator('li.issue-row').count()) > 3);
+  const keys = async () => (await side.locator('li.issue-row').evaluateAll((items) => items.map((item) => item.getAttribute('aria-label') ?? ''))).map((text) => /^[A-Z]+-\d+/.exec(text)?.[0]).filter(Boolean);
+  check(`${size}: My issues beside the day keep completed issues five days (HAR-5, done two days ago), not older ones`, JSON.stringify(lastCall('PlannerAssigned')?.variables.filter ?? {}).includes('"completedAt":{"gte":"-P5D"}') && (await keys()).includes('HAR-5') && !(await keys()).includes('HAR-6'), (await keys()).join(','));
+  // Show already imported: off, an issue planned already is left out (OPS-1, planned beside Today before).
+  await side.getByRole('checkbox', { name: 'Show already imported' }).uncheck();
+  await until(async () => !(await keys()).includes('OPS-1'));
+  const hiddenNote = await side.getByRole('status').filter({ hasText: 'already imported' }).innerText().catch(() => '');
+  check(`${size}: "Show already imported" off leaves out the issues planned already, and says how many`, !(await keys()).includes('OPS-1') && /already imported, not shown/.test(hiddenNote), hiddenNote);
+  await h.shot(`21-sunsama-linear-imported-${size}`);
+  await side.getByRole('checkbox', { name: 'Show already imported' }).check();
+  // Create a view in Linear (My issues), Edit view in Linear (a saved view).
+  const create = await side.getByRole('link', { name: 'Create a view in Linear' }).getAttribute('href').catch(() => '');
+  await side.getByRole('combobox', { name: 'Linear issues to show' }).selectOption('view:org-h:v-open');
+  const edit = await side.getByRole('link', { name: 'Edit view in Linear' }).getAttribute('href', { timeout: 10_000 }).catch(() => '');
+  check(`${size}: the panel links to Linear to create a view, and to edit the one shown`, /^https:\/\/linear\.app\/(harness|side)\/views$/.test(create ?? '') && edit === 'https://linear.app/harness/view/slug-v-open', `${create} · ${edit}`);
+  await side.getByRole('combobox', { name: 'Linear issues to show' }).selectOption('assigned');
+  await sideRow(importKey).waitFor({ timeout: 15_000 });
+  // The import automation: right after importing, a prompt to update the status, any of the team's states.
+  const issueId = `iss-${importKey.toLowerCase()}`;
+  await sideRow(importKey).hover();
+  await sideRow(importKey).getByRole('button', { name: `Plan ${importKey} today` }).click();
+  const prompt = frame.getByRole('alertdialog', { name: `Update ${importKey} in Linear` });
+  await prompt.getByRole('combobox', { name: 'Status in Linear' }).waitFor({ timeout: 15_000 });
+  const choices = await prompt.getByRole('combobox', { name: 'Status in Linear' }).locator('option').allInnerTexts();
+  check(`${size}: importing an issue asks to update its status in Linear, offering the team's states`, choices.join('|') === 'Backlog|Todo|In Progress|In Review|Done|Canceled' && (await prompt.innerText()).includes('Imported'), choices.join('|'));
+  await prompt.getByRole('combobox', { name: 'Status in Linear' }).selectOption({ label: 'In Review' });
+  await h.shot(`22-sunsama-linear-import-prompt-${size}`);
+  await prompt.getByRole('button', { name: 'Move to In Review' }).click();
+  check(`${size}: the state picked is the one the issue moves to`, Boolean(await until(() => moves(issueId).includes('st-h-review'))), moves(issueId).join(','));
+  // The completion automation: completing it asks too, Done picked to start with.
+  const title = world.issues.find((item) => item.identifier === importKey).title;
+  const linearIcon = card(title).locator('a.source-open');
+  check(`${size}: the imported issue's card shows Linear's icon, which opens the issue in Linear`, (await linearIcon.getAttribute('aria-label')) === `Open ${importKey} in Linear` && (await linearIcon.getAttribute('href')) === world.issues.find((item) => item.identifier === importKey).url, await linearIcon.getAttribute('href'));
+  await card(title).getByRole('button', { name: 'Mark complete' }).click();
+  await prompt.getByRole('combobox', { name: 'Status in Linear' }).waitFor({ timeout: 15_000 });
+  const picked = await prompt.getByRole('combobox', { name: 'Status in Linear' }).evaluate((select) => select.selectedOptions[0]?.textContent ?? '');
+  check(`${size}: completing it asks again, Done picked; Move to Done moves it`, picked === 'Done' && (await prompt.innerText()).includes('Completed'), picked);
+  await prompt.getByRole('button', { name: 'Move to Done' }).click();
+  check(`${size}: …and the issue is Done in Linear`, Boolean(await until(() => moves(issueId).includes('st-h-done'))), moves(issueId).join(','));
+  // A pasted issue: its status in the add field, changed before it is added (Sunsama's "Updating Linear issue status when adding via URL").
+  await day().getByRole('button', { name: 'Add task' }).click();
+  await day().getByRole('textbox', { name: 'New task' }).fill(`https://linear.app/harness/issue/${urlKey}/x`);
+  const urlStatus = day().locator('.url-status select');
+  await urlStatus.waitFor({ timeout: 15_000 });
+  const urlIssue = world.issues.find((item) => item.identifier === urlKey);
+  const shownState = await urlStatus.evaluate((select) => select.selectedOptions[0]?.textContent ?? '');
+  await urlStatus.selectOption({ label: 'In Progress' });
+  await h.shot(`23-sunsama-linear-url-status-${size}`);
+  await day().getByRole('textbox', { name: 'New task' }).press('Enter');
+  await day().getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
+  const pasted = await until(() => taskOf(urlKey));
+  check(`${size}: a pasted issue shows its status in the add field; the one picked is set as it is added (and not asked again)`, shownState === urlIssue.state.name && Boolean(pasted) && Boolean(await until(() => moves(urlIssue.id).includes('st-h-prog'))) && (await frame.getByRole('alertdialog', { name: `Update ${urlKey} in Linear` }).count()) === 0, `${shownState} → ${moves(urlIssue.id).join(',')}`);
+  // Merged (Alt/Option + drop) straight from the panel into a task: a subtask still linked to the issue.
+  await day().getByRole('button', { name: 'Add task' }).click();
+  await day().getByRole('textbox', { name: 'New task' }).fill(`harness triage ${size}`);
+  await day().getByRole('textbox', { name: 'New task' }).press('Enter');
+  await day().getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
+  await card(`harness triage ${size}`).waitFor();
+  await sideRow(mergeKey).waitFor({ timeout: 15_000 });
+  await browserPage.keyboard.down('Alt');
+  await sideRow(mergeKey).dragTo(card(`harness triage ${size}`));
+  await browserPage.keyboard.up('Alt');
+  const triage = await until(async () => Object.values((await state()).tasks).find((task) => task.title === `harness triage ${size}` && task.subtasks?.length));
+  check(`${size}: an issue dropped with Alt/Option onto a task merges in as a subtask, still linked to Linear`, triage?.subtasks?.[0]?.source?.key === mergeKey && triage.subtasks[0].source.kind === 'linear' && !(await taskOf(mergeKey)), JSON.stringify(triage?.subtasks ?? null));
+  // Merged straight from the panel, it is imported: the import automation asks about it too.
+  const mergedPrompt = frame.getByRole('alertdialog', { name: `Update ${mergeKey} in Linear` });
+  check(`${size}: merged straight from the panel, the issue is imported: the import prompt asks about it`, await mergedPrompt.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
+  await h.shot(`24-sunsama-linear-merged-${size}`);
+  await mergedPrompt.getByRole('button', { name: 'Not now' }).click();
+  await go('Settings');
+  await frame.getByRole('checkbox', { name: /Import automations: Show prompt to update status in Linear/ }).uncheck();
+  for (const [item, issueState, completedAt, updatedAt] of saved) Object.assign(item, { state: issueState, completedAt, updatedAt });
+};
 
 try {
   await h.openPlanner();
@@ -595,6 +697,9 @@ try {
   // all / any at the top, content, subscribers and relations. Each goes to Linear as an IssueFilter, and the rows shown
   // are exactly the fake's own evaluation of that filter over its whole world (the view holds every issue).
   await browserPage.setViewportSize({ width: 1440, height: 900 });
+  await sunsamaLinear('1440', { importKey: 'HAR-2', urlKey: 'HAR-3', mergeKey: 'OPS-3' });
+  await h.nav('Linear').click();
+  await sidebar().waitFor({ timeout: 15_000 });
   await browserPage.keyboard.press('[');
   await sidebar().waitFor({ state: 'detached', timeout: 5000 });
   const folded = await frame.getByRole('button', { name: 'Show the sidebar' }).isVisible();
@@ -809,6 +914,8 @@ try {
   const focusedLabel = () => frame.locator(':focus').evaluate((element) => element.querySelector('.lin-nav-label')?.textContent ?? element.getAttribute('aria-label') ?? element.textContent ?? '').catch(() => '');
   await browserPage.keyboard.press('[');
   await overlay.waitFor({ timeout: 5000 });
+  // The sidebar puts the focus on the open section once it is drawn; keys pressed before then go nowhere.
+  await until(async () => (await focusedLabel()) === 'Created', 5000);
   const firstFocus = await focusedLabel();
   await browserPage.keyboard.press('ArrowDown');
   const onSubscribed = await focusedLabel();
@@ -817,6 +924,7 @@ try {
   check('"[" opens the sidebar on the open section; ↓ and Enter open Subscribed', firstFocus === 'Created' && onSubscribed === 'Subscribed' && (await overlay.count()) === 0, `${firstFocus} → ${onSubscribed}`);
   await browserPage.keyboard.press('[');
   await overlay.waitFor({ timeout: 5000 });
+  await until(async () => (await focusedLabel()) === 'Subscribed', 5000);
   await browserPage.keyboard.press('ArrowDown');
   await browserPage.keyboard.press('ArrowDown');
   const onFavorite = await focusedLabel();
@@ -879,6 +987,7 @@ try {
   await h.shot('20-linear-1024-issue');
   await browserPage.keyboard.press('Escape');
   await narrowIssue.waitFor({ state: 'detached', timeout: 5000 });
+  await sunsamaLinear('1024', { importKey: 'HAR-8', urlKey: 'HAR-7', mergeKey: 'OPS-2' });
   await browserPage.setViewportSize({ width: 1920, height: 1080 });
 
   // The host's own requests (such as its source-control binding) may fail in the dev container; those are not the Planner's.

@@ -663,6 +663,28 @@ export class GoogleData {
 
   // ── Gmail ──────────────────────────────────────────────────────────────────
 
+  /**
+   * The message a pasted Gmail address opens: a thread's latest message (by the thread's API id), or a message by
+   * its own; null when this account has neither.
+   */
+  async mailItem(account: string, which: { thread?: string | null; message?: string | null }): Promise<MailItem | null> {
+    const metadata = 'format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date';
+    try {
+      if (which.message) {
+        const raw = await this.accounts.request<RawMessage>(account, 'GET', `${GMAIL}/messages/${enc(which.message)}?${metadata}`);
+        return raw ? toMailItem(raw, account) : null;
+      }
+      if (!which.thread) return null;
+      const thread = await this.accounts.request<{ messages?: RawMessage[] }>(account, 'GET', `${GMAIL}/threads/${enc(which.thread)}?${metadata}`);
+      const latest = thread?.messages?.at(-1);
+      return latest ? toMailItem(latest, account) : null;
+    } catch (error) {
+      // Not this account's (Gmail answers 404, or 400 for an id it can't read).
+      if (error instanceof GoogleError && (error.status === 404 || error.status === 400)) return null;
+      throw error;
+    }
+  }
+
   /** One page of messages matching a Gmail search, newest first, and where the next page starts. */
   async mail(account: string, query: string, pageToken?: string): Promise<{ messages: MailItem[]; nextPageToken: string | null }> {
     const list = await this.accounts.request<{ messages?: { id?: string }[]; nextPageToken?: string }>(account, 'GET', `${GMAIL}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX), ...(pageToken ? { pageToken } : {}) })}`);

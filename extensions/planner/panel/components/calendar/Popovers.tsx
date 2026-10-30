@@ -1,10 +1,11 @@
 // Google Calendar's popovers: an event's details (with Edit, Delete, Duplicate,
-// RSVP and the Planner's "Plan as task"), a Google task's (edit, complete,
+// RSVP and Sunsama's "Add to tasks"), a Google task's (edit, complete,
 // delete, plan it), one upcoming occurrence of a repeating task (edit or
 // delete it alone, or its series), and a month day's "N more" list.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { DateKey, Task } from '../../../src/domain/types.ts';
+import type { DateKey, PlannerState, Task } from '../../../src/domain/types.ts';
+import { addMeetingCommands, eventKey, taskForEvent as meetingTaskFor } from '../../../src/domain/meetings.ts';
 import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
 import { compactClock, compactRange, eventSpan, longDay, weekdayShort } from '../../../src/domain/gcalendar.ts';
 import { describeRecurrence } from '../../../src/domain/rrule.ts';
@@ -59,9 +60,13 @@ const guestSummary = (detail: GoogleEventDetail): string => {
   return (['accepted', 'declined', 'tentative', 'needsAction'] as const).filter((response) => counts.get(response)).map((response) => `${counts.get(response)} ${RESPONSE_LABEL[response]}`).join(', ');
 };
 
-/** The Planner's task for an event: one on its day with its title. */
-const taskForEvent = (tasks: Readonly<Record<string, Task>>, event: CalendarEvent, day: DateKey): Task | null =>
-  Object.values(tasks).find((task) => task.title === event.title && !task.deletedAt && task.placement.kind === 'day' && task.placement.date === day) ?? null;
+/** The Planner's task for an event: the one added from it (not removed), else one on its day with its title. */
+const taskForEvent = (state: PlannerState, event: CalendarEvent, day: DateKey): Task | null => {
+  const key = eventKey(event);
+  const added = key ? meetingTaskFor(state, key) : null;
+  if (added && !added.deletedAt) return added;
+  return Object.values(state.tasks).find((task) => task.title === event.title && !task.deletedAt && task.placement.kind === 'day' && task.placement.date === day) ?? null;
+};
 
 export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: Anchor }) => {
   const { client, host } = usePlanner();
@@ -97,16 +102,22 @@ export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: 
   const calendar = view.state.calendars[event.calendarId];
   const color = eventColor(event, view.state);
   const day = eventSpan(event, zone).first;
-  const planned = taskForEvent(view.state.tasks, event, day);
+  const planned = taskForEvent(view.state, event, day);
   const minutes = event.allDay ? null : Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60_000);
   const description = detail?.description ? descriptionText(detail.description) : '';
   const meet = detail?.meet?.url ?? ref?.meet ?? null;
   const guests = detail?.attendees.filter((guest) => !guest.resource) ?? [];
+  // Sunsama's "Add to tasks": a task linked to the event, by its start time (an event of a calendar feed, unlinked).
   const plan = () => {
+    const linked = addMeetingCommands(view.state, event, zone, newId);
+    if (linked.length) {
+      void client.dispatch(linked, { undo: 'Added to tasks' });
+      return;
+    }
     const placement = { kind: 'day' as const, date: day };
     void client.dispatch(
       [{ type: 'task.created', task: { id: newId(), title: event.title, placement, position: edgePosition(view.state, placement, 'bottom'), ...(minutes ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {}), notes: `${whenText(event, zone)}, from the calendar` } }],
-      { undo: 'Task added from the calendar' },
+      { undo: 'Added to tasks' },
     );
   };
   return (
@@ -259,8 +270,8 @@ export const EventPopover = ({ event, anchor }: { event: CalendarEvent; anchor: 
             <Icon name="check" size={16} /> In your plan: open the task
           </button>
         ) : (
-          <button class="link" onClick={plan} title="Add it to its day as a task, its length as planned time">
-            <Icon name="task" size={16} /> Plan as task
+          <button class="link" onClick={plan} title="Add it to its day as a task, its length as planned time; it is checked off when it ends (Settings → Meeting import)">
+            <Icon name="task" size={16} /> Add to tasks
           </button>
         )}
       </div>

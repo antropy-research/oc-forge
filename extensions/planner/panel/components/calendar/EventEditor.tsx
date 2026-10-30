@@ -3,6 +3,7 @@
 // location, notifications, color, busy or free, visibility, description and
 // guests. Saving a change to a series asks which events it is for, and an
 // event with guests asks whether to email them, as Google Calendar does.
+import { GuestSuggestions, useContactSuggestions } from './GuestSuggestions.tsx';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/ics.ts';
 import type { DateKey } from '../../../src/domain/types.ts';
@@ -181,6 +182,7 @@ export const EventEditor = ({ target }: { target: EditorTarget }) => {
   const [form, setForm] = useState<Form | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
   const [guestDraft, setGuestDraft] = useState('');
+  const suggestions = useContactSuggestions(writable.find((calendar) => calendar.key === form?.calendar)?.account ?? null, guestDraft);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const dialog = useRef<HTMLDivElement>(null);
@@ -519,9 +521,10 @@ export const EventEditor = ({ target }: { target: EditorTarget }) => {
             <aside class="ee-side" aria-label="Guests">
               <h3>Guests</h3>
               <div class="ee-guest-add">
-                <input aria-label="Add guests" placeholder="Add guests" value={guestDraft} onInput={(input) => setGuestDraft(input.currentTarget.value)} onKeyDown={(key) => key.key === 'Enter' && addGuest()} />
+                <input aria-label="Add guests" placeholder="Add guests" list={suggestions.listId} value={guestDraft} onInput={(input) => setGuestDraft(input.currentTarget.value)} onKeyDown={(key) => key.key === 'Enter' && addGuest()} />
                 <button onClick={addGuest} disabled={!guestDraft.trim()}>Add</button>
               </div>
+              <GuestSuggestions suggestions={suggestions} />
               <ul class="guest-list" aria-label="Guest list">
                 {form.guests.map((guest) => (
                   <li key={guest.email} class={`guest is-${guest.response ?? 'needsAction'}`}>

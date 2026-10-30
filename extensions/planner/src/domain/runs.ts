@@ -4,7 +4,7 @@ import type { PlannerState, RunPullRequest, TaskRun, TaskSourceRef } from './typ
 import { isRunAssignee } from './assignees.ts';
 
 /** How the first message names a task's source. */
-const SOURCE_LABELS: Record<TaskSourceRef['kind'], string> = { linear: 'Linear issue', github: 'GitHub', gtask: 'Google task', email: 'Email in Gmail' };
+const SOURCE_LABELS: Record<TaskSourceRef['kind'], string> = { linear: 'Linear issue', github: 'GitHub', gtask: 'Google task', email: 'Email in Gmail', link: 'Link', event: 'Google Calendar event' };
 import type { EventBody, SeenPullRequest } from './events.ts';
 
 export type SessionActivity = 'unknown' | 'idle' | 'running' | 'retrying' | 'waiting-permission' | 'waiting-question';

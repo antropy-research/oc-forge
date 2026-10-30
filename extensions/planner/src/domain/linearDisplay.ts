@@ -68,6 +68,7 @@ export const ORDER_LABELS: Record<LinearOrderBy, string> = {
 export const COMPLETED_LABELS: Record<LinearCompletedWindow, string> = {
   all: 'All',
   day: 'Past day',
+  '5days': 'Past 5 days',
   week: 'Past week',
   month: 'Past month',
   '3months': 'Past 3 months',
@@ -267,7 +268,7 @@ export const viewDisplay = (prefs: ViewPrefs | null | undefined, fallback: Issue
 
 // ── The filter a display implies ────────────────────────────────────────────
 
-const WINDOW_DURATIONS: Record<string, string> = { day: 'P1D', week: 'P1W', month: 'P1M', '3months': 'P3M', '6months': 'P6M', year: 'P1Y' };
+const WINDOW_DURATIONS: Record<string, string> = { day: 'P1D', '5days': 'P5D', week: 'P1W', month: 'P1M', '3months': 'P3M', '6months': 'P6M', year: 'P1Y' };
 const OPEN_STATES: GraphFilter = { state: { type: { nin: ['completed', 'canceled'] } } };
 
 /** Several filters that must all hold; null when there are none. */
@@ -653,8 +654,8 @@ export const readPages = async <T>(fetchPage: (after: string | null) => Promise<
   for (let page = 0; page < options.maxPages; page++) {
     const answer = await fetchPage(after);
     nodes.push(...answer.nodes);
-    // A next page without a cursor to reach it would be read again forever.
-    if (!answer.pageInfo.hasNextPage || !answer.pageInfo.endCursor) return { nodes, endCursor: null, hasMore: false };
+    // A next page without a cursor to reach it would be read again forever; an answer without pageInfo is its last page.
+    if (!answer.pageInfo?.hasNextPage || !answer.pageInfo.endCursor) return { nodes, endCursor: null, hasMore: false };
     after = answer.pageInfo.endCursor;
   }
   return { nodes, endCursor: after, hasMore: true };

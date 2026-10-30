@@ -18,6 +18,16 @@
 //   // write ghConfigFiles(gh.socket) into <HOME>/.config/gh/ for the gh that should use it
 //   gh.world.pulls: what was opened; gh.requests: what gh asked; await gh.close();
 //
+// The Planner's GitHub source reads issues and pull requests through `gh api graphql`: a page of a
+// search (`search(query:, type: ISSUE, first:, after:)`, aliased or not, filtered by the qualifiers it
+// sends, with `issueCount` and `pageInfo`), items by node id (`nodes(ids:)`) and one by its URL
+// (`resource(url:)`). `world.issues` are the issues it finds; `world.pulls` the pull requests (with
+// `author`, `mergedAt`, `mergedBy` and `reviews` for the day's work). Daily Highlights reads the
+// viewer's work of a day: review contributions (`contributionsCollection(from:, to:)`), issue
+// comments last updated first (`world.issueComments`, each `on` an issue's or pull request's URL),
+// discussions newest first (`world.discussions`) and discussion comments oldest first, from either
+// end (`world.discussionComments`, each of a `discussionId`).
+//
 // On its own, e.g. in the dev container where the agents' gh runs:
 //   node fakeGithub.mjs <socket> <state.json> <world.json> [<git port>]
 // keeps <state.json> up to date ({ pid, gitPort, pulls, requests }) and stops on SIGTERM.
@@ -35,7 +45,23 @@ export const defaultGithubWorld = ({ owner = 'harness-org', repo = 'planner-pr-d
   viewer,
   repos: [{ id: `R_${owner}_${repo}`, owner, name: repo, defaultBranch, bare }],
   pulls: [],
+  issues: [],
+  issueComments: [],
+  discussions: [],
+  discussionComments: [],
   next: 1,
+});
+
+/** An issue of `repo` (owner/name), assigned to `assignees` (logins), as the fake's world keeps one. */
+export const fakeIssue = (repo, number, { title = `Issue ${number}`, state = 'OPEN', assignees = [], updatedAt = new Date(Date.UTC(2026, 9, 1) + number * 60_000).toISOString() } = {}) => ({
+  id: `I_${repo.replace(/[^A-Za-z0-9]/g, '_')}_${number}`,
+  number,
+  repo,
+  url: `https://github.com/${repo}/issues/${number}`,
+  title,
+  state,
+  assignees,
+  updatedAt,
 });
 
 /** gh's config.yml and hosts.yml for the fake: every request through `socket`, signed in to github.com with a fake token. */
@@ -141,7 +167,9 @@ export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null,
     issueTemplates: [],
   });
   const pullNode = (pull) => {
-    const repo = world.repos.find((item) => full(item) === pull.repo);
+    // A pull request of a repository the world doesn't hold (someone else's, for the day's work) is named by it.
+    const [owner, name] = pull.repo.split('/');
+    const repo = world.repos.find((item) => full(item) === pull.repo) ?? { id: `R_${owner}_${name}`, owner, name };
     return {
       id: pull.id,
       number: pull.number,
@@ -154,8 +182,9 @@ export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null,
       merged: pull.state === 'MERGED',
       createdAt: pull.createdAt,
       updatedAt: pull.updatedAt,
-      closedAt: null,
-      mergedAt: null,
+      closedAt: pull.mergedAt ?? null,
+      mergedAt: pull.mergedAt ?? null,
+      mergedBy: pull.mergedBy ? { login: pull.mergedBy } : null,
       headRefName: pull.headRefName,
       headRefOid: pull.headOid,
       baseRefName: pull.baseRefName,
@@ -163,7 +192,7 @@ export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null,
       maintainerCanModify: false,
       headRepositoryOwner: { id: `O_${repo.owner}`, login: repo.owner },
       headRepository: { id: repo.id, name: repo.name },
-      author: viewerNode(),
+      author: pull.author ? { id: `U_${pull.author}`, login: pull.author, __typename: 'User' } : viewerNode(),
       additions: 0,
       deletions: 0,
       changedFiles: 0,
@@ -222,9 +251,140 @@ export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null,
     .filter((pull) => pull.repo === full(repo) && (!head || pull.headRefName === branchOf(head, repo)) && (!base || pull.baseRefName === base) && (!states?.length || states.includes(pull.state)))
     .sort((a, b) => b.number - a.number);
 
+  const itemNode = (item) => (item.headRefName === undefined
+    ? { __typename: 'Issue', id: item.id, number: item.number, title: item.title, url: item.url, state: item.state, updatedAt: item.updatedAt, repository: { nameWithOwner: item.repo } }
+    : { __typename: 'PullRequest', ...pullNode(item) });
+  /** A date qualifier's value (`A..B`, `>=A`, `>A`, `<=A`, `<A`, or a day) as a test of an instant. */
+  const dateTest = (value) => {
+    const at = (text) => Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(text) ? `${text}T00:00:00Z` : text);
+    const range = /^(.+?)\.\.(.+)$/.exec(value);
+    if (range) return (instant) => instant >= at(range[1]) && instant <= at(range[2]);
+    const compare = /^(>=|>|<=|<)(.+)$/.exec(value);
+    if (compare) return { '>=': (instant) => instant >= at(compare[2]), '>': (instant) => instant > at(compare[2]), '<=': (instant) => instant <= at(compare[2]), '<': (instant) => instant < at(compare[2]) }[compare[1]];
+    return (instant) => new Date(instant).toISOString().slice(0, 10) === value;
+  };
+  const authorOf = (item) => (item.headRefName !== undefined ? item.author ?? world.viewer : item.author ?? '');
+  /**
+   * GitHub's issue search, for the qualifiers the Planner sends (is:, assignee:, review-requested:, reviewed-by:,
+   * involves:, author:, repo:, created:, merged:, updated:, sort:, a `-` before one leaves its matches out) and words in the title.
+   */
+  const searchItems = (q) => {
+    let items = [...(world.issues ?? []), ...world.pulls];
+    const words = [];
+    for (const raw of String(q ?? '').split(/\s+/).filter(Boolean)) {
+      const negated = raw.startsWith('-') && raw.includes(':');
+      const token = negated ? raw.slice(1) : raw;
+      const [qualifier, value] = token.includes(':') ? [token.slice(0, token.indexOf(':')).toLowerCase(), token.slice(token.indexOf(':') + 1)] : [null, token];
+      const me = (login) => (value === '@me' ? world.viewer : value).toLowerCase() === String(login).toLowerCase();
+      const commented = (item) => (world.issueComments ?? []).some((comment) => comment.on === item.url && me(comment.author));
+      const tests = {
+        is: (item) => (value === 'open' ? item.state === 'OPEN' : value === 'closed' ? item.state !== 'OPEN' : value === 'issue' ? item.headRefName === undefined : value === 'pr' ? item.headRefName !== undefined : value === 'merged' ? Boolean(item.mergedAt) || item.state === 'MERGED' : true),
+        assignee: (item) => (item.assignees ?? []).some(me),
+        'review-requested': (item) => (item.reviewRequested ?? []).some(me),
+        'reviewed-by': (item) => (item.reviews ?? []).some((review) => me(review.author)),
+        author: (item) => me(authorOf(item)),
+        involves: (item) => me(authorOf(item)) || (item.assignees ?? []).some(me) || commented(item),
+        commenter: commented,
+        repo: (item) => item.repo.toLowerCase() === value.toLowerCase(),
+        created: (item) => Boolean(item.createdAt) && dateTest(value)(Date.parse(item.createdAt)),
+        merged: (item) => Boolean(item.mergedAt) && dateTest(value)(Date.parse(item.mergedAt)),
+        updated: (item) => Boolean(item.updatedAt) && dateTest(value)(Date.parse(item.updatedAt)),
+      };
+      if (qualifier === 'archived' || qualifier === 'sort') continue;
+      if (qualifier && tests[qualifier]) items = items.filter((item) => tests[qualifier](item) !== negated);
+      else words.push(token.toLowerCase());
+    }
+    if (words.length) items = items.filter((item) => words.every((word) => item.title.toLowerCase().includes(word)));
+    return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.number - a.number);
+  };
+  const cursorOf = (offset) => Buffer.from(`cursor:${offset}`).toString('base64');
+  const offsetOf = (cursor) => (cursor ? Number(/^cursor:(\d+)$/.exec(Buffer.from(String(cursor), 'base64').toString('utf8'))?.[1] ?? 0) : 0);
+
+  /** A page of `all` from a cursor on (`first`/`after`), or up to one (`last`/`before`), the cursors positions in it. */
+  const pageOf = (all, { first, last, after, before }) => {
+    if (Number.isFinite(last)) {
+      const end = before ? offsetOf(before) : all.length;
+      const start = Math.max(0, end - last);
+      return { nodes: all.slice(start, end), pageInfo: { hasPreviousPage: start > 0, startCursor: cursorOf(start), hasNextPage: end < all.length, endCursor: cursorOf(end) } };
+    }
+    const from = offsetOf(after);
+    const size = Math.min(100, Number.isFinite(first) ? first : 10);
+    const nodes = all.slice(from, from + size);
+    return { nodes, pageInfo: { hasNextPage: from + size < all.length, endCursor: nodes.length ? cursorOf(from + nodes.length) : null, hasPreviousPage: from > 0, startCursor: cursorOf(from) } };
+  };
+  const viewerIs = (login) => String(login ?? '').toLowerCase() === world.viewer.toLowerCase();
+  const targetOf = (item) => (item ? { id: item.id, number: item.number, title: item.title, url: item.url, repository: { nameWithOwner: item.repo } } : null);
+
   const graphql = (query, variables = {}) => {
     const data = {};
+    /** A connection's arguments in the query: its page size and the cursor variables it names. */
+    const argsOf = (name) => {
+      const found = new RegExp(`\\b${name}\\s*\\(([^)]*)\\)`).exec(query)?.[1] ?? '';
+      const number = (key) => Number(new RegExp(`\\b${key}\\s*:\\s*(\\d+)`).exec(found)?.[1] ?? NaN);
+      const variable = (key) => {
+        const named = new RegExp(`\\b${key}\\s*:\\s*\\$(\\w+)`).exec(found)?.[1];
+        return named ? variables[named] : undefined;
+      };
+      return { first: number('first'), last: number('last'), after: variable('after'), before: variable('before') };
+    };
+    // Searches, one a query or several aliased (the day's work asks four at once).
+    const searches = [...query.matchAll(/(?:(\w+)\s*:\s*)?\bsearch\s*\(\s*query\s*:\s*\$(\w+)\s*,\s*type\s*:\s*\w+\s*,\s*first\s*:\s*(\d+)(?:\s*,\s*after\s*:\s*\$(\w+))?/g)];
+    for (const [, alias, qVariable, first, afterVariable] of searches) {
+      const all = searchItems(variables[qVariable]);
+      const page = pageOf(all, { first: Number(variables.first ?? first), after: afterVariable ? variables[afterVariable] : undefined });
+      data[alias ?? 'search'] = { issueCount: all.length, pageInfo: { hasNextPage: page.pageInfo.hasNextPage, endCursor: page.pageInfo.endCursor }, nodes: page.nodes.map(itemNode) };
+    }
+    if (/\bnodes\s*\(\s*ids/.test(query)) {
+      const ids = [].concat(variables.ids ?? []);
+      const nodes = ids.map((id) => [...(world.issues ?? []), ...world.pulls].find((item) => item.id === id) ?? null);
+      const missing = ids.filter((_, index) => nodes[index] === null);
+      return { data: { nodes: nodes.map((node) => (node ? itemNode(node) : null)) }, ...(missing.length ? { errors: missing.map((id) => ({ type: 'NOT_FOUND', path: ['nodes'], message: `Could not resolve to a node with the global id of '${id}'` })) } : {}) };
+    }
+    if (/\bresource\s*\(/.test(query)) {
+      const url = String(variables.url ?? '').replace(/\/$/, '');
+      const found = [...(world.issues ?? []), ...world.pulls].find((item) => item.url.toLowerCase() === url.toLowerCase());
+      return { data: { resource: found ? itemNode(found) : null } };
+    }
     if (/\bviewer\s*\{/.test(query)) data.viewer = viewerNode();
+    // The repositories the viewer works in (the panel's Repository choice): those of its items, the latest updated first,
+    // then the world's other repositories.
+    if (data.viewer && /\brepositoriesContributedTo\s*\(/.test(query)) {
+      const latest = new Map();
+      for (const item of [...(world.issues ?? []), ...world.pulls]) if ((latest.get(item.repo) ?? '') < item.updatedAt) latest.set(item.repo, item.updatedAt);
+      const names = [...latest].sort((a, b) => b[1].localeCompare(a[1])).map(([name]) => name);
+      for (const repo of world.repos) if (!names.includes(full(repo))) names.push(full(repo));
+      data.viewer.repositoriesContributedTo = { nodes: names.slice(0, Number(argsOf('repositoriesContributedTo').first) || 25).map((nameWithOwner) => ({ nameWithOwner })) };
+    }
+    // The viewer's work of a day (Daily Highlights).
+    if (data.viewer && /\bcontributionsCollection\s*\(/.test(query)) {
+      const [from, to] = [Date.parse(variables.from ?? ''), Date.parse(variables.to ?? '')];
+      const reviews = world.pulls
+        .flatMap((pull) => (pull.reviews ?? []).filter((review) => viewerIs(review.author) && Date.parse(review.submittedAt) >= from && Date.parse(review.submittedAt) <= to).map((review) => ({ occurredAt: review.submittedAt, pullRequestReview: { id: review.id, url: review.url, state: review.state }, pullRequest: targetOf(pull) })))
+        .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+      data.viewer.contributionsCollection = { pullRequestReviewContributions: pageOf(reviews, argsOf('pullRequestReviewContributions')) };
+    }
+    if (data.viewer && /\bissueComments\s*\(/.test(query)) {
+      const byUrl = (url) => [...(world.issues ?? []), ...world.pulls].find((item) => item.url === url) ?? null;
+      const comments = (world.issueComments ?? [])
+        .filter((comment) => viewerIs(comment.author))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        .map((comment) => {
+          const on = byUrl(comment.on);
+          return { id: comment.id, url: comment.url, createdAt: comment.createdAt, updatedAt: comment.updatedAt, issue: targetOf(on), pullRequest: on && on.headRefName !== undefined ? targetOf(on) : null };
+        });
+      data.viewer.issueComments = pageOf(comments, argsOf('issueComments'));
+    }
+    if (data.viewer && /\brepositoryDiscussions\s*\(/.test(query)) {
+      const discussions = (world.discussions ?? []).filter((discussion) => viewerIs(discussion.author)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((discussion) => ({ ...targetOf(discussion), createdAt: discussion.createdAt }));
+      data.viewer.repositoryDiscussions = pageOf(discussions, argsOf('repositoryDiscussions'));
+    }
+    if (data.viewer && /\brepositoryDiscussionComments\s*\(/.test(query)) {
+      const comments = (world.discussionComments ?? [])
+        .filter((comment) => viewerIs(comment.author))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        .map((comment) => ({ id: comment.id, url: comment.url, createdAt: comment.createdAt, discussion: targetOf((world.discussions ?? []).find((discussion) => discussion.id === comment.discussionId)) }));
+      data.viewer.repositoryDiscussionComments = pageOf(comments, argsOf('repositoryDiscussionComments'));
+    }
     if (/createPullRequest\s*\(/.test(query)) {
       const input = variables.input ?? {};
       const repo = world.repos.find((item) => item.id === input.repositoryId);
@@ -263,7 +423,7 @@ export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null,
       data.repository = repository;
       return { data };
     }
-    if (data.viewer) return { data };
+    if (data.viewer || searches.length) return { data };
     const operation = /\b(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? 'this request';
     return { errors: [{ type: 'NOT_SUPPORTED', message: `the fake GitHub does not answer ${operation}` }] };
   };

@@ -5,8 +5,11 @@
 // list; events with weekly and daily series, their occurrences and exceptions;
 // insert, patch, delete, move, instances), Google Tasks (lists, tasks with
 // subtasks and order, move between lists), each list in pages, and Google
-// Drive's file search (only with the Drive scope). Every request is logged in
-// `requests`. Used by tests/googleService.test.ts and the e2e journeys.
+// Drive's file search (only with the Drive scope), Gmail (a search's messages with
+// their labels, by words and the in:/is:/label: terms; threads with their text;
+// labels; and, with gmail.modify, a thread's labels changed or trashed), and the
+// People API's contact searches (with the contacts scopes). Every request is
+// logged in `requests`. Used by tests/googleService.test.ts and the e2e journeys.
 import http from 'node:http';
 
 const pad = (n, width = 2) => String(n).padStart(width, '0');
@@ -81,6 +84,8 @@ const occurrences = (event, untilMs, defaultZone) => {
 /** What the account allowed the Planner unless a world says: Calendar, Tasks and Gmail. */
 export const DEFAULT_SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/calendar.calendarlist.readonly', 'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/tasks', 'https://www.googleapis.com/auth/gmail.readonly'];
 export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.metadata.readonly';
+export const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+export const CONTACTS_SCOPES = ['https://www.googleapis.com/auth/contacts.readonly', 'https://www.googleapis.com/auth/contacts.other.readonly'];
 /** The code Google's redirect carries in this fake: the scopes the sign-in asked for, so the token answer grants them. */
 export const fakeAuthCode = (scope) => Buffer.from(JSON.stringify({ scope })).toString('base64url');
 
@@ -201,6 +206,9 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       fail.next = null;
       return [status, { error: { code: status, message } }];
     }
+    // Access taken back (a password changed, the Planner removed in the account's permissions): every token and every
+    // request is refused, as Google refuses them.
+    if (world.revoked && path !== '/revoke') return path === '/token' ? [400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }] : [401, { error: { code: 401, message: 'Request had invalid authentication credentials.', status: 'UNAUTHENTICATED' } }];
     if (path === '/token' && body.grant_type === 'authorization_code') {
       // A sign-in: Google keeps what the account granted before (include_granted_scopes) and adds what it just allowed,
       // and says who it is in the ID token (`hd`: a work or school account's domain).
@@ -217,17 +225,84 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
     if (path === '/token') return [200, { access_token: `fake-${next++}`, expires_in: 3600, token_type: 'Bearer' }];
     if (path === '/revoke') return [200, {}];
     if (path === '/oauth2/v3/userinfo' && method === 'GET') return [200, { sub: '1', email: world.account, email_verified: true, ...(world.hostedDomain ? { hd: world.hostedDomain } : {}) }];
-    // Gmail: a search's messages (words of the subject, sender or snippet; in: and is: pass), and each one's headers.
+    // Gmail: a message's labels are Gmail's own (INBOX, UNREAD, STARRED, SPAM, TRASH…) and the user's (`world.mailLabels`,
+    // by id); a message says only `unread` until something changes them.
+    const granted = () => world.granted ?? DEFAULT_SCOPES;
+    const labelsOf = (message) => (message.labels ??= message.unread ? ['UNREAD', 'INBOX'] : ['INBOX']);
+    const slug = (name) => name.toLowerCase().replace(/[\s/]+/g, '-');
+    const SYSTEM = { inbox: 'INBOX', unread: 'UNREAD', starred: 'STARRED', important: 'IMPORTANT', spam: 'SPAM', trash: 'TRASH', sent: 'SENT', drafts: 'DRAFT' };
+    /** Gmail's search, as far as the Planner sends it: words of the subject, sender or snippet, and in:/is:/label: terms; spam and trash only with in:anywhere (or in:spam, in:trash). */
+    const matches = (message, q) => {
+      const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+      const labels = labelsOf(message);
+      if (!terms.some((term) => ['in:anywhere', 'in:spam', 'in:trash'].includes(term)) && (labels.includes('SPAM') || labels.includes('TRASH'))) return false;
+      return terms.every((term) => {
+        const [kind, value] = /^(in|is|label):(.+)$/.exec(term)?.slice(1) ?? [null, term];
+        if (kind === 'in' && value === 'anywhere') return true;
+        if (kind === 'in' || kind === 'is') return SYSTEM[value] ? labels.includes(SYSTEM[value]) : true;
+        if (kind === 'label') return (world.mailLabels ?? []).some((label) => slug(label.name) === value && labels.includes(label.id));
+        return `${message.subject} ${message.from} ${message.snippet}`.toLowerCase().includes(term);
+      });
+    };
     if (path === '/gmail/v1/users/me/messages' && method === 'GET') {
-      const words = (query.get('q') ?? '').toLowerCase().split(/\s+/).filter((word) => word && !/^(in|is):/.test(word));
-      const found = (world.mail ?? []).filter((message) => words.every((word) => `${message.subject} ${message.from} ${message.snippet}`.toLowerCase().includes(word)));
+      const found = (world.mail ?? []).filter((message) => matches(message, query.get('q') ?? ''));
       return [200, { messages: found.map((message) => ({ id: message.id, threadId: message.threadId })), resultSizeEstimate: found.length }];
+    }
+    if (path === '/gmail/v1/users/me/labels' && method === 'GET') {
+      const system = ['INBOX', 'STARRED', 'IMPORTANT', 'UNREAD', 'SENT', 'DRAFT', 'SPAM', 'TRASH', 'CATEGORY_SOCIAL', 'CHAT'].map((id) => ({ id, name: id, type: 'system' }));
+      return [200, { labels: [...system, ...(world.mailLabels ?? []).map((label) => ({ ...label, type: 'user' }))] }];
+    }
+    const base64url = (text) => Buffer.from(text, 'utf8').toString('base64url');
+    const rawMessage = (message) => ({
+      id: message.id,
+      threadId: message.threadId,
+      snippet: message.snippet,
+      internalDate: String(Date.parse(message.date)),
+      labelIds: [...labelsOf(message)],
+      payload: {
+        mimeType: 'multipart/alternative',
+        headers: [{ name: 'Subject', value: message.subject }, { name: 'From', value: message.from }, { name: 'To', value: world.account }, { name: 'Date', value: message.date }],
+        parts: [
+          { mimeType: 'text/plain', body: { data: base64url(message.body ?? message.snippet ?? '') } },
+          { mimeType: 'text/html', body: { data: base64url(`<p>${message.body ?? message.snippet ?? ''}</p>`) } },
+        ],
+      },
+    });
+    // A thread's labels changed, or the thread trashed: Gmail's conversation actions (gmail.modify, never a delete).
+    const threadAction = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)\/(modify|trash)$/.exec(path);
+    if (threadAction && method === 'POST') {
+      if (!granted().includes(GMAIL_MODIFY_SCOPE)) return [403, { error: { code: 403, message: 'Request had insufficient authentication scopes.' } }];
+      const messages = (world.mail ?? []).filter((one) => one.threadId === decodeURIComponent(threadAction[1]));
+      if (!messages.length) return [404, { error: { message: 'Not Found' } }];
+      const add = threadAction[2] === 'trash' ? ['TRASH'] : [].concat(body.addLabelIds ?? []);
+      const remove = threadAction[2] === 'trash' ? ['INBOX'] : [].concat(body.removeLabelIds ?? []);
+      const known = new Set([...Object.values(SYSTEM), ...(world.mailLabels ?? []).map((label) => label.id)]);
+      const unknown = [...add, ...remove].find((label) => !known.has(label));
+      if (unknown) return [400, { error: { code: 400, message: `Invalid label: ${unknown}` } }];
+      for (const message of messages) message.labels = [...new Set([...labelsOf(message).filter((label) => !remove.includes(label)), ...add])];
+      return [200, { id: decodeURIComponent(threadAction[1]), messages: messages.map((message) => ({ id: message.id, threadId: message.threadId, labelIds: [...message.labels] })) }];
+    }
+    // The People API: people of the contacts, and those emailed ("other contacts"), whose name or address starts so.
+    const people = /^\/v1\/(people:searchContacts|otherContacts:search)$/.exec(path);
+    if (people && method === 'GET') {
+      if (!CONTACTS_SCOPES.every((scope) => granted().includes(scope))) return [403, { error: { code: 403, message: 'Request had insufficient authentication scopes.' } }];
+      const q = (query.get('query') ?? '').toLowerCase();
+      const all = people[1] === 'people:searchContacts' ? world.contacts ?? [] : world.otherContacts ?? [];
+      const found = q ? all.filter((person) => [person.name, person.email].some((text) => text.toLowerCase().split(/[\s@.]+/).some((word) => word.startsWith(q)) || text.toLowerCase().startsWith(q))) : [];
+      return [200, { results: found.map((person) => ({ person: { names: person.name ? [{ displayName: person.name }] : [], emailAddresses: [{ value: person.email }] } })) }];
     }
     const mailMatch = /^\/gmail\/v1\/users\/me\/messages\/([^/]+)$/.exec(path);
     if (mailMatch && method === 'GET') {
       const message = (world.mail ?? []).find((one) => one.id === decodeURIComponent(mailMatch[1]));
       if (!message) return [404, { error: { message: 'Not Found' } }];
-      return [200, { id: message.id, threadId: message.threadId, snippet: message.snippet, internalDate: String(Date.parse(message.date)), labelIds: message.unread ? ['UNREAD', 'INBOX'] : ['INBOX'], payload: { headers: [{ name: 'Subject', value: message.subject }, { name: 'From', value: message.from }, { name: 'Date', value: message.date }] } }];
+      return [200, rawMessage(message)];
+    }
+    // A thread: its messages, oldest first, as Gmail gives them (what a pasted thread address opens).
+    const threadMatch = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)$/.exec(path);
+    if (threadMatch && method === 'GET') {
+      const messages = (world.mail ?? []).filter((one) => one.threadId === decodeURIComponent(threadMatch[1])).sort((a, b) => a.date.localeCompare(b.date));
+      if (!messages.length) return [404, { error: { message: 'Not Found' } }];
+      return [200, { id: decodeURIComponent(threadMatch[1]), messages: messages.map(rawMessage) }];
     }
     // Google Drive: file names, types and addresses, by a part of the name (Drive's `name contains '…'`), newest first.
     if (path === '/drive/v3/files' && method === 'GET') {

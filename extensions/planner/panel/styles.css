@@ -330,10 +330,27 @@ html[data-surface='status'], html[data-surface='status'] body { height: auto; ba
 .highlights li { display: flex; gap: 8px; align-items: center; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 4px 8px; }
 .highlights li.is-starred { border-color: color-mix(in srgb, #f59f00 60%, transparent); }
 .highlights .star { background: none; border: 0; font-size: 16px; color: #f59f00; padding: 0 2px; }
-.highlight-text { flex: 1; border: 1px solid transparent; background: transparent; border-radius: 4px; padding: 2px 4px; }
+.highlight-text { flex: 1; min-width: 0; border: 1px solid transparent; background: transparent; border-radius: 4px; padding: 2px 4px; }
 .highlight-text:focus { border-color: var(--pl-line); outline: 0; }
 .highlight-actions { display: flex; gap: 4px; }
 .highlight-actions button { padding: 0 6px; }
+.highlight-open { align-self: center; padding: 0 6px; text-decoration: none; color: var(--oc-muted); }
+.highlight-open:hover { color: var(--oc-fg, inherit); }
+.other-activities .activity-source { margin-top: 10px; }
+.other-activities h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; font-size: 13px; }
+.other-activities h4 { margin: 8px 0 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--oc-muted); }
+.other-activities .feed-errors { margin: 0 0 6px; }
+.activity-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.activity-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 4px 8px; border-radius: 6px; background: var(--pl-softer); font-size: 12px; }
+.activity-kind { flex: none; min-width: 64px; color: var(--oc-muted); }
+.activity-kind.is-merged { color: #8250df; }
+.activity-kind.is-opened { color: #2da44e; }
+.activity-kind.is-reviewed { color: #bf8700; }
+.activity-title { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; color: inherit; }
+a.activity-title { text-decoration: none; }
+a.activity-title:hover { text-decoration: underline; }
+.activity-ref { color: var(--oc-muted); }
+.activity-time, .activity-included { flex: none; }
 .time-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .time-summary > div { display: flex; flex-direction: column; padding: 8px; border-radius: 8px; background: var(--pl-softer); }
 .time-summary .label { font-size: 11px; color: var(--oc-muted); }
@@ -384,6 +401,10 @@ kbd { font: 11px var(--oc-mono, ui-monospace, monospace); padding: 0 5px; border
 .linear-search { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 4px 8px; }
 .issue-group h3 { font-size: 12px; font-weight: 600; color: var(--oc-muted); margin: 6px 0 4px; display: flex; gap: 6px; }
 .issue-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.gh-search { width: 100%; box-sizing: border-box; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 4px 8px; }
+.gh-more { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 2px 2px 6px; }
+.gh-more .hint { margin: 0; }
+.link-url { margin: 0 0 4px; overflow-wrap: anywhere; }
 .issue-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 6px 8px; border-radius: 8px; background: var(--pl-surface); border: 1px solid var(--pl-line); cursor: grab; }
 .issue-row:hover { border-color: color-mix(in srgb, var(--oc-fg) 22%, transparent); }
 .issue-state { width: 10px; height: 10px; margin-top: 4px; border-radius: 50%; border: 2px solid var(--item-color); }
@@ -677,6 +698,7 @@ button.all-day-event.is-task:hover { background: color-mix(in srgb, var(--item-c
 .lin-nav-hint { flex: none; font-size: 10.5px; color: var(--oc-muted); }
 .lin-nav-find { margin: 2px 2px 4px; padding: 3px 8px; border: 1px solid var(--pl-line); border-radius: 6px; background: var(--pl-surface); font-size: 12px; }
 .lin-nav-note { margin: 2px 8px; }
+.lin-filter-partial { flex-basis: 100%; color: var(--oc-muted); font-size: 11px; }
 .lin-kbd { font: 10px var(--oc-mono, ui-monospace, monospace); padding: 0 4px; border-radius: 4px; border: 1px solid var(--pl-line); color: var(--oc-muted); background: var(--pl-softer); white-space: nowrap; }
 
 .lin-head { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 8px 20px; border-bottom: 1px solid var(--pl-line); }
@@ -715,6 +737,8 @@ button.lin-crumb { padding: 0; }
 .lin-popover-empty { padding: 8px; color: var(--oc-muted); font-size: 12px; }
 .lin-popover-footer { border-top: 1px solid var(--pl-line); padding: 6px 8px; font-size: 11.5px; }
 .lin-popover-help { display: flex; align-items: center; gap: 8px; }
+.lin-popover-help:has(> .lin-filter-partial) { flex-wrap: wrap; }
+.iv-more { margin: 4px 0 8px; }
 .lin-popover-help .grow { flex: 1; }
 .lin-popover-title { padding: 8px 10px 4px; font-size: 12px; font-weight: 600; }
 .lin-option { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 3px 8px; border-radius: 5px; cursor: pointer; font-size: 12.5px; }
@@ -1744,3 +1768,68 @@ button.lin-title-text { background: none; border: 0; padding: 0; color: inherit;
   .pp-paper { zoom: 0.4; }
   .pp-paper.is-landscape { zoom: 0.32; }
 }
+.url-hint { margin: 4px 2px 0; font-size: 12px; }
+
+/* ── Sunsama's integrations, round 12: source icons, merge, Gmail, meeting import ── */
+/* A linked card's tool icon (a click opens the item there). */
+.source-open { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; color: var(--oc-muted); }
+.source-open svg { width: 14px; height: 14px; }
+.source-open:hover { background: var(--pl-soft); color: var(--oc-fg); }
+/* Alt/Option held over a card: it takes the dragged task or item as a subtask. */
+.task-card[data-merging] { outline: 2px dashed var(--oc-primary); outline-offset: 1px; }
+.merged-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.merged-list li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; }
+.merged-list li:hover { background: var(--pl-soft); }
+.merged-list li.is-done .grow { text-decoration: line-through; color: var(--oc-muted); }
+.merged-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; }
+.merged-icon svg { width: 14px; height: 14px; }
+.merge-chip { margin: 4px 2px 0; }
+/* The day's name at the top of its list: shows that day's calendar in the panel. */
+button.day-name { background: none; border: 0; padding: 0; margin: 0; font: inherit; font-weight: 600; font-size: 15px; color: inherit; text-align: left; cursor: pointer; }
+button.day-name:hover { text-decoration: underline; }
+.calendars-toggle { margin-left: auto; font-size: 12px; }
+.calendars-menu { min-width: 200px; max-height: 320px; overflow: auto; }
+.menu-check-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; font-size: 12.5px; }
+.menu-check-row:hover { background: var(--pl-soft); }
+.menu-check-row .calendar-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+/* Gmail: labels (one, Cmd/Ctrl adds), filters, an email task's thread and actions, the automations' prompt. */
+.gmail-labels { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.gmail-label { font-size: 11.5px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--pl-line); background: var(--pl-surface); }
+.gmail-label[aria-pressed='true'] { background: color-mix(in srgb, var(--oc-primary) 14%, transparent); border-color: color-mix(in srgb, var(--oc-primary) 40%, transparent); }
+.gmail-filters { padding: 6px 8px; gap: 4px; min-width: 190px; }
+.gmail-filters label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.mail-row.is-unread .issue-title { font-weight: 600; }
+.gmail-readd { margin: 0 2px 6px; }
+.gmail-where { font-weight: 400; }
+.gmail-actions { margin-bottom: 6px; }
+.gmail-allow { margin: 4px 0; }
+.gmail-thread { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.gmail-message { border: 1px solid var(--pl-line); border-radius: 8px; background: var(--pl-surface); }
+.gmail-message.is-unread .gmail-message-head strong { font-weight: 700; }
+.gmail-message-head { display: flex; gap: 8px; align-items: baseline; width: 100%; background: none; border: 0; padding: 6px 8px; text-align: left; cursor: pointer; min-width: 0; }
+.gmail-snippet { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gmail-text { margin: 0; padding: 0 8px 8px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
+.linear-prompt.is-gmail { bottom: 136px; flex-wrap: wrap; }
+.gmail-choice { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; }
+.gmail-automation { border-top: 1px solid var(--pl-line); padding-top: 8px; margin-top: 8px; }
+.gmail-automation h3 { font-size: 12.5px; margin: 0 0 2px; }
+.gmail-automation-choices { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.gmail-automation-choices label { display: inline-flex; align-items: center; gap: 4px; }
+.gmail-automation-labels { list-style: none; padding: 0; margin: 4px 0; font-size: 12.5px; }
+/* Meeting import: daily planning's "fill in calendar events", and its settings. */
+.meetings-prompt { border: 1px solid color-mix(in srgb, var(--oc-success, #2f9e44) 45%, transparent); background: color-mix(in srgb, var(--oc-success, #2f9e44) 7%, transparent); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; }
+.meetings-prompt .row { display: flex; align-items: center; gap: 10px; }
+.meetings-prompt button.primary { background: var(--oc-success, #2f9e44); border-color: var(--oc-success, #2f9e44); color: #fff; }
+.meetings-pick { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.meetings-pick label { display: flex; align-items: baseline; gap: 6px; }
+.meeting-calendars, .meeting-exclusions, .channel-timeboxes { margin: 8px 0; display: flex; flex-direction: column; gap: 4px; }
+.meeting-calendars h3, .meeting-exclusions h3 { font-size: 12.5px; margin: 0; }
+.meeting-calendar { display: flex; align-items: center; gap: 8px; }
+.meeting-calendar .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+/* Linear: the side panel's options row, a pasted issue's status. */
+.linear-side-options { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; }
+.url-status { display: flex; align-items: center; gap: 6px; margin: 4px 2px 0; font-size: 12px; color: var(--oc-muted); }
+.url-status select { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 2px 6px; }
+/* GitHub: the repositories the viewer works in. */
+.gh-repo { width: 100%; margin: 6px 0 0; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; padding: 3px 6px; }
+.ee-contacts-allow { font-size: 12px; margin: 4px 0; }

@@ -7,6 +7,7 @@
 // it (its own filter, plus what its display hides), page after page until
 // Linear has no more; temporary filters go to Linear as an IssueFilter, so the
 // answer is complete. The Linear page and the side panels keep a list each.
+import { mergedDone, mergedImports, planSubtaskSourceSync, subtaskSources, wasMerged } from '../../src/domain/merge.ts';
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 import type { Command, EventBody } from '../../src/domain/events.ts';
 import {
@@ -32,6 +33,9 @@ import {
   SET_STATE_MUTATION,
   TEAMS_QUERY,
   TEAM_OPTIONS_QUERY,
+  WORKSPACE_LABELS_QUERY,
+  teamOptionPageQuery,
+  type TeamOptionField,
   TEAM_STATES_QUERY,
   UPDATE_ISSUE_MUTATION,
   VIEWS_QUERY,
@@ -94,6 +98,7 @@ import {
   pruneFilters,
   readFilter,
   workspacesFor,
+  type CatalogPart,
   type FilterCatalog,
   type FilterContext,
   type FilterJoin,
@@ -120,10 +125,13 @@ export type ListId = 'page' | 'side';
 export type LinearMode = 'issues' | 'projects' | 'planned';
 
 /** A question to ask before changing an issue in Linear. */
+/** Sunsama's "Show prompt to update status in Linear": after completing, planning (the Planner's) or importing an issue. */
 export interface LinearPrompt {
-  kind: 'complete' | 'start';
+  kind: 'complete' | 'start' | 'import';
   taskId: string;
   key: string;
+  /** An issue merged into the task (a subtask with its link), not the task's own. */
+  subtaskId?: string;
 }
 
 export interface LinearTeam {
@@ -198,6 +206,10 @@ export interface LinearView {
   /** Saved views (of issues and of projects), from every connected workspace. */
   views: LinearSavedView[];
   viewsLoaded: boolean;
+  /** Workspaces with more saved views than read so far: where the next page starts (Load more views). */
+  viewsMore: Record<string, string>;
+  /** Linear has more favorites than were read (MAX_FAVORITE_PAGES of 250): the sidebar says so. */
+  favoritesCut?: boolean;
   /** My favorites in Linear's sidebar: views, projects and issues. */
   favorites: LinearFavorite[];
   /** Current issues behind open linked tasks, by issue id. */
@@ -205,6 +217,8 @@ export interface LinearView {
   projects: LinearProject[];
   projectsLoaded: boolean;
   projectsLoading: boolean;
+  /** Workspaces with more open projects than read so far: where the next page starts (Load more). */
+  projectsMore: Record<string, string>;
   project: OpenProject | null;
   /** What filters offer and boards need, by workspace: teams and their states, people, labels, projects, cycles. */
   catalogs: Record<string, FilterCatalog>;
@@ -227,9 +241,15 @@ export interface LinearLocation {
 const REFRESH_MS = 5 * 60_000;
 /** Pages a list reads at once (100 issues each); further pages come on scroll or Load more. */
 const FIRST_PAGES = 3;
+// Bounds of one read; where Linear has more, the rest is a Load more away (projects, views) or the menu says so (catalogs).
 const MAX_PROJECT_PAGES = 10;
 const MAX_VIEW_PAGES = 10;
 const MAX_CATALOG_PAGES = 20;
+/** Pages of 100 teams for the team picker, and of 250 favorites. */
+const MAX_TEAM_PAGES = 20;
+const MAX_FAVORITE_PAGES = 10;
+/** Pages of 250 of one of a team's options (people, labels…) after the first. */
+const MAX_OPTION_PAGES = 20;
 const CATALOG_MS = 10 * 60_000;
 const LOCATION_KEY = 'linear.location';
 const STATE_WORDS: Record<string, string> = { completed: 'Done', started: 'In Progress', unstarted: 'Todo', backlog: 'Backlog', triage: 'Triage' };
@@ -268,7 +288,9 @@ const isSource = (value: unknown): value is LinearSource => {
 export const displayOf = (list: Pick<IssueList, 'display' | 'source'>, settings: Settings, listId: ListId = 'page'): IssueDisplay => {
   if (list.display) return list.display;
   const display = settingsDisplay({ ...settings, linearDisplay: { ...DEFAULT_SETTINGS.linearDisplay, ...settings.linearDisplay } });
-  return listId === 'side' ? { ...display, showCompleted: 'none' } : display;
+  // The panel beside a day is Sunsama's: its My issues keep completed issues for five days; a search, open ones.
+  const mine = list.source.kind === 'assigned' || list.source.kind === 'created' || list.source.kind === 'subscribed';
+  return listId === 'side' ? { ...display, showCompleted: mine ? '5days' : 'none' } : display;
 };
 
 /** Whether a changed issue still belongs in a list, judged as Linear would by its filter and display. */
@@ -291,11 +313,13 @@ export class LinearStore {
     lists: { page: emptyList(), side: emptyList() },
     views: [],
     viewsLoaded: false,
+    viewsMore: {},
     favorites: [],
     linked: {},
     projects: [],
     projectsLoaded: false,
     projectsLoading: false,
+    projectsMore: {},
     project: null,
     catalogs: {},
     error: null,
@@ -452,6 +476,7 @@ export class LinearStore {
       lists: { page: { ...emptyList(fix(this.view.lists.page)), loading: true }, side: { ...emptyList(fix(this.view.lists.side)), loading: true } },
       projects: [],
       projectsLoaded: false,
+      projectsMore: {},
       project: null,
     });
     for (const id of this.used) void this.loadList(id);
@@ -558,14 +583,46 @@ export class LinearStore {
     if (seq !== this.projectSeq) return;
     const errors = new Map<string, string>();
     const projects: LinearProject[] = [];
+    const more: Record<string, string> = {};
     settled.forEach((result, index) => {
       const workspaceId = targets[index]!.id;
-      if (result.status === 'fulfilled') projects.push(...result.value.nodes.map((project) => inWorkspace(project, workspaceId)));
-      else errors.set(workspaceId, messageOf(result.reason));
+      if (result.status === 'fulfilled') {
+        projects.push(...result.value.nodes.map((project) => inWorkspace(project, workspaceId)));
+        // More than a read takes: the rest a Load more away, never left out silently.
+        if (result.value.hasMore && result.value.endCursor) more[workspaceId] = result.value.endCursor;
+      } else errors.set(workspaceId, messageOf(result.reason));
     });
     this.noteErrors(errors, targets.map((workspace) => workspace.id));
     const allFailed = targets.length > 0 && errors.size === targets.length;
-    this.set({ projects, projectsLoaded: true, projectsLoading: false, error: allFailed ? errors.get(targets[0]!.id) ?? null : this.view.error });
+    this.set({ projects, projectsLoaded: true, projectsLoading: false, projectsMore: more, error: allFailed ? errors.get(targets[0]!.id) ?? null : this.view.error });
+  }
+
+  /** The next open projects of the workspaces that have more, after the ones shown. */
+  async loadMoreProjects(): Promise<void> {
+    const pending = Object.entries(this.view.projectsMore);
+    if (!pending.length || this.view.projectsLoading) return;
+    const seq = this.projectSeq;
+    this.set({ projectsLoading: true });
+    const settled = await Promise.allSettled(
+      pending.map(([workspaceId, after]) =>
+        readPages<LinearProject>((cursor) => this.graphqlIn<{ projects: Page<LinearProject> }>(workspaceId, PROJECTS_QUERY, { after: cursor }).then((data) => data.projects), { after, maxPages: MAX_PROJECT_PAGES }),
+      ),
+    );
+    if (seq !== this.projectSeq) return;
+    const known = new Set(this.view.projects.map((project) => project.id));
+    const projects = [...this.view.projects];
+    const more: Record<string, string> = {};
+    settled.forEach((result, index) => {
+      const [workspaceId, after] = pending[index]!;
+      if (result.status === 'rejected') {
+        more[workspaceId] = after;
+        this.set({ error: messageOf(result.reason) });
+        return;
+      }
+      for (const project of result.value.nodes) if (!known.has(project.id)) projects.push(inWorkspace(project, workspaceId));
+      if (result.value.hasMore && result.value.endCursor) more[workspaceId] = result.value.endCursor;
+    });
+    this.set({ projects, projectsMore: more, projectsLoading: false });
   }
 
   /** Open a project: its overview, and its issues as the page's list. */
@@ -620,8 +677,10 @@ export class LinearStore {
     this.set({
       lists: { page: fixList(this.view.lists.page), side: fixList(this.view.lists.side) },
       views: keep(this.view.views),
+      viewsMore: Object.fromEntries(Object.entries(this.view.viewsMore).filter(([workspaceId]) => workspaceId !== id)),
       favorites: this.view.favorites.filter((favorite) => favorite.workspaceId !== id),
       projects: keep(this.view.projects),
+      projectsMore: Object.fromEntries(Object.entries(this.view.projectsMore).filter(([workspaceId]) => workspaceId !== id)),
       catalogs,
       linked: Object.fromEntries(Object.entries(this.view.linked).filter(([, issue]) => issue.workspaceId !== id)),
       project: this.view.project?.project.workspaceId === id ? null : this.view.project,
@@ -662,15 +721,27 @@ export class LinearStore {
     return null;
   }
 
+  /** Workspaces with more teams than `teams()` reads (MAX_TEAM_PAGES of 100): the team picker says so. */
+  readonly teamsCut = new Set<string>();
+
   /** Teams of every connected workspace, for creating an issue. */
   async teams(): Promise<LinearTeam[]> {
     const settled = await Promise.allSettled(
       this.view.workspaces.map(async (workspace) => {
         const cached = this.teamLists.get(workspace.id);
         if (cached) return cached;
-        const data = await this.graphqlIn<{ viewer: { id: string }; teams: { nodes: Omit<LinearTeam, 'workspaceId'>[] } }>(workspace.id, TEAMS_QUERY);
-        this.viewerIds.set(workspace.id, data.viewer.id);
-        const teams = data.teams.nodes.map((team) => ({ ...team, workspaceId: workspace.id }));
+        // Every team, a page at a time (the picker used to stop at the first 100).
+        const read = await readPages<Omit<LinearTeam, 'workspaceId'>>(
+          (after) =>
+            this.graphqlIn<{ viewer: { id: string }; teams: Page<Omit<LinearTeam, 'workspaceId'>> }>(workspace.id, TEAMS_QUERY, { after }).then((data) => {
+              this.viewerIds.set(workspace.id, data.viewer.id);
+              return data.teams;
+            }),
+          { maxPages: MAX_TEAM_PAGES },
+        );
+        const teams = read.nodes.map((team) => ({ ...team, workspaceId: workspace.id }));
+        if (read.hasMore) this.teamsCut.add(workspace.id);
+        else this.teamsCut.delete(workspace.id);
         this.teamLists.set(workspace.id, teams);
         return teams;
       }),
@@ -693,6 +764,51 @@ export class LinearStore {
   }
 
   /** Move the issue behind `task` to its team's first completed or started state. */
+  /** The issue a prompt is about: the task's own, or one merged into it. */
+  promptSource(prompt: LinearPrompt, state: PlannerState = this.client.getView().state): TaskSourceRef | null {
+    const task = state.tasks[prompt.taskId];
+    const source = prompt.subtaskId ? task?.subtasks.find((subtask) => subtask.id === prompt.subtaskId)?.source : task?.source;
+    return source?.kind === 'linear' ? source : null;
+  }
+
+  /** The workflow states of a linked task's issue's team, in workflow order (the status prompt's choices). */
+  statesForTask(task: Task): Promise<LinearState[]> {
+    return this.statesForSource(task.source ?? null);
+  }
+
+  /** The workflow states of an issue's team, by its link (a task's, or a merged subtask's). */
+  async statesForSource(source: TaskSourceRef | null): Promise<LinearState[]> {
+    if (source?.kind !== 'linear') return [];
+    const workspaceId = this.workspaceOf(source);
+    if (!workspaceId || !this.workspace(workspaceId)) return [];
+    const teamId = source.teamId ?? (await this.issueIn(workspaceId, source.id))?.team.id;
+    return teamId ? this.statesOf(workspaceId, teamId) : [];
+  }
+
+  /** An issue's team's states (a pasted issue's, to choose its status before it is added). */
+  statesForIssue(issue: LinearIssue): Promise<LinearState[]> {
+    const workspaceId = issue.workspaceId ?? this.hostWorkspace?.id ?? null;
+    return workspaceId && this.workspace(workspaceId) ? this.statesOf(workspaceId, issue.team.id) : Promise.resolve([]);
+  }
+
+  /** Move the issue behind a linked task to one of its team's states (the status prompt's choice). */
+  setStatus(task: Task, stateId: string): Promise<boolean> {
+    const source = task.source;
+    if (source?.kind !== 'linear') return Promise.resolve(false);
+    return this.moveTo({ id: source.id, key: source.key, teamId: source.teamId, workspaceId: this.workspaceOf(source) }, { stateId }, task);
+  }
+
+  /** No import prompt for this task: its status was offered as it was added (a pasted issue's, in the add field). */
+  dismissImportPrompt(taskId: string): void {
+    if (this.view.prompt?.kind === 'import' && this.view.prompt.taskId === taskId) this.set({ prompt: null });
+  }
+
+  /** Move a merged issue (a subtask's link): to a state of its team, or to its first of a type; its subtask follows at the next sync. */
+  moveSource(source: TaskSourceRef, to: 'completed' | 'started' | { stateId: string }): Promise<boolean> {
+    if (source.kind !== 'linear') return Promise.resolve(false);
+    return this.moveTo({ id: source.id, key: source.key, teamId: source.teamId, workspaceId: this.workspaceOf(source) }, to, null);
+  }
+
   moveIssue(task: Task, type: 'completed' | 'started'): Promise<boolean> {
     const source = task.source;
     if (source?.kind !== 'linear') return Promise.resolve(false);
@@ -755,24 +871,43 @@ export class LinearStore {
         issueEstimationType?: string;
         issueEstimationAllowZero?: boolean;
         issueEstimationExtended?: boolean;
-        states: { nodes: LinearState[] };
-        members: { nodes: TeamOptions['members'] };
-        labels: { nodes: LinearLabel[] };
-        cycles?: { nodes: LinearCycle[] };
-        projects?: { nodes: TeamOptions['projects'] };
+        states: Page<LinearState>;
+        members: Page<TeamOptions['members'][number]>;
+        labels: Page<LinearLabel>;
+        cycles?: Page<LinearCycle>;
+        projects?: Page<TeamOptions['projects'][number]>;
       } | null;
-      issueLabels: { nodes: LinearLabel[] };
+      issueLabels: Page<LinearLabel>;
     };
     const data = await this.graphqlIn<Answer>(workspaceId, TEAM_OPTIONS_QUERY, { id: teamId });
     if (!data.team) throw new Error('Linear no longer has this team');
-    const labels = new Map([...data.team.labels.nodes, ...data.issueLabels.nodes].map((label) => [label.id, label]));
+    // A team or workspace with more than one read's worth (more than 250 people or labels): the rest, page by page,
+    // so every one can be picked (they used to stop at the first page).
+    const rest = async <T>(first: Page<T> | undefined, more: (after: string) => Promise<Page<T>>): Promise<T[]> => {
+      if (!first) return [];
+      if (!first.pageInfo?.hasNextPage || !first.pageInfo.endCursor) return first.nodes;
+      const read = await readPages<T>((after) => more(after!), { after: first.pageInfo.endCursor, maxPages: MAX_OPTION_PAGES });
+      return [...first.nodes, ...read.nodes];
+    };
+    const ofTeam = <T>(field: TeamOptionField) => (after: string) =>
+      this.graphqlIn<{ team: Record<string, Page<T>> | null }>(workspaceId, teamOptionPageQuery(field), { id: teamId, after }).then((answer) => answer.team?.[field] ?? { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } });
+    const team = data.team;
+    const [states, members, teamLabels, workspaceLabels, cycles, projects] = await Promise.all([
+      rest(team.states, ofTeam<LinearState>('states')),
+      rest(team.members, ofTeam<TeamOptions['members'][number]>('members')),
+      rest(team.labels, ofTeam<LinearLabel>('labels')),
+      rest(data.issueLabels, (after) => this.graphqlIn<{ issueLabels: Page<LinearLabel> }>(workspaceId, WORKSPACE_LABELS_QUERY, { after }).then((answer) => answer.issueLabels)),
+      rest(team.cycles, ofTeam<LinearCycle>('cycles')),
+      rest(team.projects, ofTeam<TeamOptions['projects'][number]>('projects')),
+    ]);
+    const labels = new Map([...teamLabels, ...workspaceLabels].map((label) => [label.id, label]));
     const options: TeamOptions = {
-      states: workflowOrder(data.team.states.nodes),
-      members: data.team.members.nodes.filter((member) => member.active).sort((a, b) => a.name.localeCompare(b.name)),
+      states: workflowOrder(states),
+      members: members.filter((member) => member.active).sort((a, b) => a.name.localeCompare(b.name)),
       labels: [...labels.values()].sort((a, b) => a.name.localeCompare(b.name)),
-      cycles: data.team.cyclesEnabled === false ? [] : [...(data.team.cycles?.nodes ?? [])].sort((a, b) => a.number - b.number),
-      projects: [...(data.team.projects?.nodes ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
-      estimation: { type: data.team.issueEstimationType ?? 'notUsed', allowZero: Boolean(data.team.issueEstimationAllowZero), extended: Boolean(data.team.issueEstimationExtended) },
+      cycles: team.cyclesEnabled === false ? [] : [...cycles].sort((a, b) => a.number - b.number),
+      projects: [...projects].sort((a, b) => a.name.localeCompare(b.name)),
+      estimation: { type: team.issueEstimationType ?? 'notUsed', allowZero: Boolean(team.issueEstimationAllowZero), extended: Boolean(team.issueEstimationExtended) },
     };
     this.teamStates.set(teamId, options.states);
     this.teamOptionCache.set(teamId, options);
@@ -824,16 +959,24 @@ export class LinearStore {
     return this.view.workspaces.find((workspace) => workspace.id === id) ?? null;
   }
 
-  answerPrompt(answer: 'yes' | 'no' | 'always'): void {
+  /** The prompt's answer: the state chosen (or, without one, Done or In Progress); Always makes completing or planning do it by itself. */
+  answerPrompt(answer: 'yes' | 'no' | 'always', stateId?: string): void {
     const prompt = this.view.prompt;
     this.set({ prompt: null });
     if (!prompt || answer === 'no') return;
     const task = this.client.getView().state.tasks[prompt.taskId];
     if (!task) return;
-    if (answer === 'always') {
+    if (prompt.subtaskId) {
+      const source = this.promptSource(prompt);
+      if (answer === 'always' && prompt.kind === 'complete') void this.client.dispatch([{ type: 'settings.updated', patch: { linearOnComplete: 'complete' } }]);
+      if (source) void this.moveSource(source, stateId ? { stateId } : prompt.kind === 'complete' ? 'completed' : 'started');
+      return;
+    }
+    if (answer === 'always' && prompt.kind !== 'import') {
       void this.client.dispatch([{ type: 'settings.updated', patch: prompt.kind === 'complete' ? { linearOnComplete: 'complete' } : { linearOnPlan: 'start' } }]);
     }
-    void this.moveIssue(task, prompt.kind === 'complete' ? 'completed' : 'started');
+    if (stateId) void this.setStatus(task, stateId);
+    else void this.moveIssue(task, prompt.kind === 'complete' ? 'completed' : 'started');
   }
 
   /** What filters offer and boards need, for the given workspaces: read once, then kept for a while. */
@@ -894,7 +1037,7 @@ export class LinearStore {
     return index < 0 ? null : { index, total: this.order.length };
   }
 
-  private async moveTo(target: { id: string; key: string; teamId?: string; workspaceId: string | null }, type: string, task: Task | null): Promise<boolean> {
+  private async moveTo(target: { id: string; key: string; teamId?: string; workspaceId: string | null }, type: string | { stateId: string }, task: Task | null): Promise<boolean> {
     if (this.view.moving.has(target.id)) return false;
     this.set({ moving: new Set([...this.view.moving, target.id]) });
     try {
@@ -902,8 +1045,9 @@ export class LinearStore {
       if (!workspaceId || !this.workspace(workspaceId)) throw new Error('its Linear workspace is not connected');
       const teamId = target.teamId ?? (await this.issueIn(workspaceId, target.id))?.team.id;
       if (!teamId) throw new Error('the issue was not found');
-      const state = stateOfType(await this.statesOf(workspaceId, teamId), type);
-      if (!state) throw new Error(`its team has no ${STATE_WORDS[type] ?? type} state`);
+      const states = await this.statesOf(workspaceId, teamId);
+      const state = typeof type === 'string' ? stateOfType(states, type) : states.find((item) => item.id === type.stateId);
+      if (!state) throw new Error(typeof type === 'string' ? `its team has no ${STATE_WORDS[type] ?? type} state` : 'its team has no such state');
       const data = await this.graphqlIn<{ issueUpdate: { success: boolean; issue: LinearIssue | null } }>(workspaceId, SET_STATE_MUTATION, { id: target.id, stateId: state.id });
       if (!data.issueUpdate.success || !data.issueUpdate.issue) throw new Error('Linear did not accept the change');
       const issue = inWorkspace(data.issueUpdate.issue, workspaceId);
@@ -958,12 +1102,34 @@ export class LinearStore {
       // Only surfaces with room for the question ask it.
       if (this.surface !== 'status') this.set({ prompt });
     };
+    const made = commands.flatMap((command) => (command.type === 'task.created' && command.task.source ? [command.task.source] : []));
     for (const command of commands) {
+      // Issues merged into a task stay integrated (Sunsama's merge): checking one off, or merging one straight in from
+      // the panel, asks as the task's own would.
+      if (command.type === 'task.updated' && command.patch.subtasks) {
+        for (const subtask of mergedDone(before.tasks[command.taskId], after.tasks[command.taskId])) {
+          const source = subtask.source!;
+          if (source.kind !== 'linear' || isClosedType(source.status?.type)) continue;
+          if (settings.linearOnComplete === 'complete') void this.moveSource(source, 'completed');
+          else if (settings.linearOnComplete === 'ask') ask({ kind: 'complete', taskId: command.taskId, key: source.key, subtaskId: subtask.id });
+        }
+        if (settings.linearImportPrompt) {
+          for (const subtask of mergedImports(before, after, command.taskId, made)) {
+            if (subtask.source?.kind === 'linear') ask({ kind: 'import', taskId: command.taskId, key: subtask.source.key, subtaskId: subtask.id });
+          }
+        }
+        continue;
+      }
       if (command.type === 'task.completed') {
         const task = after.tasks[command.taskId];
         if (task?.source?.kind !== 'linear' || isClosedType(task.source.status?.type)) continue;
         if (settings.linearOnComplete === 'complete') void this.moveIssue(task, 'completed');
         else if (settings.linearOnComplete === 'ask') ask({ kind: 'complete', taskId: task.id, key: task.source.key });
+        continue;
+      }
+      // Sunsama's import automation: right after an issue is imported, a prompt to update its status in Linear.
+      if (command.type === 'task.created' && command.task.source?.kind === 'linear' && settings.linearImportPrompt && !before.tasks[command.task.id] && !wasMerged(before, command.task.source)) {
+        ask({ kind: 'import', taskId: command.task.id, key: command.task.source.key });
         continue;
       }
       const plannedId = command.type === 'task.created' ? command.task.id : command.type === 'task.moved' ? command.taskId : null;
@@ -980,7 +1146,8 @@ export class LinearStore {
 
   private async sync(linked: Record<string, LinearIssue>): Promise<void> {
     const { state, today } = this.client.getView();
-    const bodies = planLinearSync(state, new Map(Object.entries(linked)), { today, importCompletion: state.settings.linearImportCompletion });
+    const merged = new Map(Object.values(linked).map((issue) => [issue.id, { title: issue.title, status: { name: issue.state.name, type: issue.state.type, color: issue.state.color }, closed: isClosedType(issue.state.type) }]));
+    const bodies = [...planLinearSync(state, new Map(Object.entries(linked)), { today, importCompletion: state.settings.linearImportCompletion }), ...planSubtaskSourceSync(state, 'linear', merged)];
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'linear' });
   }
 
@@ -1198,41 +1365,98 @@ export class LinearStore {
     const settled = await Promise.allSettled(workspaces.map((workspace) => this.fetchViewsIn(workspace.id)));
     const views: LinearSavedView[] = [];
     const favorites: LinearFavorite[] = [];
+    const more: Record<string, string> = {};
+    let favoritesCut = false;
     settled.forEach((result, index) => {
       if (result.status !== 'fulfilled') return;
       views.push(...result.value.views.map((item) => inWorkspace(item, workspaces[index]!.id)));
       favorites.push(...result.value.favorites);
+      if (result.value.more) more[workspaces[index]!.id] = result.value.more;
+      favoritesCut ||= result.value.favoritesCut;
     });
-    this.set({ views, favorites, viewsLoaded: true });
+    this.set({ views, favorites, viewsLoaded: true, viewsMore: more, favoritesCut });
   }
 
-  private async fetchViewsIn(workspaceId: string): Promise<{ views: LinearSavedView[]; favorites: LinearFavorite[] }> {
-    const favoriteNodes = this.graphqlIn<{ favorites: { nodes: LinearFavoriteNode[] } }>(workspaceId, FAVORITE_VIEWS_QUERY)
-      .then((data) => data.favorites.nodes)
+  /** Where the favorites put each view, by workspace (a view read by Load more views takes its place too). */
+  private readonly viewOrders = new Map<string, Map<string, number>>();
+
+  private async fetchViewsIn(workspaceId: string): Promise<{ views: LinearSavedView[]; favorites: LinearFavorite[]; more: string | null; favoritesCut: boolean }> {
+    let favoritesCut = false;
+    const favoriteNodes = readPages<LinearFavoriteNode>((after) => this.graphqlIn<{ favorites: Page<LinearFavoriteNode> }>(workspaceId, FAVORITE_VIEWS_QUERY, { after }).then((data) => data.favorites), { maxPages: MAX_FAVORITE_PAGES })
+      .then((read) => {
+        favoritesCut = read.hasMore;
+        return read.nodes;
+      })
       .catch(() => [] as LinearFavoriteNode[]);
     const read = await readPages<LinearSavedView>((after) => this.graphqlIn<{ customViews: Page<LinearSavedView> }>(workspaceId, VIEWS_QUERY, { after }).then((data) => data.customViews), { maxPages: MAX_VIEW_PAGES });
     const nodes = await favoriteNodes;
     const order = favoriteOrder(nodes);
+    this.viewOrders.set(workspaceId, order);
     const known = new Set(read.nodes.map((view) => view.id));
     return {
       views: read.nodes.map((view) => (order.has(view.id) ? { ...view, favoriteOrder: order.get(view.id)! } : view)),
-      // A favorite view I can no longer see is left out.
-      favorites: favoritesOf(nodes, workspaceId).filter((favorite) => favorite.kind !== 'view' || known.has(favorite.id)),
+      // A favorite view I can no longer see is left out (one past the views read so far may come with Load more views).
+      favorites: favoritesOf(nodes, workspaceId).filter((favorite) => favorite.kind !== 'view' || known.has(favorite.id) || read.hasMore),
+      more: read.hasMore ? read.endCursor : null,
+      favoritesCut,
     };
   }
 
+  /** The next saved views of the workspaces that have more, after the ones read (the sidebar's Load more views). */
+  async loadMoreViews(): Promise<void> {
+    const pending = Object.entries(this.view.viewsMore);
+    if (!pending.length || this.loadingViews) return;
+    this.loadingViews = true;
+    try {
+      const settled = await Promise.allSettled(
+        pending.map(([workspaceId, after]) =>
+          readPages<LinearSavedView>((cursor) => this.graphqlIn<{ customViews: Page<LinearSavedView> }>(workspaceId, VIEWS_QUERY, { after: cursor }).then((data) => data.customViews), { after, maxPages: MAX_VIEW_PAGES }),
+        ),
+      );
+      const known = new Set(this.view.views.map((view) => `${view.workspaceId}:${view.id}`));
+      const views = [...this.view.views];
+      const more: Record<string, string> = {};
+      settled.forEach((result, index) => {
+        const [workspaceId, after] = pending[index]!;
+        if (result.status === 'rejected') {
+          more[workspaceId] = after;
+          this.set({ error: messageOf(result.reason) });
+          return;
+        }
+        const order = this.viewOrders.get(workspaceId);
+        for (const view of result.value.nodes) {
+          if (known.has(`${workspaceId}:${view.id}`)) continue;
+          views.push(inWorkspace(order?.has(view.id) ? { ...view, favoriteOrder: order.get(view.id)! } : view, workspaceId));
+        }
+        if (result.value.hasMore && result.value.endCursor) more[workspaceId] = result.value.endCursor;
+      });
+      this.set({ views, viewsMore: more });
+    } finally {
+      this.loadingViews = false;
+    }
+  }
+
+  private loadingViews = false;
+
   private async fetchCatalog(workspaceId: string): Promise<FilterCatalog> {
-    const all = <T>(query: string, key: string) =>
-      readPages<T>((after) => this.graphqlIn<Record<string, Page<T>>>(workspaceId, query, { after }).then((data) => data[key]!), { maxPages: MAX_CATALOG_PAGES }).then((read) => read.nodes);
-    type TeamNode = { id: string; key: string; name: string; issueEstimationType?: string; issueEstimationAllowZero?: boolean; issueEstimationExtended?: boolean; states: { nodes: LinearState[] } };
+    // What Linear has more of than this read (its bound of pages): the filter menu says so.
+    const partial = new Set<CatalogPart>();
+    const all = <T>(query: string, key: string, part: CatalogPart) =>
+      readPages<T>((after) => this.graphqlIn<Record<string, Page<T>>>(workspaceId, query, { after }).then((data) => data[key]!), { maxPages: MAX_CATALOG_PAGES }).then((read) => {
+        if (read.hasMore) partial.add(part);
+        return read.nodes;
+      });
+    type TeamNode = { id: string; key: string; name: string; issueEstimationType?: string; issueEstimationAllowZero?: boolean; issueEstimationExtended?: boolean; states: Page<LinearState> };
     const [teams, users, labels, projects, cycles, milestones] = await Promise.all([
-      all<TeamNode>(FILTER_TEAMS_QUERY, 'teams'),
-      all<FilterCatalog['users'][number]>(FILTER_USERS_QUERY, 'users').catch(() => []),
-      all<FilterCatalog['labels'][number]>(FILTER_LABELS_QUERY, 'issueLabels').catch(() => []),
-      all<FilterCatalog['projects'][number]>(FILTER_PROJECTS_QUERY, 'projects').catch(() => []),
-      all<FilterCatalog['cycles'][number]>(FILTER_CYCLES_QUERY, 'cycles').catch(() => []),
-      all<NonNullable<FilterCatalog['milestones']>[number]>(FILTER_MILESTONES_QUERY, 'projectMilestones').catch(() => []),
+      all<TeamNode>(FILTER_TEAMS_QUERY, 'teams', 'teams'),
+      all<FilterCatalog['users'][number]>(FILTER_USERS_QUERY, 'users', 'users').catch(() => []),
+      all<FilterCatalog['labels'][number]>(FILTER_LABELS_QUERY, 'issueLabels', 'labels').catch(() => []),
+      all<FilterCatalog['projects'][number]>(FILTER_PROJECTS_QUERY, 'projects', 'projects').catch(() => []),
+      all<FilterCatalog['cycles'][number]>(FILTER_CYCLES_QUERY, 'cycles', 'cycles').catch(() => []),
+      all<NonNullable<FilterCatalog['milestones']>[number]>(FILTER_MILESTONES_QUERY, 'projectMilestones', 'milestones').catch(() => []),
     ]);
+    // A team's states are its first 50 here (the issue editor reads them all).
+    if (teams.some((team) => team.states.pageInfo?.hasNextPage)) partial.add('states');
     const me = users.find((user) => user.isMe);
     if (me) this.viewerIds.set(workspaceId, me.id);
     return {
@@ -1249,12 +1473,21 @@ export class LinearStore {
       projects,
       cycles,
       milestones,
+      ...(partial.size ? { partial: [...partial] } : {}),
     };
   }
 
   /** Issues behind open linked tasks, read from the workspace each lives in. */
   private async fetchLinked(): Promise<{ issues: Record<string, LinearIssue>; errors: Map<string, string>; asked: string[] }> {
-    const groups = [...linkedIssueIdsByWorkspace(this.client.getView().state, this.hostWorkspace?.id ?? null)].filter(([workspaceId]) => this.workspace(workspaceId));
+    const state = this.client.getView().state;
+    const fallback = this.hostWorkspace?.id ?? null;
+    // Linked tasks' issues, and issues merged into tasks (they stay synced, as in Sunsama), by workspace.
+    const byWorkspace = new Map(linkedIssueIdsByWorkspace(state, fallback));
+    for (const source of subtaskSources(state, 'linear')) {
+      const workspaceId = source.workspaceId ?? fallback;
+      if (workspaceId) byWorkspace.set(workspaceId, [...new Set([...(byWorkspace.get(workspaceId) ?? []), source.id])]);
+    }
+    const groups = [...byWorkspace].filter(([workspaceId]) => this.workspace(workspaceId));
     const issues: Record<string, LinearIssue> = {};
     const errors = new Map<string, string>();
     await Promise.all(
