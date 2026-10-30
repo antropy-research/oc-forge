@@ -27,6 +27,7 @@ import {
   nodeIn,
   operatorLabel,
   operatorsFor,
+  partialNote,
   replaceIn,
   searchChoices,
   toggleRuleValue,
@@ -132,6 +133,8 @@ const useChoices = (listId: ListId, inGroup: boolean) => {
     loading,
     load: () => linear.loadCatalogs(workspaceIds),
     choices: (field: LinearFilterField): FilterOption[] => filterChoices(field, catalogs, { teamIds, workspaceNames: names }),
+    /** Said under a property's values when Linear has more of them than the catalog read. */
+    partial: (field: LinearFilterField): string | null => partialNote(field, catalogs),
     // The workspace picks which workspaces are read: a top-level filter of the bar only.
     fields: LINEAR_FILTER_FIELDS.filter((field) => field !== 'workspace' || (!inGroup && lv.workspaces.length > 1 && list.source.kind !== 'view' && list.source.kind !== 'project')),
   };
@@ -214,7 +217,7 @@ const FilterMenu = ({
   const [term, setTerm] = useState('');
   // The rule this menu edits, once there is one.
   const [path, setPath] = useState<FilterPath | null>(target.kind === 'rule' ? target.path : null);
-  const { choices, fields, load, loading } = useChoices(listId, target.kind !== 'bar');
+  const { choices, fields, load, loading, partial } = useChoices(listId, target.kind !== 'bar');
   useEffect(() => void load(), []);
 
   /** Where a value of `field` goes: the rule this menu edits; in the bar, that property's top-level rule. */
@@ -363,6 +366,7 @@ const FilterMenu = ({
       onClose={onClose}
       footer={
         <span class="lin-popover-help">
+          {partial(field) && <span class="lin-filter-partial" role="note">{partial(field)}</span>}
           {stage.from === 'menu' && <button type="button" class="link" onClick={() => setStage({ kind: 'fields' })}>← Filters</button>}
           <span class="grow" />
           <span class="muted">{single ? '↑↓ move · Enter pick · Esc close' : '↑↓ move · Enter tick · Esc close'}</span>

@@ -681,6 +681,7 @@ button.all-day-event.is-task:hover { background: color-mix(in srgb, var(--item-c
 .lin-nav-hint { flex: none; font-size: 10.5px; color: var(--oc-muted); }
 .lin-nav-find { margin: 2px 2px 4px; padding: 3px 8px; border: 1px solid var(--pl-line); border-radius: 6px; background: var(--pl-surface); font-size: 12px; }
 .lin-nav-note { margin: 2px 8px; }
+.lin-filter-partial { flex-basis: 100%; color: var(--oc-muted); font-size: 11px; }
 .lin-kbd { font: 10px var(--oc-mono, ui-monospace, monospace); padding: 0 4px; border-radius: 4px; border: 1px solid var(--pl-line); color: var(--oc-muted); background: var(--pl-softer); white-space: nowrap; }
 
 .lin-head { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 8px 20px; border-bottom: 1px solid var(--pl-line); }
@@ -719,6 +720,8 @@ button.lin-crumb { padding: 0; }
 .lin-popover-empty { padding: 8px; color: var(--oc-muted); font-size: 12px; }
 .lin-popover-footer { border-top: 1px solid var(--pl-line); padding: 6px 8px; font-size: 11.5px; }
 .lin-popover-help { display: flex; align-items: center; gap: 8px; }
+.lin-popover-help:has(> .lin-filter-partial) { flex-wrap: wrap; }
+.iv-more { margin: 4px 0 8px; }
 .lin-popover-help .grow { flex: 1; }
 .lin-popover-title { padding: 8px 10px 4px; font-size: 12px; font-weight: 600; }
 .lin-option { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 3px 8px; border-radius: 5px; cursor: pointer; font-size: 12.5px; }

@@ -2778,7 +2778,7 @@ var ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrder
     cycle { id number name isActive isNext }
     projectMilestone { id name }
     parent { id identifier title }
-    labels(first: 25) { nodes { id name color } }
+    labels(first: 25) { nodes { id name color } pageInfo { hasNextPage } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 var PAGE = "pageInfo { hasNextPage endCursor }";
 var PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate createdAt updatedAt sortOrder
@@ -2819,14 +2819,15 @@ var VIEWS_QUERY = `query PlannerViews($after: String) {
     ${PAGE}
   }
 }`;
-var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews {
-  favorites(first: 250) {
+var FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews($after: String) {
+  favorites(first: 250, after: $after) {
     nodes {
       id type sortOrder
       customView { id }
       project { ${PROJECT_FIELDS} }
       issue { id identifier title url state { id name type color } team { id key name } }
     }
+    ${PAGE}
   }
 }`;
 var VIEW_QUERY = `query PlannerView($id: String!) {
@@ -2869,9 +2870,9 @@ var ISSUE_QUERY = `query PlannerIssue($id: String!) {
 var TEAM_STATES_QUERY = `query PlannerTeamStates($id: String!) {
   team(id: $id) { id states(first: 100) { nodes { id name type color position } } }
 }`;
-var TEAMS_QUERY = `query PlannerTeams {
+var TEAMS_QUERY = `query PlannerTeams($after: String) {
   viewer { id }
-  teams(first: 100) { nodes { id key name } }
+  teams(first: 100, after: $after) { nodes { id key name } ${PAGE} }
 }`;
 var WHOAMI_QUERY = `query PlannerWhoAmI {
   viewer { id name }
@@ -2887,13 +2888,13 @@ var PROJECT_QUERY = `query PlannerProject($id: String!) {
   project(id: $id) {
     ${PROJECT_FIELDS}
     content
-    projectMilestones(first: 25) { nodes { id name targetDate progress sortOrder } }
+    projectMilestones(first: 100) { nodes { id name targetDate progress sortOrder } pageInfo { hasNextPage } }
     lastUpdate { id body health createdAt url user { id name } }
   }
 }`;
 var FILTER_TEAMS_QUERY = `query PlannerFilterTeams($after: String) {
   teams(first: 50, after: $after) {
-    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } } }
+    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } pageInfo { hasNextPage } } }
     ${PAGE}
   }
 }`;
@@ -2938,10 +2939,10 @@ var HISTORY_FIELDS = `id createdAt actor { id name } botActor { name }
       fromEstimate toEstimate updatedDescription`;
 var DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
-    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }
-    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } }
-    attachments(first: 25) { nodes { id title subtitle url sourceType } }
-    history(first: 50) { nodes { ${HISTORY_FIELDS} } }`;
+    comments(first: 100) { nodes { ${COMMENT_FIELDS} } pageInfo { hasNextPage } }
+    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } pageInfo { hasNextPage } }
+    attachments(first: 25) { nodes { id title subtitle url sourceType } pageInfo { hasNextPage } }
+    history(first: 50) { nodes { ${HISTORY_FIELDS} } pageInfo { hasNextPage } }`;
 var ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
   issue(id: $id) { ${DETAIL_FIELDS} }
 }`;
@@ -2952,13 +2953,23 @@ var TEAM_OPTIONS_QUERY = `query PlannerTeamOptions($id: String!) {
     issueEstimationType
     issueEstimationAllowZero
     issueEstimationExtended
-    states(first: 100) { nodes { id name type color position } }
-    members(first: 250) { nodes { id name displayName active } }
-    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } }
-    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } }
-    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } }
+    states(first: 100) { nodes { id name type color position } ${PAGE} }
+    members(first: 250) { nodes { id name displayName active } ${PAGE} }
+    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }
+    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }
   }
-  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } }
+  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+}`;
+var TEAM_OPTION_PAGES = {
+  states: `states(first: 250, after: $after) { nodes { id name type color position } ${PAGE} }`,
+  members: `members(first: 250, after: $after) { nodes { id name displayName active } ${PAGE} }`,
+  labels: `labels(first: 250, after: $after, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }`,
+  cycles: `cycles(first: 250, after: $after, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }`,
+  projects: `projects(first: 250, after: $after, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }`
+};
+var WORKSPACE_LABELS_QUERY = `query PlannerWorkspaceLabels($after: String) {
+  issueLabels(first: 250, after: $after, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
 }`;
 var UPDATE_ISSUE_MUTATION = `mutation PlannerUpdateIssue($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success issue { ${DETAIL_FIELDS} } }
@@ -7063,7 +7074,11 @@ var server = http2.createServer(async (req, res) => {
     }
     if (url.pathname === "/github/pulls" && req.method === "POST") {
       const body = await readJson(req);
-      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
+      if (Array.isArray(body.runs) && body.runs.length > PULL_LOOKUPS_PER_REQUEST) {
+        json(res, 400, { error: `at most ${PULL_LOOKUPS_PER_REQUEST} runs a request` });
+        return;
+      }
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup) : [];
       const results = await mapLimited2(runs, 4, async (run) => {
         try {
           return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };

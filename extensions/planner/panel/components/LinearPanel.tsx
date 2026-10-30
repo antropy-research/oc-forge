@@ -244,6 +244,7 @@ const CreateIssue = ({ task }: { task: Task }) => {
           return <option key={item.id} value={item.id}>{workspace ? `${workspace} · ` : ''}{item.key} · {item.name}</option>;
         })}
       </select>
+      {linear.teamsCut.size > 0 && <span class="hint" role="note">Linear has more teams than listed here</span>}
       <button
         class="link"
         disabled={busy || !team}

@@ -653,8 +653,8 @@ export const readPages = async <T>(fetchPage: (after: string | null) => Promise<
   for (let page = 0; page < options.maxPages; page++) {
     const answer = await fetchPage(after);
     nodes.push(...answer.nodes);
-    // A next page without a cursor to reach it would be read again forever.
-    if (!answer.pageInfo.hasNextPage || !answer.pageInfo.endCursor) return { nodes, endCursor: null, hasMore: false };
+    // A next page without a cursor to reach it would be read again forever; an answer without pageInfo is its last page.
+    if (!answer.pageInfo?.hasNextPage || !answer.pageInfo.endCursor) return { nodes, endCursor: null, hasMore: false };
     after = answer.pageInfo.endCursor;
   }
   return { nodes, endCursor: after, hasMore: true };

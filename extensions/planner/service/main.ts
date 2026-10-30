@@ -375,7 +375,12 @@ const server = http.createServer(async (req, res) => {
       // Pull requests that agents opened from their runs' worktree branches. Four
       // at a time, in parallel, so the request ends well within the host's 20 seconds.
       const body = (await readJson(req)) as { runs?: unknown };
-      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup).slice(0, PULL_LOOKUPS_PER_REQUEST) : [];
+      // The panel sends them PULL_LOOKUPS_PER_REQUEST at a time; more is refused, not cut short.
+      if (Array.isArray(body.runs) && body.runs.length > PULL_LOOKUPS_PER_REQUEST) {
+        json(res, 400, { error: `at most ${PULL_LOOKUPS_PER_REQUEST} runs a request` });
+        return;
+      }
+      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup) : [];
       const results = await mapLimited(runs, 4, async (run) => {
         try {
           return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };

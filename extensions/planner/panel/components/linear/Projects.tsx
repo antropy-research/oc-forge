@@ -70,7 +70,7 @@ export const ProjectsPane = () => {
         <div class="lin-crumbs"><h1>Projects</h1></div>
         <span class="grow" />
         <HeadSearch />
-        <span class="lin-count">{lv.projectsLoaded ? countText(lv.projects.length, false, 'open project') : ''}</span>
+        <span class="lin-count">{lv.projectsLoaded ? countText(lv.projects.length, Object.keys(lv.projectsMore).length > 0, 'open project') : ''}</span>
         <button class="lin-icon-button" aria-label="Refresh projects" title="Refresh" onClick={() => void linear.loadProjects()}>↻</button>
       </header>
       <div class="lin-content view-scroll linear-projects">
@@ -78,6 +78,12 @@ export const ProjectsPane = () => {
         {lv.projectsLoading && lv.projects.length === 0 && <p class="hint">Loading projects…</p>}
         {!lv.projectsLoading && lv.projectsLoaded && lv.projects.length === 0 && <p class="hint">No open projects here.</p>}
         <ProjectGroups projects={lv.projects} />
+        {Object.keys(lv.projectsMore).length > 0 && (
+          <div class="lin-more" role="status">
+            <span class="hint">{lv.projects.length} shown; Linear has more open projects</span>
+            <button class="link" disabled={lv.projectsLoading} onClick={() => void linear.loadMoreProjects()}>{lv.projectsLoading ? 'Loading…' : 'Load more projects'}</button>
+          </div>
+        )}
       </div>
     </>
   );
@@ -135,6 +141,11 @@ export const ProjectOverview = ({ detail }: { detail: LinearProjectDetail }) => 
               </li>
             ))}
           </ul>
+          {detail.projectMilestones.pageInfo?.hasNextPage && (
+            <p class="hint" role="note">
+              Linear has more milestones than the first {milestones.length}: <button class="link" onClick={() => void host.openUrl(detail.url)}>Open in Linear</button>
+            </p>
+          )}
         </section>
       )}
       {detail.content?.trim() && (
