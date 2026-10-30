@@ -1160,6 +1160,11 @@ const printJourney = async (viewport) => {
     await preview.getByRole('combobox', { name: 'View' }).selectOption('schedule');
     check(`${size}: View Schedule offers Print descriptions and Print your response`, (await preview.getByRole('checkbox', { name: 'Print descriptions' }).count()) === 1 && (await preview.getByRole('checkbox', { name: 'Print your response' }).count()) === 1);
     check(`${size}: Show weekends off leaves Saturdays and Sundays out of the Schedule too`, await until(async () => !/(Saturday|Sunday), /.test(await paper.innerText()), 5000), (await paper.innerText()).slice(0, 300));
+    // The response printed is to the invitation (Vendor demo), which is tomorrow: a Saturday the weekends just left
+    // out, or past the week's end, on some days. So the weekends come back and the range reaches tomorrow, and the
+    // check holds whatever day it runs (on 2026-10-29 at 23:00 PDT, Friday in the zone it picked, it did not).
+    await preview.getByRole('checkbox', { name: 'Show weekends' }).check();
+    if ((await range())[1] < addDays(today, 1)) await preview.getByLabel('Print range to').fill(addDays(today, 1));
     await preview.getByRole('checkbox', { name: 'Print descriptions' }).check();
     await preview.getByRole('checkbox', { name: 'Print your response' }).check();
     check(`${size}: they print each event's description and my answer (Quarter planning: "Agenda…"; Your response)`, await until(async () => (await paper.innerText()).includes('Agenda') && (await paper.innerText()).includes('Your response:'), 15_000), (await paper.innerText()).slice(0, 400));
