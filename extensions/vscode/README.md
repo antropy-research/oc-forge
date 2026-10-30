@@ -154,6 +154,42 @@ the shell, as VS Code's own navigation keys do (`terminal.integrated.commandsToS
 them, and the rest stay the shell's (Alt+W is Esc w for Emacs, Ctrl+[ is Esc, Ctrl+B is readline's and tmux's).
 Keys Chrome keeps in a normal tab (Ctrl+Tab, Cmd+W, Cmd+Option+←/→) reach VS Code only in an installed app window.
 
+**Focus.** A frame takes the keyboard focus only for the user (`src/focus.ts`). VS Code focuses a part as it starts
+(`Layout.restoreParts`), and each part focused what it showed, so a frame that started or reloaded while the user was
+elsewhere in OpenChamber took the focus from them. After "Open in VS Code" the rail view, the page and the terminal
+reload on the new folder, and a folder's rail panel starts when one of its chats shows. Before this guard, every
+"Open in VS Code" round trip saw 3–5 such grabs. The focus left the menu the user had just opened (OpenChamber's
+menus close when they lose it) or the composer they were typing in. Now, from before VS Code runs, a focus call
+(`element.focus()`, `window.focus()`) takes effect only:
+- while the frame has the focus already;
+- within 2 s of the user acting on it: a click, a touch, a key or a drop in it;
+- when the user chose something in it through OpenChamber, as it opens:
+  - a rail entry: its view container, as VS Code's activity bar focuses it, and the quick pick behind Additional Views;
+  - a header tab, while the page still shows it;
+  - an unsaved tab being closed: VS Code's save prompt;
+  - a link followed.
+
+That moment ends early when the frame loses the focus. The terminal takes the focus when it is opened, as
+OpenChamber's own terminal does, but not when it reloads to follow the folder (the frame marks that reload in
+`window.name`). A view or a page that OpenChamber starts by itself (a rail panel opening, a chat in another folder, a
+reload) takes the focus only on a click. The "OpenChamber is now in …" notification shows at the bottom of the rail
+view and takes no focus.
+
+A webview (Markdown's preview, an extension's page or view) goes by the same rule. VS Code focuses one through its
+frame's window: `WebviewElement._doFocus` calls `iframe.contentWindow.focus()`, a cross-origin call no `element.focus()`
+guard sees, then posts the webview `focus` for its content. A preview restored as the page's active editor took the
+focus that way each time the page started again behind a chat (the way back from "Open in VS Code", a reload). Now:
+- every webview the webview service makes (`IWebviewService.createWebviewElement`, the same in 1.140 to 1.144) has its
+  `focus()` guarded. The service is a delayed one, a proxy that keeps the first function read through it, so the
+  guard takes the original from the class and puts its own in before anything reads it (`guardWebviews`);
+- the `focus()` VS Code gives the webview's iframe goes through the guard too;
+- the host page (`webview/host.ts`) passes VS Code's `focus` on to the content only while its own frame has the
+  focus, as it already did when content loads, so a late one (the content still loading) doesn't take the focus back
+  from where the user went. This page serves the stock panel's webviews too; nothing the user does there changes.
+
+A click into a webview, choosing its header tab, Find (Ctrl+F, Enter, and Escape back into it) and Ctrl+C work as
+before.
+
 **Tunnels.** Each workbench holds 2 of the service's tunnels (its management connection and its extension host's).
 A browser window runs up to 3 workbenches, so 6, and 12 for the 45 s a reloaded frame's old tunnels linger; past
 `MAX_TUNNELS` the least recently polled one is closed, which ends a live workbench. The limit is 128 (was 32): room
@@ -176,7 +212,7 @@ a tab or is opened.
 
 **Limits.**
 - A file a rail view or the terminal hands to a page that is still starting (VS Code restoring, the page closing
-  editors closed before) opens once the page is ready, and takes the focus then.
+  editors closed before) opens once the page is ready, and takes the focus then if the page still shows it.
 - The adapted OpenChamber sends a window's service requests over one WebSocket (its transport, which Chrome pools
   apart from the six connections), so two browser tabs each run VS Code's parts. Where they go over plain HTTP
   instead (an adapted build before the transport, or with it off, `oc-forge:service-socket` in localStorage), a
@@ -196,7 +232,7 @@ a tab or is opened.
 
 | Path | Role |
 |---|---|
-| `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`), the rail entries (`rail.ts`), the roles and editors between frames (`surfaces.ts`) |
+| `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`), the rail entries (`rail.ts`), the roles and editors between frames (`surfaces.ts`), the frames' keyboard focus (`focus.ts`) |
 | `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`), the rail (`rail.ts`), editors handed to the page and its saved tabs (`editors.ts`) |
 | `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB; the roles in OpenChamber's own surfaces (`surfaces.ts`) and the VS Code services they use (`vscode.ts`) |
 | `panel/` | The background frame: "Open in VS Code" on a chat |
@@ -231,14 +267,19 @@ behind it then and opens each, and the Explorer shows, lit, once the container s
 through VS Code's Quick Open in the page, past the 64 tabs the host had room for (each has its header tab, the last
 selected, in view and named by the address bar; the strip's list holds every one and opens the 30th; the last, switched
 to from its tab and closed unsaved from the header, asks to save: Cancel keeps it, Don't Save closes it, and the file
-shown next is the selected tab and the address bar's; `4ac4898`'s build failed all of these).
+shown next is the selected tab and the address bar's; `4ac4898`'s build failed all of these); "Open in VS Code" on a
+chat in a second project and back, the chat's menu opened once each time (no retry), and a menu opened while VS Code
+follows the folder staying open, with the focus still in OpenChamber once the rail view and the page have started on it
+(`ffd6c44`'s build lost the menu and the focus to a VS Code frame every time); the same with Markdown's preview as the
+page's active editor: coming back, the page starts again with the preview active while the menu held open stays open
+(`63c9cb1`'s build lost both to the preview's frame every time), then a click into the preview and choosing its header
+tab each give it the keys.
 At 1440×900 also: Markdown's preview in the stock instance's
 whole workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a
 rail view; Ctrl+click on a link in a rail view (the probe extension's welcome view) and on a file link in the terminal
 opening a new browser tab on that file's editor while this tab stays as it was, a plain click opening it here;
 OpenChamber's rail digits (Ctrl+Alt+digit) reaching it from the rail view, the page and the terminal, Alt+W from a
-rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; "Open in VS Code" on a chat in a
-second project and back; the terminal under a file's editor (`keepBottomZone`: the page ends where the bottom zone
+rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; the terminal under a file's editor (`keepBottomZone`: the page ends where the bottom zone
 begins, both take input, both stay through a chat); closing the last unsaved file tab (Cancel keeps the tab, the
 editor and the change; Don't Save closes without writing, and the file opens again as on disk; Save writes; each back
 to the chat), and across a reload the tabs coming back once each (Markdown's preview too), tabs chosen while the page
@@ -249,7 +290,10 @@ while this one stays as it was, VS Code's rail view and page then working in bot
 service requests over a WebSocket of its own (the adapters' transport); and three browser windows in a row each
 opening the terminal and running a command in it, the terminal's part adding no terminal to the ones VS Code
 reconnects. It writes each size's start times and memory to `<size>-frames.json`. Run the stack's `prepare` outside a
-private network namespace (it downloads), then `up`, the check and `down` inside one.
+private network namespace (it downloads), then `up`, the check and `down` inside one. `SURFACES_ONLY=openInVscode`
+(phase functions, comma-separated) runs only those, after the seed. `SURFACES_TRACE=1` writes `toasts.log`: every VS Code
+notification and OpenChamber toast shown, where and for how long, among the checks. A full run shows two, both
+"OpenChamber is now in …" in phase 10's rail view, for under 2 s.
 
 `run.mjs` checks the dev container, whichever OpenChamber it runs; its catalog tells (an adapted server publishes the
 extension's `ocForge` block). On a stock OpenChamber it connects the panel to the VS Code Server and checks the
