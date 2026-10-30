@@ -29,8 +29,11 @@
 // other; a task's form open in one window while another moves the series'
 // time or cuts it short, saving its title alone keeping both, the question
 // offering This task and All tasks, and a time changed in both windows asked
-// about (Keep theirs, Save mine), as a Planner task's notes are; titles that
-// read in full; the layout at 1440 and 1024 px.
+// about (Keep theirs, Save mine), as a Planner task's notes are; a task with
+// subtasks deleted from the calendar right after a reload and undone, all of
+// it back and nested; a form's save whose read of the task fails writing
+// nothing and offering Try again, then the conflict; titles that read in
+// full; the layout at 1440 and 1024 px.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/calendar.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
@@ -2273,6 +2276,201 @@ try {
       await removeTasks(made, `review10-${size}`);
     }
   };
+  /**
+   * Review 11. P1-1: right after a reload, on the calendar (Tasks never opened), a dated task with an undated and a
+   * dated subtask deleted from its details, then Undo: the task, both subtasks under it and what the Planner kept for
+   * them (a time, a color, a star) come back, in Google and after a reload (Tasks shows them nested), as when Tasks was
+   * loaded first. P1-2: a task's form open in the second window while the first saves another title; the second
+   * window's reads of the task fail (503, as the reviewer failed them): Done writes nothing, the form stays open with
+   * the edit and says it couldn't check, with Try again; once reads work, Try again asks the conflict, and Keep theirs
+   * (1440) or Save mine (1024) does what it says.
+   */
+  const review11 = async (size) => {
+    const made = [];
+    const inGoogle = (id) => fake.tasks.get('L1').find((task) => task.id === id);
+    const patchesOf = (id) => fake.requests.filter((request) => request.method === 'PATCH' && request.path === `/tasks/v1/lists/L1/tasks/${id}`).length;
+    const newTask = async (title, extra = {}) => {
+      const task = (await h.call('POST', '/google/tasks', { account: ME, listId: 'L1', title, ...extra })).json.task;
+      made.push(task.id);
+      return task;
+    };
+    try {
+      // 1. Deleted and undone from the calendar, cold (right after a reload) and warm (Tasks loaded first).
+      for (const warm of [false, true]) {
+        const tag = warm ? 'warm' : 'cold';
+        const parent = await newTask(`Harness parent ${tag} ${size}`, { due: today });
+        const undated = await newTask(`Harness undated ${tag} ${size}`, { parent: parent.id });
+        const dated = await newTask(`Harness dated ${tag} ${size}`, { parent: parent.id, previous: undated.id, due: today });
+        await h.call('POST', '/commands', {
+          commands: [
+            { cmd: `harness-r11-${tag}-${size}-p`, type: 'gtask.kept', account: ME, listId: 'L1', taskId: parent.id, patch: { time: 600, color: '#d50000' } },
+            { cmd: `harness-r11-${tag}-${size}-d`, type: 'gtask.kept', account: ME, listId: 'L1', taskId: dated.id, patch: { time: 840, starred: true } },
+          ],
+        });
+        await reload();
+        if (warm) {
+          await toPage('Tasks');
+          await myTasks.locator(`li.gt-row[data-task="${undated.id}"]`).waitFor({ timeout: 15_000 });
+        }
+        await weekOf(today);
+        await realOn(today, parent.title).first().waitFor({ timeout: 15_000 });
+        await openReal(today, parent.title);
+        const details = f.getByRole('dialog', { name: `Google task: ${parent.title}` });
+        await details.getByRole('button', { name: 'Delete task' }).click();
+        const deleted = Boolean(await until(() => ![parent.id, undated.id, dated.id].some(inGoogle), 10_000));
+        const snack = f.locator('.gcal-snack', { hasText: 'Task deleted' });
+        const offered = await snack.waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+        await shot(`cal-120-${tag}-deleted-${size}`);
+        if (offered) await snack.getByRole('button', { name: 'Undo' }).click();
+        const back = await until(() => (inGoogle(parent.id) && inGoogle(undated.id)?.parent === parent.id && inGoogle(dated.id)?.parent === parent.id ? true : null), 10_000);
+        const keptBack = await until(async () => {
+          const plan = await state();
+          const own = plan.googleTasks?.[`${ME}\n${parent.id}`];
+          const child = plan.googleTasks?.[`${ME}\n${dated.id}`];
+          return own?.time === 600 && own.color === '#d50000' && child?.time === 840 && child.starredAt ? true : null;
+        }, 10_000);
+        await reload();
+        await toPage('Tasks');
+        const nested = await settle(
+          async () => ({
+            parent: await myTasks.locator(`li.gt-row.depth-0[data-task="${parent.id}"]`).count(),
+            undated: await myTasks.locator(`li.gt-row.depth-1[data-task="${undated.id}"]`).count(),
+            dated: await myTasks.locator(`li.gt-row.depth-1[data-task="${dated.id}"]`).count(),
+          }),
+          (seen) => seen.parent === 1 && seen.undated === 1 && seen.dated === 1,
+        );
+        await shot(`cal-121-${tag}-undone-reloaded-${size}`);
+        check(
+          `${size} px: ${warm ? 'with Tasks loaded first' : 'right after a reload, Tasks never opened'}, a dated task with an undated and a dated subtask deleted from its details on the calendar, then Undo: the task and both subtasks come back in Google, under it, with what the Planner kept (a time, a color, a star), and Tasks shows them nested after a reload`,
+          deleted && offered && Boolean(back) && Boolean(keptBack) && nested.parent === 1 && nested.undated === 1 && nested.dated === 1,
+          JSON.stringify({ deleted, offered, back: Boolean(back), keptBack: Boolean(keptBack), nested, google: [parent.id, undated.id, dated.id].map((id) => inGoogle(id) && { id, parent: inGoogle(id).parent ?? null }) }),
+        );
+      }
+
+      // 2. A form's save whose read of the task fails (503) in the second window.
+      const other = await h.context.newPage();
+      await other.setViewportSize(page.viewportSize());
+      other.setDefaultTimeout(15_000);
+      await other.addLocatorHandler(other.getByText('OpenCode update'), async () => {
+        await other.locator('li.toast', { hasText: 'OpenCode update' }).getByRole('button', { name: 'Close', exact: true }).first().click({ timeout: 2000 }).catch(() => {});
+      });
+      other.on('pageerror', (error) => plannerErrors.push(`second window pageerror: ${error.message}`));
+      // The service route the second window's requests fail on (503), as the reviewer failed them: the task read again
+      // (`/google/tasks/linked`), or the plan (`/state`).
+      let failing = null;
+      let failedReads = 0;
+      await other.route((url) => new URL(url).pathname === '/api/guests/oc-forge-planner/service/request', async (route) => {
+        if (failing && route.request().postDataJSON()?.path === failing) {
+          failedReads += 1;
+          return route.fulfill({ json: { status: 503, body: JSON.stringify({ error: 'Service Unavailable' }) } });
+        }
+        return route.fallback();
+      });
+      try {
+        const g = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+        const gTasks = g.getByRole('region', { name: 'My Tasks' });
+        const title = `Harness fresh ${size}`;
+        const theirs = `${title} from the first window`;
+        const mine = `${title} from the second window`;
+        const task = await newTask(title, { due: today });
+        await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+        const home = g.getByRole('heading', { name: 'Home' });
+        if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
+          const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
+          if (await button.isVisible().catch(() => false)) await button.click();
+          else {
+            await other.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+            await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
+          }
+          await home.waitFor({ timeout: 30_000 });
+        }
+        const menu = g.getByRole('button', { name: 'Planner menu' });
+        if (await menu.isVisible().catch(() => false)) await menu.click();
+        await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: 'Calendar', exact: true }).click();
+        await g.getByRole('radio', { name: 'Tasks', exact: true }).click();
+        await gTasks.getByRole('button', { name: `Edit ${title}`, exact: true }).click();
+        const gForm = gTasks.getByRole('group', { name: `Edit ${title}` });
+        await gForm.getByRole('textbox', { name: 'Title' }).fill(mine);
+        // The first window saves another title, which Google takes.
+        await page.bringToFront();
+        await reload();
+        await toPage('Tasks');
+        await myTasks.getByRole('button', { name: `Edit ${title}`, exact: true }).click();
+        const form = myTasks.getByRole('group', { name: `Edit ${title}` });
+        await form.getByRole('textbox', { name: 'Title' }).fill(theirs);
+        await form.getByRole('button', { name: 'Done' }).click();
+        const accepted = Boolean(await until(() => inGoogle(task.id)?.title === theirs, 10_000));
+        const writes = patchesOf(task.id);
+        // The second window saves, its reads of the task failing.
+        failing = '/google/tasks/linked';
+        await other.bringToFront();
+        await gForm.getByRole('button', { name: 'Done' }).click();
+        const retry = gForm.locator('.edit-conflict', { hasText: "Couldn't check for changes made elsewhere" });
+        const said = await retry.waitFor({ timeout: 10_000 }).then(() => retry.innerText()).catch(() => '');
+        const kept = { draft: await gForm.getByRole('textbox', { name: 'Title' }).inputValue().catch(() => null), open: await gForm.count(), google: inGoogle(task.id)?.title, writes: patchesOf(task.id) - writes };
+        await other.screenshot({ path: `${out}/cal-122-fresh-failed-${size}.png` });
+        check(
+          `${size} px: a task's form open in a second window while the first saves another title (Google takes it); the second window's reads of the task fail (503): Done writes nothing, keeps the form open with its edit, and says it couldn't check for changes made elsewhere, with Try again`,
+          accepted && failedReads >= 1 && said.includes("Couldn't check for changes made elsewhere") && said.includes('Nothing was saved') && said.includes('Try again') && kept.draft === mine && kept.open === 1 && kept.google === theirs && kept.writes === 0,
+          JSON.stringify({ accepted, failedReads, said, kept }),
+        );
+        // Reads work again: Try again asks the conflict; Keep theirs at 1440, Save mine at 1024.
+        failing = null;
+        if (said) await retry.getByRole('button', { name: 'Try again' }).click();
+        const conflict = gForm.locator('.edit-conflict', { hasText: 'Title was changed to' });
+        const asked = await conflict.waitFor({ timeout: 10_000 }).then(() => conflict.innerText()).catch(() => '');
+        const unwritten = patchesOf(task.id) - writes;
+        await other.screenshot({ path: `${out}/cal-123-fresh-conflict-${size}.png` });
+        const choice = size === 1440 ? 'Keep theirs' : 'Save mine';
+        if (asked) await conflict.getByRole('button', { name: choice }).click();
+        const closed = await gForm.waitFor({ state: 'detached', timeout: 15_000 }).then(() => true).catch(() => false);
+        const wanted = choice === 'Keep theirs' ? theirs : mine;
+        const settled = Boolean(await until(() => inGoogle(task.id)?.title === wanted, 10_000));
+        check(
+          `${size} px: once the second window can read again, Try again asks "Title was changed to … in Google Tasks or another window (yours: …)" with Keep theirs and Save mine, writing nothing yet; ${choice} then leaves the ${choice === 'Keep theirs' ? "first window's" : "second window's"} title in Google`,
+          asked.includes(`Title was changed to “${theirs}” in Google Tasks or another window (yours: “${mine}”)`) && unwritten === 0 && closed && settled,
+          JSON.stringify({ asked, unwritten, closed, settled, google: inGoogle(task.id)?.title }),
+        );
+
+        // At 1440, a Planner task's notes typed in the second window while its read of the plan fails.
+        if (size === 1440) {
+          const noted = `Harness unread notes ${size}`;
+          const notedId = `harness-unread-notes-${size}`;
+          await h.call('POST', '/commands', { commands: [{ cmd: `harness-r11-notes-${size}`, type: 'task.created', task: { id: notedId, title: noted, notes: 'First notes', placement: { kind: 'day', date: today }, position: 1024 } }] });
+          try {
+            if (await menu.isVisible().catch(() => false)) await menu.click();
+            await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: 'Today', exact: true }).click();
+            await g.getByRole('button', { name: `Open ${noted}` }).first().click();
+            const details = g.getByRole('dialog', { name: 'Task details' });
+            const notes = details.getByRole('textbox', { name: 'Notes' });
+            await notes.fill('Notes typed in the second window');
+            failing = '/state';
+            await details.getByRole('textbox', { name: 'Title' }).click();
+            const unread = details.locator('.edit-conflict', { hasText: "Couldn't check whether it changed elsewhere" });
+            const notesSaid = await unread.waitFor({ timeout: 10_000 }).then(() => unread.innerText()).catch(() => '');
+            const unsaved = (await state()).tasks[notedId]?.notes;
+            const draft = await notes.inputValue();
+            await other.screenshot({ path: `${out}/cal-124-notes-unread-${size}.png` });
+            failing = null;
+            if (notesSaid) await unread.getByRole('button', { name: 'Try again' }).click();
+            const saved = Boolean(await until(async () => (await state()).tasks[notedId]?.notes === 'Notes typed in the second window', 10_000));
+            check(
+              `${size} px: a Planner task's notes typed in a window whose read of the plan fails (503): nothing is saved, the notes stay as typed and it says it couldn't check, with Try again; Try again, once reading works, saves them`,
+              notesSaid.includes("Couldn't check whether it changed elsewhere") && notesSaid.includes('Try again') && unsaved === 'First notes' && draft === 'Notes typed in the second window' && saved,
+              JSON.stringify({ notesSaid, unsaved, draft, saved }),
+            );
+            await other.keyboard.press('Escape');
+          } finally {
+            await h.call('POST', '/commands', { commands: [{ cmd: `harness-r11-notes-${size}-gone`, type: 'task.deleted', taskId: notedId }] });
+          }
+        }
+      } finally {
+        await other.close().catch(() => {});
+      }
+    } finally {
+      await removeTasks(made, `review11-${size}`);
+    }
+  };
   const occurrences = async (size) => {
     const d = (days) => addDays(today, days);
     await toPage('Calendar');
@@ -2549,6 +2747,10 @@ try {
     // 7. Review 10: a task's form open in one window while the other changes its series (its time, a cut); both
     //    windows changing one time, and (1440) a Planner task's notes.
     await review10(size);
+
+    // 8. Review 11: a task with subtasks deleted from the calendar and undone, cold and warm; a form's save whose read of
+    //    the task fails, then its conflict.
+    await review11(size);
   };
   await occurrences(1440);
   await page.setViewportSize({ width: 1024, height: 768 });
