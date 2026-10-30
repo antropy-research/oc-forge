@@ -254,7 +254,34 @@ export async function startHarness({
     issues: [], reviews: [], pulls: [],
   };
   const serviceCalls = [];
+  // The Planner requests the browser has sent and not seen answered, and when the last was sent: close() waits for them
+  // (below). Only the Planner's own paths: those are the ones that reach its real service, and they never stream.
+  const inFlight = new Set();
+  let lastSent = Date.now();
+  context.on('request', (request) => {
+    if (!new URL(request.url()).pathname.startsWith('/api/guests/oc-forge-planner/')) return;
+    inFlight.add(request);
+    lastSent = Date.now();
+  });
+  context.on('requestfinished', (request) => inFlight.delete(request));
+  context.on('requestfailed', (request) => inFlight.delete(request));
+  // HARNESS_TRACE=1: every Planner command the browser sends, and whether this harness answered it.
+  const routedRequests = new WeakSet();
+  if (process.env.HARNESS_TRACE) {
+    const t0 = Date.now();
+    context.on('request', (request) => {
+      const path = new URL(request.url()).pathname;
+      if (!/^\/api\/(guests\/oc-forge-planner\/|oc-forge\/)/.test(path) || /\/(oauth|frame-grant)/.test(path)) return;
+      const body = (() => { try { return request.postData() ?? ''; } catch { return ''; } })();
+      if (!/commands|settings|undo/.test(body) && !path.startsWith('/api/oc-forge/')) return;
+      const at = `${((Date.now() - t0) / 1000).toFixed(1)}s ${new Date().toISOString().slice(11, 23)}Z`;
+      const cmds = [...body.matchAll(/\\?"cmd\\?":\\?"([0-9a-z-]+)/g)].map((match) => match[1]).join(',');
+      console.error(`TRACE ${at} ${request.method()} ${path} cmds=${cmds} ${body.slice(0, 160)}`);
+      setTimeout(() => { if (!routedRequests.has(request)) console.error(`TRACE NOT ROUTED ${at} ${path} cmds=${cmds}`); }, 3000);
+    });
+  }
   await context.route((url) => new URL(url).pathname === '/api/guests/oc-forge-planner/service/request', async (route) => {
+    routedRequests.add(route.request());
     const outer = route.request().postDataJSON();
     const body = outer.body ? (() => { try { return JSON.parse(outer.body); } catch { return outer.body; } })() : undefined;
     serviceCalls.push({ method: outer.method, path: outer.path });
@@ -270,8 +297,9 @@ export async function startHarness({
   });
 
   const linearCalls = [];
-  await context.route((url) => new URL(url).pathname === '/api/guests/oc-forge-planner/oauth/status', (route) => route.fulfill({ json: { connected: true, account: linearWorld.viewer.name, hasClient: true, settings: {}, redirectUri: '' } }));
+  await context.route((url) => new URL(url).pathname === '/api/guests/oc-forge-planner/oauth/status', (route) => routedRequests.add(route.request()) && route.fulfill({ json: { connected: true, account: linearWorld.viewer.name, hasClient: true, settings: {}, redirectUri: '' } }));
   await context.route((url) => new URL(url).pathname === '/api/guests/oc-forge-planner/request', async (route) => {
+    routedRequests.add(route.request());
     const { query, variables = {} } = JSON.parse(route.request().postDataJSON().body);
     const op = /(?:query|mutation) (\w+)/.exec(query)?.[1];
     linearCalls.push({ op, variables, query });
@@ -280,6 +308,7 @@ export async function startHarness({
     await route.fulfill({ json: { status: 200, body: JSON.stringify(data ? { data } : { errors: [{ message: `harness: unexpected ${op}` }] }) } });
   });
   await context.route((url) => /\/api\/guests\/oc-forge-planner\/generate$/.test(new URL(url).pathname), async (route) => {
+    routedRequests.add(route.request());
     const request = route.request().postDataJSON();
     route.fulfill({ json: { ok: true, result: { text: await generate(request) } } });
   });
@@ -315,7 +344,19 @@ export async function startHarness({
   const nav = (name) => frame.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name, exact: true });
   const shot = (name) => page.screenshot({ path: join(out, `${name}.png`) });
   const close = async () => {
-    // A route callback still forwarding a request (route.fetch) fails once the browser is gone; without this its
+    // Nothing may reach the dev container's own Planner service and the owner's real plan. A request the page sent
+    // just before (linear.mjs's last settings change, on 2026-10-29 at 22:18 and 22:39 PDT) waits paused for its
+    // route; once the page or the routes go, Chromium lets it through to the host, and the real service applied it.
+    // So: wait until every Planner request sent has been taken by a route here (one a route holds, a long poll, can't
+    // get out) and the page has been quiet for a moment (at most 15 s), then close the pages while the routes still
+    // answer, then remove the routes.
+    const waiting = () => [...inFlight].filter((request) => !routedRequests.has(request));
+    for (const end = Date.now() + 15_000; Date.now() < end; await new Promise((resolve) => setTimeout(resolve, 100))) {
+      if (waiting().length === 0 && Date.now() - lastSent > 1500) break;
+    }
+    if (waiting().length > 0) console.error(`harness: closing with ${waiting().length} request(s) no route took: ${waiting().map((request) => new URL(request.url()).pathname).slice(0, 3).join(', ')}`);
+    for (const open of context.pages()) await open.close({ runBeforeUnload: false }).catch(() => {});
+    // A route callback still forwarding a request (route.fetch) fails once its page is gone; without this its
     // rejection is unhandled and ends the journey before it reports.
     await context.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
     await browser.close().catch(() => {});
