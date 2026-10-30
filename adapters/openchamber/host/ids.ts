@@ -2,7 +2,8 @@
 // panel is the surface `plugin:<extension>--<entry>`; everything else that
 // reads a plugin mode (the pane, badges, labels) must still find the
 // extension. Imported by lib/surfaces/modes.ts, so it imports nothing: the
-// host registers how to read the catalog once it starts.
+// host registers how to read the catalog once it starts. And the id of an
+// OpenChamber window, which every frame of the window is told.
 
 type CatalogGuest = { id: string; ocForge?: { rail?: unknown } };
 
@@ -33,3 +34,11 @@ export const ocForgeEntrySurfaceOf = (surfaceId: string): { guestId: string; ent
 export const ocForgeGuestIdOf = (surfaceId: string): string => ocForgeEntrySurfaceOf(surfaceId)?.guestId ?? surfaceId;
 
 export const ocForgeEntrySurfaceId = (guestId: string, entry: string): string => `${guestId}${ENTRY_SEPARATOR}${entry}`;
+
+/**
+ * A new window id: 128 random bits, in hex. From getRandomValues, which every page has: randomUUID needs a secure
+ * context, and OpenChamber served over plain HTTP (a tailnet address) is not one.
+ */
+export const newOcForgeWindowId = (): string => (
+  Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+);

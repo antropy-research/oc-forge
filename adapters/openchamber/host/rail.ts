@@ -127,6 +127,12 @@ export const ocForgeRailSurfaceActive = (
   return !view || ocForgeCurrentEntry(view.guestId, rail) === view.entry;
 };
 
+/** Whether the surface is on screen in a project's panel: its zone is open on it, as the rail lights it. */
+const shownIn = (directory: string, mode: ContextSurfaceDescriptor['mode']): boolean => {
+  const ui = useUIStore.getState();
+  return shownContextModes(ui.contextPanelByDirectory[directory], ui.contextSurfaceZones).has(mode);
+};
+
 /**
  * A rail click or digit shortcut on a view entry: show the panel on that
  * entry, or close it when it already shows it. False for every other surface,
@@ -136,7 +142,7 @@ export const ocForgeSelectRailSurface = (directory: string, surface: Pick<Contex
   const view = viewEntryOf(surface);
   if (!view || !directory) return false;
   const ui = useUIStore.getState();
-  const shown = shownContextModes(ui.contextPanelByDirectory[directory], ui.contextSurfaceZones).has(surface.mode);
+  const shown = shownIn(directory, surface.mode);
   if (shown && ocForgeCurrentEntry(view.guestId) === view.entry) {
     ui.openContextSurface(directory, surface.mode);
     return true;
@@ -144,6 +150,18 @@ export const ocForgeSelectRailSurface = (directory: string, surface: Pick<Contex
   setOcForgeCurrentEntry(view.guestId, view.entry, true);
   if (!shown) ui.openContextSurface(directory, surface.mode);
   return true;
+};
+
+/**
+ * `rail.open` from a frame of the extension: shows one of its entries in a project's panel as a click on it would (a
+ * view entry shows the extension's one panel on it, its frame told; an entry with a zone opens its own panel there),
+ * and the rail lights it. Unlike a click it never closes what already shows. Whether the entry shows now.
+ */
+export const openOcForgeRailEntry = (directory: string, guestId: string, entry: OcForgeRailEntry): boolean => {
+  const mode: PluginContextPanelMode = `${PLUGIN_PREFIX}${entry.zone ? ocForgeEntrySurfaceId(guestId, entry.id) : guestId}`;
+  if (!entry.zone && ocForgeCurrentEntry(guestId) !== entry.id) setOcForgeCurrentEntry(guestId, entry.id, true);
+  if (!shownIn(directory, mode)) useUIStore.getState().openContextSurface(directory, mode);
+  return shownIn(directory, mode);
 };
 
 const sameEntries = (left: readonly OcForgeRailEntry[] | undefined, right: readonly OcForgeRailEntry[]): boolean => (
@@ -222,6 +240,26 @@ const startRailPolling = (guestId: string, source: RailSource): (() => void) => 
 const railSourceOf = (guest: InstalledGuest): RailSource | null => (
   isGuestActive(guest) && guest.entry && guest.service?.granted && guest.ocForge?.rail ? guest.ocForge.rail : null
 );
+
+/**
+ * Whether the extension's service has listed its entries: at once once it has, else when its first answer comes (a
+ * frame can start before the first poll is back), false when that takes longer than `ms` or the host polls nothing.
+ */
+export const ocForgeRailListed = (guest: InstalledGuest, ms: number): Promise<boolean> => {
+  if (useOcForgeStore.getState().entries[guest.id]) return Promise.resolve(true);
+  if (!railSourceOf(guest)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const done = (listed: boolean) => {
+      window.clearTimeout(timer);
+      unsubscribe();
+      resolve(listed);
+    };
+    const timer = window.setTimeout(() => done(false), ms);
+    const unsubscribe = useOcForgeStore.subscribe((state) => {
+      if (state.entries[guest.id]) done(true);
+    });
+  });
+};
 
 /** One poller per active extension that declares a rail source and has its service approved. */
 export const useOcForgeRailPolling = (): void => {

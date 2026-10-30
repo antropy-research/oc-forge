@@ -10,7 +10,7 @@
 export const OC_FORGE_CHANNEL = 'oc-forge';
 export const OC_FORGE_VERSION = 1;
 
-export const OC_FORGE_FEATURES = ['rail', 'tabs', 'zones', 'keys', 'links', 'modals'] as const;
+export const OC_FORGE_FEATURES = ['rail', 'tabs', 'zones', 'keys', 'links', 'modals', 'rail-open', 'window-id'] as const;
 export type OcForgeFeature = (typeof OC_FORGE_FEATURES)[number];
 
 export const OC_FORGE_ZONES = ['left', 'right', 'bottom'] as const;
@@ -159,6 +159,11 @@ export type OcForgeHello = {
   shortcuts: OcForgeShortcuts;
   /** What this host takes (`OC_FORGE_LIMITS`); an older host sends none, and `OC_FORGE_LEGACY_LIMITS` hold. */
   limits?: OcForgeLimits;
+  /**
+   * This OpenChamber window's id (`window-id`): one per page load of the app, the same in every frame of that browser
+   * tab, a reloaded frame's too, and another in each tab. An older host sends none.
+   */
+  windowId?: string;
 };
 
 export type OcForgeKey = {
@@ -175,6 +180,8 @@ export type OcForgeKey = {
 export type OcForgeRequest =
   | { type: 'hello' }
   | { type: 'rail-active'; payload: { entry: string } }
+  /** Shows one of the extension's own rail entries, as a click on it would, but never closes it (`rail-open`). */
+  | { type: 'rail-open'; payload: { entry: string } }
   | { type: 'tab-open'; payload: OcForgeTab & { activate?: boolean } }
   | { type: 'tab-update'; payload: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean; route?: string | null } }
   | { type: 'tab-close'; payload: { id: string } }
@@ -262,8 +269,9 @@ export const parseOcForgeRequest = (data: unknown): Parsed | null => {
     case 'hello':
       return { id, request: { type: 'hello' } };
     case 'rail-active':
-      return typeof payload.entry === 'string' && OC_FORGE_ENTRY_ID.test(payload.entry)
-        ? { id, request: { type: 'rail-active', payload: { entry: payload.entry } } }
+    case 'rail-open':
+      return typeof payload.entry === 'string' && payload.entry.length <= OC_FORGE_LIMITS.entryId && OC_FORGE_ENTRY_ID.test(payload.entry)
+        ? { id, request: { type: data.type, payload: { entry: payload.entry } } }
         : refuse(`an entry's id is kebab-case, at most ${OC_FORGE_LIMITS.entryId} characters`);
     case 'tab-open': {
       const tab = readTab(payload);

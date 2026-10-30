@@ -17,6 +17,7 @@ import {
 } from "../adapters/openchamber/client/index"
 import { ocForgeDocumentSandbox, parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
 import { ocForgeCommandsOnceLoaded } from "../adapters/openchamber/host/commands.ts"
+import { newOcForgeWindowId } from "../adapters/openchamber/host/ids.ts"
 import { createOcForgeServiceSocket, type OcForgeSocketLike } from "../adapters/openchamber/host/service-socket.ts"
 
 const linux: OcForgeShortcuts = {
@@ -52,6 +53,10 @@ describe("frame requests", () => {
     expect(readOcForgeRequest(envelope({ type: "tab-update", payload: { id: "a", icon: null, dirty: true } }))?.request).toEqual({ type: "tab-update", payload: { id: "a", icon: null, dirty: true } })
     expect(readOcForgeRequest(envelope({ type: "route", payload: { route: "x".repeat(2049) } }))).toBeNull()
     expect(readOcForgeRequest(envelope({ type: "rail-active", payload: { entry: "a--b" } }))).toBeNull()
+    // rail.open names one of the extension's own entries by its id, never a surface.
+    expect(readOcForgeRequest(envelope({ type: "rail-open", payload: { entry: "terminal" } }, "4"))).toEqual({ id: "4", request: { type: "rail-open", payload: { entry: "terminal" } } })
+    expect(readOcForgeRequest(envelope({ type: "rail-open", payload: { entry: "plugin:oc-forge-vscode--terminal" } }))).toBeNull()
+    expect(readOcForgeRequest(envelope({ type: "rail-open", payload: {} }))).toBeNull()
     expect(readOcForgeRequest(envelope({ type: "key", payload: press("1", "Digit1", { ctrlKey: true }) }))?.request.type).toBe("key")
     expect(readOcForgeRequest(envelope({ type: "key", payload: { key: "1", code: "Digit1" } }))).toBeNull()
     expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: true } }))?.request).toEqual({ type: "tab-close-handler", payload: { on: true } })
@@ -75,6 +80,11 @@ describe("frame requests", () => {
     expect(refused("route", { route: "/x", push: 1 }).error).toBe("Refused route: push is true or false.")
     expect(refused("key", { key: "1" }).error).toMatch(/^Refused key: a press has/)
     expect(refused("tab-shuffle", {}).error).toBe("Refused tab-shuffle: not a request this host knows.")
+    const entryRule = "an entry's id is kebab-case, at most 48 characters."
+    expect(refused("rail-open", { entry: "oc-forge-vscode--terminal" }).error).toBe(`Refused rail-open: ${entryRule}`)
+    expect(refused("rail-open", { entry: "e".repeat(49) }).error).toBe(`Refused rail-open: ${entryRule}`)
+    expect(refused("rail-active", { entry: "e".repeat(49) }).error).toBe(`Refused rail-active: ${entryRule}`)
+    expect(parseOcForgeRequest(envelope({ type: "rail-open", payload: { entry: "e".repeat(48) } }, "5"))).toEqual({ id: "5", request: { type: "rail-open", payload: { entry: "e".repeat(48) } } })
     // Without an id there is nothing to answer, but it is still refused.
     expect(parseOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a" } }))).toEqual({ id: null, error: "Refused tab-open: a title is 1–512 characters." })
     // The well-formed read as before.
@@ -278,6 +288,45 @@ describe("the client module", () => {
     forge!.dispose()
   })
 
+  test("rail.open asks the host to show one of the extension's own entries, and says why it refused one", async () => {
+    const { frame, host, deliver } = fakeFrame()
+    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
+    deliver(envelope({ type: "hello", payload: { ...hello, surface: "page", rail: null, features: [...hello.features, "rail-open", "window-id"], windowId: "0f".repeat(16) } }))
+    const forge = (await connecting)!
+    expect(forge.has("rail-open")).toBe(true)
+    const opening = forge.rail.open("dock")
+    const request = host.posted.at(-1)!.data as { id: string }
+    expect(request).toMatchObject({ channel: "oc-forge", v: 1, type: "rail-open", payload: { entry: "dock" } })
+    deliver(envelope({ type: "result", id: request.id, ok: true }))
+    await opening
+    const refusal = 'ocforge-test has no rail entry "explorer"; a frame opens only its own extension\'s entries.'
+    const refused = forge.rail.open("explorer")
+    deliver(envelope({ type: "result", id: (host.posted.at(-1)!.data as { id: string }).id, ok: false, error: refusal }))
+    await expect(refused).rejects.toThrow(refusal)
+    forge.dispose()
+  })
+
+  test("window.id is the window's id from the hello, again after the frame says hello again; an older host has none", async () => {
+    const { frame, deliver } = fakeFrame()
+    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
+    const windowId = "0123456789abcdef0123456789abcdef"
+    deliver(envelope({ type: "hello", payload: { ...hello, features: [...hello.features, "window-id"], windowId } }))
+    const forge = (await connecting)!
+    expect(forge.has("window-id")).toBe(true)
+    expect(forge.window.id()).toBe(windowId)
+    deliver(envelope({ type: "hello", payload: { ...hello, features: [...hello.features, "window-id"], windowId } }))
+    expect(forge.window.id()).toBe(windowId)
+    forge.dispose()
+
+    const older = fakeFrame()
+    const connectingOlder = connectOcForge({ target: older.frame, timeoutMs: 500 })
+    older.deliver(envelope({ type: "hello", payload: hello }))
+    const forgeOlder = (await connectingOlder)!
+    expect(forgeOlder.has("window-id")).toBe(false)
+    expect(() => forgeOlder.window.id()).toThrow("names no window")
+    forgeOlder.dispose()
+  })
+
   test("onCloseRequest: the frame decides how dirty tabs close while it listens", async () => {
     const { frame, host, deliver } = fakeFrame()
     const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
@@ -322,6 +371,22 @@ describe("the client module", () => {
     stop()
     expect(key({ key: "2", code: "Digit2", ctrlKey: true }).defaultPrevented).toBe(false)
     forge.dispose()
+  })
+})
+
+describe("an OpenChamber window's id", () => {
+  test("128 random bits in hex, another each time; made without randomUUID, which plain HTTP (not a secure context) lacks", () => {
+    const own = Object.getOwnPropertyDescriptor(crypto, "randomUUID")
+    Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true, writable: true })
+    try {
+      const ids = new Set(Array.from({ length: 200 }, () => newOcForgeWindowId()))
+      expect(ids.size).toBe(200)
+      for (const id of ids) expect(id).toMatch(/^[0-9a-f]{32}$/)
+    } finally {
+      if (own) Object.defineProperty(crypto, "randomUUID", own)
+      else delete (crypto as { randomUUID?: unknown }).randomUUID
+    }
+    expect(typeof crypto.randomUUID).toBe("function")
   })
 })
 
