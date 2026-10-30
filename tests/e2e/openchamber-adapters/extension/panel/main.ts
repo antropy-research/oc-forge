@@ -9,6 +9,7 @@ const log = (line: string) => {
   $('log').textContent = `${new Date().toISOString().slice(11, 23)} ${line}\n${$('log').textContent ?? ''}`;
 };
 $('loaded').textContent = String(Date.now());
+$('reload-frame').onclick = () => location.reload();
 
 // print() opens the print dialog only where the host sandboxes this frame with allow-modals (ocForge.modals); in an
 // allow-scripts frame Chrome ignores it, and no print event comes.
@@ -68,6 +69,18 @@ if (!forge) {
   $('report-beta').onclick = () => {
     void forge.rail.setActive('beta').then(() => { showEntry('beta'); log('reported beta'); }, (error: Error) => log(`report failed: ${error.message}`));
   };
+  // rail.open: one of this extension's entries, shown as a click on it shows it, never closed; how long the host took,
+  // or why it refused.
+  $('rail-open').onclick = () => {
+    const entry = ($('open-entry') as HTMLInputElement).value.trim();
+    const started = performance.now();
+    $('rail-open-result').textContent = '…';
+    void forge.rail.open(entry).then(
+      () => { $('rail-open-result').textContent = `opened ${entry} in ${Math.round(performance.now() - started)} ms`; log(`opened ${entry}`); },
+      (error: Error) => { $('rail-open-result').textContent = `refused ${entry}: ${error.message}`; log(`refused ${entry}`); },
+    );
+  };
+  $('window-id').textContent = forge.has('window-id') ? forge.window.id() : 'none';
 
   const showTab = (id: string | null) => { $('tab').textContent = id ?? '—'; };
   showTab(hello.tabs.shown ? hello.tabs.active : null);

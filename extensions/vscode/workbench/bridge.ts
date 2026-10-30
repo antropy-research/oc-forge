@@ -56,14 +56,6 @@ export interface BridgeFrame {
   readonly running: boolean;
 }
 
-/** A feature of oc-forge's host this build may not know by name yet (`rail-open`, `window-id`). */
-const hasFeature = (forge: OcForgeClient | null, feature: string): boolean => {
-  try {
-    return Boolean(forge && (forge.has as (name: string) => boolean)(feature));
-  } catch {
-    return false;
-  }
-};
 
 /** Puts `make(original)` in place of a method of a VS Code service, `original` taken from its class (see guardWebviews). */
 const replaceMethod = <T extends object, K extends keyof T>(service: T, key: K, make: (original: T[K]) => T[K]): void => {
@@ -92,10 +84,11 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
   const moved = new Map<number, number>();
   /** When VS Code last tried to show this part's panel (a terminal's `show()`). */
   let panelWanted = 0;
+  // This OpenChamber window's id (each browser tab is a VS Code window of its own), on a host that names its windows.
   const windowId = (): string | null => {
-    if (!hasFeature(options.forge, 'window-id')) return null;
+    if (!options.forge?.has('window-id')) return null;
     try {
-      return (options.forge as unknown as { window: { id(): string } }).window.id();
+      return options.forge.window.id();
     } catch {
       return null;
     }
@@ -107,9 +100,10 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
       return null;
     }
   };
+  // OpenChamber's bottom, VS Code's terminal, opened as a click on its rail entry would (never closed), on a host that can.
   const openBottom = async (): Promise<boolean> => {
-    if (!options.forge || !hasFeature(options.forge, 'rail-open')) return false;
-    await (options.forge.rail as unknown as { open(entry: string): Promise<void> }).open(TERMINAL_ENTRY);
+    if (!options.forge?.has('rail-open')) return false;
+    await options.forge.rail.open(TERMINAL_ENTRY);
     return true;
   };
 
