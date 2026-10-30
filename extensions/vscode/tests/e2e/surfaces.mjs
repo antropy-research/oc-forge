@@ -58,6 +58,13 @@
 //      while the rail view stays mounted; reopened, it lists exactly the
 //      containers behind it then and opens each; uninstalled while its view
 //      shows, a container gives way to the Explorer, which the rail lights;
+//  17. many files, at both sizes: 66 opened through VS Code's Quick Open in the
+//      page, past the 64 tabs the host had room for: each has its header tab;
+//      the last is selected, in view in the strip, its editor shown and the
+//      address bar naming it; the strip's list of all tabs holds every one and
+//      opens one from it; switching to the last from its header tab and closing
+//      it unsaved asks to save (Cancel keeps it, Don't Save closes it), then the
+//      page shows its neighbour, which the header and the address bar name;
 // and, with OpenChamber's session tabs off, the page keeps VS Code's own tab
 // bar. It also measures each workbench's start and memory (`<size>-frames.json`).
 //
@@ -66,6 +73,8 @@
 //   node tests/e2e/openchamber-adapters/stack.mjs up
 //   node extensions/vscode/tests/e2e/surfaces.mjs [outDir]
 //   node tests/e2e/openchamber-adapters/stack.mjs down
+//
+// SURFACES_ONLY=manyFiles (phase functions, comma-separated) runs only those, after the seed.
 //
 // On a host whose network interfaces keep changing (Docker builds), run `up`,
 // this and `down` inside one private network namespace (see the adapters'
@@ -1498,18 +1507,186 @@ const overflowAtRuntime = async (chat, viewport) => {
   }
 };
 
+// ── 17. Many files, past the 64 header tabs the host had room for: opened through VS Code's Quick Open in the page,
+// each has its header tab, the last selected, in view and named by the address bar; every one in the strip's list of
+// all tabs; the last switched to and closed unsaved from the header, through VS Code's prompt ──
+const MANY_FILES = 66;
+const manyFile = (index) => `many-file-${String(index).padStart(2, '0')}.txt`;
+const manyFiles = async (chat, viewport) => {
+  const size = `${viewport.width}x${viewport.height}, ${MANY_FILES} files`;
+  const label = `${viewport.width}x${viewport.height}-17`;
+  for (let index = 1; index <= MANY_FILES; index++) writeFileSync(join(project, manyFile(index)), `many file ${index}\n`);
+  const context = await browser.newContext({ viewport });
+  await context.request.post(`${base}/auth/session`, { data: { password } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error' || /could not (update|close|select|name)/.test(message.text())) {
+      if (/\[OpenChamber VS Code\]/.test(message.text())) errors.push(message.text().split('\n')[0]);
+    }
+  });
+  const lastName = manyFile(MANY_FILES);
+  const editorOf = (name) => pageFrame(page).locator(`.part.editor .monaco-editor[data-uri$="/${name}"]`).first();
+  const shows = (name) => editorOf(name).locator('.view-line', { hasText: `many file ${Number(name.slice(10, 12))}` }).first().isVisible().catch(() => false);
+  const routeNames = (name) => (deepLinkOf(page.url())?.key ?? '').endsWith(`/${name}`);
+  /** Its header tab: selected, and within the strip's scroller (not past either end). */
+  const inStrip = (name) => headerTab(page, name).evaluate((slot) => {
+    const scroller = slot.closest('.session-tabs-scroll');
+    const outer = scroller?.getBoundingClientRect();
+    const inner = slot.getBoundingClientRect();
+    return { selected: slot.getAttribute('data-active') === 'true', inView: Boolean(outer) && inner.left >= outer.left - 1 && inner.right <= outer.right + 1 };
+  }).catch(() => null);
+  const named = async (name) => {
+    const strip = await inStrip(name);
+    return Boolean(strip?.selected && strip.inView && routeNames(name) && await shows(name));
+  };
+  const state = async (name) => `${name}: ${JSON.stringify(await inStrip(name))}, route ${deepLinkOf(page.url())?.key?.split('/').pop() ?? new URL(page.url()).searchParams.get('route')}, shown ${await shows(name)}`;
+  const quickOpen = async (name) => {
+    await page.keyboard.press('Control+p');
+    await pageFrame(page).locator('.quick-input-widget input').waitFor({ timeout: 10_000 });
+    await page.keyboard.type(name);
+    const row = pageFrame(page).locator('.quick-input-list .monaco-list-row', { hasText: name }).first();
+    await row.waitFor({ timeout: 15_000 });
+    await row.click();
+    return until(() => editorOf(name).count(), 20_000);
+  };
+  try {
+    await page.goto(`${base}/?session=${chat}`);
+    await until(async () => (await rail(page)).some((entry) => entry.id === entrySurface('explorer')), 60_000);
+    await entryButton(page, 'explorer').click();
+    const view = viewFrame(page);
+    // A fresh stack asks for its VS Code Server once (when this runs alone).
+    const form = await view.getByRole('textbox', { name: 'VS Code Server address' }).waitFor({ timeout: 8_000 }).then(() => true).catch(() => false);
+    if (form) {
+      await view.getByRole('textbox', { name: 'VS Code Server address' }).fill(vscodeUrl);
+      await view.getByLabel('VS Code Server connection token').fill(token);
+      await view.getByRole('button', { name: 'Connect' }).click();
+    }
+    // The first from the Explorer starts the page; the rest through VS Code's Quick Open there, as one opens files.
+    await view.locator('.explorer-folders-view .monaco-list-row', { hasText: manyFile(1) }).first().click({ timeout: 120_000 });
+    await until(async () => await pageShown(page) && await shows(manyFile(1)), 120_000);
+    await pageStarted(page);
+    await editorOf(manyFile(1)).locator('.view-line').first().click();
+    const started = Date.now();
+    let opened = 1;
+    for (let index = 2; index <= MANY_FILES; index++) if (await quickOpen(manyFile(index))) opened += 1;
+    const tabbed = await until(async () => {
+      const titles = new Set((await headerTabs(page)).map((tab) => tab.title));
+      return Array.from({ length: MANY_FILES }, (_, index) => manyFile(index + 1)).every((name) => titles.has(name));
+    }, 30_000);
+    const titles = (await headerTabs(page)).map((tab) => tab.title);
+    const missing = Array.from({ length: MANY_FILES }, (_, index) => manyFile(index + 1)).filter((name) => !titles.includes(name));
+    check(`[${size}] 17 ${MANY_FILES} files opened through VS Code's Quick Open: each has its header tab`, opened === MANY_FILES && tabbed,
+      `${opened} opened in ${((Date.now() - started) / 1000).toFixed(0)} s; ${titles.length} VS Code tabs in the header${missing.length ? `; none for ${missing.join(', ')}` : ''}`);
+    const last = await until(() => named(lastName), 15_000);
+    const pageParts = await partsOf(pageFrame(page)).catch(() => ({}));
+    check(`[${size}] 17 the last is selected, in view in the strip, its editor shown, and the address bar names it; VS Code's own tab bar stays hidden`,
+      last && pageParts.tabs === 0, `${await state(lastName)}; VS Code tabs ${pageParts.tabs}`);
+    await shot(page, `${label}-last`);
+    // The strip's list of every tab: each file in it, the last marked; one opened from it.
+    const allTabs = page.locator('[data-oc-forge-all-tabs]');
+    const listed = await allTabs.isVisible().catch(() => false);
+    if (listed) await allTabs.click();
+    const items = page.locator(`[data-oc-forge-all-tabs-item^="${VSCODE}:"]`);
+    await items.first().waitFor({ timeout: 5_000 }).catch(() => undefined);
+    const listedTitles = (await items.allInnerTexts()).map((text) => text.trim());
+    const marked = (await page.locator(`[data-oc-forge-all-tabs-item^="${VSCODE}:"][aria-current="true"]`).innerText().catch(() => '')).trim();
+    // (The list fades in for 150 ms.)
+    await wait(400);
+    const inSight = await page.locator(`[data-oc-forge-all-tabs-item^="${VSCODE}:"][aria-current="true"]`).evaluate((item) => {
+      let list = item.parentElement;
+      while (list && getComputedStyle(list).overflowY !== 'auto') list = list.parentElement;
+      const outer = list?.getBoundingClientRect();
+      const inner = item.getBoundingClientRect();
+      return Boolean(outer) && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+    }).catch(() => false);
+    check(`[${size}] 17 the strip's list of all tabs holds every file, the shown one marked and in sight`,
+      listed && Array.from({ length: MANY_FILES }, (_, index) => manyFile(index + 1)).every((name) => listedTitles.includes(name)) && marked === lastName && inSight,
+      listed ? `${listedTitles.length} VS Code tabs listed, marked ${marked}${inSight ? ', in sight' : ', NOT in sight'}` : 'no list button');
+    await shot(page, `${label}-list`);
+    if (listed) await items.filter({ hasText: manyFile(30) }).first().click();
+    const thirtieth = await until(() => named(manyFile(30)), 15_000);
+    check(`[${size}] 17 choosing the 30th there shows its editor, its tab selected and in view, the address bar naming it`, thirtieth, await state(manyFile(30)));
+    // Back to the last from its own header tab (the strip scrolls to it), then unsaved, closed from the header.
+    await headerTab(page, lastName).click();
+    const back = await until(() => named(lastName), 15_000);
+    check(`[${size}] 17 its header tab switches back to the last`, back, await state(lastName));
+    // The focus in VS Code again (the click was in OpenChamber's header), for its command palette.
+    await editorOf(lastName).locator('.view-line').first().click();
+    await runCommand(page, pageFrame(page), 'File: Toggle Auto Save');
+    await wait(800);
+    await editorOf(lastName).locator('.view-line').first().click();
+    await page.keyboard.press('End');
+    await page.keyboard.type(` ${run}`);
+    const dirty = await until(async () => (await headerTabs(page)).find((tab) => tab.title === lastName && tab.dirty), 10_000);
+    await closeHeaderTab(page, lastName);
+    const prompt = pageFrame(page).locator('.monaco-dialog-box').first();
+    const asked = await until(async () => (await prompt.innerText({ timeout: 1_000 })).includes(lastName), 15_000);
+    await shot(page, `${label}-save-prompt`);
+    if (asked) await pageFrame(page).locator('.monaco-dialog-box .monaco-button', { hasText: 'Cancel' }).first().click();
+    const kept = await until(async () => !(await prompt.isVisible().catch(() => false)) && (await headerTabs(page)).some((tab) => tab.title === lastName && tab.dirty) && await named(lastName), 10_000);
+    check(`[${size}] 17 closing it unsaved from the header asks to save; Cancel keeps its tab, its editor, its change and the address bar on it`,
+      dirty && asked && kept, `${dirty ? 'dirty' : 'not dirty'}; ${asked ? 'asked' : 'not asked'}; ${await state(lastName)}`);
+    await closeHeaderTab(page, lastName);
+    const askedAgain = await until(async () => (await prompt.innerText({ timeout: 1_000 })).includes(lastName), 15_000);
+    if (askedAgain) await pageFrame(page).locator('.monaco-dialog-box .monaco-button', { hasText: "Don't Save" }).first().click();
+    // Which file shows next is VS Code's choice or OpenChamber's (the one used before, the tab beside): the header
+    // selects the one shown, and the address bar names it.
+    const selectedFile = async () => (await headerTabs(page)).find((tab) => tab.active && tab.title.startsWith('many-file-'))?.title ?? null;
+    const next = await until(async () => {
+      if ((await headerTabs(page)).some((tab) => tab.title === lastName) || await editorOf(lastName).count()) return null;
+      const selected = await selectedFile();
+      return selected && await named(selected) ? selected : null;
+    }, 15_000);
+    check(`[${size}] 17 Don't Save closes it without writing; the page shows another file, which the header selects and the address bar names`,
+      askedAgain && next && readFileSync(join(project, lastName), 'utf8') === `many file ${MANY_FILES}\n`,
+      `${askedAgain ? 'asked' : 'not asked'}; ${next ? await state(next) : `selected ${await selectedFile()}, route ${deepLinkOf(page.url())?.key?.split('/').pop()}`}`);
+    await shot(page, `${label}-closed`);
+    if (next) await editorOf(next).locator('.view-line').first().click();
+    await runCommand(page, pageFrame(page), 'File: Toggle Auto Save');
+    await wait(800);
+    check(`[${size}] 17 nothing fell out of step silently: no error from the page`, errors.length === 0, errors.slice(0, 3).join(' | '));
+    // The files' tabs go with VS Code's editors, and the saved list with them before this window goes (else the next
+    // window, the next size, starts with the tabs saved before: OpenChamber brings back the saved tabs after a reload).
+    await runCommand(page, pageFrame(page), 'View: Close All Editors');
+    const prompt2 = await pageFrame(page).locator('.monaco-dialog-box').first().isVisible().catch(() => false);
+    if (prompt2) await pageFrame(page).locator('.monaco-dialog-box .monaco-button', { hasText: "Don't Save" }).first().click();
+    await until(async () => !(await headerTabs(page)).some((tab) => tab.title.startsWith('many-file-')), 30_000);
+    await until(async () => {
+      const answer = await context.request.post(`${base}/api/guests/${VSCODE}/service/request`, {
+        data: { method: 'POST', path: '/tabs/load', body: JSON.stringify({ serverUrl: vscodeUrl, token, folder: project }) },
+      });
+      return (JSON.parse((await answer.json()).body ?? '{}').tabs ?? [null]).length === 0;
+    }, 20_000);
+    await wait(2_000);
+  } catch (error) {
+    check(`[${size}] the journey ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+    await shot(page, `${label}-failure`).catch(() => undefined);
+  } finally {
+    await context.close();
+    for (let index = 1; index <= MANY_FILES; index++) rmSync(join(project, manyFile(index)), { force: true });
+  }
+};
+
+// SURFACES_ONLY: these phases only (their function names), after the seed.
+const only = process.env.SURFACES_ONLY ? new Set(process.env.SURFACES_ONLY.split(',')) : null;
+const runs = (phase) => !only || only.has(phase);
+
 try {
   const seeded = await seed();
-  await classic();
-  await journey({ width: 1440, height: 900 }, seeded.chats, true);
-  await journey({ width: 1024, height: 768 }, seeded.chats, false);
-  await openInVscode(seeded.chats, seeded.chatB);
-  await withoutStrip(seeded.chats);
-  await pageAlone(seeded.chats[0]);
-  await twoTabs(seeded.chats[0]);
-  await terminalAfterSessions(seeded.chats[0]);
-  await overflowAtRuntime(seeded.chats[0], { width: 1440, height: 900 });
-  await overflowAtRuntime(seeded.chats[0], { width: 1024, height: 768 });
+  if (runs('classic')) await classic();
+  if (runs('journey')) await journey({ width: 1440, height: 900 }, seeded.chats, true);
+  if (runs('journey')) await journey({ width: 1024, height: 768 }, seeded.chats, false);
+  if (runs('openInVscode')) await openInVscode(seeded.chats, seeded.chatB);
+  if (runs('withoutStrip')) await withoutStrip(seeded.chats);
+  if (runs('pageAlone')) await pageAlone(seeded.chats[0]);
+  if (runs('twoTabs')) await twoTabs(seeded.chats[0]);
+  if (runs('terminalAfterSessions')) await terminalAfterSessions(seeded.chats[0]);
+  if (runs('overflowAtRuntime')) await overflowAtRuntime(seeded.chats[0], { width: 1440, height: 900 });
+  if (runs('overflowAtRuntime')) await overflowAtRuntime(seeded.chats[0], { width: 1024, height: 768 });
+  if (runs('manyFiles')) await manyFiles(seeded.chats[0], { width: 1440, height: 900 });
+  if (runs('manyFiles')) await manyFiles(seeded.chats[0], { width: 1024, height: 768 });
 } catch (error) {
   check('the check ran to the end', false, String(error.message ?? error).split('\n')[0]);
 } finally {
