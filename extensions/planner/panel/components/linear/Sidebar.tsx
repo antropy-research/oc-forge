@@ -4,7 +4,7 @@
 // Where the page is narrow it opens over the list and closes on Escape, on a
 // pick or on a click outside.
 import type { ComponentChildren } from 'preact';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useLayoutEffect, useMemo, useState } from 'preact/hooks';
 import { groupViews, isProjectView, type LinearFavorite, type LinearSavedView } from '../../../src/domain/linear.ts';
 import { searchChoices } from '../../../src/domain/linearFilter.ts';
 import { useLinear, usePlanner } from '../../lib/context.ts';
@@ -82,7 +82,9 @@ export const LinearSidebar = ({
   const lv = useLinear();
   const { setUi } = useUi();
   const [find, setFind] = useState('');
-  useEffect(() => {
+  // The focus moves in as it opens, before anything else can happen: a key typed right after "[" (↓ at once) is the
+  // sidebar's. After the next paint (an effect), such a key went to the page and was lost.
+  useLayoutEffect(() => {
     if (focus === 'find') findRef.current?.focus();
     else if (focus === 'nav') (document.querySelector<HTMLElement>('#lin-sidebar .lin-nav-item.is-active') ?? document.querySelector<HTMLElement>('#lin-sidebar .lin-nav-item'))?.focus();
   }, []);

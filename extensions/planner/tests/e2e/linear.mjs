@@ -603,6 +603,16 @@ try {
   check('"[" folds the sidebar away (a toggle stays in the header) and brings it back, as in Linear', folded && (await sidebar().isVisible()) && (await frame.getByRole('button', { name: 'Show the sidebar' }).count()) === 0);
   await openFromSidebar('harness Everything');
   await rows().first().waitFor({ timeout: 15_000 });
+  // Keys typed at once after "[" are the sidebar's: the focus is on the open section as it shows, not a frame later
+  // (a ↓ pressed in that frame went to the page and was lost). ↑ then leaves the focus where the click put it.
+  const focusedItem = () => frame.locator(':focus').evaluate((element) => element.querySelector('.lin-nav-label')?.textContent ?? element.getAttribute('aria-label') ?? '').catch(() => '');
+  await browserPage.keyboard.press('[');
+  await sidebar().waitFor({ state: 'detached', timeout: 5000 });
+  await browserPage.keyboard.press('[');
+  await browserPage.keyboard.press('ArrowDown');
+  const wideAtOnce = await focusedItem();
+  await browserPage.keyboard.press('ArrowUp');
+  check('"[" and ↓ typed at once: the sidebar shows on the open section and ↓ moves from it (harness Everything → harness Finished work)', wideAtOnce === 'harness Finished work' && (await focusedItem()) === 'harness Everything', wideAtOnce);
   const bar = frame.locator('.linear-page .lin-filters').first();
   // A list's first page: what a new read asks (a replaced read may still have had a page on its way).
   const everything = () => calls('PlannerViewIssues').filter((call) => call.variables.id === 'v-all' && !call.variables.after);
@@ -814,6 +824,13 @@ try {
   await browserPage.keyboard.press('Enter');
   await frame.locator('.lin-head h1', { hasText: 'harness Open work' }).waitFor({ timeout: 10_000 });
   check('…and a favorite view, from the keyboard', onFavorite === 'harness Open work' && inFavorites && (await overlay.count()) === 0, onFavorite);
+  // Typed at once, with no wait for the sidebar: "[" opens it on the open section (the favorite view) and ↓ is its.
+  await browserPage.keyboard.press('[');
+  await browserPage.keyboard.press('ArrowDown');
+  const narrowAtOnce = await focusedLabel();
+  await browserPage.keyboard.press('Escape');
+  await overlay.waitFor({ state: 'detached', timeout: 5000 });
+  check('"[" and ↓ typed at once over the list: ↓ moves from the open section (harness Open work → Planner)', narrowAtOnce === 'Planner', narrowAtOnce);
   await openOverlay();
   await sidebar().getByRole('group', { name: 'Favorites', exact: true }).getByRole('button', { name: 'Planner' }).click();
   await frame.locator('.project-detail').getByRole('heading', { name: 'Planner' }).waitFor({ timeout: 10_000 });

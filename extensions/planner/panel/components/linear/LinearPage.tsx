@@ -136,7 +136,8 @@ export const LinearPage = () => {
   const hideSidebar = (restoreFocus = true) => {
     if (narrow) setOverlay(false);
     else setDocked(false);
-    if (restoreFocus) requestAnimationFrame(() => toggleRef.current?.focus());
+    // Back on the toggle a frame later, unless the sidebar opened again meanwhile ("[" at once): the focus is its then.
+    if (restoreFocus) requestAnimationFrame(() => !live.current.sidebarShown && toggleRef.current?.focus());
   };
   const toggleSidebar = () => (sidebarShown ? hideSidebar() : showSidebar('nav'));
 
