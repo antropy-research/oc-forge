@@ -4,6 +4,8 @@
 //   import { connectOcForge } from '../../../adapters/openchamber/client/index.ts';
 //   const forge = await connectOcForge();      // null on a stock OpenChamber
 //   if (forge?.has('tabs')) await forge.tabs.open({ id: 'file:///a.ts', title: 'a.ts' }, { activate: true });
+//   if (forge?.has('rail-open')) await forge.rail.open('terminal');   // its own entry, shown (never toggled)
+//   const windowId = forge?.has('window-id') ? forge.window.id() : null;  // the same in every frame of this tab
 //
 // It has no dependencies. Everything it sends travels on its own postMessage
 // channel, which a stock OpenChamber ignores, so `connectOcForge` resolving
@@ -41,6 +43,23 @@ export type OcForgeClient = {
     onEntry(listener: (entry: string) => void): () => void;
     /** The panel switched entries by itself (its own navigation): move the rail's highlight. */
     setActive(entry: string): Promise<void>;
+    /**
+     * Shows one of this extension's own rail entries, as the user's click on it would (`has('rail-open')`, from any
+     * frame of the extension: its page, a rail panel, a zone). A view entry shows the extension's one panel on it (that
+     * frame gets `onEntry`); an entry with a zone opens its own panel there (`terminal` with `zone: "bottom"` is
+     * `plugin:<extension>--terminal`, at the bottom). The rail lights it. Unlike a click it never closes an entry
+     * already shown. Resolves once OpenChamber shows it (its own panel's frame then loads); rejects, saying why, for
+     * an entry its service doesn't list, another extension's included.
+     */
+    open(entry: string): Promise<void>;
+  };
+  window: {
+    /**
+     * This OpenChamber window's id (`has('window-id')`): one per page load of the app, the same in every frame of
+     * the window (any surface, any extension) and in this one after it reloads; another in each browser tab, and
+     * again after the app reloads. Throws on a host without it.
+     */
+    id(): string;
   };
   tabs: {
     state(): OcForgeTabsState;
@@ -186,6 +205,16 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
         setActive: async (entry) => {
           await request('rail-active', { entry });
           if (hello?.rail) hello = { ...hello, rail: { ...hello.rail, entry } };
+        },
+        open: async (entry) => {
+          await request('rail-open', { entry });
+        },
+      },
+      window: {
+        id: () => {
+          const id = state().windowId;
+          if (!id) throw new Error('This OpenChamber names no window: its hello has no windowId (has(\'window-id\') is false).');
+          return id;
         },
       },
       tabs: {

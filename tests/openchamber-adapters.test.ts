@@ -119,6 +119,13 @@ describe("openchamber adapters", () => {
     expect(adapted("packages/ui/src/hooks/useRouter.ts")).toContain("        applyOcForgeRoute();\n      } finally {")
   })
 
+  test("the README's inventory counts the edits there are", () => {
+    const files = adaptedFiles(adapters)
+    const edits = files.reduce((count, file) => count + editsFor(adapters, file).length, 0)
+    const readme = readFileSync(join(import.meta.dir, "../adapters/openchamber/README.md"), "utf8")
+    expect(/(\d+) edits in (\d+) files/.exec(readme)?.slice(1).map(Number)).toEqual([edits, files.length])
+  })
+
   test("a moved or doubled anchor stops the build with a message naming it", () => {
     const file = "packages/ui/src/lib/surfaces/modes.ts"
     const original = read(file)

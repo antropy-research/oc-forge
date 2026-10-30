@@ -3,12 +3,14 @@
 // nothing from it: stock extensions see the release's behaviour.
 import React from 'react';
 
+import { resolveEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { isGuestActive } from '@/lib/guests/capabilities';
 import { useGuestsStore } from '@/lib/guests/store';
 import type { InstalledGuest } from '@/lib/guests/types';
+import { normalizeContextPanelDirectoryKey } from '@/stores/useUIStore';
 
 import { postToFrame, registerOcForgeFrame, type OcForgeFrame } from './bus.ts';
-import { ocForgeEntrySurfaceOf, setOcForgeCatalogReader } from './ids.ts';
+import { newOcForgeWindowId, ocForgeEntrySurfaceOf, setOcForgeCatalogReader } from './ids.ts';
 import { forwardOcForgeKey, ocForgeShortcuts } from './keys.ts';
 import {
   OC_FORGE_FEATURES,
@@ -18,7 +20,7 @@ import {
   type OcForgeHello,
   type OcForgeRequest,
 } from './protocol.ts';
-import { ocForgeCurrentEntry, setOcForgeCurrentEntry } from './rail.ts';
+import { ocForgeCurrentEntry, ocForgeRailListed, openOcForgeRailEntry, setOcForgeCurrentEntry } from './rail.ts';
 import { ocForgeLinks, setOcForgeRoute } from './routes.ts';
 import { useOcForgeStore } from './store.ts';
 import {
@@ -35,6 +37,15 @@ import {
 setOcForgeCatalogReader(() => useGuestsStore.getState().guests);
 
 const PLUGIN_PREFIX = 'plugin:';
+
+/**
+ * This OpenChamber window's id, in each frame's hello: one per page load of the app, so every frame of the window
+ * has the same, a frame that reloads gets it again, and another browser tab has its own.
+ */
+const OC_FORGE_WINDOW_ID = newOcForgeWindowId();
+
+/** A frame may start before its extension's service has listed the entries: `rail-open` waits this long for the list, under the client's 10 s. */
+const RAIL_LIST_WAIT_MS = 8_000;
 
 const identify = (frame: OcForgeFrame): void => {
   const surfaceId = frame.mode.slice(PLUGIN_PREFIX.length);
@@ -59,8 +70,9 @@ export const ocForgeFrameSandbox = (guest: Pick<InstalledGuest, 'ocForge'> | nul
 
 export const ocForgeHello = (frame: OcForgeFrame, guest: InstalledGuest): OcForgeHello => {
   const railPanel = frame.surface === 'panel' && Boolean(guest.ocForge?.rail);
-  const features = new Set<OcForgeFeature>(['zones', 'keys', 'links']);
+  const features = new Set<OcForgeFeature>(['zones', 'keys', 'links', 'window-id']);
   if (railPanel) features.add('rail');
+  if (guest.ocForge?.rail) features.add('rail-open');
   if (guest.pageEntry) features.add('tabs');
   if (guest.ocForge?.modals) features.add('modals');
   return {
@@ -79,12 +91,28 @@ export const ocForgeHello = (frame: OcForgeFrame, guest: InstalledGuest): OcForg
     links: ocForgeLinks(guest.id),
     shortcuts: ocForgeShortcuts(),
     limits: OC_FORGE_LIMITS,
+    windowId: OC_FORGE_WINDOW_ID,
   };
 };
 
 type Answer = { ok: true; payload?: unknown } | { ok: false; error: string };
 
-const answer = (frame: OcForgeFrame, guest: InstalledGuest, request: OcForgeRequest): Answer | null => {
+/** `rail-open`: one of the extension's own entries, shown in the project the rail shows (the main chat's). */
+const openRailEntry = async (guest: InstalledGuest, id: string): Promise<Answer> => {
+  if (!guest.ocForge?.rail) return { ok: false, error: `${guest.id} has no rail entries: its package.json names no ocForge.rail.` };
+  if (!await ocForgeRailListed(guest, RAIL_LIST_WAIT_MS)) {
+    return { ok: false, error: `${guest.id}'s service has not listed its rail entries: it is not approved, or did not answer within ${RAIL_LIST_WAIT_MS / 1000} s.` };
+  }
+  const entry = useOcForgeStore.getState().entries[guest.id]?.find((item) => item.id === id);
+  if (!entry) return { ok: false, error: `${guest.id} has no rail entry "${id}"; a frame opens only its own extension's entries.` };
+  const directory = resolveEffectiveDirectory();
+  if (!directory) return { ok: false, error: 'OpenChamber has no project open to show the entry in.' };
+  return openOcForgeRailEntry(normalizeContextPanelDirectoryKey(directory), guest.id, entry)
+    ? { ok: true }
+    : { ok: false, error: `OpenChamber did not show "${id}".` };
+};
+
+const answer = (frame: OcForgeFrame, guest: InstalledGuest, request: OcForgeRequest): Answer | Promise<Answer> | null => {
   switch (request.type) {
     case 'hello':
       // A (re)loaded client: it says again whether it decides how tabs close.
@@ -98,6 +126,8 @@ const answer = (frame: OcForgeFrame, guest: InstalledGuest, request: OcForgeRequ
       }
       setOcForgeCurrentEntry(guest.id, request.payload.entry, false);
       return { ok: true };
+    case 'rail-open':
+      return openRailEntry(guest, request.payload.entry);
     case 'tab-open': {
       const { activate, ...tab } = request.payload;
       return openOcForgeTab(guest.id, tab, activate === true);
@@ -159,10 +189,13 @@ export const useOcForgeFrame = ({ iframeRef, mode, surface, enabled }: FrameOpti
       const reply = guest && isGuestActive(guest)
         ? answer(frame, guest, read.request)
         : { ok: false as const, error: 'Extension is unavailable.' };
-      if (!reply || read.id === null) return;
-      postToFrame(frame, reply.ok
-        ? { type: 'result', id: read.id, ok: true, payload: 'payload' in reply ? reply.payload : undefined }
-        : { type: 'result', id: read.id, ok: false, error: reply.error });
+      const id = read.id;
+      if (!reply || id === null) return;
+      const post = (result: Answer) => postToFrame(frame, result.ok
+        ? { type: 'result', id, ok: true, payload: 'payload' in result ? result.payload : undefined }
+        : { type: 'result', id, ok: false, error: result.error });
+      if (reply instanceof Promise) void reply.then(post, (error: unknown) => post({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      else post(reply);
     };
     window.addEventListener('message', onMessage);
     return () => {
