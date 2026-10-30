@@ -1,13 +1,17 @@
 // GitHub issues and pull requests through the GitHub CLI of the machine running
 // OpenChamber. Read-only, like Sunsama's GitHub integration. A list is read a
 // page at a time (each page's cursor reaches the next, so none is left out),
-// an item can be found by its URL (pasted into a new task, as in Sunsama), and
-// linked items are read back in GitHub's batches of 100.
+// an item can be found by its URL (pasted into a new task, as in Sunsama),
+// linked items are read back in GitHub's batches of 100, and the day's work
+// (pull requests, reviews, comments, discussions) is read for Daily Highlights
+// (githubActivity.ts).
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
 import { parseGitHubUrl, type GitHubItem } from '../src/domain/github.ts';
+import type { ActivityPage, ActivitySource } from '../src/domain/githubActivity.ts';
+import { readActivity, readActivityPage } from './githubActivity.ts';
 import type { SeenPullRequest } from '../src/domain/events.ts';
 
 /** Runs gh; `cwd` picks the repository for commands that infer it from a checkout. */
@@ -248,5 +252,15 @@ export class GitHubSource {
       found.push(...parseNodes(graphqlData<{ nodes?: (RawNode | null)[] }>(out).nodes ?? []));
     }
     return found;
+  }
+
+  /** The day's GitHub work [from, to), for Daily Highlights: the first page of each source, in one gh call. */
+  activity(from: string, to: string): Promise<ActivityPage> {
+    return readActivity((args) => this.graphql(args), from, to);
+  }
+
+  /** The next page of one source of the day's GitHub work, from `after`. */
+  activityPage(source: ActivitySource, from: string, to: string, after: string): Promise<ActivityPage> {
+    return readActivityPage((args) => this.graphql(args), source, from, to, after);
   }
 }

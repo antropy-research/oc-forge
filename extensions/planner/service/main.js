@@ -1410,6 +1410,8 @@ var validateRitualFields = (ritual, fields) => {
       for (const item of value) {
         if (!isRecord2(item) || !isId(item.id) || !(typeof item.text === "string" && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== "boolean" || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === "boolean"))
           return "a highlight is invalid";
+        if (!(item.url === undefined || typeof item.url === "string" && item.url.length <= 2000 && /^https:\/\/\S+$/.test(item.url)) || !(item.ref === undefined || typeof item.ref === "string" && item.ref.length > 0 && item.ref.length <= 300))
+          return "a highlight is invalid";
       }
     }
   }
@@ -2600,6 +2602,217 @@ var parseGitHubUrl = (text) => {
   return { repo, number: Number(number), kind: path === "pull" ? "pull" : "issue", key: `${repo}#${Number(number)}`, url: `https://github.com/${repo}/${path}/${Number(number)}` };
 };
 
+// src/domain/githubActivity.ts
+var ACTIVITY_SOURCES = ["opened", "merged", "mergedReviewed", "mergedInvolved", "reviewed", "commented", "discussions", "discussionComments"];
+var searchInstant = (iso) => `${new Date(iso).toISOString().slice(0, 19)}+00:00`;
+var searchRange = (from, to) => `${searchInstant(from)}..${searchInstant(new Date(Date.parse(to) - 1000).toISOString())}`;
+var activitySearches = (from, to) => {
+  const day = searchRange(from, to);
+  return {
+    opened: `is:pr author:@me created:${day}`,
+    merged: `is:pr is:merged author:@me merged:${day}`,
+    mergedReviewed: `is:pr is:merged -author:@me reviewed-by:@me merged:${day}`,
+    mergedInvolved: `is:pr is:merged -author:@me involves:@me merged:${day}`
+  };
+};
+
+// service/githubActivity.ts
+var ACTIVITY_PAGE_SIZE = 50;
+var PAGE_INFO = "pageInfo { hasNextPage endCursor }";
+var BOTH_WAYS = "pageInfo { hasNextPage endCursor hasPreviousPage startCursor }";
+var PR = "... on PullRequest { id number title url createdAt mergedAt mergedBy { login } author { login } repository { nameWithOwner } }";
+var REVIEW = "occurredAt pullRequestReview { id url state } pullRequest { id number title url repository { nameWithOwner } }";
+var COMMENT = "id url createdAt updatedAt issue { id number title url repository { nameWithOwner } } pullRequest { id number title url repository { nameWithOwner } }";
+var DISCUSSION = "id number title url createdAt repository { nameWithOwner }";
+var DISCUSSION_COMMENT = "id url createdAt discussion { id number title url repository { nameWithOwner } }";
+var N = ACTIVITY_PAGE_SIZE;
+var search = (alias, variable) => `${alias}: search(query: $${variable}, type: ISSUE, first: ${N}) { issueCount ${PAGE_INFO} nodes { ${PR} } }`;
+var ACTIVITY_QUERY = `query PlannerGitHubActivity($opened: String!, $merged: String!, $mergedReviewed: String!, $mergedInvolved: String!, $from: DateTime!, $to: DateTime!) {
+  viewer {
+    login
+    contributionsCollection(from: $from, to: $to) { pullRequestReviewContributions(first: ${N}) { ${PAGE_INFO} nodes { ${REVIEW} } } }
+    issueComments(first: ${N}, orderBy: { field: UPDATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${COMMENT} } }
+    repositoryDiscussions(first: ${N}, orderBy: { field: CREATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${DISCUSSION} } }
+    repositoryDiscussionComments(last: ${N}) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } }
+  }
+  ${search("opened", "opened")}
+  ${search("merged", "merged")}
+  ${search("mergedReviewed", "mergedReviewed")}
+  ${search("mergedInvolved", "mergedInvolved")}
+}`;
+var ACTIVITY_SEARCH_QUERY = `query PlannerGitHubActivitySearch($q: String!, $after: String) { viewer { login } search(query: $q, type: ISSUE, first: ${N}, after: $after) { issueCount ${PAGE_INFO} nodes { ${PR} } } }`;
+var ACTIVITY_REVIEWS_QUERY = `query PlannerGitHubActivityReviews($from: DateTime!, $to: DateTime!, $after: String) { viewer { login contributionsCollection(from: $from, to: $to) { pullRequestReviewContributions(first: ${N}, after: $after) { ${PAGE_INFO} nodes { ${REVIEW} } } } } }`;
+var ACTIVITY_COMMENTS_QUERY = `query PlannerGitHubActivityComments($after: String) { viewer { login issueComments(first: ${N}, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${COMMENT} } } } }`;
+var ACTIVITY_DISCUSSIONS_QUERY = `query PlannerGitHubActivityDiscussions($after: String) { viewer { login repositoryDiscussions(first: ${N}, after: $after, orderBy: { field: CREATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${DISCUSSION} } } } }`;
+var ACTIVITY_DISCUSSION_COMMENTS_BACK_QUERY = `query PlannerGitHubActivityDiscussionCommentsBack($cursor: String) { viewer { login repositoryDiscussionComments(last: ${N}, before: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
+var ACTIVITY_DISCUSSION_COMMENTS_ON_QUERY = `query PlannerGitHubActivityDiscussionCommentsOn($cursor: String) { viewer { login repositoryDiscussionComments(first: ${N}, after: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
+var dataOf = (out) => {
+  const parsed = JSON.parse(out);
+  if (!parsed.data && parsed.errors?.length)
+    throw new Error(parsed.errors[0]?.message ?? "GitHub returned an error");
+  return parsed.data ?? {};
+};
+var nodesOf = (page) => (page?.nodes ?? []).filter((node) => Boolean(node));
+var targetOf = (node, type) => node?.id && Number.isInteger(node.number) && typeof node.title === "string" && typeof node.url === "string" && node.repository?.nameWithOwner ? { id: node.id, repo: node.repository.nameWithOwner, number: node.number, title: node.title, url: node.url, type } : null;
+var same = (a, b) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
+var dayOf2 = (from, to) => {
+  const start = Date.parse(from);
+  const end = Date.parse(to);
+  return { start, inDay: (at) => typeof at === "string" && Date.parse(at) >= start && Date.parse(at) < end };
+};
+var pullItems = (source, page, login, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node, "pull");
+  if (!target)
+    return [];
+  if (source === "opened")
+    return day.inDay(node.createdAt) ? [{ id: `opened:${target.id}`, kind: "opened", target, url: target.url, at: node.createdAt }] : [];
+  if (!day.inDay(node.mergedAt))
+    return [];
+  const mergedBy = node.mergedBy?.login ?? null;
+  const mergedByMe = same(mergedBy, login);
+  const mine = same(node.author?.login, login);
+  if (!mine && !mergedByMe)
+    return [];
+  return [{ id: `merged:${target.id}`, kind: "merged", target, url: target.url, at: node.mergedAt, mergedBy, mergedByMe, mine }];
+});
+var reviewItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node.pullRequest, "pull");
+  const review = node.pullRequestReview;
+  if (!target || !review?.id || !day.inDay(node.occurredAt))
+    return [];
+  return [{ id: `reviewed:${review.id}`, kind: "reviewed", target, url: review.url ?? target.url, at: node.occurredAt, ...review.state ? { state: review.state } : {} }];
+});
+var commentItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node.pullRequest, "pull") ?? targetOf(node.issue, "issue");
+  if (!target || !node.id || !node.url || !day.inDay(node.createdAt))
+    return [];
+  return [{ id: `commented:${node.id}`, kind: "commented", target, url: node.url, at: node.createdAt }];
+});
+var discussionItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node, "discussion");
+  return target && day.inDay(node.createdAt) ? [{ id: `discussion:${target.id}`, kind: "discussion", target, url: target.url, at: node.createdAt }] : [];
+});
+var discussionCommentItems = (page, day) => nodesOf(page).flatMap((node) => {
+  const target = targetOf(node.discussion, "discussion");
+  if (!target || !node.id || !node.url || !day.inDay(node.createdAt))
+    return [];
+  return [{ id: `discussionComment:${node.id}`, kind: "discussionComment", target, url: node.url, at: node.createdAt }];
+});
+var nextOf = (page) => page?.pageInfo?.hasNextPage && page.pageInfo.endCursor ? page.pageInfo.endCursor : null;
+var nextWhileRecent = (page, field, day) => {
+  const last = nodesOf(page).at(-1);
+  return nextOf(page) && last && Date.parse(last[field] ?? "") >= day.start ? nextOf(page) : null;
+};
+var nextDiscussionComments = (page, read, day) => {
+  const nodes = nodesOf(page);
+  const info = page?.pageInfo ?? {};
+  const first = Date.parse(nodes[0]?.createdAt ?? "");
+  const last = Date.parse(nodes.at(-1)?.createdAt ?? "");
+  if (!nodes.length)
+    return null;
+  if (read === "back") {
+    if (nodes.length > 1 && first > last)
+      return info.hasPreviousPage ? "on:" : null;
+    return info.hasPreviousPage && info.startCursor && first >= day.start ? `back:${info.startCursor}` : null;
+  }
+  return info.hasNextPage && info.endCursor && last >= day.start ? `on:${info.endCursor}` : null;
+};
+var lastSecond = (to) => new Date(Date.parse(to) - 1000).toISOString();
+var page = (login, items, more, totals = {}) => ({
+  login,
+  items,
+  more: Object.fromEntries(Object.entries(more).filter(([, cursor]) => typeof cursor === "string")),
+  totals
+});
+var readActivity = async (graphql, from, to) => {
+  const searches = activitySearches(from, to);
+  const out = await graphql([
+    "-f",
+    `query=${ACTIVITY_QUERY}`,
+    "-f",
+    `opened=${searches.opened}`,
+    "-f",
+    `merged=${searches.merged}`,
+    "-f",
+    `mergedReviewed=${searches.mergedReviewed}`,
+    "-f",
+    `mergedInvolved=${searches.mergedInvolved}`,
+    "-f",
+    `from=${new Date(from).toISOString()}`,
+    "-f",
+    `to=${lastSecond(to)}`
+  ]);
+  const data = dataOf(out);
+  const login = data.viewer?.login ?? "";
+  const day = dayOf2(from, to);
+  const viewer = data.viewer ?? {};
+  const reviews = viewer.contributionsCollection?.pullRequestReviewContributions;
+  const items = [
+    ...pullItems("opened", data.opened, login, day),
+    ...pullItems("merged", data.merged, login, day),
+    ...pullItems("mergedReviewed", data.mergedReviewed, login, day),
+    ...pullItems("mergedInvolved", data.mergedInvolved, login, day),
+    ...reviewItems(reviews, day),
+    ...commentItems(viewer.issueComments, day),
+    ...discussionItems(viewer.repositoryDiscussions, day),
+    ...discussionCommentItems(viewer.repositoryDiscussionComments, day)
+  ];
+  const more = {
+    opened: nextOf(data.opened),
+    merged: nextOf(data.merged),
+    mergedReviewed: nextOf(data.mergedReviewed),
+    mergedInvolved: nextOf(data.mergedInvolved),
+    reviewed: nextOf(reviews),
+    commented: nextWhileRecent(viewer.issueComments, "updatedAt", day),
+    discussions: nextWhileRecent(viewer.repositoryDiscussions, "createdAt", day),
+    discussionComments: nextDiscussionComments(viewer.repositoryDiscussionComments, "back", day)
+  };
+  const totals = {};
+  for (const source of ["opened", "merged", "mergedReviewed", "mergedInvolved"]) {
+    const count = data[source]?.issueCount;
+    if (typeof count === "number" && Number.isInteger(count))
+      totals[source] = count;
+  }
+  return page(login, items, more, totals);
+};
+var readActivityPage = async (graphql, source, from, to, after) => {
+  const day = dayOf2(from, to);
+  const cursor = (value) => value ? ["-f", `after=${value}`] : [];
+  switch (source) {
+    case "opened":
+    case "merged":
+    case "mergedReviewed":
+    case "mergedInvolved": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_SEARCH_QUERY}`, "-f", `q=${activitySearches(from, to)[source]}`, ...cursor(after)]));
+      const login = data.viewer?.login ?? "";
+      const count = data.search?.issueCount;
+      return page(login, pullItems(source, data.search, login, day), { [source]: nextOf(data.search) }, typeof count === "number" ? { [source]: count } : {});
+    }
+    case "reviewed": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_REVIEWS_QUERY}`, "-f", `from=${new Date(from).toISOString()}`, "-f", `to=${lastSecond(to)}`, ...cursor(after)]));
+      const reviews = data.viewer?.contributionsCollection?.pullRequestReviewContributions;
+      return page(data.viewer?.login ?? "", reviewItems(reviews, day), { reviewed: nextOf(reviews) });
+    }
+    case "commented": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_COMMENTS_QUERY}`, ...cursor(after)]));
+      return page(data.viewer?.login ?? "", commentItems(data.viewer?.issueComments, day), { commented: nextWhileRecent(data.viewer?.issueComments, "updatedAt", day) });
+    }
+    case "discussions": {
+      const data = dataOf(await graphql(["-f", `query=${ACTIVITY_DISCUSSIONS_QUERY}`, ...cursor(after)]));
+      return page(data.viewer?.login ?? "", discussionItems(data.viewer?.repositoryDiscussions, day), { discussions: nextWhileRecent(data.viewer?.repositoryDiscussions, "createdAt", day) });
+    }
+    case "discussionComments": {
+      const split = after.indexOf(":");
+      const read = after.slice(0, split) === "on" ? "on" : "back";
+      const at = split >= 0 ? after.slice(split + 1) : after;
+      const query = read === "on" ? ACTIVITY_DISCUSSION_COMMENTS_ON_QUERY : ACTIVITY_DISCUSSION_COMMENTS_BACK_QUERY;
+      const data = dataOf(await graphql(["-f", `query=${query}`, ...at ? ["-f", `cursor=${at}`] : []]));
+      const comments = data.viewer?.repositoryDiscussionComments;
+      return page(data.viewer?.login ?? "", discussionCommentItems(comments, day), { discussionComments: nextDiscussionComments(comments, read, day) });
+    }
+  }
+};
+
 // service/github.ts
 var GH_TIMEOUT_MS = 15000;
 var ghRunner = (args, options) => new Promise((resolve, reject) => {
@@ -2760,6 +2973,12 @@ class GitHubSource {
       found.push(...parseNodes(graphqlData(out).nodes ?? []));
     }
     return found;
+  }
+  activity(from, to) {
+    return readActivity((args) => this.graphql(args), from, to);
+  }
+  activityPage(source, from, to, after) {
+    return readActivityPage((args) => this.graphql(args), source, from, to, after);
   }
 }
 
@@ -3219,7 +3438,7 @@ var loopbackListen = (onRequest) => new Promise((resolve, reject) => {
   server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port, close: () => server.close() }));
 });
 var base64url = (bytes) => bytes.toString("base64url");
-var page = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font:15px system-ui;margin:3em;max-width:36em"><h1 style="font-size:20px">${title}</h1><p>${text}</p>`;
+var page2 = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font:15px system-ui;margin:3em;max-width:36em"><h1 style="font-size:20px">${title}</h1><p>${text}</p>`;
 var featuresOf = (scopes) => GOOGLE_FEATURES.filter((feature) => FEATURE_SCOPES[feature].every((scope) => scopes.includes(scope)));
 var domainOf = (value) => typeof value === "string" && /^[a-z0-9.-]{1,253}$/i.test(value) ? value.toLowerCase() : null;
 var identityFromIdToken = (idToken) => {
@@ -3430,24 +3649,24 @@ class GoogleAccounts {
   async callback(id, url) {
     const signIn = this.signIns.get(id);
     if (!signIn || signIn.result.status !== "pending")
-      return page("Planner", "This sign-in is already over. You can close this tab.");
+      return page2("Planner", "This sign-in is already over. You can close this tab.");
     if (url.searchParams.get("state") !== signIn.state) {
-      return page("Planner", "This page does not belong to the sign-in the Planner is waiting for.");
+      return page2("Planner", "This page does not belong to the sign-in the Planner is waiting for.");
     }
     const error = url.searchParams.get("error");
     const code = url.searchParams.get("code");
     if (error || !code) {
       this.endSignIn(id, { status: "failed", message: error === "access_denied" ? "Access was not allowed" : `Google said: ${error ?? "no code"}` });
-      return page("Not connected", "Google did not let the Planner in. You can close this tab and try again.");
+      return page2("Not connected", "Google did not let the Planner in. You can close this tab and try again.");
     }
     try {
       const account = await this.exchange(code, signIn);
       this.endSignIn(id, { status: "connected", email: account.email, features: featuresOf(account.scopes) });
-      return page("Connected", `The Planner can now use ${account.email}. You can close this tab.`);
+      return page2("Connected", `The Planner can now use ${account.email}. You can close this tab.`);
     } catch (failure) {
       const message = failure instanceof Error ? failure.message : String(failure);
       this.endSignIn(id, { status: "failed", message });
-      return page("Not connected", `${message.replace(/[<>&]/g, "")}. You can close this tab.`);
+      return page2("Not connected", `${message.replace(/[<>&]/g, "")}. You can close this tab.`);
     }
   }
   async exchange(code, signIn) {
@@ -6483,13 +6702,13 @@ var orderAgents = (agents) => {
   return agents.sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
 };
 var parseModels = (out) => [...new Set(out.split(/\r?\n/).map((line) => line.trim()).filter((line) => isModelRef(line) && !line.includes("#")))].sort((a, b) => a.localeCompare(b));
-var dataOf = (json) => {
+var dataOf2 = (json) => {
   const data = json?.data;
   return Array.isArray(data) ? data : [];
 };
 var parseModelDetails = (json) => {
   const details = new Map;
-  for (const item of dataOf(json)) {
+  for (const item of dataOf2(json)) {
     const model = item;
     if (typeof model.id !== "string" || typeof model.providerID !== "string")
       continue;
@@ -6504,7 +6723,7 @@ var parseModelDetails = (json) => {
   }
   return details;
 };
-var parseLiveAgents = (json) => dataOf(json).flatMap((item) => {
+var parseLiveAgents = (json) => dataOf2(json).flatMap((item) => {
   const agent = item;
   if (!isAgentName(agent.id) || agent.mode === "subagent" || agent.hidden === true)
     return [];
@@ -6519,7 +6738,7 @@ var parseLiveAgents = (json) => dataOf(json).flatMap((item) => {
     source: "global"
   }];
 });
-var parseCommandNames = (json) => dataOf(json).flatMap((item) => {
+var parseCommandNames = (json) => dataOf2(json).flatMap((item) => {
   const name = item?.name;
   return typeof name === "string" ? [name] : [];
 });
@@ -7053,6 +7272,24 @@ var server = http2.createServer(async (req, res) => {
       }
       try {
         json(res, 200, { items: await github.items(ids) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === "/github/activity" && req.method === "GET") {
+      const from = url.searchParams.get("from") ?? "";
+      const to = url.searchParams.get("to") ?? "";
+      const source = url.searchParams.get("source");
+      const after = url.searchParams.get("after") ?? "";
+      const instant = (value) => /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+      const span = Date.parse(to) - Date.parse(from);
+      if (!instant(from) || !instant(to) || !(span > 0 && span <= 26 * 3600000) || source !== null && !ACTIVITY_SOURCES.includes(source) || !/^[A-Za-z0-9+/=_:-]{0,400}$/.test(after)) {
+        json(res, 400, { error: "from and to must be the bounds of one day (ISO instants); source one of the activity sources; after a cursor" });
+        return;
+      }
+      try {
+        json(res, 200, source ? await github.activityPage(source, from, to, after) : await github.activity(from, to));
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }

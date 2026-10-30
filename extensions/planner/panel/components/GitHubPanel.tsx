@@ -66,7 +66,7 @@ const ItemRow = ({ item }: { item: GitHubItem }) => {
 };
 
 /** What to do when gh is missing or signed out: where to run `gh auth login`, to copy. */
-const GitHubSignIn = () => {
+export const GitHubSignIn = () => {
   const { github, host, client } = usePlanner();
   const gv = useGitHub();
   const status = gv.status!;

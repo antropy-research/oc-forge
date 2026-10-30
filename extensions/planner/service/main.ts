@@ -9,6 +9,7 @@ import { CalendarFeeds } from './calendars.ts';
 import { SyncManager } from './sync.ts';
 import { GitHubSource, LISTS, NODES_MAX, type ListKind } from './github.ts';
 import { parseGitHubUrl } from '../src/domain/github.ts';
+import { ACTIVITY_SOURCES, type ActivitySource } from '../src/domain/githubActivity.ts';
 import { LinearWorkspaces, WorkspaceError } from './linear.ts';
 import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from './google.ts';
 import { GoogleData } from './googleData.ts';
@@ -351,6 +352,25 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         json(res, 200, { items: await github.items(ids) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/activity' && req.method === 'GET') {
+      // The day's GitHub work for Daily Highlights: the first page of each source, or the next page of one (`source`, `after`).
+      const from = url.searchParams.get('from') ?? '';
+      const to = url.searchParams.get('to') ?? '';
+      const source = url.searchParams.get('source');
+      const after = url.searchParams.get('after') ?? '';
+      const instant = (value: string) => /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+      const span = Date.parse(to) - Date.parse(from);
+      if (!instant(from) || !instant(to) || !(span > 0 && span <= 26 * 3_600_000) || (source !== null && !(ACTIVITY_SOURCES as readonly string[]).includes(source)) || !/^[A-Za-z0-9+/=_:-]{0,400}$/.test(after)) {
+        json(res, 400, { error: 'from and to must be the bounds of one day (ISO instants); source one of the activity sources; after a cursor' });
+        return;
+      }
+      try {
+        json(res, 200, source ? await github.activityPage(source as ActivitySource, from, to, after) : await github.activity(from, to));
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }

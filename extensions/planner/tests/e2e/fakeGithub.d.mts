@@ -26,11 +26,51 @@ export interface FakeIssue {
   updatedAt: string;
 }
 
+/** A pull request's review, as the day's work reads it (contributionsCollection). */
+export interface FakeReview {
+  id: string;
+  author: string;
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED';
+  submittedAt: string;
+  url: string;
+}
+
+/** A comment on an issue or a pull request (`on` is its URL). */
+export interface FakeIssueComment {
+  id: string;
+  author: string;
+  on: string;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FakeDiscussion {
+  id: string;
+  number: number;
+  repo: string;
+  title: string;
+  url: string;
+  author: string;
+  createdAt: string;
+}
+
+export interface FakeDiscussionComment {
+  id: string;
+  discussionId: string;
+  author: string;
+  url: string;
+  createdAt: string;
+}
+
 export interface FakeGithubWorld {
   viewer: string;
   repos: { id: string; owner: string; name: string; defaultBranch: string; bare: string | null }[];
-  pulls: (FakePull & { reviewRequested?: string[] })[];
+  pulls: (FakePull & { reviewRequested?: string[]; author?: string; mergedAt?: string | null; mergedBy?: string | null; reviews?: FakeReview[]; assignees?: string[] })[];
   issues?: FakeIssue[];
+  issueComments?: FakeIssueComment[];
+  discussions?: FakeDiscussion[];
+  discussionComments?: FakeDiscussionComment[];
   next: number;
 }
 

@@ -307,6 +307,10 @@ export interface Highlight {
   starred: boolean;
   /** A task-derived item the user removed; kept so it is not merged back in. */
   hidden?: boolean;
+  /** Where it opens (an item included from Other activities, such as a pull request on GitHub). */
+  url?: string;
+  /** What it was included from (`github:<kind>:<id>`), so that one shows as included. */
+  ref?: string;
 }
 
 /** What a ritual left behind for one day (or one week, keyed by its first day). */

@@ -112,6 +112,64 @@ describe.skipIf(!GH)('the fake GitHub answers the real gh as GitHub would', () =
     expect(fake.requests.filter((request) => request.operation === 'query PlannerGitHubNodes').map((request) => (request.variables?.ids as string[]).length)).toEqual([100, 12]);
   });
 
+  // Daily Highlights, with the GitHub CLI itself: the day's work read as the service reads it (service/githubActivity.ts),
+  // one gh call for every source's first page, then a source with more of the day page by page.
+  test("the day's work: pull requests opened, reviewed and merged, comments past one page, discussions and their comments", async () => {
+    const repo = 'harness-org/planner-pr-demo';
+    // A day well before the pull requests the other tests open now.
+    const from = '2026-10-20T07:00:00.000Z';
+    const to = '2026-10-21T07:00:00.000Z';
+    const before = { pulls: [...fake.world.pulls], issues: fake.world.issues };
+    const at = (hours: number) => new Date(Date.parse(from) + hours * 3_600_000).toISOString();
+    const viewer = fake.world.viewer;
+    const pullOf = (number: number, extra: Record<string, unknown>) => ({ id: `PR_day_${number}`, number, repo, url: `https://github.com/${repo}/pull/${number}`, title: `Day pull ${number}`, body: '', headRefName: `day-${number}`, baseRefName: 'main', headOid: 'x', isDraft: false, state: 'OPEN' as const, createdAt: at(-48), updatedAt: at(1), ...extra });
+    try {
+    fake.world.pulls.push(
+      pullOf(101, { createdAt: at(2), updatedAt: at(2) }),
+      pullOf(102, { author: 'ann', reviews: [{ id: 'RV_1', author: viewer, state: 'CHANGES_REQUESTED', submittedAt: at(3), url: `https://github.com/${repo}/pull/102#pullrequestreview-1` }, { id: 'RV_2', author: viewer, state: 'APPROVED', submittedAt: at(5), url: `https://github.com/${repo}/pull/102#pullrequestreview-2` }] }),
+      pullOf(103, { state: 'MERGED', mergedAt: at(4), mergedBy: 'ann' }),
+      pullOf(104, { author: 'bo', state: 'MERGED', mergedAt: at(6), mergedBy: viewer, reviews: [{ id: 'RV_3', author: viewer, state: 'APPROVED', submittedAt: at(-30), url: `https://github.com/${repo}/pull/104#pullrequestreview-3` }] }),
+      pullOf(105, { author: 'bo', state: 'MERGED', mergedAt: at(6), mergedBy: 'ann' }),
+    );
+    // 55 comments of the day on issue 1 (more than a page of 50), one of yesterday updated today, one of last week.
+    fake.world.issues = [fakeIssue(repo, 1, { title: 'Day issue 1' })];
+    fake.world.issueComments = [
+      ...Array.from({ length: 55 }, (_, n) => ({ id: `IC_${n}`, author: viewer, on: `https://github.com/${repo}/issues/1`, url: `https://github.com/${repo}/issues/1#issuecomment-${n}`, createdAt: at(8 + n / 60), updatedAt: at(8 + n / 60) })),
+      { id: 'IC_y', author: viewer, on: `https://github.com/${repo}/issues/1`, url: `https://github.com/${repo}/issues/1#issuecomment-y`, createdAt: at(-20), updatedAt: at(2) },
+      { id: 'IC_old', author: viewer, on: `https://github.com/${repo}/issues/1`, url: `https://github.com/${repo}/issues/1#issuecomment-old`, createdAt: at(-200), updatedAt: at(-200) },
+      { id: 'IC_pr', author: viewer, on: `https://github.com/${repo}/pull/102`, url: `https://github.com/${repo}/pull/102#issuecomment-pr`, createdAt: at(9.5), updatedAt: at(9.5) },
+    ];
+    fake.world.discussions = [{ id: 'DS_1', number: 7, repo, title: 'Roadmap', url: `https://github.com/${repo}/discussions/7`, author: viewer, createdAt: at(10) }, { id: 'DS_0', number: 6, repo, title: 'Old', url: `https://github.com/${repo}/discussions/6`, author: viewer, createdAt: at(-100) }];
+    fake.world.discussionComments = [{ id: 'DCM_0', discussionId: 'DS_0', author: viewer, url: `https://github.com/${repo}/discussions/6#discussioncomment-0`, createdAt: at(-90) }, { id: 'DCM_1', discussionId: 'DS_0', author: viewer, url: `https://github.com/${repo}/discussions/6#discussioncomment-1`, createdAt: at(11) }];
+    const source = new GitHubSource(async (args) => {
+      const result = await run(GH!, args);
+      if (result.code !== 0) throw Object.assign(new Error(result.err), { stdout: result.out, stderr: result.err });
+      return result.out;
+    });
+    const first = await source.activity(from, to);
+    expect(first.login).toBe(viewer);
+    const kinds = (items: { kind: string; id: string }[]) => items.filter((item) => item.kind !== 'commented').map((item) => item.id);
+    // Bo's pull request merged by me is found through my review of it (involves: covers no reviewer); Bo's merged by Ann isn't mine.
+    expect(kinds(first.items)).toEqual(['opened:PR_day_101', 'merged:PR_day_103', 'merged:PR_day_104', 'reviewed:RV_2', 'reviewed:RV_1', 'discussion:DS_1', 'discussionComment:DCM_1']);
+    // Last updated first: the comment on pull request 102 (9:30) and 49 of issue 1's; the rest on the next page, where
+    // yesterday's comment (updated today) and last week's end the reading.
+    const comments = first.items.filter((item) => item.kind === 'commented');
+    expect([comments.length, comments[0]!.id, comments[0]!.target.type, comments[0]!.target.number]).toEqual([50, 'commented:IC_pr', 'pull', 102]);
+    expect(Object.keys(first.more)).toEqual(['commented']);
+    const rest = await source.activityPage('commented', from, to, first.more.commented!);
+    expect([rest.items.map((item) => item.id), rest.more]).toEqual([['commented:IC_5', 'commented:IC_4', 'commented:IC_3', 'commented:IC_2', 'commented:IC_1', 'commented:IC_0'], {}]);
+    const asked = fake.requests.filter((request) => request.operation?.startsWith('query PlannerGitHubActivity'));
+    expect(asked.map((request) => request.operation)).toEqual(['query PlannerGitHubActivity', 'query PlannerGitHubActivityComments']);
+    expect(asked[0]!.variables).toMatchObject({ opened: `is:pr author:@me created:2026-10-20T07:00:00+00:00..2026-10-21T06:59:59+00:00`, from, to: '2026-10-21T06:59:59.000Z' });
+    } finally {
+      fake.world.pulls = before.pulls;
+      fake.world.issues = before.issues;
+      fake.world.issueComments = [];
+      fake.world.discussions = [];
+      fake.world.discussionComments = [];
+    }
+  });
+
   test('as GitHub does, it refuses a second pull request for a branch, a branch never pushed, and one with nothing new', async () => {
     await ok('git', ['checkout', '-q', '-b', 'planner/harness-two', 'main']);
     await commit('two.txt');

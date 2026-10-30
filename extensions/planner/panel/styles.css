@@ -330,10 +330,27 @@ html[data-surface='status'], html[data-surface='status'] body { height: auto; ba
 .highlights li { display: flex; gap: 8px; align-items: center; background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 8px; padding: 4px 8px; }
 .highlights li.is-starred { border-color: color-mix(in srgb, #f59f00 60%, transparent); }
 .highlights .star { background: none; border: 0; font-size: 16px; color: #f59f00; padding: 0 2px; }
-.highlight-text { flex: 1; border: 1px solid transparent; background: transparent; border-radius: 4px; padding: 2px 4px; }
+.highlight-text { flex: 1; min-width: 0; border: 1px solid transparent; background: transparent; border-radius: 4px; padding: 2px 4px; }
 .highlight-text:focus { border-color: var(--pl-line); outline: 0; }
 .highlight-actions { display: flex; gap: 4px; }
 .highlight-actions button { padding: 0 6px; }
+.highlight-open { align-self: center; padding: 0 6px; text-decoration: none; color: var(--oc-muted); }
+.highlight-open:hover { color: var(--oc-fg, inherit); }
+.other-activities .activity-source { margin-top: 10px; }
+.other-activities h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; font-size: 13px; }
+.other-activities h4 { margin: 8px 0 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--oc-muted); }
+.other-activities .feed-errors { margin: 0 0 6px; }
+.activity-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.activity-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 4px 8px; border-radius: 6px; background: var(--pl-softer); font-size: 12px; }
+.activity-kind { flex: none; min-width: 64px; color: var(--oc-muted); }
+.activity-kind.is-merged { color: #8250df; }
+.activity-kind.is-opened { color: #2da44e; }
+.activity-kind.is-reviewed { color: #bf8700; }
+.activity-title { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; color: inherit; }
+a.activity-title { text-decoration: none; }
+a.activity-title:hover { text-decoration: underline; }
+.activity-ref { color: var(--oc-muted); }
+.activity-time, .activity-included { flex: none; }
 .time-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .time-summary > div { display: flex; flex-direction: column; padding: 8px; border-radius: 8px; background: var(--pl-softer); }
 .time-summary .label { font-size: 11px; color: var(--oc-muted); }

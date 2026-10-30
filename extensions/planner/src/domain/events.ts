@@ -424,6 +424,7 @@ const validateRitualFields = (ritual: Ritual, fields: unknown): string | null =>
       if (!Array.isArray(value) || value.length > 100) return 'items must be a list of at most 100';
       for (const item of value) {
         if (!isRecord(item) || !isId(item.id) || !(typeof item.text === 'string' && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== 'boolean' || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === 'boolean')) return 'a highlight is invalid';
+        if (!(item.url === undefined || (typeof item.url === 'string' && item.url.length <= 2000 && /^https:\/\/\S+$/.test(item.url))) || !(item.ref === undefined || (typeof item.ref === 'string' && item.ref.length > 0 && item.ref.length <= 300))) return 'a highlight is invalid';
       }
     }
   }

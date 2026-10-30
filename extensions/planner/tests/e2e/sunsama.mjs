@@ -65,7 +65,10 @@ const serviceOverride = async ({ method, path, body }) => {
 // 51 issues are assigned to me: the source shows 50, says so ("Showing 50 of 51") and Load more reaches the 51st,
 // which plans as a task linked to it (its real id, title and URL); Refresh reads both pages again (not the first
 // alone); the search field narrows the list. An issue's URL pasted alone into Add task (one not assigned to me) and a
-// pull request's make tasks linked to them, as Sunsama's "Add via URL" does. SUNSAMA_PARTS=github runs this alone.
+// pull request's make tasks linked to them, as Sunsama's "Add via URL" does. Daily Highlights' Other activities list
+// the day's GitHub work (pull requests opened, reviewed and merged, comments, a discussion and a comment on it), as
+// Sunsama's GitHub integration surfaces it in the end-of-day review; one opens on GitHub in a new tab, one is included
+// and starred; signed out, the section says how to sign in. SUNSAMA_PARTS=github runs this alone.
 /** The GitHub CLI itself (never mise's shim, which wants a trusted folder; never the harness's signed-out stub). */
 const realGh = () => {
   const candidates = [process.env.GH_BIN, '/home/qihang/.local/share/mise/installs/gh/latest/gh_2.103.3_linux_amd64/bin/gh', ...(process.env.PATH ?? '').split(':').filter((dir) => dir && !/mise\/shims|planner-harness-/.test(dir)).map((dir) => join(dir, 'gh'))];
@@ -84,15 +87,46 @@ const githubPart = async (viewport) => {
   // Issue 1 updated last: GitHub's search (updated, newest first) gives 1 to 50 a page, then 51.
   world.issues = Array.from({ length: 51 }, (_, n) => fakeIssue(repo, n + 1, { title: `${run} gh issue ${n + 1}`, assignees: [world.viewer], updatedAt: new Date(Date.now() - n * 60_000).toISOString() }));
   world.issues.push(fakeIssue(repo, 52, { title: `${run} gh unassigned 52`, assignees: ['someone-else'] }));
-  world.pulls.push({ id: 'PR_planner_gh_7', number: 7, repo, url: `https://github.com/${repo}/pull/7`, title: `${run} gh pull 7`, body: '', headRefName: 'harness-feature', baseRefName: 'main', headOid: 'fake', isDraft: false, state: 'OPEN', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), reviewRequested: [world.viewer] });
+  // Today in the harness's zone, and an hour of it as an instant.
+  const zone = 'America/Los_Angeles';
+  const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const offsetAt = (instant) => {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(instant).map((part) => [part.type, part.value]));
+    return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second)) - Math.floor(instant / 1000) * 1000;
+  };
+  const localAt = (hours) => {
+    const wall = Date.parse(`${localDate}T00:00:00Z`) + hours * 3_600_000;
+    return new Date(wall - offsetAt(wall)).toISOString();
+  };
+  world.pulls.push({ id: 'PR_planner_gh_7', number: 7, repo, url: `https://github.com/${repo}/pull/7`, title: `${run} gh pull 7`, body: '', headRefName: 'harness-feature', baseRefName: 'main', headOid: 'fake', isDraft: false, state: 'OPEN', createdAt: localAt(-20), updatedAt: new Date().toISOString(), reviewRequested: [world.viewer] });
+  // The day's GitHub work, for Daily Highlights: a pull request opened, Ann's reviewed twice, mine merged by Ann, Bo's
+  // reviewed and merged by me, 51 comments on issue 52 and one on Ann's pull request (past a page of 50), a discussion
+  // started and a comment on it.
+  const dayPull = (number, extra) => ({ id: `PR_day_${number}`, number, repo, url: `https://github.com/${repo}/pull/${number}`, title: `${run} day pull ${number}`, body: '', headRefName: `day-${number}`, baseRefName: 'main', headOid: 'fake', isDraft: false, state: 'OPEN', createdAt: localAt(-30), updatedAt: localAt(8), ...extra });
+  const review = (number, n, state, hours) => ({ id: `RV_day_${number}_${n}`, author: world.viewer, state, submittedAt: localAt(hours), url: `https://github.com/${repo}/pull/${number}#pullrequestreview-${n}` });
+  world.pulls.push(
+    dayPull(201, { createdAt: localAt(9), updatedAt: localAt(9) }),
+    dayPull(202, { author: 'ann', reviews: [review(202, 1, 'CHANGES_REQUESTED', 10), review(202, 2, 'APPROVED', 11)] }),
+    dayPull(203, { state: 'MERGED', mergedAt: localAt(12), mergedBy: 'ann' }),
+    dayPull(204, { author: 'bo', state: 'MERGED', mergedAt: localAt(13), mergedBy: world.viewer, reviews: [review(204, 3, 'APPROVED', 12.5)] }),
+  );
+  world.issueComments = [
+    ...Array.from({ length: 51 }, (_, n) => ({ id: `IC_day_${n}`, author: world.viewer, on: world.issues[51].url, url: `${world.issues[51].url}#issuecomment-${n}`, createdAt: localAt(14 + n / 120), updatedAt: localAt(14 + n / 120) })),
+    { id: 'IC_day_pr', author: world.viewer, on: `https://github.com/${repo}/pull/202`, url: `https://github.com/${repo}/pull/202#issuecomment-pr`, createdAt: localAt(15), updatedAt: localAt(15) },
+  ];
+  world.discussions = [{ id: 'DS_day_7', number: 7, repo, title: `${run} roadmap`, url: `https://github.com/${repo}/discussions/7`, author: world.viewer, createdAt: localAt(16) }];
+  world.discussionComments = [{ id: 'DCM_day_1', discussionId: 'DS_day_7', author: world.viewer, url: `https://github.com/${repo}/discussions/7#discussioncomment-1`, createdAt: localAt(16.5) }];
   const fake = await startFakeGithub({ socket: join(dir, 'gh.sock'), world });
   const config = ghConfigFiles(fake.socket);
   // The private service's gh is the real one, its config sending every request to the fake's socket (nothing reaches GitHub).
+  // Signed out, for the last check: GitHub's status says so (the harness answers it, as gh would).
+  let signedOut = false;
   const g = await startHarness({
     out,
     viewport,
     serviceEnv: { PATH: `${dirname(gh)}:/usr/bin:/bin`, GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' },
     homeFiles: { '.config/gh/config.yml': config['config.yml'], '.config/gh/hosts.yml': config['hosts.yml'] },
+    serviceOverride: ({ path }) => (signedOut && path === '/github/status' ? { available: false, login: null, message: 'You are not signed in to GitHub (gh auth login).', reason: 'signed-out', container: null } : undefined),
   });
   const f = g.frame;
   const plannerErrors = [];
@@ -170,6 +204,77 @@ const githubPart = async (viewport) => {
     }
     check(`${size}: the paste was looked up on GitHub by its URL`, fake.requests.filter((request) => request.operation === 'query PlannerGitHubResource').map((request) => request.variables?.url).join() === `${world.issues[51].url},${world.pulls[0].url}`);
     await shotHere('gh-paste-tasks');
+
+    // ── Daily Highlights: the day's GitHub work in Other activities, read through the real gh ──
+    const go = async (name) => {
+      if (!(await g.nav(name).isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
+      await g.nav(name).click();
+    };
+    // Nothing reaches github.com: a tab the Planner opens there gets a stub page.
+    await g.context.route('https://github.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>GitHub (harness stub)</title><p>stub</p>' }));
+    await go('Daily highlights');
+    await f.getByRole('heading', { name: 'Daily highlights' }).waitFor();
+    const other = f.getByRole('region', { name: 'Other activities' });
+    const ghActivity = other.getByRole('region', { name: 'GitHub activity' });
+    await ghActivity.locator('.activity-row').first().waitFor({ timeout: 30_000 });
+    const activityRows = () => ghActivity.locator('.activity-row').evaluateAll((rows) => rows.map((row) => ({ kind: row.querySelector('.activity-kind')?.textContent ?? '', title: row.querySelector('.activity-title')?.textContent ?? '', href: row.querySelector('a.activity-title')?.getAttribute('href') ?? '' })));
+    const listed = await activityRows();
+    const expected = [
+      ['Opened', 201], ['Reviewed · approved ×2', 202], ['Merged by ann', 203], ['Reviewed · approved', 204], ['Merged', 204],
+      ['Commented ×51', 52], ['Commented', 202],
+      ['Started', 7], ['Commented', 7],
+    ];
+    check(`${size}: Daily highlights' Other activities list the day's GitHub work: pull requests opened, reviewed and merged, comments, a discussion and a comment on it`,
+      JSON.stringify(listed.map((row) => [row.kind, Number(/#(\d+)/.exec(row.title)?.[1])])) === JSON.stringify(expected), JSON.stringify(listed.map((row) => `${row.kind} ${row.title.slice(0, 40)}`)));
+    const activityAsked = fake.requests.filter((request) => request.operation?.startsWith('query PlannerGitHubActivity')).map((request) => request.operation);
+    check(`${size}: read through the real gh: the day's first pages in one call, then the comments' next page (52 comments, past a page of 50)`,
+      JSON.stringify(activityAsked) === JSON.stringify(['query PlannerGitHubActivity', 'query PlannerGitHubActivityComments']), JSON.stringify(activityAsked));
+    check(`${size}: each row links to GitHub: the latest review, the latest comment, the pull request merged`,
+      listed[1]?.href === `https://github.com/${repo}/pull/202#pullrequestreview-2` && listed[5]?.href === `${world.issues[51].url}#issuecomment-50` && listed[4]?.href === `https://github.com/${repo}/pull/204`, JSON.stringify([listed[1]?.href, listed[5]?.href, listed[4]?.href]));
+    await ghActivity.scrollIntoViewIfNeeded();
+    await shotHere('gh-highlights');
+    // Cmd/Ctrl+click opens it in a new tab; the Planner stays where it is.
+    const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+    const merged204 = ghActivity.locator('.activity-row').nth(4);
+    const opened = g.context.waitForEvent('page', { timeout: 20_000 }).catch(() => null);
+    await merged204.locator('a.activity-title').click({ modifiers: [modifier] });
+    const tab = await opened;
+    if (tab) await tab.waitForURL(/github\.com/, { timeout: 15_000 }).catch(() => {});
+    check(`${size}: a Cmd/Ctrl+click on a row opens it on GitHub in a new tab, and the Planner stays on Daily highlights`,
+      tab?.url() === `https://github.com/${repo}/pull/204` && (await f.getByRole('heading', { name: 'Daily highlights' }).isVisible()), tab ? tab.url() : 'no new tab');
+    await tab?.close();
+    // Include adds it to the highlights, with its link; it can be starred like any highlight.
+    const mergedText = `Merged pull request ${repo}#204: ${run} day pull 204`;
+    await merged204.getByRole('button', { name: `Include ${mergedText}` }).click();
+    const highlight = f.locator('ul.highlights li', { has: f.locator(`input[aria-label="Highlight"][value="${mergedText}"]`) });
+    await highlight.waitFor({ timeout: 15_000 });
+    await highlight.getByRole('button', { name: `Star ${mergedText}` }).click();
+    let savedItem = null;
+    for (let i = 0; i < 50 && !savedItem?.starred; i++) {
+      savedItem = Object.values((await latestState()).rituals ?? {}).flatMap((record) => record.items ?? []).find((item) => item.ref === 'github:merged:PR_day_204') ?? null;
+      if (!savedItem?.starred) await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    check(`${size}: Include adds the merged pull request to the highlights with its link; starred, it is saved so`,
+      savedItem?.text === mergedText && savedItem.url === `https://github.com/${repo}/pull/204` && savedItem.starred === true && (await highlight.locator('a.highlight-open').getAttribute('href')) === `https://github.com/${repo}/pull/204` && (await merged204.locator('.activity-included').count()) === 1,
+      JSON.stringify(savedItem));
+    // The day's tasks not in the highlights are there too, as in Sunsama's Other activities.
+    const openTask = other.getByRole('region', { name: 'Tasks' }).locator('.activity-row', { hasText: `${run} gh issue 51` });
+    const taskShown = (await openTask.locator('.activity-kind').innerText().catch(() => '')) === 'Not done';
+    await openTask.getByRole('button', { name: `Include ${run} gh issue 51` }).click().catch(() => {});
+    const taskIncluded = await f.locator(`ul.highlights input[aria-label="Highlight"][value="${run} gh issue 51"]`).waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+    check(`${size}: the day's open tasks are in Other activities, and one included becomes a highlight`, taskShown && taskIncluded, `${taskShown} ${taskIncluded}`);
+    await f.locator('ul.highlights').scrollIntoViewIfNeeded();
+    await shotHere('gh-highlights-included');
+    // Signed out: the section says how to sign in, as the GitHub source does.
+    signedOut = true;
+    await g.openPlanner();
+    await go('Daily highlights');
+    const signIn = f.getByRole('region', { name: 'GitHub activity' }).getByRole('status', { name: 'GitHub sign-in' });
+    const signInText = await signIn.innerText({ timeout: 20_000 }).catch(() => '');
+    check(`${size}: not signed in, the GitHub activity says so and where to run gh auth login`, /Sign in to GitHub/.test(signInText) && /gh auth login/.test(signInText), signInText.slice(0, 160));
+    await signIn.scrollIntoViewIfNeeded().catch(() => {});
+    await shotHere('gh-highlights-signin');
+    signedOut = false;
     check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
   } catch (error) {
     check(`${size}: the GitHub part ran to its end`, false, error?.stack ?? String(error));
