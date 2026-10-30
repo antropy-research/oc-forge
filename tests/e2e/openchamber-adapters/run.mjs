@@ -658,8 +658,8 @@ const manyTabsRound = async (browser, base, viewport, seeded, request) => {
 // the page, the rail panel and the bottom shows one of the extension's own entries (the bottom one, a view entry) as a
 // click would, lit, and never closes it; another extension's entry, one nobody lists, and a frame of another extension
 // are refused, saying why. A frame that asks before the host has the extension's list waits for it. window.id is one
-// id in every frame of the window, kept across a frame's reload; another in a second browser tab and after the app
-// reloads.
+// id in every frame of the window, kept across a frame's reload and the app's (the browser tab is the window); another
+// in a second browser tab.
 let railListWaitChecked = false;
 const runtimeRound = async (browser, base, viewport, seeded, request) => {
   const size = `${viewport.width}x${viewport.height}`;
@@ -770,12 +770,12 @@ const runtimeRound = async (browser, base, viewport, seeded, request) => {
     const secondId = await until(() => windowIdOf(secondRight), 30_000);
     check(`[${size}] R8 a second browser tab has another id`, isWindowId(secondId) && secondId !== ids.page, `${secondId} | this tab's ${ids.page}`);
     await second.close();
-    // A reload of the app is a new page load: a new window.
+    // A reload of the app is the same browser tab: the same window (what an extension keeps for it comes back).
     await page.reload();
     await until(async () => (await rail(page)).some((entry) => entry.id === entryId('alpha')), 60_000);
     if (!await right.locator('#window-id').isVisible({ timeout: 5_000 }).catch(() => false)) await page.locator(`[data-context-surface="${entryId('alpha')}"]`).click();
     const afterReload = await until(() => windowIdOf(right), 30_000);
-    check(`[${size}] R8 after the app reloads, the window has a new id`, isWindowId(afterReload) && afterReload !== ids.page, `${afterReload} | before ${ids.page}`);
+    check(`[${size}] R8 after the app reloads, the window keeps its id`, isWindowId(afterReload) && afterReload === ids.page, `${afterReload} | before ${ids.page}`);
     await shot(page, `${size}-r8-after-reload`);
 
     // A frame that asks before the host has the extension's list (its first poll still out) waits for the list. The

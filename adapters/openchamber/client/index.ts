@@ -52,14 +52,30 @@ export type OcForgeClient = {
      * an entry its service doesn't list, another extension's included.
      */
     open(entry: string): Promise<void>;
+    /**
+     * The counts this frame sees on the extension's rail entries (`has('rail-badge')`), by entry id: all of them, an
+     * entry left out (or 0) has none. Each icon shows its count, open or not. Every frame of the extension may send
+     * its own, when it changes; the rail shows each entry's count from the frame that saw it change last, until that
+     * frame goes. `fresh`: this is the frame's current view of every entry (the user works in it), which counts as
+     * changed for each.
+     */
+    setBadges(badges: Record<string, number>, options?: { fresh?: boolean }): Promise<void>;
   };
   window: {
     /**
-     * This OpenChamber window's id (`has('window-id')`): one per page load of the app, the same in every frame of
-     * the window (any surface, any extension) and in this one after it reloads; another in each browser tab, and
-     * again after the app reloads. Throws on a host without it.
+     * This OpenChamber window's id (`has('window-id')`): one per browser tab, the same in every frame of the tab (any
+     * surface, any extension), in this one after it reloads, and after the tab reloads the app; another in each
+     * browser tab, a duplicated one included. Throws on a host without it.
      */
     id(): string;
+  };
+  page: {
+    /**
+     * Keeps the extension's page mounted, hidden, while this frame lives (`has('page-warm')`, from any frame but the
+     * page): a header tab opened later shows a page that has started already. `false` stops asking; the page stays
+     * while it has tabs, as always.
+     */
+    warm(on: boolean): Promise<void>;
   };
   tabs: {
     state(): OcForgeTabsState;
@@ -209,12 +225,20 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
         open: async (entry) => {
           await request('rail-open', { entry });
         },
+        setBadges: async (badges, { fresh } = {}) => {
+          await request('rail-badges', fresh ? { badges, fresh } : { badges });
+        },
       },
       window: {
         id: () => {
           const id = state().windowId;
           if (!id) throw new Error('This OpenChamber names no window: its hello has no windowId (has(\'window-id\') is false).');
           return id;
+        },
+      },
+      page: {
+        warm: async (on) => {
+          await request('page-warm', { on });
         },
       },
       tabs: {

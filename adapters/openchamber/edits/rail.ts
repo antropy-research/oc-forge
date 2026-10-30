@@ -58,10 +58,27 @@ export const rail: Adapter = {
       ),
       insertAfter(
         "import { shownContextModes, zoneOfMode } from '@/lib/workspace/zones';",
-        "\nimport { ocForgeRailSurfaceActive, ocForgeSelectRailSurface, useOcForgeRailRevision } from '@/oc-forge/rail';",
+        "\nimport { ocForgeRailBadge, ocForgeRailSurfaceActive, ocForgeSelectRailSurface, useOcForgeRailRevision } from '@/oc-forge/rail';",
       ),
       insertAfter("  const guestSurfaces = useGuestSurfaces();", "\n  const ocForgeRail = useOcForgeRailRevision();"),
-      replace("                isActive={shownModes.has(surface.mode)}", "                isActive={ocForgeRailSurfaceActive(surface, shownModes, ocForgeRail)}"),
+      // An entry's own highlight, and its own count (VS Code's activity badges: Source Control's changes) before the
+      // extension's one count, shown while its panel is open too, as VS Code's activity bar shows it.
+      replace(
+        "            const badgeCount = gitChangedCount > 0 ? gitChangedCount : guestBadgeCount > 0 ? guestBadgeCount : null;\n" +
+          "            const isGuestBadge = badgeCount !== null && gitChangedCount === 0;\n" +
+          "            return (\n" +
+          "              <ContextPanelRailItem\n" +
+          "                key={surface.id}\n" +
+          "                surface={surface}\n" +
+          "                isActive={shownModes.has(surface.mode)}",
+        "            const badgeCount = gitChangedCount > 0 ? gitChangedCount : ocForgeRailBadge(surface, ocForgeRail) ?? (guestBadgeCount > 0 ? guestBadgeCount : null);\n" +
+          "            const isGuestBadge = badgeCount !== null && gitChangedCount === 0;\n" +
+          "            return (\n" +
+          "              <ContextPanelRailItem\n" +
+          "                key={surface.id}\n" +
+          "                surface={surface}\n" +
+          "                isActive={ocForgeRailSurfaceActive(surface, shownModes, ocForgeRail)}",
+      ),
       replace(
         "                  openContextSurface(directoryKey, selected.mode);",
         "                  if (!ocForgeSelectRailSurface(directoryKey, selected)) openContextSurface(directoryKey, selected.mode);",

@@ -33,11 +33,69 @@ const sharedEntries = (entries: readonly OcForgeRailEntry[] | undefined): OcForg
  * the React Compiler, which memoizes on the values a render reads, so state
  * read from the store inside a render would never invalidate it.
  */
-export type OcForgeRailState = Readonly<{ entries: Record<string, OcForgeRailEntry[]>; current: Record<string, string> }>;
+export type OcForgeRailState = Readonly<{
+  entries: Record<string, OcForgeRailEntry[]>;
+  current: Record<string, string>;
+  /** The count on each extension's entries, as the rail shows them (`resolveOcForgeRailBadges`). */
+  badges: Record<string, Record<string, number>>;
+}>;
+
+type BadgeSources = ReturnType<typeof useOcForgeStore.getState>['badges'];
+
+/**
+ * The counts the rail shows for each extension: each entry's from the frame that saw it change last. Frames may see
+ * one thing differently for a while (VS Code's parts each keep their own Source Control, which refreshes while that
+ * part has the focus), and one that sends again because another of its counts changed doesn't bring back its old view
+ * of the rest: the part the user works in counts first, entry by entry.
+ */
+export const resolveOcForgeRailBadges = (sources: BadgeSources): Record<string, Record<string, number>> => {
+  const resolved: Record<string, Record<string, number>> = {};
+  for (const [guestId, frames] of Object.entries(sources)) {
+    const counts: Record<string, number> = {};
+    const entries = new Set(Object.values(frames).flatMap((frame) => Object.keys(frame.changed)));
+    for (const entry of entries) {
+      const latest = Object.values(frames).filter((frame) => entry in frame.changed).sort((a, b) => b.changed[entry]! - a.changed[entry]!)[0];
+      const count = latest?.counts[entry] ?? 0;
+      if (count > 0) counts[entry] = count;
+    }
+    resolved[guestId] = counts;
+  }
+  return resolved;
+};
+
+/** The order counts changed in (a counter: two in one millisecond keep it). */
+let badgesChanged = 0;
+
+/**
+ * A frame's counts on its extension's entries (null: the frame is gone, its counts with it). A frame's first counts,
+ * and `fresh` ones (the user works in that frame), are its view of every entry any frame counts, the ones it leaves
+ * out at none: they count as changed, entry by entry, though they didn't in that frame.
+ */
+export const setOcForgeRailBadges = (guestId: string, frameKey: string, counts: Record<string, number> | null, fresh = false): void => {
+  useOcForgeStore.setState((state) => {
+    const frames = { ...state.badges[guestId] };
+    const previous = frames[frameKey];
+    if (counts) {
+      const known = !previous || fresh ? Object.values(frames).flatMap((frame) => Object.keys(frame.changed)) : Object.keys(previous.counts);
+      const changed = { ...previous?.changed };
+      for (const entry of new Set([...known, ...Object.keys(counts)])) {
+        if (!previous || fresh || (previous.counts[entry] ?? 0) !== (counts[entry] ?? 0)) changed[entry] = ++badgesChanged;
+      }
+      frames[frameKey] = { counts, changed };
+    } else if (frameKey in frames) {
+      delete frames[frameKey];
+    } else {
+      return state;
+    }
+    const badges = { ...state.badges, [guestId]: frames };
+    if (Object.keys(frames).length === 0) delete badges[guestId];
+    return { badges };
+  });
+};
 
 export const currentOcForgeRail = (): OcForgeRailState => {
-  const { entries, current } = useOcForgeStore.getState();
-  return { entries, current };
+  const { entries, current, badges } = useOcForgeStore.getState();
+  return { entries, current, badges: resolveOcForgeRailBadges(badges) };
 };
 
 /**
@@ -94,11 +152,20 @@ export const ocForgeExpandRailSurfaces = (
   });
 };
 
-/** The rail state for a render: pass it on, so a change of entries or current entry re-renders. */
+/** The rail state for a render: pass it on, so a change of entries, current entry or counts re-renders. */
 export const useOcForgeRailRevision = (): OcForgeRailState => {
   const entries = useOcForgeStore((state) => state.entries);
   const current = useOcForgeStore((state) => state.current);
-  return React.useMemo(() => ({ entries, current }), [entries, current]);
+  const sources = useOcForgeStore((state) => state.badges);
+  return React.useMemo(() => ({ entries, current, badges: resolveOcForgeRailBadges(sources) }), [entries, current, sources]);
+};
+
+/** The count on a polled rail entry's icon (VS Code's activity badges), or null for none and for every other surface. */
+export const ocForgeRailBadge = (surface: Pick<ContextSurfaceDescriptor, 'id'>, rail: OcForgeRailState = currentOcForgeRail()): number | null => {
+  if (!surface.id.startsWith(PLUGIN_PREFIX)) return null;
+  const own = ocForgeEntrySurfaceOf(surface.id.slice(PLUGIN_PREFIX.length));
+  const count = own ? rail.badges[own.guestId]?.[own.entry] : undefined;
+  return count && count > 0 ? count : null;
 };
 
 /** An entry's own panel is titled with the entry, in its zone's header. */
@@ -106,6 +173,15 @@ export const ocForgeSurfaceLabel = (mode: string): string | null => {
   const own = ocForgeEntrySurfaceOf(mode.slice(PLUGIN_PREFIX.length));
   if (!own) return null;
   return useOcForgeStore.getState().entries[own.guestId]?.find((entry) => entry.id === own.entry)?.title ?? null;
+};
+
+/**
+ * The title of an extension's one panel as it shows a rail entry (VS Code's Explorer, Search, …): the entry's, as an
+ * entry's own panel is titled (`ocForgeSurfaceLabel`). Null for any other frame.
+ */
+export const ocForgePanelEntryTitle = (state: Pick<OcForgeRailState, 'entries' | 'current'>, guestId: string): string | null => {
+  const entry = ocForgeCurrentEntry(guestId, { ...state, badges: {} });
+  return entry ? state.entries[guestId]?.find((item) => item.id === entry)?.title ?? null : null;
 };
 
 /** A view entry of an extension's one panel: its rail id is the entry, its mode the panel. */

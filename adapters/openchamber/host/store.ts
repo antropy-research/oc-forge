@@ -26,6 +26,14 @@ type OcForgeState = {
   routes: Record<string, string>;
   /** The extension whose page the address bar names, if any. */
   linked: string | null;
+  /**
+   * The counts each frame of an extension sees on its rail entries (`rail-badges`), by frame, with when each entry's
+   * count last changed in that frame's sends: the rail shows each entry as the frame that saw it change last
+   * (`resolveOcForgeRailBadges`).
+   */
+  badges: Record<string, Record<string, { counts: Record<string, number>; changed: Record<string, number> }>>;
+  /** Extensions whose page a frame asked to keep mounted, hidden (`page-warm`), with the frames asking. */
+  warm: Record<string, string[]>;
 };
 
 export const useOcForgeStore = create<OcForgeState>()(() => ({
@@ -36,4 +44,6 @@ export const useOcForgeStore = create<OcForgeState>()(() => ({
   lingering: {},
   routes: {},
   linked: null,
+  badges: {},
+  warm: {},
 }));

@@ -218,21 +218,24 @@ export const OcForgeAllTabs: React.FC<{
  * Extension pages in the main area. The open one shows; a page whose
  * extension has header tabs stays mounted (hidden) while another tab or a
  * chat is shown, so switching back does not restart it, and for a moment
- * after its last tab closed (`lingering`), so its frame hears the close.
- * Otherwise a page mounts and unmounts as in the release.
+ * after its last tab closed (`lingering`), so its frame hears the close; and
+ * while one of its frames asks to keep it warm (`page-warm`, a rail panel
+ * whose views open their files there). Otherwise a page mounts and unmounts
+ * as in the release.
  */
 export const OcForgeGuestPages: React.FC<{ openPage: InstalledGuest | null | undefined }> = ({ openPage }) => {
   const tabs = useOcForgeStore((state) => state.tabs);
   const lingering = useOcForgeStore((state) => state.lingering);
+  const warm = useOcForgeStore((state) => state.warm);
   const guests = useGuestsStore((state) => state.guests);
   const kept = React.useMemo(() => {
     const ids = new Set<string>();
-    for (const guestId of [...tabs.map((tab) => tab.guestId), ...Object.keys(lingering)]) {
+    for (const guestId of [...tabs.map((tab) => tab.guestId), ...Object.keys(lingering), ...Object.keys(warm)]) {
       const guest = guests.find((entry) => entry.id === guestId);
       if (guest?.pageEntry && isGuestActive(guest)) ids.add(guest.id);
     }
     return ids;
-  }, [guests, lingering, tabs]);
+  }, [guests, lingering, tabs, warm]);
   // In a fixed order: React moves a node whose place in the list changes, and a moved iframe reloads.
   const ids = [...new Set([...kept, ...(openPage ? [openPage.id] : [])])].sort();
   return (

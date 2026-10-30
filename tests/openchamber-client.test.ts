@@ -306,6 +306,36 @@ describe("the client module", () => {
     forge.dispose()
   })
 
+  test("rail.setBadges sends the frame's counts on its extension's entries; the host reads whole counts per entry", async () => {
+    const { frame, host, deliver } = fakeFrame()
+    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
+    deliver(envelope({ type: "hello", payload: { ...hello, features: [...hello.features, "rail-open", "rail-badge"] } }))
+    const forge = (await connecting)!
+    expect(forge.has("rail-badge")).toBe(true)
+    const sending = forge.rail.setBadges({ scm: 3, extensions: 1 })
+    const request = host.posted.at(-1)!.data as { id: string }
+    expect(request).toMatchObject({ channel: "oc-forge", v: 1, type: "rail-badges", payload: { badges: { scm: 3, extensions: 1 } } })
+    deliver(envelope({ type: "result", id: request.id, ok: true }))
+    await sending
+    // The user works in this frame: its counts are its view of every entry.
+    const fresh = forge.rail.setBadges({}, { fresh: true })
+    const freshRequest = host.posted.at(-1)!.data as { id: string }
+    expect(freshRequest).toMatchObject({ type: "rail-badges", payload: { badges: {}, fresh: true } })
+    deliver(envelope({ type: "result", id: freshRequest.id, ok: true }))
+    await fresh
+    forge.dispose()
+    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: {}, fresh: true } }, "12"))).toEqual({ id: "12", request: { type: "rail-badges", payload: { badges: {}, fresh: true } } })
+    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: {}, fresh: "yes" } }, "13"))).toMatchObject({ error: "Refused rail-badges: fresh is true or false." })
+
+    // Zero is no badge; anything but a whole count on a kebab-case entry is refused, saying why.
+    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: { scm: 3, search: 0 } } }, "7"))).toEqual({ id: "7", request: { type: "rail-badges", payload: { badges: { scm: 3 } } } })
+    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: { scm: 1.5 } } }, "8"))).toMatchObject({ error: "Refused rail-badges: a count is a whole number from 0 to 1000000." })
+    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: { "oc--scm": 1 } } }, "9"))).toMatchObject({ error: "Refused rail-badges: an entry's id is kebab-case, at most 48 characters." })
+    const many = Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`e${index}`, 1]))
+    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: many } }, "10"))).toMatchObject({ error: "Refused rail-badges: badges are at most 100 entries' counts." })
+    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: {} }, "11"))).toMatchObject({ error: "Refused rail-badges: badges are at most 100 entries' counts." })
+  })
+
   test("window.id is the window's id from the hello, again after the frame says hello again; an older host has none", async () => {
     const { frame, deliver } = fakeFrame()
     const connecting = connectOcForge({ target: frame, timeoutMs: 500 })

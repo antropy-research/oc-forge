@@ -10,7 +10,7 @@
 export const OC_FORGE_CHANNEL = 'oc-forge';
 export const OC_FORGE_VERSION = 1;
 
-export const OC_FORGE_FEATURES = ['rail', 'tabs', 'zones', 'keys', 'links', 'modals', 'rail-open', 'window-id'] as const;
+export const OC_FORGE_FEATURES = ['rail', 'tabs', 'zones', 'keys', 'links', 'modals', 'rail-open', 'window-id', 'rail-badge', 'page-warm'] as const;
 export type OcForgeFeature = (typeof OC_FORGE_FEATURES)[number];
 
 export const OC_FORGE_ZONES = ['left', 'right', 'bottom'] as const;
@@ -55,6 +55,9 @@ export const OC_FORGE_LIMITS = {
 export type OcForgeLimits = { readonly [K in keyof typeof OC_FORGE_LIMITS]: number };
 /** An older host's limits, for a hello without `limits`. */
 export const OC_FORGE_LEGACY_LIMITS: OcForgeLimits = { ...OC_FORGE_LIMITS, title: 80, tabs: 64 };
+
+/** The largest count a rail badge carries (OpenChamber shows 99+ past 99). */
+export const OC_FORGE_BADGE_MAX = 1_000_000;
 
 /** Kebab-case; `--` is reserved: OpenChamber names an entry's own surface `plugin:<extension>--<entry>`. */
 export const OC_FORGE_ENTRY_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -160,8 +163,9 @@ export type OcForgeHello = {
   /** What this host takes (`OC_FORGE_LIMITS`); an older host sends none, and `OC_FORGE_LEGACY_LIMITS` hold. */
   limits?: OcForgeLimits;
   /**
-   * This OpenChamber window's id (`window-id`): one per page load of the app, the same in every frame of that browser
-   * tab, a reloaded frame's too, and another in each tab. An older host sends none.
+   * This OpenChamber window's id (`window-id`): one per browser tab, the same in every frame of that tab, a reloaded
+   * frame's too, and after the tab reloads the app; another in each tab, a duplicated one included. An older host
+   * sends none; one before 2026-10-31 made a new one when the app reloaded.
    */
   windowId?: string;
 };
@@ -182,6 +186,13 @@ export type OcForgeRequest =
   | { type: 'rail-active'; payload: { entry: string } }
   /** Shows one of the extension's own rail entries, as a click on it would, but never closes it (`rail-open`). */
   | { type: 'rail-open'; payload: { entry: string } }
+  /**
+   * The counts this frame sees on the extension's rail entries (`rail-badge`): all of them, an entry left out has none.
+   * `fresh`: the frame's current view of every entry (the user works in it), not only of the ones that changed.
+   */
+  | { type: 'rail-badges'; payload: { badges: Record<string, number>; fresh?: boolean } }
+  /** Keep the extension's page mounted, hidden, while this frame lives (`page-warm`), or stop asking. */
+  | { type: 'page-warm'; payload: { on: boolean } }
   | { type: 'tab-open'; payload: OcForgeTab & { activate?: boolean } }
   | { type: 'tab-update'; payload: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean; route?: string | null } }
   | { type: 'tab-close'; payload: { id: string } }
@@ -273,6 +284,20 @@ export const parseOcForgeRequest = (data: unknown): Parsed | null => {
       return typeof payload.entry === 'string' && payload.entry.length <= OC_FORGE_LIMITS.entryId && OC_FORGE_ENTRY_ID.test(payload.entry)
         ? { id, request: { type: data.type, payload: { entry: payload.entry } } }
         : refuse(`an entry's id is kebab-case, at most ${OC_FORGE_LIMITS.entryId} characters`);
+    case 'rail-badges': {
+      const badges = isObject(payload.badges) ? Object.entries(payload.badges) : null;
+      if (!badges || badges.length > OC_FORGE_LIMITS.railEntries) return refuse(`badges are at most ${OC_FORGE_LIMITS.railEntries} entries' counts`);
+      const counts: Record<string, number> = {};
+      for (const [entry, count] of badges) {
+        if (entry.length > OC_FORGE_LIMITS.entryId || !OC_FORGE_ENTRY_ID.test(entry)) return refuse(`an entry's id is kebab-case, at most ${OC_FORGE_LIMITS.entryId} characters`);
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > OC_FORGE_BADGE_MAX) return refuse(`a count is a whole number from 0 to ${OC_FORGE_BADGE_MAX}`);
+        if (count > 0) counts[entry] = count;
+      }
+      if (payload.fresh !== undefined && typeof payload.fresh !== 'boolean') return refuse(flag('fresh'));
+      return { id, request: { type: 'rail-badges', payload: payload.fresh ? { badges: counts, fresh: true } : { badges: counts } } };
+    }
+    case 'page-warm':
+      return typeof payload.on === 'boolean' ? { id, request: { type: 'page-warm', payload: { on: payload.on } } } : refuse(flag('on'));
     case 'tab-open': {
       const tab = readTab(payload);
       if (typeof tab === 'string') return refuse(tab);

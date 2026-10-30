@@ -15,7 +15,9 @@ end-to-end check compares screenshots: 0.00% of pixels differ).
 | **zones** | 2.ii.c | A default zone (`bottom`) for its panel, or for one rail entry, which then gets a panel of its own; its page may keep the bottom zone shown under it (an editor over its terminal). |
 | **keys** | tab shortcuts | Forward a key press to OpenChamber, which runs it through its own shortcut handlers, for navigation actions only and only with a user activation; the frame is told the current bindings. |
 | **links** | Cmd+click | `?extension=<id>&route=<route>` deep links to its page; URL prefixes for real `<a href>` links to its page and to chats; its page can keep its route in the address bar. |
-| **window** | 2.ii (one VS Code across its parts) | The id of the OpenChamber window its frame is in (`window.id`): the same in every frame of one browser tab, another in each tab, so the frames of one window can find each other and leave other tabs' alone. |
+| **window** | 2.ii (one VS Code across its parts) | The id of the OpenChamber window its frame is in (`window.id`): the same in every frame of one browser tab, kept across the tab's reloads, another in each tab, so the frames of one window can find each other, keep what is the tab's, and leave other tabs' alone. |
+| **rail badges** | 2.ii.a ("用起来和在 VS Code 里一样") | A count on each of its rail entries' icons (`rail.setBadges`), shown whether its panel is open or not, as VS Code's activity bar shows its badges; its one panel's header names the entry it shows. |
+| **warm page** | 2.ii.b | Its page kept mounted, hidden, while one of its other frames asks (`page.warm`): a tab opened later shows a page that has started already. |
 
 The study behind this (what 2.5.2 can and cannot do, and the smallest host
 change for each) is zmemory `02-draft/syncopation/2026-10-27-openchamber-extension-surfaces-feasibility.md`.
@@ -154,6 +156,8 @@ before 2026-10-30 sends no `limits`; its tabs were 64 and its titles 80
 | `hello` | | The host answers with a `hello` event; only frames that said hello get events. |
 | `rail-active` | `{ entry }` | The extension's one panel shows this entry now (rail panels of `rail` extensions). |
 | `rail-open` | `{ entry }` | Shows one of the extension's own entries as a click would, never closing it (any frame of a `rail` extension; above). |
+| `rail-badges` | `{ badges: { [entry]: count }, fresh? }` | The counts this frame sees on its extension's entries, all of them (an entry left out, or 0, has none; whole counts up to 1 000 000, at most 100 entries). Each frame of the extension may send its own, when what it sees changes; the rail shows each entry's count from the frame that saw it change last, until that frame goes (`resolveOcForgeRailBadges`): a frame that sends again for another entry's change doesn't bring back its old view of the rest. `fresh` counts (the user works in that frame) count as changed for every entry. OpenChamber shows 99+ past 99. |
+| `page-warm` | `{ on }` | Keeps the extension's page mounted, hidden, while this frame lives (any frame but the page of an extension with a page), or stops asking. The page stays while it has tabs, as always. |
 | `tab-open` | `{ id, title, icon?, dirty?, route?, activate? }` | Opens or updates a header tab; `activate` shows the page on it; `route` is the tab's place on the page (a Cmd/Ctrl+click on the tab opens the page there in a new browser tab). Needs `contributes.page`; past an extension's 1000th tab the host refuses one more (`An extension has at most 1000 header tabs: close one to open another.`) and changes nothing. |
 | `tab-update` | `{ id, title?, icon? (null clears), dirty?, route? (null clears) }` | |
 | `tab-close` | `{ id }` | The extension closed its tab (no `tab-closed` event comes back). After a `tab-close-request` for it, the host goes on as for the user's close (back to the chat after the last tab). |
@@ -174,19 +178,31 @@ before 2026-10-30 sends no `limits`; its tabs were 64 and its titles 80
 | `shortcuts` | the bindings again, after the user rebinds |
 
 `features` lists what the host supports for this frame: `rail` (rail panels of
-extensions with a rail source), `rail-open` (every frame of those extensions),
-`tabs` (extensions with a page), `modals` (extensions with `ocForge.modals`:
-the frame may `print()`), and `zones`, `keys`, `links`, `window-id`
-everywhere.
+extensions with a rail source), `rail-open` and `rail-badge` (every frame of
+those extensions), `tabs` and `page-warm` (extensions with a page), `modals`
+(extensions with `ocForge.modals`: the frame may `print()`), and `zones`,
+`keys`, `links`, `window-id` everywhere.
 
 **The window's id** (`windowId`, `window.id()`): 32 hex digits (128 random
-bits), made once per page load of OpenChamber. Every frame of that browser tab
-gets the same in its hello, whatever its extension or surface, and so does a
-frame that reloads; another tab, or the same one after OpenChamber reloads, is
-another window with another id. It is made with `crypto.getRandomValues`:
-`randomUUID` needs a secure context, which OpenChamber over plain HTTP (a
-tailnet address) is not. A host before 2026-10-30 sends none, and
-`window.id()` throws there.
+bits), made once per browser tab. Every frame of that tab gets the same in its
+hello, whatever its extension or surface, and so does a frame that reloads, and
+OpenChamber itself after the tab reloads: the tab keeps it in its
+`sessionStorage`, handed over only as the page goes (`pagehide`), so a
+duplicated tab, which copies the session storage of a tab that hasn't gone, makes
+its own. Another tab is another window with another id. It is made with
+`crypto.getRandomValues`: `randomUUID` needs a secure context, which
+OpenChamber over plain HTTP (a tailnet address) is not. A host before 2026-10-30
+sends none, and `window.id()` throws there; one of 2026-10-30 made a new id when
+OpenChamber reloaded.
+
+**The panel's title.** An extension's one panel showing a rail entry is titled
+with that entry, not the extension, as an entry's own panel is: the host puts
+the entry's title in OpenChamber's own slot for a surface's header (the one
+`ContextPanelHeaderToolbar` renders into, which `useZoneHostsStore` lists by
+zone), while the panel is the surface its zone shows, from `useOcForgeFrame`,
+which every frame's pane runs: it takes the place of the header's label.
+OpenChamber hands that slot to its own surfaces only. No edit: PluginPane
+already runs the hook.
 
 **Forwardable actions** (`keys`): `switch_session_tab` (held prefix + 1–9),
 `switch_context_surface` (held prefix + 0–9), `switch_session_previous`,
@@ -308,7 +324,10 @@ Every edit names exact upstream text that must occur exactly once
 anchor. The Vite plugin also fails the build if a targeted module never loaded
 (upstream stopped using it); `lib/guests/types.ts` is exempt, being imported
 only as types. 66 edits in 22 files (34 `insertAfter`, 28 `replace`, 4
-`insertBefore`); `rail.open` and `window.id` added none.
+`insertBefore`); `rail.open` and `window.id` added none, and neither did rail
+badges (the `replace` that lights a rail entry in `ContextPanelRail.tsx` now
+starts six lines higher, at the badge's count) or the rail panel's title
+(OpenChamber's own header toolbar slot).
 
 OpenChamber is compiled with the React Compiler, which memoizes on the values a
 render reads: host code that renders passes the oc-forge state it read as an
@@ -364,7 +383,7 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   refused; with the window's first rail poll held 5 s, a frame that asks
   meanwhile waits for it. R8: `window.id` is one id in the page, the rail
   panel, the bottom and another extension's frame, kept across a frame's
-  reload, and another in a second browser tab and after OpenChamber reloads.
+  reload and OpenChamber's, and another in a second browser tab.
   `OC_FORGE_E2E_PARTS` picks parts (`compare,extensions,api,many,runtime`). The instances start like fresh installs: their own HOME and data dir,
   and none of the `OPENCODE*`/`OPENCHAMBER*` variables or credentials of the
   session that runs the check, so they cannot load its config or reach its
