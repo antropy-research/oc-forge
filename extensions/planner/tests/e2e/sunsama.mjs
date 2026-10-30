@@ -587,7 +587,9 @@ const gmailPart = async (viewport) => {
 // (help.sunsama.com/docs/usage-guides/importing-meetings, …/timeboxing/timeboxing-choosing-calendar, …/integrations/calendar)
 // Shift C; a day's name shows its calendar in the panel; Calendars there; "Add to tasks" from an event's details and on
 // hover; auto-complete when it ends; daily planning's "Fill in calendar events" (import the suggested, Pick events);
-// Remove from tasks (right-click), never added back; "Cannot merge events"; Settings → Meeting import (Auto-sync from
+// Remove from tasks (right-click), never added back; "Cannot merge events", and no Add subtask in an event task's
+// details (Sunsama's advice instead); a Google task merged into a task completed and reopened in Google Tasks with its
+// tick and with its task; Settings → Meeting import (Auto-sync from
 // the calendars chosen, an import channel, an exclusion turned off and on); a Timeboxing Channel's sessions written to
 // its calendar; Google Contacts suggested as guests. SUNSAMA_PARTS=meetings runs it alone.
 const meetingsPart = async (viewport) => {
@@ -745,6 +747,20 @@ const meetingsPart = async (viewport) => {
     const refused = await f.getByRole('alert').filter({ hasText: 'Cannot merge events' }).waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
     await shotHere('mt-05-cannot-merge');
     check(`${size}: merging into an event says "Cannot merge events", and changes nothing`, refused && !(await latestState()).tasks[(await eventTask('hoo'))?.id ?? '']?.subtasks?.length && (await card('Harness notes').isVisible()));
+    // …so an event task has no subtasks at all (Sunsama's FAQ): its details have no Add subtask, but Sunsama's advice
+    // (a breakdown in its notes, or a separate task); a plain task's details have one.
+    const details1 = f.getByRole('dialog', { name: 'Task details' });
+    await card('Harness 1:1').getByRole('button', { name: 'Open Harness 1:1' }).click();
+    await details1.waitFor({ timeout: 10_000 });
+    const eventAdd = await details1.getByRole('textbox', { name: 'Add subtask' }).count();
+    const advice = (await details1.getByRole('region', { name: 'Subtasks' }).innerText().catch(() => '')).replace(/\s+/g, ' ');
+    await shotHere('mt-05b-event-no-subtasks');
+    await details1.getByRole('button', { name: 'Close' }).click();
+    await card('Harness notes').getByRole('button', { name: 'Open Harness notes' }).click();
+    const plainAdd = await details1.getByRole('textbox', { name: 'Add subtask' }).isVisible({ timeout: 5000 }).catch(() => false);
+    await details1.getByRole('button', { name: 'Close' }).click();
+    check(`${size}: an event task's details have no Add subtask, but Sunsama's advice (its notes, or a separate task); a plain task's have Add subtask`,
+      eventAdd === 0 && advice.includes("Calendar event tasks can't have subtasks") && advice.includes('notes') && plainAdd, advice);
     // A task onto a task (Alt/Option + drop): merged in as a subtask with its planned time, the task gone.
     await column('Today').getByRole('button', { name: 'Add task' }).click();
     await column('Today').getByRole('textbox', { name: 'New task' }).fill('Harness inbox');
@@ -760,6 +776,36 @@ const meetingsPart = async (viewport) => {
     await until(async () => (inbox = Object.values((await latestState()).tasks).find((task) => task.title === 'Harness inbox'))?.subtasks?.length === 1);
     check(`${size}: a task dropped onto another with Alt/Option merges in as a subtask, its planned time kept, and is no longer a task`,
       inbox?.subtasks?.[0]?.title === 'Harness reply' && inbox.subtasks[0].plannedMinutes === 15 && !Object.values((await latestState()).tasks).some((task) => task.title === 'Harness reply' && !task.deletedAt), JSON.stringify(inbox?.subtasks ?? null));
+
+    // A Google task merged into a task stays a synced Google task (Sunsama's merge, "Complete in Google Tasks" on):
+    // its tick completes it in Google (its own subtask there first) and reopens it; its task's completion completes
+    // it, and reopening the task reopens it.
+    const inGoogle = (id) => fake.tasks.get('L1').find((task) => task.id === id)?.status ?? 'missing';
+    await g.call('POST', '/commands', { commands: [{ cmd: `harness-gtrip-${size}`, type: 'task.created', task: { id: `harness-gtrip-${size}`, title: 'Plan the trip', placement: { kind: 'day', date: today }, position: 999_999, source: { kind: 'gtask', id: 't-trip', key: 'Google Tasks', url: 'https://tasks.google.com/task/t-trip', title: 'Plan the trip', status: { name: 'Open', type: 'open', color: '#1a73e8' }, account: ACCOUNT, listId: 'L1', notes: '' } } }] });
+    await card('Plan the trip').waitFor({ timeout: 15_000 });
+    await g.page.keyboard.down('Alt');
+    await card('Plan the trip').dragTo(card('Harness inbox'));
+    await g.page.keyboard.up('Alt');
+    const tripMerged = await until(async () => Boolean(Object.values((await latestState()).tasks).find((task) => task.title === 'Harness inbox')?.subtasks?.some((subtask) => subtask.source?.kind === 'gtask' && subtask.source.id === 't-trip')));
+    await card('Harness inbox').getByRole('button', { name: 'Open Harness inbox' }).click();
+    const details2 = f.getByRole('dialog', { name: 'Task details' });
+    const tripBox = details2.getByRole('checkbox', { name: 'Complete Plan the trip' });
+    await tripBox.check();
+    const tickedThere = await until(() => inGoogle('t-trip') === 'completed' && inGoogle('t-hotel') === 'completed');
+    await shotHere('mt-05c-merged-google-ticked');
+    await tripBox.uncheck();
+    const untickedThere = await until(() => inGoogle('t-trip') === 'needsAction');
+    check(`${size}: a Google task merged into a task (Alt/Option + drop): its tick completes it in Google Tasks (its subtask there first), unticking reopens it`,
+      tripMerged && tickedThere && untickedThere, JSON.stringify({ tripMerged, trip: inGoogle('t-trip'), hotel: inGoogle('t-hotel') }));
+    await details2.getByRole('button', { name: 'Close' }).click();
+    await card('Harness inbox').getByRole('button', { name: 'Mark complete' }).click();
+    const withTask = await until(() => inGoogle('t-trip') === 'completed');
+    await shotHere('mt-05d-merged-google-with-task');
+    await card('Harness inbox').getByRole('button', { name: 'Mark incomplete' }).click();
+    const reopenedWithTask = await until(() => inGoogle('t-trip') === 'needsAction');
+    const tripState = Object.values((await latestState()).tasks).find((task) => task.title === 'Harness inbox')?.subtasks?.find((subtask) => subtask.source?.id === 't-trip');
+    check(`${size}: completing the task it is merged into completes it in Google Tasks; reopening the task reopens it there`,
+      withTask && reopenedWithTask && tripState?.done === false && tripState.source?.status?.type === 'open', JSON.stringify({ withTask, reopenedWithTask, done: tripState?.done, status: tripState?.source?.status?.type }));
 
     // Settings → Meeting import: Auto-sync from the calendars chosen, with an import channel.
     await go('Settings');
