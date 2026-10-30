@@ -1,5 +1,7 @@
 // Panel-side GitHub: issues and pull requests listed by the local service
-// (through the gh CLI), planned as tasks, kept current while the panel is open.
+// (through the gh CLI), a page at a time with Load more (and words to narrow
+// the list), planned as tasks, kept current while the panel is open; an issue
+// or a pull request found by its URL, pasted into a new task as in Sunsama.
 import type { EventBody } from '../../src/domain/events.ts';
 import { linkedGitHubIds, planGitHubSync, taskForGitHub, taskFromGitHub, type GitHubItem } from '../../src/domain/github.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
@@ -25,13 +27,38 @@ export interface GitHubView {
   items: GitHubItem[];
   loading: boolean;
   error: string | null;
+  /** How many match in all, as GitHub counts them. */
+  total: number;
+  /** The next page's cursor (Load more); null when every match is shown. */
+  next: string | null;
+  /** Words narrowing the list, in GitHub's search syntax (text, repo:owner/name, label:…). */
+  text: string;
+  loadingMore: boolean;
 }
+
+/** One page of a list, as the service reads it. */
+interface GitHubPage {
+  items: GitHubItem[];
+  total: number;
+  next: string | null;
+}
+
+/** Linked items read back in one request: GitHub's batch. */
+const LINKED_BATCH = 100;
+
+/** Items of later pages after the ones shown, each once (an item updated meanwhile can move between pages). */
+const appendItems = (shown: readonly GitHubItem[], more: readonly GitHubItem[]): GitHubItem[] => {
+  const seen = new Set(shown.map((item) => item.id));
+  return [...shown, ...more.filter((item) => !seen.has(item.id))];
+};
 
 const REFRESH_MS = 5 * 60_000;
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export class GitHubStore {
-  private view: GitHubView = { status: null, kind: 'assigned', items: [], loading: false, error: null };
+  private view: GitHubView = { status: null, kind: 'assigned', items: [], loading: false, error: null, total: 0, next: null, text: '', loadingMore: false };
+  /** The list being read: a newer kind or search makes an older answer moot. */
+  private seq = 0;
   private readonly listeners = new Set<() => void>();
   private started = false;
 
@@ -64,26 +91,90 @@ export class GitHubStore {
   }
 
   setKind(kind: GitHubListKind): void {
-    this.set({ kind, items: [] });
+    this.set({ kind, items: [], total: 0, next: null });
     void this.refresh();
   }
 
+  /** Words narrowing the list (GitHub's search syntax); the list is read again from its first page. */
+  setText(text: string): void {
+    if (text === this.view.text) return;
+    this.set({ text, items: [], total: 0, next: null });
+    void this.refresh();
+  }
+
+  private page(after: string | null): Promise<GitHubPage> {
+    const query = new URLSearchParams({ kind: this.view.kind, ...(this.view.text.trim() ? { q: this.view.text.trim() } : {}), ...(after ? { after } : {}) });
+    return this.client.call<GitHubPage>('GET', `/github/list?${query}`);
+  }
+
+  /**
+   * Read the list again: as many pages as were shown (what Load more reached stays shown), the rest still a Load more
+   * away; and the linked items' state.
+   */
   async refresh(): Promise<void> {
     if (!this.view.status?.available) return;
+    const seq = ++this.seq;
+    const shown = this.view.items.length;
     this.set({ loading: true, error: null });
     try {
-      const [list, linked] = await Promise.all([
-        this.client.call<{ items: GitHubItem[] }>('GET', `/github/list?kind=${this.view.kind}`),
-        this.client.call<{ items: GitHubItem[] }>('POST', '/github/items', { ids: linkedGitHubIds(this.client.getView().state) }),
+      const [list] = await Promise.all([
+        (async () => {
+          let page = await this.page(null);
+          let items = page.items;
+          while (page.next && items.length < shown && seq === this.seq) {
+            page = await this.page(page.next);
+            items = appendItems(items, page.items);
+          }
+          return { items, total: page.total, next: page.next };
+        })(),
+        this.syncLinked(),
       ]);
-      this.set({ items: list.items, loading: false });
-      const bodies = planGitHubSync(this.client.getView().state, new Map(linked.items.map((item) => [item.id, item])));
-      if (bodies.length) await this.client.dispatch(bodies, { origin: 'github' });
+      if (seq !== this.seq) return;
+      this.set({ items: list.items, total: Math.max(list.total, list.items.length), next: list.next, loading: false });
     } catch (error) {
+      if (seq !== this.seq) return;
       const message = messageOf(error);
       this.set({ loading: false, error: message });
       // Signed out since the last check: say how to sign in instead of an error over an empty list.
       if (/not signed in|not installed/.test(message)) void this.checkStatus();
+    }
+  }
+
+  /** The next page, after the ones shown. */
+  async loadMore(): Promise<void> {
+    const after = this.view.next;
+    if (!after || this.view.loadingMore || this.view.loading) return;
+    const seq = this.seq;
+    this.set({ loadingMore: true, error: null });
+    try {
+      const page = await this.page(after);
+      if (seq !== this.seq) return;
+      const items = appendItems(this.view.items, page.items);
+      this.set({ items, total: Math.max(page.total, items.length), next: page.next, loadingMore: false });
+    } catch (error) {
+      if (seq === this.seq) this.set({ loadingMore: false, error: messageOf(error) });
+    }
+  }
+
+  /** Linked tasks' items as GitHub has them now, all of them, a batch a request. */
+  private async syncLinked(): Promise<void> {
+    const ids = linkedGitHubIds(this.client.getView().state);
+    const found = new Map<string, GitHubItem>();
+    for (let index = 0; index < ids.length; index += LINKED_BATCH) {
+      const answer = await this.client.call<{ items: GitHubItem[] }>('POST', '/github/items', { ids: ids.slice(index, index + LINKED_BATCH) });
+      for (const item of answer.items) found.set(item.id, item);
+    }
+    const bodies = planGitHubSync(this.client.getView().state, found);
+    if (bodies.length) await this.client.dispatch(bodies, { origin: 'github' });
+  }
+
+  /** An issue or a pull request by its URL, as GitHub has it now; null when GitHub has none there (or this gh can't see it). */
+  async resolve(url: string): Promise<GitHubItem | null> {
+    try {
+      return (await this.client.call<{ item: GitHubItem }>('POST', '/github/resolve', { url })).item ?? null;
+    } catch (error) {
+      if (/was not found on GitHub/.test(messageOf(error))) return null;
+      throw error;
     }
   }
 

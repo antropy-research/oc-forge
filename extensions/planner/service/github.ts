@@ -1,10 +1,13 @@
 // GitHub issues and pull requests through the GitHub CLI of the machine running
-// OpenChamber. Read-only, like Sunsama's GitHub integration.
+// OpenChamber. Read-only, like Sunsama's GitHub integration. A list is read a
+// page at a time (each page's cursor reaches the next, so none is left out),
+// an item can be found by its URL (pasted into a new task, as in Sunsama), and
+// linked items are read back in GitHub's batches of 100.
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
-import type { GitHubItem } from '../src/domain/github.ts';
+import { parseGitHubUrl, type GitHubItem } from '../src/domain/github.ts';
 import type { SeenPullRequest } from '../src/domain/events.ts';
 
 /** Runs gh; `cwd` picks the repository for commands that infer it from a checkout. */
@@ -16,11 +19,14 @@ export type Runner = (args: string[], options?: { cwd?: string; timeoutMs?: numb
  */
 const GH_TIMEOUT_MS = 15_000;
 
-/** Runs `gh` with the service's environment (PATH and HOME come from the host). */
+/**
+ * Runs `gh` with the service's environment (PATH and HOME come from the host). A failure keeps what gh printed: `gh
+ * api graphql` exits 1 when GitHub's answer has errors, and still prints the answer, data and all.
+ */
 export const ghRunner: Runner = (args, options) =>
   new Promise((resolve, reject) => {
     execFile('gh', args, { timeout: options?.timeoutMs ?? GH_TIMEOUT_MS, maxBuffer: 8_000_000, ...(options?.cwd ? { cwd: options.cwd } : {}) }, (error, stdout, stderr) => {
-      if (error) reject(Object.assign(new Error(`${error.message}\n${stderr}`), { code: (error as NodeJS.ErrnoException).code, stderr: String(stderr) }));
+      if (error) reject(Object.assign(new Error(`${error.message}\n${stderr}`), { code: (error as NodeJS.ErrnoException).code, stderr: String(stderr), stdout: String(stdout) }));
       else resolve(stdout);
     });
   });
@@ -29,8 +35,17 @@ const ITEM_FIELDS = `__typename
   ... on Issue { id number title url state updatedAt repository { nameWithOwner } }
   ... on PullRequest { id number title url state isDraft updatedAt repository { nameWithOwner } }`;
 
-export const LIST_QUERY = `query PlannerGitHubList($q: String!) { search(query: $q, type: ISSUE, first: 50) { nodes { ${ITEM_FIELDS} } } }`;
+/** Items a list page has; GitHub's search gives up to 100 a page, 50 keeps one gh call short. */
+export const PAGE_SIZE = 50;
+/** GitHub's search returns at most this many results of one search, however many match: words narrow it. */
+export const SEARCH_MAX = 1000;
+/** Node ids GitHub reads in one `nodes(ids:)` call. */
+export const NODES_MAX = 100;
+
+export const LIST_QUERY = `query PlannerGitHubList($q: String!, $after: String) { search(query: $q, type: ISSUE, first: ${PAGE_SIZE}, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ${ITEM_FIELDS} } } }`;
 export const NODES_QUERY = `query PlannerGitHubNodes($ids: [ID!]!) { nodes(ids: $ids) { ${ITEM_FIELDS} } }`;
+/** An issue or a pull request by its address on github.com. */
+export const RESOURCE_QUERY = `query PlannerGitHubResource($url: URI!) { resource(url: $url) { ${ITEM_FIELDS} } }`;
 
 export const LISTS = {
   assigned: 'is:open is:issue assignee:@me archived:false sort:updated-desc',
@@ -39,6 +54,26 @@ export const LISTS = {
 } as const;
 
 export type ListKind = keyof typeof LISTS;
+
+/** A list's search: its own qualifiers, then the words that narrow it (GitHub's search syntax: text, repo:owner/name, label:…). */
+export const listQuery = (kind: ListKind, text = ''): string => {
+  const words = text.replace(/\s+/g, ' ').trim();
+  return words ? `${LISTS[kind]} ${words}` : LISTS[kind];
+};
+
+/** One page of a list: its items, how many match in all, and the cursor of the next page (null after the last). */
+export interface GitHubPage {
+  items: GitHubItem[];
+  total: number;
+  next: string | null;
+}
+
+/** GraphQL's answer, or its first error as an error (an answer with errors and no data is not an empty list). */
+const graphqlData = <T>(out: string): T => {
+  const parsed = JSON.parse(out) as { data?: T | null; errors?: { message?: string }[] };
+  if (!parsed.data && parsed.errors?.length) throw new Error(parsed.errors[0]?.message ?? 'GitHub returned an error');
+  return (parsed.data ?? {}) as T;
+};
 
 interface RawNode {
   __typename?: string;
@@ -129,6 +164,20 @@ export const containerId = (): string | null => {
 export class GitHubSource {
   constructor(private readonly run: Runner = ghRunner, private readonly container: () => string | null = containerId) {}
 
+  /**
+   * `gh api graphql`: GitHub's answer. gh exits 1 when the answer has errors beside its data (a linked issue deleted
+   * since, which `nodes(ids:)` answers with null and an error): the data is still the answer then.
+   */
+  private async graphql(args: string[]): Promise<string> {
+    try {
+      return await this.run(['api', 'graphql', ...args]);
+    } catch (error) {
+      const printed = (error as { stdout?: string }).stdout;
+      if (printed && /^\s*\{[\s\S]*"data"\s*:\s*\{/.test(printed)) return printed;
+      throw new Error(explain(error));
+    }
+  }
+
   async status(): Promise<GitHubStatus> {
     try {
       const login = (await this.run(['api', 'user', '--jq', '.login'])).trim();
@@ -139,11 +188,25 @@ export class GitHubSource {
     }
   }
 
-  async list(kind: ListKind): Promise<GitHubItem[]> {
-    const out = await this.run(['api', 'graphql', '-f', `query=${LIST_QUERY}`, '-f', `q=${LISTS[kind]}`]).catch((error) => {
-      throw new Error(explain(error));
-    });
-    return parseNodes((JSON.parse(out) as { data?: { search?: { nodes?: RawNode[] } } }).data?.search?.nodes ?? []);
+  /** A page of a list, from `after` (the previous page's cursor), narrowed by `text`. */
+  async list(kind: ListKind, options: { after?: string | null; text?: string } = {}): Promise<GitHubPage> {
+    const out = await this.graphql(['-f', `query=${LIST_QUERY}`, '-f', `q=${listQuery(kind, options.text)}`, ...(options.after ? ['-f', `after=${options.after}`] : [])]);
+    type Search = { issueCount?: number; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: RawNode[] };
+    const search = graphqlData<{ search?: Search }>(out).search;
+    const items = parseNodes(search?.nodes ?? []);
+    // A next page without a cursor to reach it would be asked for again forever.
+    const next = search?.pageInfo?.hasNextPage && search.pageInfo.endCursor ? search.pageInfo.endCursor : null;
+    return { items, total: Math.max(search?.issueCount ?? 0, items.length), next };
+  }
+
+  /** An issue or a pull request by its URL (pasted into a new task), as GitHub has it now; null when GitHub has none there. */
+  async byUrl(url: string): Promise<GitHubItem | null> {
+    const parsed = parseGitHubUrl(url);
+    if (!parsed) throw new Error('not a GitHub issue or pull request URL');
+    const out = await this.graphql(['-f', `query=${RESOURCE_QUERY}`, '-f', `url=${parsed.url}`]);
+    const parsedAnswer = JSON.parse(out) as { data?: { resource?: RawNode | null } | null; errors?: { type?: string; message?: string }[] };
+    if (!parsedAnswer.data?.resource && parsedAnswer.errors?.length && !parsedAnswer.errors.every((error) => error.type === 'NOT_FOUND')) throw new Error(parsedAnswer.errors[0]?.message ?? 'GitHub returned an error');
+    return parseNodes([parsedAnswer.data?.resource ?? null])[0] ?? null;
   }
 
   /**
@@ -177,12 +240,13 @@ export class GitHubSource {
     return pickPull([JSON.parse(out) as RawPull]);
   }
 
-  /** Current state of the items behind linked tasks. */
+  /** Current state of the items behind linked tasks, all of them, in GitHub's batches of 100. */
   async items(ids: readonly string[]): Promise<GitHubItem[]> {
-    if (ids.length === 0) return [];
-    const out = await this.run(['api', 'graphql', '-f', `query=${NODES_QUERY}`, ...ids.slice(0, 100).flatMap((id) => ['-f', `ids[]=${id}`])]).catch((error) => {
-      throw new Error(explain(error));
-    });
-    return parseNodes((JSON.parse(out) as { data?: { nodes?: (RawNode | null)[] } }).data?.nodes ?? []);
+    const found: GitHubItem[] = [];
+    for (let index = 0; index < ids.length; index += NODES_MAX) {
+      const out = await this.graphql(['-f', `query=${NODES_QUERY}`, ...ids.slice(index, index + NODES_MAX).flatMap((id) => ['-f', `ids[]=${id}`])]);
+      found.push(...parseNodes(graphqlData<{ nodes?: (RawNode | null)[] }>(out).nodes ?? []));
+    }
+    return found;
   }
 }

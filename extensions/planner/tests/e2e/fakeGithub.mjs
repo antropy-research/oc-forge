@@ -18,6 +18,11 @@
 //   // write ghConfigFiles(gh.socket) into <HOME>/.config/gh/ for the gh that should use it
 //   gh.world.pulls: what was opened; gh.requests: what gh asked; await gh.close();
 //
+// The Planner's GitHub source reads issues and pull requests through `gh api graphql`: a page of a
+// search (`search(query:, type: ISSUE, first:, after:)`, filtered by the qualifiers it sends, with
+// `issueCount` and `pageInfo`), items by node id (`nodes(ids:)`) and one by its URL (`resource(url:)`).
+// `world.issues` are the issues it finds; `world.pulls` the pull requests.
+//
 // On its own, e.g. in the dev container where the agents' gh runs:
 //   node fakeGithub.mjs <socket> <state.json> <world.json> [<git port>]
 // keeps <state.json> up to date ({ pid, gitPort, pulls, requests }) and stops on SIGTERM.
@@ -35,7 +40,20 @@ export const defaultGithubWorld = ({ owner = 'harness-org', repo = 'planner-pr-d
   viewer,
   repos: [{ id: `R_${owner}_${repo}`, owner, name: repo, defaultBranch, bare }],
   pulls: [],
+  issues: [],
   next: 1,
+});
+
+/** An issue of `repo` (owner/name), assigned to `assignees` (logins), as the fake's world keeps one. */
+export const fakeIssue = (repo, number, { title = `Issue ${number}`, state = 'OPEN', assignees = [], updatedAt = new Date(Date.UTC(2026, 9, 1) + number * 60_000).toISOString() } = {}) => ({
+  id: `I_${repo.replace(/[^A-Za-z0-9]/g, '_')}_${number}`,
+  number,
+  repo,
+  url: `https://github.com/${repo}/issues/${number}`,
+  title,
+  state,
+  assignees,
+  updatedAt,
 });
 
 /** gh's config.yml and hosts.yml for the fake: every request through `socket`, signed in to github.com with a fake token. */
@@ -222,8 +240,54 @@ export const startFakeGithub = async ({ socket = null, port = 0, gitPort = null,
     .filter((pull) => pull.repo === full(repo) && (!head || pull.headRefName === branchOf(head, repo)) && (!base || pull.baseRefName === base) && (!states?.length || states.includes(pull.state)))
     .sort((a, b) => b.number - a.number);
 
+  const itemNode = (item) => (item.headRefName === undefined
+    ? { __typename: 'Issue', id: item.id, number: item.number, title: item.title, url: item.url, state: item.state, updatedAt: item.updatedAt, repository: { nameWithOwner: item.repo } }
+    : { __typename: 'PullRequest', ...pullNode(item) });
+  /** GitHub's issue search, for the qualifiers the Planner sends (is:, assignee:, review-requested:, author:, repo:, sort:) and words in the title. */
+  const searchItems = (q) => {
+    let items = [...(world.issues ?? []), ...world.pulls];
+    const words = [];
+    for (const token of String(q ?? '').split(/\s+/).filter(Boolean)) {
+      const [qualifier, value] = token.includes(':') ? [token.slice(0, token.indexOf(':')).toLowerCase(), token.slice(token.indexOf(':') + 1)] : [null, token];
+      const me = (login) => (value === '@me' ? world.viewer : value).toLowerCase() === String(login).toLowerCase();
+      if (qualifier === 'is' && value === 'open') items = items.filter((item) => item.state === 'OPEN');
+      else if (qualifier === 'is' && value === 'closed') items = items.filter((item) => item.state !== 'OPEN');
+      else if (qualifier === 'is' && value === 'issue') items = items.filter((item) => item.headRefName === undefined);
+      else if (qualifier === 'is' && value === 'pr') items = items.filter((item) => item.headRefName !== undefined);
+      else if (qualifier === 'assignee') items = items.filter((item) => (item.assignees ?? []).some(me));
+      else if (qualifier === 'review-requested') items = items.filter((item) => (item.reviewRequested ?? []).some(me));
+      else if (qualifier === 'author') items = items.filter((item) => item.headRefName !== undefined ? me(world.viewer) : me(item.author ?? ''));
+      else if (qualifier === 'repo') items = items.filter((item) => item.repo.toLowerCase() === value.toLowerCase());
+      else if (qualifier === 'archived' || qualifier === 'sort') continue;
+      else words.push(token.toLowerCase());
+    }
+    if (words.length) items = items.filter((item) => words.every((word) => item.title.toLowerCase().includes(word)));
+    return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.number - a.number);
+  };
+  const cursorOf = (offset) => Buffer.from(`cursor:${offset}`).toString('base64');
+  const offsetOf = (cursor) => (cursor ? Number(/^cursor:(\d+)$/.exec(Buffer.from(String(cursor), 'base64').toString('utf8'))?.[1] ?? 0) : 0);
+
   const graphql = (query, variables = {}) => {
     const data = {};
+    if (/\bsearch\s*\(/.test(query)) {
+      const all = searchItems(variables.q);
+      const first = Math.min(100, Number(variables.first ?? /\bfirst\s*:\s*(\d+)/.exec(query)?.[1] ?? 10));
+      const from = offsetOf(variables.after);
+      const page = all.slice(from, from + first);
+      const hasNextPage = from + first < all.length;
+      return { data: { search: { issueCount: all.length, pageInfo: { hasNextPage, endCursor: page.length ? cursorOf(from + page.length) : null }, nodes: page.map(itemNode) } } };
+    }
+    if (/\bnodes\s*\(\s*ids/.test(query)) {
+      const ids = [].concat(variables.ids ?? []);
+      const nodes = ids.map((id) => [...(world.issues ?? []), ...world.pulls].find((item) => item.id === id) ?? null);
+      const missing = ids.filter((_, index) => nodes[index] === null);
+      return { data: { nodes: nodes.map((node) => (node ? itemNode(node) : null)) }, ...(missing.length ? { errors: missing.map((id) => ({ type: 'NOT_FOUND', path: ['nodes'], message: `Could not resolve to a node with the global id of '${id}'` })) } : {}) };
+    }
+    if (/\bresource\s*\(/.test(query)) {
+      const url = String(variables.url ?? '').replace(/\/$/, '');
+      const found = [...(world.issues ?? []), ...world.pulls].find((item) => item.url.toLowerCase() === url.toLowerCase());
+      return { data: { resource: found ? itemNode(found) : null } };
+    }
     if (/\bviewer\s*\{/.test(query)) data.viewer = viewerNode();
     if (/createPullRequest\s*\(/.test(query)) {
       const input = variables.input ?? {};

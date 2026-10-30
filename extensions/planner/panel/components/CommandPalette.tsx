@@ -5,7 +5,7 @@ import { parseQuickAdd } from '../../src/domain/quickAdd.ts';
 import { reorderCommands, sortTasks } from '../../src/domain/sort.ts';
 import { tasksForDay } from '../../src/domain/selectors.ts';
 import { usePlanner, useView } from '../lib/context.ts';
-import { addParsedTask } from '../lib/addTask.ts';
+import { addParsedTask, urlHint } from '../lib/addTask.ts';
 import { useUi } from '../lib/ui.ts';
 import type { Route } from './Shell.tsx';
 
@@ -128,7 +128,7 @@ export const CommandPalette = ({ onClose, onRoute, onAddTask, onAsk }: { onClose
 
 /** Sunsama's Add Task window (A): the same syntax as inline Add task, landing on today by default. */
 export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
-  const { client, linear } = usePlanner();
+  const { client, linear, github, google } = usePlanner();
   const view = useView();
   const input = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
@@ -146,11 +146,11 @@ export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
           onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key !== 'Enter' || !parsed?.title.trim()) return;
-            void addParsedTask(client, linear, parsed, { kind: 'day', date: view.today }, 'bottom', view.today);
+            void addParsedTask({ client, linear, github, google }, parsed, { kind: 'day', date: view.today }, 'bottom', view.today);
             onClose();
           }}
         />
-        <p class="hint palette-hint">Enter adds to {parsed?.placement ? 'the day or bucket you named' : 'today'}. Esc cancels.</p>
+        <p class="hint palette-hint">{(parsed && urlHint(parsed.title)) ?? `Enter adds to ${parsed?.placement ? 'the day or bucket you named' : 'today'}. Esc cancels.`}</p>
       </div>
     </div>
   );

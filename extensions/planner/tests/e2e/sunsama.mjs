@@ -2,16 +2,19 @@
 // container's real OpenChamber with this checkout's panel and service (harness.mjs).
 // Run on the host after `bun run build`:
 //   node extensions/planner/tests/e2e/sunsama.mjs [outDir]
-// GitHub, Google and the Linear workspace are fixtures; `opencode` is a stand-in
+// Google and the Linear workspace are fixtures, GitHub too but in its own part: the real gh against a fake GitHub
+// (fakeGithub.mjs), at 1440 and 1024 (SUNSAMA_PARTS=github runs it alone); `opencode` is a stand-in
 // that lists three models, and one custom agent sits in the private service's
 // OpenCode config. The agent phases start real chats in /home/node/projects/planner-demo-a
 // as OpenCode's read-only plan agent, through a command file this journey writes
 // to the container (oc-planner-harness-plan.md) and removes, with the chats and
 // their worktrees, at the end.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { startHarness } from './harness.mjs';
+import { defaultGithubWorld, fakeIssue, ghConfigFiles, startFakeGithub } from './fakeGithub.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-sunsama';
 const run = `harness-${Date.now().toString(36)}`;
@@ -57,6 +60,131 @@ const serviceOverride = async ({ method, path, body }) => {
   if (url.pathname === '/google/calendars') return { calendars: [], errors: [] };
   return undefined;
 };
+
+// ── Review 11 (P1-3): GitHub through the real gh, against a fake GitHub (fakeGithub.mjs), at 1440 and 1024 ──────
+// 51 issues are assigned to me: the source shows 50, says so ("Showing 50 of 51") and Load more reaches the 51st,
+// which plans as a task linked to it (its real id, title and URL); Refresh reads both pages again (not the first
+// alone); the search field narrows the list. An issue's URL pasted alone into Add task (one not assigned to me) and a
+// pull request's make tasks linked to them, as Sunsama's "Add via URL" does. SUNSAMA_PARTS=github runs this alone.
+/** The GitHub CLI itself (never mise's shim, which wants a trusted folder; never the harness's signed-out stub). */
+const realGh = () => {
+  const candidates = [process.env.GH_BIN, '/home/qihang/.local/share/mise/installs/gh/latest/gh_2.103.3_linux_amd64/bin/gh', ...(process.env.PATH ?? '').split(':').filter((dir) => dir && !/mise\/shims|planner-harness-/.test(dir)).map((dir) => join(dir, 'gh'))];
+  return candidates.find((path) => path && existsSync(path)) ?? null;
+};
+const githubPart = async (viewport) => {
+  const size = String(viewport.width);
+  const gh = realGh();
+  if (!gh) {
+    check(`${size}: the GitHub part has the GitHub CLI to run`, false, 'gh not found: set GH_BIN');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'planner-sunsama-gh-'));
+  const repo = 'harness-org/planner-gh';
+  const world = defaultGithubWorld({ owner: 'harness-org', repo: 'planner-gh' });
+  // Issue 1 updated last: GitHub's search (updated, newest first) gives 1 to 50 a page, then 51.
+  world.issues = Array.from({ length: 51 }, (_, n) => fakeIssue(repo, n + 1, { title: `${run} gh issue ${n + 1}`, assignees: [world.viewer], updatedAt: new Date(Date.now() - n * 60_000).toISOString() }));
+  world.issues.push(fakeIssue(repo, 52, { title: `${run} gh unassigned 52`, assignees: ['someone-else'] }));
+  world.pulls.push({ id: 'PR_planner_gh_7', number: 7, repo, url: `https://github.com/${repo}/pull/7`, title: `${run} gh pull 7`, body: '', headRefName: 'harness-feature', baseRefName: 'main', headOid: 'fake', isDraft: false, state: 'OPEN', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), reviewRequested: [world.viewer] });
+  const fake = await startFakeGithub({ socket: join(dir, 'gh.sock'), world });
+  const config = ghConfigFiles(fake.socket);
+  // The private service's gh is the real one, its config sending every request to the fake's socket (nothing reaches GitHub).
+  const g = await startHarness({
+    out,
+    viewport,
+    serviceEnv: { PATH: `${dirname(gh)}:/usr/bin:/bin`, GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' },
+    homeFiles: { '.config/gh/config.yml': config['config.yml'], '.config/gh/hosts.yml': config['hosts.yml'] },
+  });
+  const f = g.frame;
+  const plannerErrors = [];
+  g.page.on('console', (message) => {
+    if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(message.text().slice(0, 300));
+  });
+  g.page.on('pageerror', (error) => plannerErrors.push(`pageerror: ${error.message}`));
+  const shotHere = async (name) => {
+    await g.page.waitForTimeout(250);
+    await g.shot(`${name}-${size}`);
+  };
+  const latestState = async () => (await g.call('GET', '/state')).json.state;
+  const lists = () => fake.requests.filter((request) => request.operation === 'query PlannerGitHubList');
+  const ghPanel = () => f.locator('aside.source-panel');
+  const ghRow = (text) => ghPanel().locator('li.issue-row', { hasText: text }).first();
+  const shown = () => ghPanel().locator('li.issue-row').count();
+  const status = () => ghPanel().getByRole('status', { name: 'GitHub items shown' });
+  try {
+    await g.openPlanner();
+    await f.getByRole('navigation', { name: 'Sources' }).getByRole('tab', { name: 'GitHub', exact: true }).click();
+    await ghRow(`${run} gh issue 50`).waitFor({ timeout: 30_000 });
+    check(`${size}: the GitHub source shows the first 50 of 51 assigned issues, and says so, with Load more`, (await shown()) === 50 && (await status().innerText()).includes('Showing 50 of 51') && (await ghPanel().getByRole('button', { name: 'Load more' }).count()) === 1, await status().innerText().catch(() => 'no count'));
+    check(`${size}: read through the real gh: a page of 50, from the first`, lists().length >= 1 && lists()[0].variables?.after === undefined && /assignee:@me/.test(String(lists()[0].variables?.q)), JSON.stringify(lists().map((request) => request.variables)));
+    await shotHere('gh-50-of-51');
+    await ghPanel().getByRole('button', { name: 'Load more' }).click();
+    await ghRow(`${run} gh issue 51`).waitFor({ timeout: 15_000 });
+    const after = lists().at(-1)?.variables?.after;
+    check(`${size}: Load more reads the next page from the first page's cursor, and shows the 51st`, (await shown()) === 51 && typeof after === 'string' && after.length > 0 && (await status().innerText()).includes('All 51 shown'), JSON.stringify({ after, shown: await shown() }));
+    // Planned from the source: a task linked to issue 51, its real id, title and URL.
+    await ghRow(`${run} gh issue 51`).hover();
+    await ghRow(`${run} gh issue 51`).getByRole('button', { name: new RegExp(`^Plan ${repo}#51 `) }).first().click();
+    const issue51 = world.issues[50];
+    let latest = null;
+    for (let i = 0; i < 50; i++) {
+      latest = await latestState();
+      if (Object.values(latest.tasks).some((task) => task.source?.id === issue51.id)) break;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    const planned = Object.values(latest.tasks).find((task) => task.source?.id === issue51.id);
+    check(`${size}: the 51st plans as a task linked to it: its real id, title and URL`, planned?.title === issue51.title && planned.source.kind === 'github' && planned.source.key === `${repo}#51` && planned.source.url === issue51.url, JSON.stringify(planned?.source ?? null));
+    await shotHere('gh-51-planned');
+    // Refresh reads both pages again: the 51st stays reachable.
+    const before = lists().length;
+    await ghPanel().getByRole('button', { name: 'Refresh GitHub' }).click();
+    for (let i = 0; i < 50 && lists().length < before + 2; i++) await new Promise((resolve) => setTimeout(resolve, 200));
+    const again = lists().slice(before).map((request) => request.variables?.after ?? null);
+    check(`${size}: Refresh reads both pages again, from the first, not the first alone; the 51st is still there`, again.length === 2 && again[0] === null && again[1] === after && (await shown()) === 51, JSON.stringify(again));
+    // Words narrow it (GitHub's search syntax).
+    await ghPanel().getByRole('searchbox', { name: 'Search GitHub items' }).fill(`${run} gh issue 51`);
+    for (let i = 0; i < 50 && (await shown()) !== 1; i++) await new Promise((resolve) => setTimeout(resolve, 200));
+    check(`${size}: the search field narrows the list (sent to GitHub's search)`, (await shown()) === 1 && (await ghRow(`${run} gh issue 51`).count()) === 1 && String(lists().at(-1)?.variables?.q).endsWith(`${run} gh issue 51`), String(lists().at(-1)?.variables?.q));
+    await ghPanel().getByRole('searchbox', { name: 'Search GitHub items' }).fill('');
+
+    // Pasted alone into Add task: issue 52 (not assigned to me, so in no list) and pull request 7, as Sunsama imports them.
+    const today = f.locator('section.day-column[aria-label^="Today"]').first();
+    for (const [url, item, kind] of [[world.issues[51].url, world.issues[51], 'issue'], [world.pulls[0].url, world.pulls[0], 'pull request']]) {
+      await today.getByRole('button', { name: 'Add task' }).click();
+      const field = today.getByRole('textbox', { name: 'New task' });
+      await field.fill(url);
+      const hint = await today.locator('.url-hint').innerText().catch(() => '');
+      check(`${size}: a pasted ${kind} URL says Enter imports it`, hint === `Enter imports the GitHub ${kind} ${repo}#${item.number}`, hint);
+      await shotHere(`gh-paste-${kind === 'issue' ? 'issue' : 'pull'}`);
+      await field.press('Enter');
+      let task = null;
+      for (let i = 0; i < 50 && !task; i++) {
+        task = Object.values((await latestState()).tasks).find((one) => one.source?.id === item.id) ?? null;
+        if (!task) await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      check(`${size}: Enter makes a task linked to the ${kind}: its real id, title and URL (not a task titled with the URL)`, task?.title === item.title && task.source.kind === 'github' && task.source.url === item.url && task.source.key === `${repo}#${item.number}`, JSON.stringify(task ? { title: task.title, source: task.source } : null));
+      await field.press('Escape').catch(() => {});
+    }
+    check(`${size}: the paste was looked up on GitHub by its URL`, fake.requests.filter((request) => request.operation === 'query PlannerGitHubResource').map((request) => request.variables?.url).join() === `${world.issues[51].url},${world.pulls[0].url}`);
+    await shotHere('gh-paste-tasks');
+    check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
+  } catch (error) {
+    check(`${size}: the GitHub part ran to its end`, false, error?.stack ?? String(error));
+    await shotHere('gh-failure').catch(() => {});
+  } finally {
+    await g.close();
+    await fake.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+const parts = process.env.SUNSAMA_PARTS ?? 'all';
+mkdirSync(out, { recursive: true });
+if (parts === 'all' || parts === 'github') for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await githubPart(viewport);
+if (parts === 'github') {
+  const failed = results.filter((result) => !result.ok);
+  console.log(`${results.length - failed.length}/${results.length} checks passed`);
+  process.exit(failed.length ? 1 : 0);
+}
 
 mkdirSync(out, { recursive: true });
 let h = null;

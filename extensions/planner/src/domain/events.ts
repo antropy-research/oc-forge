@@ -136,7 +136,7 @@ const isSource = (value: unknown): value is TaskSourceRef =>
   typeof value.kind === 'string' && Object.hasOwn(SOURCE_NAMES, value.kind) &&
   isShortText(value.id, 200) && (value.id as string).length > 0 &&
   isShortText(value.key, 100) &&
-  isShortText(value.url, 2000) && /^https:\/\//.test(value.url as string) &&
+  isShortText(value.url, 2000) && (value.kind === 'link' ? /^https?:\/\// : /^https:\/\//).test(value.url as string) &&
   (value.title === undefined || isShortText(value.title, TITLE_MAX)) &&
   (value.teamId === undefined || isShortText(value.teamId, 200)) &&
   (value.status === undefined || (isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40))) &&

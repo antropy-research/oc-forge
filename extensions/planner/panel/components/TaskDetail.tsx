@@ -17,6 +17,7 @@ import { LinearTaskSection } from './LinearPanel.tsx';
 import { AgentSection } from './Agents.tsx';
 import { GitHubTaskSection } from './GitHubPanel.tsx';
 import { GoogleTaskSection } from './GooglePanel.tsx';
+import { LinkTaskSection } from './LinkSection.tsx';
 import { ConflictBanner, quoted, useDraft } from './Conflicts.tsx';
 
 const PRIORITIES: { id: Priority; label: string }[] = [
@@ -432,6 +433,7 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
         <LinearTaskSection task={task} />
         <GitHubTaskSection task={task} />
         <GoogleTaskSection task={task} />
+        <LinkTaskSection task={task} />
         <RepeatSection task={task} />
         <ActualTime task={task} />
         <Activity task={task} />

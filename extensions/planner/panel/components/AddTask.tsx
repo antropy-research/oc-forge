@@ -4,7 +4,7 @@ import { formatMinutes, monthDay } from '../../src/domain/dates.ts';
 import { parseQuickAdd, type QuickAdd } from '../../src/domain/quickAdd.ts';
 import { suggestFor } from '../../src/domain/suggest.ts';
 import { usePlanner, useView } from '../lib/context.ts';
-import { addParsedTask } from '../lib/addTask.ts';
+import { addParsedTask, urlHint } from '../lib/addTask.ts';
 
 const placementLabel = (placement: Placement): string =>
   placement.kind === 'day' ? monthDay(placement.date) : BACKLOG_BUCKETS.find((bucket) => bucket.id === placement.bucket)!.label;
@@ -39,7 +39,7 @@ const SuggestionChips = ({ parsed }: { parsed: QuickAdd }) => {
 
 /** Sunsama's inline Add task: `~30m` planned time, `@tomorrow` / `@backlog` start, `#channel`, `!high`. */
 export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { placement: Placement; edge?: 'top' | 'bottom'; folderId?: string | null }) => {
-  const { client, linear } = usePlanner();
+  const { client, linear, github, google } = usePlanner();
   const view = useView();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
@@ -53,7 +53,7 @@ export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { place
 
   const submit = () => {
     if (!parsed || !parsed.title.trim()) return;
-    void addParsedTask(client, linear, parsed, placement, edge, view.today, folderId);
+    void addParsedTask({ client, linear, github, google }, parsed, placement, edge, view.today, folderId);
     setText('');
   };
 
@@ -84,6 +84,7 @@ export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { place
         }}
       />
       {parsed && <Chips parsed={parsed} />}
+      {parsed && urlHint(parsed.title) && <p class="hint url-hint" role="status">{urlHint(parsed.title)}</p>}
       {parsed && <SuggestionChips parsed={parsed} />}
     </div>
   );

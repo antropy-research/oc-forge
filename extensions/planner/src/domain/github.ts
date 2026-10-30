@@ -36,6 +36,21 @@ export const githubSource = (item: GitHubItem): TaskSourceRef => ({ kind: 'githu
 
 export const taskFromGitHub = (item: GitHubItem, id: string, placement: Placement, position: number): NewTask => ({ id, title: item.title, placement, position, source: githubSource(item) });
 
+/** An issue's or a pull request's address on GitHub, pasted from the browser (a comment's or a tab's address too). */
+const ITEM_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/(issues|pull)\/(\d{1,9})(?:[/?#]\S*)?$/;
+
+/**
+ * A GitHub issue or pull request URL, as Sunsama imports one pasted into a new task's title: its repository, number
+ * and kind, and its address without what follows the number (a comment, the files tab). Null for anything else.
+ */
+export const parseGitHubUrl = (text: string): { repo: string; number: number; kind: GitHubItem['kind']; key: string; url: string } | null => {
+  const match = ITEM_URL.exec(text.trim());
+  if (!match) return null;
+  const [, owner, name, path, number] = match;
+  const repo = `${owner}/${name}`;
+  return { repo, number: Number(number), kind: path === 'pull' ? 'pull' : 'issue', key: `${repo}#${Number(number)}`, url: `https://github.com/${repo}/${path}/${Number(number)}` };
+};
+
 /** A short label for a GitHub key: name#12 instead of owner/name#12. */
 export const shortKey = (key: string): string => key.replace(/^[^/]+\//, '');
 

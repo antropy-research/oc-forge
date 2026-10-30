@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { defaultGithubWorld, ghConfigFiles, startFakeGithub, type FakeGithub } from './e2e/fakeGithub.mjs';
+import { defaultGithubWorld, fakeIssue, ghConfigFiles, startFakeGithub, type FakeGithub } from './e2e/fakeGithub.mjs';
+import { GitHubSource, LISTS } from '../service/github.ts';
 
 const GH = Bun.which('gh');
 const root = mkdtempSync(join(tmpdir(), 'planner-fake-github-'));
@@ -78,6 +79,37 @@ describe.skipIf(!GH)('the fake GitHub answers the real gh as GitHub would', () =
     // Merged on "GitHub": gh says so.
     expect((await ok(GH!, ['api', '-X', 'PUT', 'repos/harness-org/planner-pr-demo/pulls/1/merge', '--jq', '.merged']))).toBe('true');
     expect(JSON.parse(await ok(GH!, ['pr', 'view', url, '--json', 'state'])).state).toBe('MERGED');
+  });
+
+  // Review 11 (P1-3), with the GitHub CLI itself: 51 assigned issues are all reachable, a page at a time, and one is
+  // found by its URL, as the Planner's service asks for them (service/github.ts).
+  test("the Planner's list reads 51 assigned issues in two pages, its cursor reaching the 51st; an issue by its URL; linked items by id", async () => {
+    const repo = 'harness-org/planner-pr-demo';
+    // Issue 1 updated last: the oldest, issue 51, comes last, on the second page.
+    fake.world.issues = Array.from({ length: 51 }, (_, n) => fakeIssue(repo, n + 1, { title: `Planner issue ${n + 1}`, assignees: ['harness-bot'], updatedAt: new Date(Date.UTC(2026, 9, 28) - n * 60_000).toISOString() }));
+    fake.world.issues.push(fakeIssue(repo, 99, { title: 'Not mine', assignees: ['someone-else'] }));
+    // As the service's ghRunner: a failure keeps what gh printed.
+    const source = new GitHubSource(async (args) => {
+      const result = await run(GH!, args);
+      if (result.code !== 0) throw Object.assign(new Error(result.err), { stdout: result.out, stderr: result.err });
+      return result.out;
+    });
+    const first = await source.list('assigned');
+    expect([first.items.length, first.total, first.items[0]!.key, first.items.at(-1)!.key, Boolean(first.next)]).toEqual([50, 51, `${repo}#1`, `${repo}#50`, true]);
+    const second = await source.list('assigned', { after: first.next });
+    expect([second.items.map((item) => [item.key, item.title, item.url]), second.next]).toEqual([[[`${repo}#51`, 'Planner issue 51', `https://github.com/${repo}/issues/51`]], null]);
+    const searches = fake.requests.filter((request) => request.operation === 'query PlannerGitHubList');
+    expect(searches.map((request) => [request.variables?.q, request.variables?.after ?? null])).toEqual([[LISTS.assigned, null], [LISTS.assigned, first.next]]);
+    // Words narrow it.
+    expect((await source.list('assigned', { text: 'issue 51' })).items.map((item) => item.number)).toEqual([51]);
+    // By URL, a comment's address too; none where there is no such issue.
+    expect(await source.byUrl(`https://github.com/${repo}/issues/51#issuecomment-1`)).toMatchObject({ id: fake.world.issues[50]!.id, key: `${repo}#51`, title: 'Planner issue 51', state: 'OPEN' });
+    expect(await source.byUrl(`https://github.com/${repo}/issues/404`)).toBeNull();
+    // Linked items, by node id, past GitHub's 100 a call; ones deleted since (gh exits 1 on GitHub's errors) leave the rest read.
+    const ids = [...fake.world.issues.map((issue) => issue.id), ...Array.from({ length: 60 }, (_, n) => `I_gone_${n}`)];
+    expect((await source.items(ids)).length).toBe(52);
+    expect((await run(GH!, ['api', 'graphql', '-f', 'query=query X($ids: [ID!]!) { nodes(ids: $ids) { id } }', '-f', 'ids[]=I_gone'])).code).toBe(1);
+    expect(fake.requests.filter((request) => request.operation === 'query PlannerGitHubNodes').map((request) => (request.variables?.ids as string[]).length)).toEqual([100, 12]);
   });
 
   test('as GitHub does, it refuses a second pull request for a branch, a branch never pushed, and one with nothing new', async () => {

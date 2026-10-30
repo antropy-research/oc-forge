@@ -7,7 +7,8 @@ import { EventStore } from './store.ts';
 import { Planner } from './planner.ts';
 import { CalendarFeeds } from './calendars.ts';
 import { SyncManager } from './sync.ts';
-import { GitHubSource, LISTS, type ListKind } from './github.ts';
+import { GitHubSource, LISTS, NODES_MAX, type ListKind } from './github.ts';
+import { parseGitHubUrl } from '../src/domain/github.ts';
 import { LinearWorkspaces, WorkspaceError } from './linear.ts';
 import { GOOGLE_FEATURES, GoogleAccounts, GoogleError, type GoogleFeature } from './google.ts';
 import { GoogleData } from './googleData.ts';
@@ -253,6 +254,24 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     googleDueTasks.forget();
     return ok({ task });
   }
+  if (path === '/google/mail/resolve' && req.method === 'POST') {
+    // A pasted Gmail address, as Sunsama imports one: its message, in the account it names first, else in each with Gmail.
+    const body = (await readJson(req)) as { thread?: unknown; message?: unknown; account?: unknown };
+    const id = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{1,32}$/.test(value);
+    if (!id(body.thread) && !id(body.message)) return { status: 400, body: { error: 'thread or message must be a Gmail API id' } };
+    const accounts = (await google.status()).accounts.filter((account) => account.features.includes('mail')).map((account) => account.email);
+    const named = isEmail(body.account) ? body.account.toLowerCase() : null;
+    const errors: string[] = [];
+    for (const account of [...accounts.filter((email) => email === named), ...accounts.filter((email) => email !== named)]) {
+      try {
+        const item = await googleData.mailItem(account, { thread: id(body.thread) ? body.thread : null, message: id(body.message) ? body.message : null });
+        if (item) return ok({ item });
+      } catch (error) {
+        errors.push(`${account}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { status: 404, body: { error: errors.length ? errors.join('; ') : accounts.length ? 'This message is in none of your Gmail accounts' : 'No Google account has Gmail' } };
+  }
   if (path === '/google/mail' && req.method === 'GET') {
     const email = url.searchParams.get('account');
     const query = url.searchParams.get('q') ?? 'in:inbox';
@@ -307,13 +326,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/github/list' && req.method === 'GET') {
+      // A page of a list: from `after` (the previous page's cursor), narrowed by `q`; its `next` reaches the rest.
       const kind = url.searchParams.get('kind') ?? 'assigned';
-      if (!(kind in LISTS)) {
-        json(res, 400, { error: 'kind must be assigned, review or mine' });
+      const after = url.searchParams.get('after');
+      const text = url.searchParams.get('q') ?? '';
+      if (!(kind in LISTS) || (after !== null && !/^[A-Za-z0-9+/=_-]{1,200}$/.test(after)) || text.length > 200) {
+        json(res, 400, { error: 'kind must be assigned, review or mine; after a cursor; q at most 200 characters' });
         return;
       }
       try {
-        json(res, 200, { items: await github.list(kind as ListKind) });
+        json(res, 200, await github.list(kind as ListKind, { after, text }));
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -322,8 +344,28 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/github/items' && req.method === 'POST') {
       const body = (await readJson(req)) as { ids?: unknown };
       const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+      // One gh call a request: the panel sends its linked items 100 at a time; more is refused, not cut short.
+      if (ids.length > NODES_MAX) {
+        json(res, 400, { error: `at most ${NODES_MAX} ids a request` });
+        return;
+      }
       try {
         json(res, 200, { items: await github.items(ids) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === '/github/resolve' && req.method === 'POST') {
+      // A pasted issue or pull request URL, as Sunsama imports one: the item GitHub has there.
+      const body = (await readJson(req)) as { url?: unknown };
+      if (typeof body.url !== 'string' || !parseGitHubUrl(body.url)) {
+        json(res, 400, { error: 'url must be a GitHub issue or pull request URL' });
+        return;
+      }
+      try {
+        const item = await github.byUrl(body.url);
+        json(res, item ? 200 : 404, item ? { item } : { error: `${parseGitHubUrl(body.url)!.key} was not found on GitHub, or this gh can't see it` });
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }

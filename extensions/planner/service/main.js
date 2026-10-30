@@ -17,7 +17,7 @@ var BACKLOG_BUCKETS = [
   { id: "someday", label: "Someday" },
   { id: "never", label: "Never" }
 ];
-var SOURCE_NAMES = { linear: "Linear", github: "GitHub", gtask: "Google Tasks", email: "Gmail" };
+var SOURCE_NAMES = { linear: "Linear", github: "GitHub", gtask: "Google Tasks", email: "Gmail", link: "Link" };
 var LINEAR_GROUPS = ["status", "priority", "project", "team", "assignee", "workspace", "none", "cycle", "label"];
 var LINEAR_ORDERS = ["priority", "updated", "due", "identifier", "status", "manual", "created"];
 var LINEAR_COMPLETED = ["all", "day", "week", "month", "3months", "6months", "year", "none"];
@@ -1076,7 +1076,7 @@ var isPlacement = (value) => {
 };
 var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean");
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
-var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && /^https:\/\//.test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due));
+var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && (value.kind === "link" ? /^https?:\/\// : /^https:\/\//).test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due));
 var GOOGLE_NOTES_MAX = 8192;
 var isGoogleTaskId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
 var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start", "busy", "visibility", "color", "doNotDisturb", "decline", "attachments"];
@@ -2588,12 +2588,25 @@ import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync3 } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute } from "node:path";
+
+// src/domain/github.ts
+var ITEM_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/(issues|pull)\/(\d{1,9})(?:[/?#]\S*)?$/;
+var parseGitHubUrl = (text) => {
+  const match = ITEM_URL.exec(text.trim());
+  if (!match)
+    return null;
+  const [, owner, name, path, number] = match;
+  const repo = `${owner}/${name}`;
+  return { repo, number: Number(number), kind: path === "pull" ? "pull" : "issue", key: `${repo}#${Number(number)}`, url: `https://github.com/${repo}/${path}/${Number(number)}` };
+};
+
+// service/github.ts
 var GH_TIMEOUT_MS = 15000;
 var ghRunner = (args, options) => new Promise((resolve, reject) => {
   execFile2("gh", args, { timeout: options?.timeoutMs ?? GH_TIMEOUT_MS, maxBuffer: 8000000, ...options?.cwd ? { cwd: options.cwd } : {} }, (error, stdout, stderr) => {
     if (error)
       reject(Object.assign(new Error(`${error.message}
-${stderr}`), { code: error.code, stderr: String(stderr) }));
+${stderr}`), { code: error.code, stderr: String(stderr), stdout: String(stdout) }));
     else
       resolve(stdout);
   });
@@ -2601,12 +2614,25 @@ ${stderr}`), { code: error.code, stderr: String(stderr) }));
 var ITEM_FIELDS = `__typename
   ... on Issue { id number title url state updatedAt repository { nameWithOwner } }
   ... on PullRequest { id number title url state isDraft updatedAt repository { nameWithOwner } }`;
-var LIST_QUERY = `query PlannerGitHubList($q: String!) { search(query: $q, type: ISSUE, first: 50) { nodes { ${ITEM_FIELDS} } } }`;
+var PAGE_SIZE = 50;
+var NODES_MAX = 100;
+var LIST_QUERY = `query PlannerGitHubList($q: String!, $after: String) { search(query: $q, type: ISSUE, first: ${PAGE_SIZE}, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ${ITEM_FIELDS} } } }`;
 var NODES_QUERY = `query PlannerGitHubNodes($ids: [ID!]!) { nodes(ids: $ids) { ${ITEM_FIELDS} } }`;
+var RESOURCE_QUERY = `query PlannerGitHubResource($url: URI!) { resource(url: $url) { ${ITEM_FIELDS} } }`;
 var LISTS = {
   assigned: "is:open is:issue assignee:@me archived:false sort:updated-desc",
   review: "is:open is:pr review-requested:@me archived:false sort:updated-desc",
   mine: "is:open is:pr author:@me archived:false sort:updated-desc"
+};
+var listQuery = (kind, text = "") => {
+  const words = text.replace(/\s+/g, " ").trim();
+  return words ? `${LISTS[kind]} ${words}` : LISTS[kind];
+};
+var graphqlData = (out) => {
+  const parsed = JSON.parse(out);
+  if (!parsed.data && parsed.errors?.length)
+    throw new Error(parsed.errors[0]?.message ?? "GitHub returned an error");
+  return parsed.data ?? {};
 };
 var parseNodes = (nodes) => nodes.flatMap((node) => {
   if (!node?.id || !node.number || !node.title || !node.url || !node.repository?.nameWithOwner)
@@ -2665,6 +2691,16 @@ class GitHubSource {
     this.run = run;
     this.container = container;
   }
+  async graphql(args) {
+    try {
+      return await this.run(["api", "graphql", ...args]);
+    } catch (error) {
+      const printed = error.stdout;
+      if (printed && /^\s*\{[\s\S]*"data"\s*:\s*\{/.test(printed))
+        return printed;
+      throw new Error(explain(error));
+    }
+  }
   async status() {
     try {
       const login = (await this.run(["api", "user", "--jq", ".login"])).trim();
@@ -2674,11 +2710,22 @@ class GitHubSource {
       return { available: false, login: null, message, reason, container: reason ? this.container() : null };
     }
   }
-  async list(kind) {
-    const out = await this.run(["api", "graphql", "-f", `query=${LIST_QUERY}`, "-f", `q=${LISTS[kind]}`]).catch((error) => {
-      throw new Error(explain(error));
-    });
-    return parseNodes(JSON.parse(out).data?.search?.nodes ?? []);
+  async list(kind, options = {}) {
+    const out = await this.graphql(["-f", `query=${LIST_QUERY}`, "-f", `q=${listQuery(kind, options.text)}`, ...options.after ? ["-f", `after=${options.after}`] : []]);
+    const search = graphqlData(out).search;
+    const items = parseNodes(search?.nodes ?? []);
+    const next = search?.pageInfo?.hasNextPage && search.pageInfo.endCursor ? search.pageInfo.endCursor : null;
+    return { items, total: Math.max(search?.issueCount ?? 0, items.length), next };
+  }
+  async byUrl(url) {
+    const parsed = parseGitHubUrl(url);
+    if (!parsed)
+      throw new Error("not a GitHub issue or pull request URL");
+    const out = await this.graphql(["-f", `query=${RESOURCE_QUERY}`, "-f", `url=${parsed.url}`]);
+    const parsedAnswer = JSON.parse(out);
+    if (!parsedAnswer.data?.resource && parsedAnswer.errors?.length && !parsedAnswer.errors.every((error) => error.type === "NOT_FOUND"))
+      throw new Error(parsedAnswer.errors[0]?.message ?? "GitHub returned an error");
+    return parseNodes([parsedAnswer.data?.resource ?? null])[0] ?? null;
   }
   async pullRequestFor(branch, directories) {
     if (!BRANCH.test(branch))
@@ -2707,12 +2754,12 @@ class GitHubSource {
     return pickPull([JSON.parse(out)]);
   }
   async items(ids) {
-    if (ids.length === 0)
-      return [];
-    const out = await this.run(["api", "graphql", "-f", `query=${NODES_QUERY}`, ...ids.slice(0, 100).flatMap((id) => ["-f", `ids[]=${id}`])]).catch((error) => {
-      throw new Error(explain(error));
-    });
-    return parseNodes(JSON.parse(out).data?.nodes ?? []);
+    const found = [];
+    for (let index = 0;index < ids.length; index += NODES_MAX) {
+      const out = await this.graphql(["-f", `query=${NODES_QUERY}`, ...ids.slice(index, index + NODES_MAX).flatMap((id) => ["-f", `ids[]=${id}`])]);
+      found.push(...parseNodes(graphqlData(out).nodes ?? []));
+    }
+    return found;
   }
 }
 
@@ -4833,6 +4880,24 @@ ${calendarId}`;
     const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}/move${query.size ? `?${query}` : ""}`);
     return raw ? toTaskItem(raw, account, target.destination ?? listId) : null;
   }
+  async mailItem(account, which) {
+    const metadata = "format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date";
+    try {
+      if (which.message) {
+        const raw = await this.accounts.request(account, "GET", `${GMAIL}/messages/${enc(which.message)}?${metadata}`);
+        return raw ? toMailItem(raw, account) : null;
+      }
+      if (!which.thread)
+        return null;
+      const thread = await this.accounts.request(account, "GET", `${GMAIL}/threads/${enc(which.thread)}?${metadata}`);
+      const latest = thread?.messages?.at(-1);
+      return latest ? toMailItem(latest, account) : null;
+    } catch (error) {
+      if (error instanceof GoogleError && (error.status === 404 || error.status === 400))
+        return null;
+      throw error;
+    }
+  }
   async mail(account, query, pageToken) {
     const list = await this.accounts.request(account, "GET", `${GMAIL}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX), ...pageToken ? { pageToken } : {} })}`);
     const ids = (list?.messages ?? []).flatMap((message) => message.id ? [message.id] : []);
@@ -6883,6 +6948,25 @@ var googleRoute = async (req, url) => {
     googleDueTasks.forget();
     return ok({ task });
   }
+  if (path === "/google/mail/resolve" && req.method === "POST") {
+    const body = await readJson(req);
+    const id = (value) => typeof value === "string" && /^[0-9a-f]{1,32}$/.test(value);
+    if (!id(body.thread) && !id(body.message))
+      return { status: 400, body: { error: "thread or message must be a Gmail API id" } };
+    const accounts = (await google.status()).accounts.filter((account) => account.features.includes("mail")).map((account) => account.email);
+    const named = isEmail2(body.account) ? body.account.toLowerCase() : null;
+    const errors = [];
+    for (const account of [...accounts.filter((email) => email === named), ...accounts.filter((email) => email !== named)]) {
+      try {
+        const item = await googleData.mailItem(account, { thread: id(body.thread) ? body.thread : null, message: id(body.message) ? body.message : null });
+        if (item)
+          return ok({ item });
+      } catch (error) {
+        errors.push(`${account}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { status: 404, body: { error: errors.length ? errors.join("; ") : accounts.length ? "This message is in none of your Gmail accounts" : "No Google account has Gmail" } };
+  }
   if (path === "/google/mail" && req.method === "GET") {
     const email = url.searchParams.get("account");
     const query = url.searchParams.get("q") ?? "in:inbox";
@@ -6936,12 +7020,14 @@ var server = http2.createServer(async (req, res) => {
     }
     if (url.pathname === "/github/list" && req.method === "GET") {
       const kind = url.searchParams.get("kind") ?? "assigned";
-      if (!(kind in LISTS)) {
-        json(res, 400, { error: "kind must be assigned, review or mine" });
+      const after = url.searchParams.get("after");
+      const text = url.searchParams.get("q") ?? "";
+      if (!(kind in LISTS) || after !== null && !/^[A-Za-z0-9+/=_-]{1,200}$/.test(after) || text.length > 200) {
+        json(res, 400, { error: "kind must be assigned, review or mine; after a cursor; q at most 200 characters" });
         return;
       }
       try {
-        json(res, 200, { items: await github.list(kind) });
+        json(res, 200, await github.list(kind, { after, text }));
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }
@@ -6950,8 +7036,26 @@ var server = http2.createServer(async (req, res) => {
     if (url.pathname === "/github/items" && req.method === "POST") {
       const body = await readJson(req);
       const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === "string" && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+      if (ids.length > NODES_MAX) {
+        json(res, 400, { error: `at most ${NODES_MAX} ids a request` });
+        return;
+      }
       try {
         json(res, 200, { items: await github.items(ids) });
+      } catch (error) {
+        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    if (url.pathname === "/github/resolve" && req.method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.url !== "string" || !parseGitHubUrl(body.url)) {
+        json(res, 400, { error: "url must be a GitHub issue or pull request URL" });
+        return;
+      }
+      try {
+        const item = await github.byUrl(body.url);
+        json(res, item ? 200 : 404, item ? { item } : { error: `${parseGitHubUrl(body.url).key} was not found on GitHub, or this gh can't see it` });
       } catch (error) {
         json(res, 502, { error: error instanceof Error ? error.message : String(error) });
       }

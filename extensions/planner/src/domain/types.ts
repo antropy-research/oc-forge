@@ -26,7 +26,8 @@ export interface Subtask {
 
 /** An external object the task plans; the source stays authoritative for its state. */
 /** Where a linked task comes from, by name. */
-export const SOURCE_NAMES = { linear: 'Linear', github: 'GitHub', gtask: 'Google Tasks', email: 'Gmail' } as const;
+/** Where a task comes from; `link` is any other page, the task's backlink (Sunsama's "Tasks from URL"). */
+export const SOURCE_NAMES = { linear: 'Linear', github: 'GitHub', gtask: 'Google Tasks', email: 'Gmail', link: 'Link' } as const;
 
 export interface TaskSourceRef {
   kind: keyof typeof SOURCE_NAMES;

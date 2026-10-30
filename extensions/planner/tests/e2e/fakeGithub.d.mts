@@ -15,10 +15,22 @@ export interface FakePull {
   updatedAt: string;
 }
 
+export interface FakeIssue {
+  id: string;
+  number: number;
+  repo: string;
+  url: string;
+  title: string;
+  state: 'OPEN' | 'CLOSED';
+  assignees: string[];
+  updatedAt: string;
+}
+
 export interface FakeGithubWorld {
   viewer: string;
   repos: { id: string; owner: string; name: string; defaultBranch: string; bare: string | null }[];
-  pulls: FakePull[];
+  pulls: (FakePull & { reviewRequested?: string[] })[];
+  issues?: FakeIssue[];
   next: number;
 }
 
@@ -45,4 +57,5 @@ export interface FakeGithub {
 export const FAKE_TOKEN: string;
 export function defaultGithubWorld(options?: { owner?: string; repo?: string; viewer?: string; bare?: string | null; defaultBranch?: string }): FakeGithubWorld;
 export function ghConfigFiles(socket: string, viewer?: string): Record<'config.yml' | 'hosts.yml', string>;
+export function fakeIssue(repo: string, number: number, options?: { title?: string; state?: 'OPEN' | 'CLOSED'; assignees?: string[]; updatedAt?: string }): FakeIssue;
 export function startFakeGithub(options?: { socket?: string | null; port?: number; gitPort?: number | null; world?: FakeGithubWorld; onChange?: () => void }): Promise<FakeGithub>;

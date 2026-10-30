@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
 import { shortKey, taskForGitHub, type GitHubItem } from '../../src/domain/github.ts';
@@ -92,24 +93,57 @@ const GitHubSignIn = () => {
   );
 };
 
-/** GitHub issues and pull requests to plan, through the machine's gh CLI. */
+/** GitHub's search returns at most this many results of one search (service/github.ts `SEARCH_MAX`). */
+const SEARCH_MAX = 1000;
+
+/**
+ * GitHub issues and pull requests to plan, through the machine's gh CLI: a page at a time, every match reachable
+ * (Load more, and words to narrow the list); Refresh reads again as many as are shown.
+ */
 export const GitHubItems = () => {
   const { github } = usePlanner();
   const gv = useGitHub();
+  const [text, setText] = useState(gv.text);
+  // The list follows the words once typing stops.
+  useEffect(() => {
+    const timer = setTimeout(() => github.setText(text), 400);
+    return () => clearTimeout(timer);
+  }, [text]);
   if (!gv.status) return <p class="hint">Checking GitHub…</p>;
   if (!gv.status.available) return <GitHubSignIn />;
+  const kindLabel = KINDS.find((kind) => kind.id === gv.kind)?.label ?? 'GitHub';
   return (
     <div class="linear-issues">
       <div class="linear-toolbar">
         <select aria-label="GitHub items to show" value={gv.kind} onChange={(event) => github.setKind(event.currentTarget.value as GitHubListKind)}>
           {KINDS.map((kind) => <option key={kind.id} value={kind.id}>{kind.label}</option>)}
         </select>
-        <button class="icon-button" aria-label="Refresh GitHub" onClick={() => void github.refresh()}>↻</button>
+        <button class="icon-button" aria-label="Refresh GitHub" title="Refresh: reads again as many as are shown" onClick={() => void github.refresh()}>↻</button>
       </div>
+      <input
+        class="gh-search"
+        type="search"
+        aria-label="Search GitHub items"
+        placeholder="Search: words, repo:owner/name, label:bug"
+        value={text}
+        onInput={(event) => setText(event.currentTarget.value)}
+        onKeyDown={(event) => event.key === 'Enter' && github.setText(event.currentTarget.value)}
+      />
       {gv.error && <p class="feed-errors" role="alert">{gv.error}</p>}
       {gv.loading && gv.items.length === 0 && <p class="hint">Loading…</p>}
-      {!gv.loading && gv.items.length === 0 && !gv.error && <p class="hint">Nothing here right now.</p>}
-      <ul class="issue-list">{gv.items.map((item) => <ItemRow key={item.id} item={item} />)}</ul>
+      {!gv.loading && gv.items.length === 0 && !gv.error && <p class="hint">{gv.text.trim() ? 'Nothing matches.' : 'Nothing here right now.'}</p>}
+      <ul class="issue-list" aria-label={kindLabel}>{gv.items.map((item) => <ItemRow key={item.id} item={item} />)}</ul>
+      {gv.items.length > 0 && (
+        <div class="gh-more" role="status" aria-label="GitHub items shown">
+          <span class="hint">{gv.next ? `Showing ${gv.items.length} of ${gv.total}` : `All ${gv.items.length} shown`}</span>
+          {gv.next && (
+            <button class="link" disabled={gv.loadingMore} onClick={() => void github.loadMore()}>
+              {gv.loadingMore ? 'Loading…' : 'Load more'}
+            </button>
+          )}
+          {gv.total > SEARCH_MAX && <p class="hint">GitHub's search gives the first {SEARCH_MAX.toLocaleString('en-US')} of {gv.total.toLocaleString('en-US')}: narrow it with words or repo:owner/name.</p>}
+        </div>
+      )}
     </div>
   );
 };
