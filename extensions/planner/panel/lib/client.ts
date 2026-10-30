@@ -4,7 +4,7 @@
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 import type { Command, EventBody, PlannerEvent } from '../../src/domain/events.ts';
 import { applyEvents } from '../../src/domain/reducer.ts';
-import { inverseOfBatch } from '../../src/domain/undo.ts';
+import { CHANGED_SINCE, asEvents, changedSince, inverseOfBatch } from '../../src/domain/undo.ts';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import type { GoogleTaskItem } from '../../src/domain/google.ts';
 import { todayIn } from '../../src/domain/dates.ts';
@@ -50,7 +50,11 @@ export interface ClientView {
 }
 
 export interface DispatchOptions {
-  /** Offer Undo for this batch with this label (e.g. "Task deleted"). */
+  /**
+   * Offer Undo for this batch with this label (e.g. "Task deleted"). The
+   * service keeps what takes it back and undoes it only while nobody has
+   * changed since what it would put back (`undo`).
+   */
   undo?: string;
   /**
    * Who caused the batch. `linear` marks changes that came from Linear, so they
@@ -92,7 +96,8 @@ export class PlannerClient {
   private confirmed: PlannerState = emptyState();
   private pending: Command[] = [];
   private queue: Promise<void> = Promise.resolve();
-  private undoBatch: EventBody[] | null = null;
+  /** The batch the toast's Undo takes back (its first command), and what takes it back as this window sees it. */
+  private undoOffer: { batch: string; inverse: EventBody[] } | null = null;
   private undoTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly commitListeners = new Set<CommitListener>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -131,14 +136,19 @@ export class PlannerClient {
   /** Apply now, persist in order. Resolves when the service has answered. */
   dispatch(bodies: EventBody[], options: DispatchOptions = {}): Promise<void> {
     if (bodies.length === 0) return this.queue;
-    if (options.undo) {
-      const inverse = inverseOfBatch(this.view.state, bodies);
-      if (inverse) this.offerUndo(options.undo, inverse);
-    }
     const commands = bodies.map((body) => ({ ...body, cmd: newId() }) as Command);
+    const before = this.view.state;
+    const offered = options.undo ? inverseOfBatch(before, bodies) : null;
+    if (options.undo && offered) this.offerUndo(options.undo, { batch: commands[0]!.cmd, inverse: offered });
     this.pending = [...this.pending, ...commands];
     this.recompute();
-    this.queue = this.queue.then(() => this.send(commands, options.origin ?? 'user'));
+    // This window changing again what its Undo would put back (the same task moved again): that Undo goes, as it would
+    // be refused, so its toast never says another window did it. Automation (a sync) never ends it.
+    if (!offered && this.undoOffer && (options.origin ?? 'user') === 'user') {
+      const after = this.view.state;
+      if (changedSince(before, after, applyEvents(after, asEvents(this.undoOffer.inverse))).length) this.clearUndo();
+    }
+    this.queue = this.queue.then(() => this.send(commands, options.origin ?? 'user', Boolean(offered)));
     return this.queue;
   }
 
@@ -167,17 +177,24 @@ export class PlannerClient {
     }
   }
 
-  /** Reverse the last undoable batch. */
+  /**
+   * Reverse the last undoable batch, as the service decides against its plan
+   * as it is then, in its turn after this window's batches on their way:
+   * undone, or, when something it would put back was changed since in another
+   * window, left as it is ("Changed in another window since; not undone").
+   */
   undo(): Promise<void> {
-    const batch = this.undoBatch;
+    const offer = this.undoOffer;
     this.clearUndo();
-    return batch ? this.dispatch(batch) : this.queue;
+    if (!offer) return this.queue;
+    this.queue = this.queue.then(() => this.sendUndo(offer.batch));
+    return this.queue;
   }
 
   clearUndo(): void {
     if (this.undoTimer) clearTimeout(this.undoTimer);
     this.undoTimer = null;
-    this.undoBatch = null;
+    this.undoOffer = null;
     if (this.view.undoLabel) this.set({ undoLabel: null });
   }
 
@@ -256,17 +273,17 @@ export class PlannerClient {
     }, 6000);
   }
 
-  private offerUndo(label: string, inverse: EventBody[]): void {
+  private offerUndo(label: string, offer: { batch: string; inverse: EventBody[] }): void {
     if (this.undoTimer) clearTimeout(this.undoTimer);
-    this.undoBatch = inverse;
+    this.undoOffer = offer;
     this.undoTimer = setTimeout(() => this.clearUndo(), UNDO_WINDOW_MS);
     this.set({ undoLabel: label });
   }
 
-  private async send(commands: Command[], origin: Origin): Promise<void> {
+  private async send(commands: Command[], origin: Origin, undoable = false): Promise<void> {
     this.set({ saving: true });
     try {
-      const snapshot = await this.request<Snapshot>('POST', '/commands', { commands });
+      const snapshot = await this.request<Snapshot>('POST', '/commands', { commands, ...(undoable ? { undo: true } : {}) });
       this.pending = this.pending.filter((command) => !commands.includes(command));
       const before = this.confirmed;
       this.accept(snapshot);
@@ -278,12 +295,46 @@ export class PlannerClient {
         }
       }
     } catch (error) {
-      // Drop the optimistic change and show what the service actually has.
+      // Drop the optimistic change and show what the service actually has; nothing was done, so nothing to undo.
       this.pending = this.pending.filter((command) => !commands.includes(command));
+      if (this.undoOffer?.batch === commands[0]?.cmd) this.clearUndo();
       this.recompute();
       if (origin === 'user') this.set({ error: messageOf(error), ...(error instanceof HostRequestError ? { problem: problemOf(error) } : {}) });
       else console.warn(`[planner] ${origin} update skipped: ${messageOf(error)}`);
       await this.load();
+    } finally {
+      this.set({ saving: this.pending.length > 0 });
+    }
+  }
+
+  /**
+   * The service's Undo of a batch: done, the plan after it (and this window's
+   * follow-ups, as for any change of the user's: Google and Linear hear of a
+   * task reopened); refused, what it says shows and the plan as it is (theirs
+   * included) replaces the view.
+   */
+  private async sendUndo(batch: string): Promise<void> {
+    this.set({ saving: true });
+    try {
+      const response = await this.host.serviceRequest({ method: 'POST', path: '/undo', body: JSON.stringify({ batch }) });
+      const data = (response.body ? JSON.parse(response.body) : {}) as Partial<Snapshot> & { commands?: Command[]; error?: string };
+      if (response.status === 200 && data.state) {
+        const before = this.confirmed;
+        this.accept(data as Snapshot);
+        for (const listener of this.commitListeners) {
+          try {
+            listener(data.commands ?? [], before, this.confirmed, 'user');
+          } catch (error) {
+            console.error('[planner] commit listener failed', error);
+          }
+        }
+        return;
+      }
+      if (data.state) this.accept(data as Snapshot);
+      if (response.status === 409 || response.status === 410) this.notify(data.error ?? CHANGED_SINCE);
+      else this.set({ error: data.error ?? `Planner service answered ${response.status}` });
+    } catch (error) {
+      this.set({ error: messageOf(error), ...(error instanceof HostRequestError ? { problem: problemOf(error) } : {}) });
     } finally {
       this.set({ saving: this.pending.length > 0 });
     }

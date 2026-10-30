@@ -69,6 +69,8 @@ export type EventBody =
   | { type: 'objective.created'; objective: Pick<Objective, 'id' | 'weekStart' | 'title' | 'carriedFrom'> }
   | { type: 'objective.updated'; objectiveId: string; patch: { title?: string; completed?: boolean } }
   | { type: 'objective.deleted'; objectiveId: string }
+  /** A deleted objective back (Undo); the tasks aligned with it are aligned again by their own updates. */
+  | { type: 'objective.restored'; objectiveId: string }
   | { type: 'ritual.saved'; ritual: Ritual; date: DateKey; fields: RitualRecord }
   | { type: 'folder.created'; folder: Pick<Folder, 'id' | 'name'> }
   | { type: 'folder.renamed'; folderId: string; name: string }
@@ -566,6 +568,7 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       return null;
     }
     case 'objective.deleted':
+    case 'objective.restored':
       return isId(command.objectiveId) && context.objectives[command.objectiveId as string] ? null : 'unknown objective';
     case 'series.created': {
       const series = command.series;

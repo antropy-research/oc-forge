@@ -4,12 +4,24 @@ import { commandBody, validateCommand, type Command, type EventBody, type Planne
 import { planRollover } from '../src/domain/rollover.ts';
 import { planInstances } from '../src/domain/recurrence.ts';
 import { touchesTask } from '../src/domain/activity.ts';
+import { changedSince, inverseOfBatch } from '../src/domain/undo.ts';
 import { todayIn } from '../src/domain/dates.ts';
 import { newId } from '../src/domain/ids.ts';
 import type { DateKey, PlannerState } from '../src/domain/types.ts';
 import type { EventStore } from './store.ts';
 
 export type ExecuteResult = { ok: true; applied: number } | { ok: false; error: string; index: number };
+
+/**
+ * An Undo, as the service decides it: done (the commands it wrote, for the
+ * window's follow-ups), refused because something it would put back was
+ * changed since (`changed`: what), or no longer possible (`gone`).
+ */
+export type UndoResult = { ok: true; applied: number; commands: Command[] } | { ok: false; reason: 'changed'; changed: string[] } | { ok: false; reason: 'gone' };
+
+/** How long, and how many, Undos are kept: a window offers one for eight seconds. */
+const UNDO_KEEP_MS = 60_000;
+const UNDO_KEEP_MAX = 50;
 
 /** Told after events are written here, with the state before and after them. */
 export type PersistListener = (events: readonly PlannerEvent[], before: PlannerState, after: PlannerState) => void;
@@ -49,6 +61,7 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'objective.created': return `Add objective: ${event.objective.title}`;
     case 'objective.updated': return 'Edit objective';
     case 'objective.deleted': return 'Delete objective';
+    case 'objective.restored': return 'Restore objective';
     case 'ritual.saved': return `Save ${event.ritual} for ${event.date}`;
     case 'calendar.added': return `Subscribe to calendar: ${event.calendar.name}`;
     case 'calendar.updated': return 'Edit calendar';
@@ -80,6 +93,12 @@ const DEFAULT_CHANNELS: EventBody[] = [
 export class Planner {
   state: PlannerState;
   private readonly applied = new Set<string>();
+  /**
+   * Batches that can be undone, by their first command: the commands that take
+   * each back, against the plan as it was just before it, and the plan right
+   * after it, which an Undo is checked against.
+   */
+  private readonly undos = new Map<string, { inverse: EventBody[]; after: PlannerState; at: number }>();
   private readonly log: PlannerEvent[];
   private lastAt = 0;
   private readonly persistListeners = new Set<PersistListener>();
@@ -140,8 +159,10 @@ export class Planner {
    * Apply a batch atomically. Each command is validated against the state the
    * earlier ones produced, so one batch can create a task and then move it.
    * A command id seen before is skipped, which makes client retries safe.
+   * With `undo`, what takes it back is kept, by its first command (`undo`).
    */
-  execute(commands: readonly unknown[]): ExecuteResult {
+  execute(commands: readonly unknown[], options: { undo?: boolean } = {}): ExecuteResult {
+    const before = this.state;
     let working = this.state;
     const events: PlannerEvent[] = [];
     for (let index = 0; index < commands.length; index++) {
@@ -154,7 +175,47 @@ export class Planner {
       working = applyEvents(working, [event]);
     }
     if (events.length) this.persist(events, working);
+    if (options.undo && events.length) this.keepUndo((commands[0] as Command).cmd, before, events, working);
     return { ok: true, applied: events.length };
+  }
+
+  /**
+   * Take back a batch run with `undo`, as one batch against the plan as it is
+   * now, only if it changes nothing that was changed since the batch by
+   * anyone else (`changedSince`): a field the batch set and someone has set
+   * again since keeps their value, and nothing is written. A command of it
+   * that is no longer valid (a working session deleted since) is a change
+   * since too. Once: kept no longer, done or not.
+   */
+  undo(batch: string): UndoResult {
+    const record = this.undos.get(batch);
+    this.undos.delete(batch);
+    if (!record || this.now().getTime() - record.at > UNDO_KEEP_MS) return { ok: false, reason: 'gone' };
+    let working = this.state;
+    const events: PlannerEvent[] = [];
+    for (const body of record.inverse) {
+      const command = { ...body, cmd: newId() } as Command;
+      const error = validateCommand(command, working);
+      if (error) return { ok: false, reason: 'changed', changed: [error] };
+      const event = this.toEvent(body, command.cmd);
+      events.push(event);
+      working = applyEvents(working, [event]);
+    }
+    const changed = changedSince(record.after, this.state, working);
+    if (changed.length) return { ok: false, reason: 'changed', changed };
+    if (events.length) this.persist(events, working);
+    return {
+      ok: true,
+      applied: events.length,
+      commands: events.map(({ v: _v, id: _id, at: _at, ...command }) => command as Command),
+    };
+  }
+
+  private keepUndo(batch: string, before: PlannerState, events: readonly PlannerEvent[], after: PlannerState): void {
+    const now = this.now().getTime();
+    for (const [key, record] of this.undos) if (now - record.at > UNDO_KEEP_MS || this.undos.size >= UNDO_KEEP_MAX) this.undos.delete(key);
+    const inverse = inverseOfBatch(before, events);
+    if (inverse) this.undos.set(batch, { inverse, after, at: now });
   }
 
   /** Read the whole log again, after a merge brought in events from another machine. */

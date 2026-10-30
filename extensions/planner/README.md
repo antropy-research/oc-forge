@@ -64,7 +64,7 @@ URL names.
 | Area | In the Planner |
 |---|---|
 | Home / Today / Focus | Multi-day board with a date jump and Sunsama's right-hand panel: a vertical rail of sources (Calendar, Backlog, Linear, GitHub, Gmail, Google Tasks) beside the chosen one's list, folding down to the rail. A source's items drag onto any day column on screen, or onto the calendar shown under the list; each row plans with a click on the first days on screen, or on any visible day, the backlog or a date from its menu. Today has the same panel beside today's list. In a narrow page (OpenChamber's own sidebar open in a 1024 px window leaves about 700 px) the Planner's menu folds into a rail and opens over the page, as Sunsama and Linear fold theirs; the panel narrows so a whole day stays beside it, and dragging to the board's edge scrolls on to later days. Focus with timer, subtasks, notes, up/down, Pomodoro, Done for the day; rail-panel Today. |
-| Tasks | Title, notes, subtasks (a subtask can become a task), planned and actual time, channel, priority, start (day or backlog bucket), due date, objective, folder, repeat, activity log, duplicate, archive, trash, undo. A title, notes, planned time or subtask's title edited in place saves what changed from what it showed when editing began, over the task as it is then: one left as it was writes nothing (a change made in another window meanwhile shows), one changed in another window meanwhile too is asked about (Keep theirs, Save mine). Subtasks are ticked, added, renamed and deleted on the list as the plan has it then. When that can't be read, nothing is saved: a field keeps its edit and says it couldn't check, with Try again; a subtask change says so. |
+| Tasks | Title, notes, subtasks (a subtask can become a task), planned and actual time, channel, priority, start (day or backlog bucket), due date, objective, folder, repeat, activity log, duplicate, archive, trash, undo (only of what nobody has changed since: see [The Planner's own Undo](#the-planners-own-undo)). A title, notes, planned time or subtask's title edited in place saves what changed from what it showed when editing began, over the task as it is then: one left as it was writes nothing (a change made in another window meanwhile shows), one changed in another window meanwhile too is asked about (Keep theirs, Save mine). Subtasks are ticked, added, renamed and deleted on the list as the plan has it then. When that can't be read, nothing is saved: a field keeps its edit and says it couldn't check, with Try again; a subtask change says so. |
 | Add Task syntax | `~30m`, `@tomorrow` / `@fri` / `@oct 30` / `@backlog` / `@someday`, `#channel`, `!high`, `$objective`; a pasted Linear issue URL links the issue; `A` opens the Add task window. |
 | Backlog | Six time buckets, folders, search, channel and context filters, Braindump (line by line, or organized by the Small Model and reviewed before adding). |
 | Channels | Work and personal contexts; personal time stays out of the workload; filters; delete keeps tasks. |
@@ -84,6 +84,62 @@ URL names.
 | Agents | Assign a task to an agent, as in GitHub or Linear: "Assign to…" (task detail's Assignee, a card's menu, Agent on a Linear or GitHub issue row) with a search box, presets and OpenCode's agents in sections with avatars, the current assignees checked, arrows and Enter; typing a model's name offers an agent on that model, kept as a preset. The agents are OpenCode's primary agents (build, plan, and custom ones from its global config folder or the project's `.opencode/`), each on its own model, and the presets named in Settings → Agents (an agent and a model, such as "Build · Claude"). Each assignee is an OpenCode command, `oc-planner-<id>.md` in OpenCode's global `command/` folder, whose frontmatter names the agent and model and whose template is the arguments (a preset's stays with the preset; an agent's goes a few minutes after its last use, so OpenChamber's `/` menu does not keep one for every agent); the chat starts with `/oc-planner-<id> <instructions>`, so OpenCode switches to that agent and model (`` !` `` in the instructions is defused, as OpenCode runs it as shell). The assignee works in a new worktree on Linear's branch name or `planner/<title>` (made first, with an empty "Worktree for …" chat, so OpenCode has loaded the commands there before the first message) and is told to commit, push and open a pull request with `gh pr create` that links the issue; the run follows that pull request through gh and through the pull requests linked to the chat (Open, Draft, Merged, Closed), and a merged one offers to complete the task. The run keeps its assignee, shown on the card, in the task detail and on the Agents page, which filters by it. Or send a task to an agent (any assignee, or OpenChamber's default) in a project folder or a new or existing worktree; the task travels as a chip; runs show working, has a question, needs permission, ready for review, failed; Accept and complete is the user's call; Agents page; Work Status line; rail badge. From a chat: "Add to Planner" on a message, "Track chat in Planner", `/task`, `/today`. |
 | Assistant | Ask Planner: the request and a compact plan go to the Small Model; known operations on known tasks only; preview, apply, undo. |
 | Sync | Git remote for the data repository (a private GitHub repo or any git URL); sync after changes and every 5 minutes; Sync now. |
+
+## The Planner's own Undo
+
+An action on the Planner's own tasks, objectives, rituals and working sessions shows "… · Undo" for
+eight seconds. The service keeps, for each such batch (named by its first command), what takes it
+back, computed against the plan just before it, and the plan just after it (`service/planner.ts`,
+`POST /commands` with `undo: true`). Undo (`POST /undo`) runs that against the plan as it is then,
+and only if nothing it would change was changed since by someone else (`changedSince` in
+`src/domain/undo.ts`): a field counts when the Undo would change it now and it no longer has the
+value the action left. Otherwise nothing is written, the other window's change stays, the window
+takes the plan as it is, and the toast says "Changed in another window since; not undone".
+
+1. Only what the Undo puts back counts. A task moved, then renamed in another window, is moved
+   back with their title.
+2. An Undo that deletes something (taking back a creation, a session) counts all of it. A task
+   renamed elsewhere since it was added is not deleted.
+3. What the Planner keeps in step itself is not a change:
+   - a source's state, and a linked task's due date, from the Linear, GitHub and Google syncs;
+   - a working session's Google Calendar event, which the service writes and links;
+   - when a record was last touched.
+4. One that can no longer be done counts as changed too, for example a session deleted since.
+5. The window's own later change to the same thing ends its Undo, so the toast never blames
+   another window. A later change to something else, or a sync, does not.
+6. The service keeps an Undo once, for a minute. Afterwards it says "This can no longer be undone".
+
+| Undo (toast) | Offered from | Takes back | Not undone when, since, elsewhere |
+|---|---|---|---|
+| Task moved, Moved to today / tomorrow / next week / the next day / backlog | A task's menu, details, Z (backlog), Daily planning and shutdown, the archive, a drop on the calendar's all-day row or a month day | Its day or bucket and place; the working sessions the move dropped from its day, and its planned time; its folder; the archive | It was moved, reordered, archived or timeboxed on its new day |
+| List sorted | A day's sort, Sort today by priority | Each task's place | Any of them was moved |
+| Task archived | A task's menu, details, Daily planning and shutdown | Out of the archive | It was deleted |
+| Task deleted | A task's menu, details, the archive | Back (into the archive if it was there) | It was restored elsewhere and archived or deleted again |
+| Task restored | The archive | Back into the archive or the trash | It was archived or deleted again |
+| Task completed | Focus | Open again | It was reopened and completed again |
+| Task added, Task added from the calendar, Task duplicated, Added n tasks, Planned … (a Linear or GitHub issue, a Google task, an email) | Add task, the calendar, Duplicate, Braindump, the sources panel and drops | Deleted (a source already planned: moved back) | Anything of it was changed (a source's own sync aside) |
+| Subtask became a task | Details | The new task deleted, the subtask back | The parent's subtasks changed |
+| Estimates filled | Daily planning | Each planned time | One of them changed |
+| Link removed, Added to Google Tasks | Linear, GitHub and Google panels | The link as it was | It was linked to something else |
+| Timeboxed | A drop on the calendar, Timebox automatically | The session deleted; the task's day and planned time | The session was moved, or the task moved |
+| Session moved, Session resized | Dragging a session on the calendar | Its time; the task's day and planned time | It was moved again, deleted, or its task moved |
+| Session removed | A session's × on the calendar (Remove working session) | The session back; the task's day and planned time | Its task was moved |
+| Objective deleted | Weekly planning | The objective back, and the tasks aligned with it aligned again | One of them was aligned elsewhere |
+| Assistant made n changes | Ask Planner | Each of its changes, as above | Any of them, as above |
+
+No Undo is offered for:
+
+- starting and stopping a timer;
+- logging or deleting time;
+- saving a ritual's fields;
+- adding, editing or completing an objective;
+- settings (saving an agent preset asks for one, but a settings change has none).
+
+Completing, archiving or deleting a task stops its timer: the time tracked stays as an entry,
+and Undo does not start the timer again.
+
+Google's own Undos (the Tasks view, Google Calendar's events and tasks) are Google's, described
+below.
 
 ## Google's task help, operation by operation
 
