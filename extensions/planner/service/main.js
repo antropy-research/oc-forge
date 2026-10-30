@@ -4358,9 +4358,6 @@ var planMeetingSync = (state, events, options) => {
       const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000));
       push({ type: "task.updated", taskId: task.id, patch: { title: event.title, source, ...minutes && minutes > 0 ? { plannedMinutes: minutes } : {} } });
     }
-    const channelId = importChannel(working, event);
-    if (channelId && !working.tasks[task.id].channelId)
-      push({ type: "task.updated", taskId: task.id, patch: { channelId } });
   }
   for (const task of Object.values(working.tasks)) {
     const event = task.source?.kind === "event" ? task.source.event : undefined;
@@ -4401,12 +4398,17 @@ class MeetingImport {
   log;
   now;
   running = null;
-  channels = null;
   constructor(planner, calendars, log = () => {}, now = Date.now) {
     this.planner = planner;
     this.calendars = calendars;
     this.log = log;
     this.now = now;
+    planner.onPersist((_events, before, after) => {
+      const channels = after.settings.meetingChannels;
+      const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== before.settings.meetingChannels[calendarId]);
+      if (changed.length)
+        queueMicrotask(() => this.fillChannels(changed));
+    });
   }
   apply(bodies) {
     if (!bodies.length)
@@ -4422,19 +4424,12 @@ class MeetingImport {
     const zone = this.planner.state.settings.timezone;
     return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
   }
-  fillChannels() {
+  fillChannels(calendarIds) {
     const state = this.planner.state;
-    const seen = this.channels;
-    const channels = state.settings.meetingChannels;
-    this.channels = { ...channels };
     const zone = state.settings.timezone;
-    if (!seen || !zone)
-      return 0;
-    const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== seen[calendarId]);
-    return changed.length ? this.apply(planChannelFill(state, changed, todayIn(zone, new Date(this.now())), zone)) : 0;
+    return zone ? this.apply(planChannelFill(state, calendarIds, todayIn(zone, new Date(this.now())), zone)) : 0;
   }
   run() {
-    this.fillChannels();
     this.running ??= this.once().finally(() => {
       this.running = null;
     });

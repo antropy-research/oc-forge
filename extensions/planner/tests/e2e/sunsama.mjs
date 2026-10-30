@@ -768,8 +768,13 @@ const meetingsPart = async (viewport) => {
     meeting('hsolo', 'Harness dentist', tomorrow, 15, 15.5, { attendees: undefined }),
     meeting('hdemo', 'Harness demo day', inThree, 15, 16),
   );
-  // The Team calendar's own meetings, on days no other check here looks at: its import channel is chosen at the end.
-  world.events['team@group.calendar.google.com'].push(meeting('tsync', 'Team sync', addDays(today, 4), 11, 11.5), meeting('tplan', 'Team planning', addDays(today, 5), 11, 12));
+  // The Team calendar's own meetings, on days no other check here looks at (and one late today, on the board): its
+  // import channel is chosen at the end.
+  world.events['team@group.calendar.google.com'].push(
+    meeting('tsync', 'Team sync', addDays(today, 4), 11, 11.5),
+    meeting('tplan', 'Team planning', addDays(today, 5), 11, 12),
+    meeting('tlate', 'Team late call', today, 23.5, 23.75),
+  );
   const fake = await startFakeGoogle(world);
   // The plan starts with the account's work and team calendars shown, and two channels.
   const seeded = [
@@ -992,9 +997,9 @@ const meetingsPart = async (viewport) => {
 
     // Round 13: the order users take. Ticked under Auto-sync, the Team calendar syncs at once, so its meetings are in
     // before its channel's menu can be used; the channel chosen straight after goes to them at once, without waiting
-    // for Google (its next two answers for the Team calendar, the sync's and a calendar view's, are held 9 s here,
-    // inside the service's 12 s limit). Team sync gets #personal; Team planning, given #work by another window
-    // meanwhile, keeps it; yesterday's Team review, still open (rolled over to today), keeps no channel.
+    // for Google (its next answer for the Team calendar, the sync's, is held 9 s here, inside the service's 12 s
+    // limit). Team sync gets #personal; Team planning, given #work by another window meanwhile, keeps it; yesterday's
+    // Team review, still open (rolled over to today), keeps no channel.
     const teamTask = async (eventId) => Object.values((await latestState()).tasks).find((task) => task.source?.kind === 'event' && task.source.id === `${ACCOUNT}|team@group.calendar.google.com|${eventId}`) ?? null;
     await g.call('POST', '/commands', { commands: [{ cmd: `harness-tpast-${size}`, type: 'task.created', task: { id: `harness-tpast-${size}`, title: 'Team review', placement: { kind: 'day', date: yesterday }, position: 4096, source: { kind: 'event', id: `${ACCOUNT}|team@group.calendar.google.com|tpast`, key: 'Google Calendar', url: 'https://www.google.com/calendar/event?eid=tpast', title: 'Team review', account: ACCOUNT, event: { calendarId: 'team@group.calendar.google.com', start: zoned(yesterday, 10), end: zoned(yesterday, 11), allDay: false, invitees: false, auto: true } } } }] });
     await settings.getByRole('group', { name: 'Calendars to import from' }).getByRole('checkbox', { name: /^Team / }).check();
@@ -1002,7 +1007,7 @@ const meetingsPart = async (viewport) => {
     let tplan = null;
     const teamImported = await until(async () => Boolean((tsync = await teamTask('tsync')) && (tplan = await teamTask('tplan'))), 20_000);
     await g.call('POST', '/commands', { commands: [{ cmd: `harness-tplan-${size}`, type: 'task.updated', taskId: tplan.id, patch: { channelId: 'work' } }] });
-    fake.delayNext('GET', '/calendars/team@group.calendar.google.com/events', 9000, 2);
+    fake.delayNext('GET', '/calendars/team@group.calendar.google.com/events', 9000);
     const chosenAt = Date.now();
     await settings.getByRole('combobox', { name: 'Import channel for Team' }).selectOption('personal');
     const atOnce = await until(async () => (await teamTask('tsync'))?.channelId === 'personal', 5000);
@@ -1018,6 +1023,25 @@ const meetingsPart = async (viewport) => {
     if (held.length) await g.page.waitForTimeout(Math.max(0, Math.max(...held.map((request) => request.at)) + 9500 - Date.now()));
     await settings.scrollIntoViewIfNeeded();
     await shotHere('mt-06b-team-channel');
+    // A channel cleared by hand stays cleared: Team late call, given #personal with the rest, has it taken off in its
+    // details; a sync the panel asks for (a meeting setting changed: an exclusion matching none of these) leaves it be.
+    await go('Home');
+    const lateFilled = (await teamTask('tlate'))?.channelId ?? null;
+    await card('Team late call').getByRole('button', { name: 'Open Team late call' }).click();
+    const lateDetail = f.getByRole('dialog', { name: 'Task details' });
+    await lateDetail.getByRole('combobox', { name: 'Channel' }).selectOption('');
+    await lateDetail.getByRole('button', { name: 'Close' }).click();
+    const lateCleared = await until(async () => (await teamTask('tlate'))?.channelId === null);
+    await go('Settings');
+    const oooHold = settings.getByRole('group', { name: 'Exclude certain types of events' }).getByRole('checkbox', { name: 'Exclude events with "OOO" or "HOLD" in title' });
+    const syncAsked = Date.now();
+    await oooHold.uncheck();
+    // The sync's read of the Team calendar answered, and a moment for the sync to apply what it read.
+    const lateSynced = await until(async () => fake.requests.some((request) => request.path.includes('/calendars/team@group.calendar.google.com/events') && request.at >= syncAsked && request.answeredAt), 15_000);
+    await g.page.waitForTimeout(1500);
+    const lateAfter = (await teamTask('tlate'))?.channelId ?? null;
+    check(`${size}: a meeting's channel cleared by hand stays cleared through a sync`, lateFilled === 'personal' && lateCleared && lateSynced && lateAfter === null, JSON.stringify({ filled: lateFilled, cleared: lateCleared, synced: lateSynced, after: lateAfter }));
+    await oooHold.check();
 
     // Timeboxing Channel: #personal's sessions go to the Team calendar, though no default is set.
     const personal = f.getByRole('group', { name: 'Timeboxing channels' }).getByRole('combobox', { name: 'Calendar for #personal working sessions' });

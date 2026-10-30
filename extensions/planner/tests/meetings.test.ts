@@ -169,18 +169,20 @@ describe('auto-sync', () => {
     expect(planMeetingSync(state, [moved], options())).toEqual([]);
   });
 
-  test("an import channel chosen after they were added: the meetings it added take it, unless given one", () => {
+  test("a meeting it imports takes its calendar's import channel; a sync never gives one after, so one cleared by hand stays cleared", () => {
     let state = run(base({ meetingImport: 'autoSync', meetingCalendars: ['work'] }), [
       { type: 'channel.created', channel: { id: 'meet', name: 'meetings', color: '#e8590c', context: 'work' } },
-      { type: 'channel.created', channel: { id: 'mine', name: 'mine', color: '#1c7ed6', context: 'personal' } },
+      { type: 'settings.updated', patch: { meetingChannels: { work: 'meet' } } },
     ]);
     state = synced(state, [planning, standup]);
     const planningId = taskForEvent(state, eventKey(planning)!)!.id;
     const standupId = taskForEvent(state, eventKey(standup)!)!.id;
-    state = run(state, [{ type: 'task.updated', taskId: standupId, patch: { channelId: 'mine' } }, { type: 'settings.updated', patch: { meetingChannels: { work: 'meet' } } }]);
-    state = synced(state, [planning, standup]);
-    expect([state.tasks[planningId]!.channelId, state.tasks[standupId]!.channelId]).toEqual(['meet', 'mine']);
+    expect([state.tasks[planningId]!.channelId, state.tasks[standupId]!.channelId]).toEqual(['meet', 'meet']);
+    state = run(state, [{ type: 'task.updated', taskId: planningId, patch: { channelId: null } }]);
     expect(planMeetingSync(state, [planning, standup], options())).toEqual([]);
+    state = synced(synced(state, [planning, standup]), [planning, standup, review]);
+    // Through syncs it keeps none; a meeting imported since takes the channel.
+    expect([state.tasks[planningId]!.channelId, state.tasks[taskForEvent(state, eventKey(review)!)!.id]!.channelId]).toEqual([null, 'meet']);
   });
 
   test('a calendar that could not be read keeps its meetings; one no longer chosen takes them off', () => {
@@ -232,7 +234,7 @@ describe('an import channel chosen with auto-sync on', () => {
     expect(planChannelFill(run(state, [{ type: 'channel.deleted', channelId: 'meet' }]), ['work'], TODAY, ZONE)).toEqual([]);
   });
 
-  test('chosen while a run waits on Google, the service fills them at once by their ids, from its own plan: one another window gave a channel meanwhile keeps it', async () => {
+  test('the service fills them as the choice is written (a run waiting on Google or not), by their ids, from its own plan: another window\'s channel stays; a channel cleared by hand stays cleared through syncs; a restart fills nothing', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'planner-meetings-'));
     dirs.push(dir);
     const store = new EventStore({ dir, commitDelayMs: 5 });
@@ -261,18 +263,33 @@ describe('an import channel chosen with auto-sync on', () => {
     await first;
     const planningId = taskForEvent(planner.state, eventKey(planning)!)!.id;
     const reviewId = taskForEvent(planner.state, eventKey(review)!)!.id;
-    expect([planner.state.tasks[planningId]!.channelId, planner.state.tasks[reviewId]!.channelId]).toEqual([null, null]);
-    // Another window gives the review a channel; then the calendar's channel is chosen, and the run it asks for waits on Google.
-    execute({ type: 'task.updated', taskId: reviewId, patch: { channelId: 'mine' } }, { type: 'settings.updated', patch: { meetingChannels: { work: 'meet' } } });
+    const channelsNow = (state: PlannerState) => [state.tasks[planningId]!.channelId, state.tasks[reviewId]!.channelId];
+    expect(channelsNow(planner.state)).toEqual([null, null]);
+    // A run waits on Google; another window gives the review a channel; then the calendar's channel is chosen, and
+    // nobody asks for a run: the planning meeting takes it as the choice is written, the review keeps its own.
     const second = meetings.run();
-    expect([planner.state.tasks[planningId]!.channelId, planner.state.tasks[reviewId]!.channelId]).toEqual(['meet', 'mine']);
-    // Asked again before Google answers: nothing changed since, nothing written.
-    const version = planner.state.version;
-    expect(meetings.run()).toBe(second);
-    expect(planner.state.version).toBe(version);
+    execute({ type: 'task.updated', taskId: reviewId, patch: { channelId: 'mine' } }, { type: 'settings.updated', patch: { meetingChannels: { work: 'meet' } } });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(channelsNow(planner.state)).toEqual(['meet', 'mine']);
+    // Cleared by hand, the planning meeting keeps none through the run under way and the next.
+    execute({ type: 'task.updated', taskId: planningId, patch: { channelId: null } });
     release();
     await second;
-    expect([planner.state.tasks[planningId]!.channelId, planner.state.tasks[reviewId]!.channelId]).toEqual(['meet', 'mine']);
+    const third = meetings.run();
+    release();
+    await third;
+    expect(channelsNow(planner.state)).toEqual([null, 'mine']);
+    // Restarted over the same plan, the service fills nothing: no channel changed since it started.
+    await store.flush();
+    const restarted = new EventStore({ dir, commitDelayMs: 5 });
+    await restarted.init();
+    const again = new Planner(restarted, () => new Date(at(TODAY, 12)));
+    const version = again.state.version;
+    const after = new MeetingImport(again, { read: async () => ({ events: [planning, review], errors: [], reads: new Map() }) } as never, () => {}, () => Date.parse(at(TODAY, 12)));
+    await after.run();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect([again.state.version, ...channelsNow(again.state)]).toEqual([version, null, 'mine']);
+    await restarted.flush();
   });
 });
 
