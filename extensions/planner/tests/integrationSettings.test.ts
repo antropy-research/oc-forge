@@ -47,7 +47,7 @@ describe('integration settings', () => {
 describe('a task from an event, and a task merged in', () => {
   const event = { kind: 'event', id: 'me@example.com|primary|ev1', key: 'Google Calendar', url: 'https://www.google.com/calendar/event?eid=ev1', title: 'Standup', account: 'me@example.com', event: { calendarId: 'primary', start: '2026-10-29T16:00:00.000Z', end: '2026-10-29T16:15:00.000Z', allDay: false, invitees: true } };
   const created = (source: unknown) => validateCommand({ cmd: 'c2', type: 'task.created', task: { id: 't2', title: 'Standup', placement: { kind: 'day', date: '2026-10-29' }, position: 2048, source } }, state);
-  const subtasks = (items: unknown[]) => validateCommand({ cmd: 'c3', type: 'task.updated', taskId: 't1', patch: { subtasks: items } }, state);
+  const subtask = (item: unknown) => validateCommand({ cmd: 'c3', type: 'subtask.added', taskId: 't1', subtask: item }, state);
 
   test("an event task keeps its event's times and calendar, and whether it was added by auto-sync", () => {
     expect(created(event)).toBeNull();
@@ -57,9 +57,9 @@ describe('a task from an event, and a task merged in', () => {
   });
 
   test('a merged subtask keeps its notes, planned time and link; too long or malformed is refused', () => {
-    expect(subtasks([{ id: 's1', title: 'Budget', done: false, notes: 'Numbers', plannedMinutes: 15, source: { kind: 'email', id: 'm1', key: 'Gmail', url: 'https://mail.google.com/mail/u/0/#all/t1', account: 'me@example.com' } }])).toBeNull();
-    expect(subtasks([{ id: 's1', title: 'Budget', done: false, plannedMinutes: 15.5 }])).not.toBeNull();
-    expect(subtasks([{ id: 's1', title: 'Budget', done: false, notes: 'x'.repeat(40_001) }])).not.toBeNull();
-    expect(subtasks([{ id: 's1', title: 'Budget', done: false, source: { kind: 'fax', id: 'x' } }])).not.toBeNull();
+    expect(subtask({ id: 's1', title: 'Budget', done: false, notes: 'Numbers', plannedMinutes: 15, source: { kind: 'email', id: 'm1', key: 'Gmail', url: 'https://mail.google.com/mail/u/0/#all/t1', account: 'me@example.com' } })).toBeNull();
+    expect(subtask({ id: 's1', title: 'Budget', done: false, plannedMinutes: 15.5 })).not.toBeNull();
+    expect(subtask({ id: 's1', title: 'Budget', done: false, notes: 'x'.repeat(40_001) })).not.toBeNull();
+    expect(subtask({ id: 's1', title: 'Budget', done: false, source: { kind: 'fax', id: 'x' } })).not.toBeNull();
   });
 });

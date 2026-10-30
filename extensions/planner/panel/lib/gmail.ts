@@ -5,7 +5,7 @@
 import type { Command } from '../../src/domain/events.ts';
 import { DEFAULT_MAIL_FILTER, gmailActionKey, mailQuery, threadIdOf, type GmailLabel, type MailFilter, type MailThread } from '../../src/domain/gmail.ts';
 import type { GmailAction, PlannerState, Subtask, Task, TaskSourceRef } from '../../src/domain/types.ts';
-import { mergedDone, mergedImports, wasMerged } from '../../src/domain/merge.ts';
+import { mergedDone, mergedImports, subtasksChangedIn, wasMerged } from '../../src/domain/merge.ts';
 import type { Origin, PlannerClient } from './client.ts';
 import type { GoogleStore } from './google.ts';
 
@@ -184,11 +184,16 @@ export class GmailStore {
     // Only the surfaces with room for the question act; the Work Status frame and the background never do.
     if (origin !== 'user' || this.surface === 'status' || this.surface === 'background') return;
     const made = commands.flatMap((command) => (command.type === 'task.created' && command.task.source ? [command.task.source] : []));
+    const seen = new Set<string>();
     for (const command of commands) {
-      if (command.type === 'task.updated' && command.patch.subtasks) {
+      // Once a task, for all of a batch's changes to its subtasks.
+      const subtasksOf = subtasksChangedIn(command);
+      if (subtasksOf) {
+        if (seen.has(subtasksOf)) continue;
+        seen.add(subtasksOf);
         const mails = (subtasks: readonly Subtask[]) => subtasks.flatMap((subtask) => mailOfSource(subtask.source) ?? []);
-        this.automate('import', command.taskId, mails(mergedImports(before, after, command.taskId, made)), after);
-        this.automate('complete', command.taskId, mails(mergedDone(before.tasks[command.taskId], after.tasks[command.taskId])), after);
+        this.automate('import', subtasksOf, mails(mergedImports(before, after, subtasksOf, made)), after);
+        this.automate('complete', subtasksOf, mails(mergedDone(before.tasks[subtasksOf], after.tasks[subtasksOf])), after);
         continue;
       }
       const when = command.type === 'task.created' ? 'import' : command.type === 'task.completed' ? 'complete' : null;

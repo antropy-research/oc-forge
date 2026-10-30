@@ -3,8 +3,8 @@
 // in as a subtask that keeps its notes, planned time and integrated information; an item from an integration panel
 // merges straight in; merged items stay linked and synced (a Linear issue's or a GitHub item's state and title follow);
 // an event task neither merges nor takes one ("Cannot merge events"), so it has no subtasks at all; Convert to task gives
-// one back as a task.
-import type { EventBody } from './events.ts';
+// one back as a task. Each changes the subtasks one at a time, by identity (`subtask.*`).
+import { SUBTASK_PATCH_FIELDS, type EventBody, type SubtaskPatch, type SubtaskSeen } from './events.ts';
 import { positionAt, tasksIn } from './selectors.ts';
 import type { DateKey, PlannerState, Subtask, Task, TaskSourceRef } from './types.ts';
 
@@ -61,7 +61,7 @@ export const mergeTaskCommands = (state: PlannerState, draggedId: string, target
     ...(dragged.source ? { source: dragged.source } : {}),
   };
   return [
-    { type: 'task.updated', taskId: targetId, patch: { subtasks: [...target.subtasks, subtask] } },
+    { type: 'subtask.added', taskId: targetId, subtask },
     { type: 'task.deleted', taskId: draggedId },
   ];
 };
@@ -72,10 +72,14 @@ export const mergeItemCommands = (state: PlannerState, targetId: string, item: {
   if (!target || target.deletedAt) return [];
   if (isEventTask(target) || item.source.kind === 'event') return CANNOT_MERGE_EVENTS;
   if (target.subtasks.some((subtask) => subtask.source?.kind === item.source.kind && subtask.source.id === item.source.id)) return [];
-  return [{ type: 'task.updated', taskId: targetId, patch: { subtasks: [...target.subtasks, { id: newId(), title: item.title, done: false, source: item.source }] } }];
+  return [{ type: 'subtask.added', taskId: targetId, subtask: { id: newId(), title: item.title, done: false, source: item.source } }];
 };
 
-/** Convert to task: the subtask becomes a task again, right after its task, with what it kept (notes, planned time, link). */
+/**
+ * Convert to task: the subtask becomes a task again, right after its task, with what it kept (notes, planned time,
+ * link); renamed elsewhere since it was seen, the service refuses it (`subtaskConflict`), so the task never takes the
+ * old title.
+ */
 export const convertSubtaskCommands = (state: PlannerState, taskId: string, subtaskId: string, newId: () => string): EventBody[] => {
   const task = state.tasks[taskId];
   const subtask = task?.subtasks.find((item) => item.id === subtaskId);
@@ -83,7 +87,7 @@ export const convertSubtaskCommands = (state: PlannerState, taskId: string, subt
   const list = tasksIn(state, task.placement);
   const index = list.findIndex((item) => item.id === task.id);
   return [
-    { type: 'task.updated', taskId, patch: { subtasks: task.subtasks.filter((item) => item.id !== subtaskId) } },
+    { type: 'subtask.deleted', taskId, subtaskId, seen: { title: subtask.title } },
     {
       type: 'task.created',
       task: {
@@ -105,6 +109,23 @@ const sourceKey = (source: Pick<TaskSourceRef, 'kind' | 'id'>): string => `${sou
 /** A task made from an item merged before (Convert to task): no import, its item was imported when it was merged. */
 export const wasMerged = (before: PlannerState, source: Pick<TaskSourceRef, 'kind' | 'id'>): boolean =>
   Object.values(before.tasks).some((task) => task.subtasks.some((subtask) => subtask.source && sourceKey(subtask.source) === sourceKey(source)));
+
+/** The task whose subtasks a command changes (one added, changed, deleted or moved), else null. */
+export const subtasksChangedIn = (command: EventBody): string | null =>
+  command.type === 'subtask.added' || command.type === 'subtask.updated' || command.type === 'subtask.deleted' || command.type === 'subtask.moved' ? command.taskId : null;
+
+/**
+ * A subtask an automation changes (a merged item following its item), as a command: the fields that differ, with the
+ * title and done it had (`seen`), so a subtask renamed by hand meanwhile keeps its name (the service refuses it, and
+ * the next sync reads it again). Null when nothing differs.
+ */
+export const subtaskChange = (taskId: string, was: Subtask, next: Subtask): EventBody | null => {
+  const patch: Record<string, unknown> = {};
+  for (const field of SUBTASK_PATCH_FIELDS) if (next[field] !== undefined && JSON.stringify(next[field]) !== JSON.stringify(was[field])) patch[field] = next[field];
+  if (!Object.keys(patch).length) return null;
+  const seen: SubtaskSeen = { ...(patch.title !== undefined ? { title: was.title } : {}), ...(patch.done !== undefined ? { done: was.done } : {}) };
+  return { type: 'subtask.updated', taskId, subtaskId: was.id, patch: patch as SubtaskPatch, ...(Object.keys(seen).length ? { seen } : {}) };
+};
 
 /** Merged items a change checked off (a subtask with a link, done now and not before): their completion automations run. */
 export const mergedDone = (before: Task | undefined, after: Task | undefined): Subtask[] =>
@@ -145,17 +166,15 @@ export const subtaskSources = (state: PlannerState, kind: TaskSourceRef['kind'])
 export const planSubtaskSourceSync = (state: PlannerState, kind: TaskSourceRef['kind'], items: ReadonlyMap<string, { title: string; status: NonNullable<TaskSourceRef['status']>; closed: boolean }>): EventBody[] =>
   Object.values(state.tasks).flatMap((task): EventBody[] => {
     if (task.deletedAt || task.archivedAt) return [];
-    let changed = false;
-    const subtasks = task.subtasks.map((subtask) => {
+    return task.subtasks.flatMap((subtask): EventBody[] => {
       const source = subtask.source;
       const item = source?.kind === kind ? items.get(source.id) : undefined;
-      if (!source || !item) return subtask;
+      if (!source || !item) return [];
       const sameStatus = source.status?.name === item.status.name && source.status?.type === item.status.type;
       const title = subtask.title === (source.title ?? subtask.title) ? item.title : subtask.title;
       const done = subtask.done || item.closed;
-      if (sameStatus && source.title === item.title && title === subtask.title && done === subtask.done) return subtask;
-      changed = true;
-      return { ...subtask, title, done, source: { ...source, title: item.title, status: item.status } };
+      if (sameStatus && source.title === item.title && title === subtask.title && done === subtask.done) return [];
+      const body = subtaskChange(task.id, subtask, { ...subtask, title, done, source: { ...source, title: item.title, status: item.status } });
+      return body ? [body] : [];
     });
-    return changed ? [{ type: 'task.updated', taskId: task.id, patch: { subtasks } }] : [];
   });

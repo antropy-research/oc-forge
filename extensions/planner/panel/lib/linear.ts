@@ -7,7 +7,7 @@
 // it (its own filter, plus what its display hides), page after page until
 // Linear has no more; temporary filters go to Linear as an IssueFilter, so the
 // answer is complete. The Linear page and the side panels keep a list each.
-import { mergedDone, mergedImports, planSubtaskSourceSync, subtaskSources, wasMerged } from '../../src/domain/merge.ts';
+import { mergedDone, mergedImports, planSubtaskSourceSync, subtaskSources, subtasksChangedIn, wasMerged } from '../../src/domain/merge.ts';
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 import type { Command, EventBody } from '../../src/domain/events.ts';
 import {
@@ -1136,16 +1136,20 @@ export class LinearStore {
       if (this.surface !== 'status') this.set({ prompt });
     };
     const made = commands.flatMap((command) => (command.type === 'task.created' && command.task.source ? [command.task.source] : []));
+    const seen = new Set<string>();
     for (const command of commands) {
       // Issues merged into a task stay integrated (Sunsama's merge): checking one off, or merging one straight in from
-      // the panel, asks as the task's own would.
-      if (command.type === 'task.updated' && command.patch.subtasks) {
-        const ticked = mergedDone(before.tasks[command.taskId], after.tasks[command.taskId]).filter((subtask) => subtask.source?.kind === 'linear' && !isClosedType(subtask.source.status?.type));
-        const task = after.tasks[command.taskId];
+      // the panel, asks as the task's own would (once a task, for all of a batch's changes to its subtasks).
+      const subtasksOf = subtasksChangedIn(command);
+      if (subtasksOf) {
+        if (seen.has(subtasksOf)) continue;
+        seen.add(subtasksOf);
+        const ticked = mergedDone(before.tasks[subtasksOf], after.tasks[subtasksOf]).filter((subtask) => subtask.source?.kind === 'linear' && !isClosedType(subtask.source.status?.type));
+        const task = after.tasks[subtasksOf];
         if (task && ticked.length) this.completeIssues(task, false, ticked, settings, ask);
         if (settings.linearImportPrompt) {
-          for (const subtask of mergedImports(before, after, command.taskId, made)) {
-            if (subtask.source?.kind === 'linear') ask({ kind: 'import', taskId: command.taskId, key: subtask.source.key, subtaskId: subtask.id });
+          for (const subtask of mergedImports(before, after, subtasksOf, made)) {
+            if (subtask.source?.kind === 'linear') ask({ kind: 'import', taskId: subtasksOf, key: subtask.source.key, subtaskId: subtask.id });
           }
         }
         continue;

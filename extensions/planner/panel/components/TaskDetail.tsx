@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { EventBody, PlannerEvent, TaskPatch } from '../../src/domain/events.ts';
+import type { EventBody, PlannerEvent, SubtaskConflict, TaskPatch } from '../../src/domain/events.ts';
 import { BACKLOG_BUCKETS, type BacklogBucket, type Placement, type Priority, type Subtask, type Task } from '../../src/domain/types.ts';
 import { addDays, formatMinutes, isDateKey, monthDay } from '../../src/domain/dates.ts';
 import { parseDuration } from '../../src/domain/quickAdd.ts';
@@ -81,35 +81,89 @@ const StartPicker = ({ task }: { task: Task }) => {
   );
 };
 
+/** A subtask change the service found changed elsewhere since, as the section asks it: what, and Save mine. */
+interface SubtaskProblem {
+  /** The subtask it is about: a newer question about it replaces this one. */
+  id: string;
+  line: string;
+  mine: () => void;
+}
+
 /**
- * A task's subtasks changed as the plan has them now, read again first: the
- * list is written whole, so one added, ticked or renamed in another window
- * meanwhile stays. When the plan cannot be read, nothing is written (never on
- * this window's copy of the list), and it says so, to try again. `also`:
- * what goes with it in the same step.
+ * A task's subtasks changed one at a time, by identity (`subtask.*`): the
+ * service applies each to the plan as it has it then, so a subtask added,
+ * ticked or renamed in another window meanwhile stays. A tick or a rename
+ * says what it saw, a delete the title it saw: a subtask renamed or deleted
+ * elsewhere since is asked as an edit's conflict is (`problems`: Keep theirs,
+ * or Save mine), nothing of it written. Each resolves to that conflict, or
+ * null.
  */
-const useSubtasks = (taskId: string) => {
+const useSubtaskCommands = (task: Task) => {
   const { client } = usePlanner();
-  return async (change: (subtasks: Subtask[]) => Subtask[], also: EventBody[] = [], undo?: string) => {
-    let state;
-    try {
-      state = await client.refresh();
-    } catch (error) {
-      client.notify(`The subtasks were not changed: the task couldn't be read as it is now (${error instanceof Error ? error.message : String(error)}). Try again.`);
-      return;
-    }
-    const now = state.tasks[taskId];
-    if (now) await client.dispatch([...also, { type: 'task.updated', taskId, patch: { subtasks: change(now.subtasks) } }], undo ? { undo } : undefined);
+  const view = useView();
+  const [problems, setProblems] = useState<SubtaskProblem[]>([]);
+  const ask = (id: string, line: string, mine: () => void) => setProblems((list) => [...list.filter((item) => item.id !== id), { id, line, mine }]);
+  const settle = (id: string) => setProblems((list) => list.filter((item) => item.id !== id));
+  const send = (bodies: EventBody[], undo?: string) =>
+    new Promise<SubtaskConflict | null>((resolve) => {
+      let found: SubtaskConflict | null = null;
+      void client.dispatch(bodies, { ...(undo ? { undo } : {}), onConflict: (conflict) => (found = conflict) }).then(() => resolve(found));
+    });
+  /** Where a subtask is in this window's list: after the one before it (null: first). */
+  const placeOf = (subtask: Subtask) => {
+    const index = task.subtasks.findIndex((item) => item.id === subtask.id);
+    return index > 0 ? task.subtasks[index - 1]!.id : index === 0 ? null : undefined;
   };
+  /** Deleted elsewhere since: Save mine puts it back where it was, with this change. */
+  const deleted = (subtask: Subtask, yours: string, mine: Subtask, after: string | null | undefined) =>
+    ask(subtask.id, `${quoted(subtask.title)} was deleted elsewhere (yours: ${yours})`, () => void send([{ type: 'subtask.added', taskId: task.id, subtask: mine, after }]));
+  const tick = async (subtask: Subtask) => {
+    const done = !subtask.done;
+    const after = placeOf(subtask);
+    const conflict = await send([{ type: 'subtask.updated', taskId: task.id, subtaskId: subtask.id, patch: { done }, seen: { done: subtask.done } }]);
+    if (conflict && !conflict.now) deleted(subtask, done ? 'checked off' : 'unchecked', { ...subtask, done }, after);
+  };
+  const rename = async (subtask: Subtask, title: string, seen: string) => {
+    const after = placeOf(subtask);
+    const conflict = await send([{ type: 'subtask.updated', taskId: task.id, subtaskId: subtask.id, patch: { title }, seen: { title: seen } }]);
+    if (conflict && !conflict.now) deleted({ ...subtask, title: seen }, `renamed ${quoted(title)}`, { ...subtask, title }, after);
+    return conflict;
+  };
+  const remove = async (subtask: Subtask, seen = subtask.title) => {
+    const conflict = await send([{ type: 'subtask.deleted', taskId: task.id, subtaskId: subtask.id, seen: { title: seen } }]);
+    const now = conflict?.now;
+    if (now) ask(subtask.id, `${quoted(seen)} was renamed ${quoted(now.title)} elsewhere (yours: deleted)`, () => void remove(subtask, now.title));
+  };
+  /** ↗ Turn into a task: a task right after this one, the subtask gone, in one step Undo takes back. */
+  const toTask = async (subtask: Subtask) => {
+    const list = tasksIn(view.state, task.placement);
+    const position = positionAt(view.state, task.placement, list.findIndex((item) => item.id === task.id) + 1);
+    const conflict = await send(
+      [
+        { type: 'task.created', task: { id: newId(), title: subtask.title, placement: task.placement, position, channelId: task.channelId, folderId: task.folderId, objectiveId: task.objectiveId } },
+        { type: 'subtask.deleted', taskId: task.id, subtaskId: subtask.id, seen: { title: subtask.title } },
+      ],
+      'Subtask became a task',
+    );
+    const now = conflict?.now;
+    if (now) ask(subtask.id, `${quoted(subtask.title)} was renamed ${quoted(now.title)} elsewhere (yours: turned into a task)`, () => void toTask(now));
+  };
+  const add = (title: string) => send([{ type: 'subtask.added', taskId: task.id, subtask: { id: newId(), title, done: false } }]);
+  return { problems, settle, add, tick, rename, remove, toTask };
 };
 
-/** A subtask's title, edited in place over the title as it is (`useDraft`): renamed meanwhile too is asked. */
-const SubtaskTitle = ({ task, subtask }: { task: Task; subtask: Subtask }) => {
+/**
+ * A subtask's title, edited in place over the title as it is (`useDraft`): renamed meanwhile too is asked, here; deleted
+ * meanwhile, the section asks (`useSubtaskCommands`).
+ */
+const SubtaskTitle = ({ task, subtask, rename }: { task: Task; subtask: Subtask; rename: (subtask: Subtask, title: string, seen: string) => Promise<SubtaskConflict | null> }) => {
   const { client } = usePlanner();
-  const change = useSubtasks(task.id);
   const title = useDraft(
     subtask.title,
-    (value) => void change((subtasks) => subtasks.map((item) => (item.id === subtask.id ? { ...item, title: value } : item))),
+    async (value, seen) => {
+      const conflict = await rename(subtask, value, seen);
+      return conflict?.now ? { theirs: conflict.now.title } : null;
+    },
     async () => (await client.refresh()).tasks[task.id]?.subtasks.find((item) => item.id === subtask.id)?.title ?? subtask.title,
   );
   return (
@@ -136,16 +190,15 @@ const SubtaskTitle = ({ task, subtask }: { task: Task; subtask: Subtask }) => {
 };
 
 export const Subtasks = ({ task }: { task: Task }) => {
-  const view = useView();
   const [draft, setDraft] = useState('');
-  const change = useSubtasks(task.id);
+  const commands = useSubtaskCommands(task);
   // A calendar event task has no subtasks at all, as in Sunsama (merging is how they are made, and events don't merge):
   // no Add subtask, Sunsama's advice instead. Any it had before stay, to tick, rename, convert or delete.
   const event = isEventTask(task);
   const add = () => {
     const title = draft.trim();
     if (!title) return;
-    void change((subtasks) => [...subtasks, { id: newId(), title, done: false }]);
+    void commands.add(title);
     setDraft('');
   };
   const done = task.subtasks.filter((subtask) => subtask.done).length;
@@ -155,33 +208,26 @@ export const Subtasks = ({ task }: { task: Task }) => {
       <ul class="subtasks">
         {task.subtasks.map((subtask) => (
           <li key={subtask.id} class={subtask.done ? 'is-done' : ''}>
-            <input
-              type="checkbox"
-              checked={subtask.done}
-              aria-label={`Complete ${subtask.title}`}
-              onChange={() => void change((subtasks) => subtasks.map((item) => (item.id === subtask.id ? { ...item, done: !subtask.done } : item)))}
-            />
-            <SubtaskTitle task={task} subtask={subtask} />
-            <button
-              class="link"
-              aria-label={`Turn ${subtask.title} into a task`}
-              title="Turn into a task"
-              onClick={() => {
-                const list = tasksIn(view.state, task.placement);
-                const position = positionAt(view.state, task.placement, list.findIndex((item) => item.id === task.id) + 1);
-                void change(
-                  (subtasks) => subtasks.filter((item) => item.id !== subtask.id),
-                  [{ type: 'task.created', task: { id: newId(), title: subtask.title, placement: task.placement, position, channelId: task.channelId, folderId: task.folderId, objectiveId: task.objectiveId } }],
-                  'Subtask became a task',
-                );
-              }}
-            >
+            <input type="checkbox" checked={subtask.done} aria-label={`Complete ${subtask.title}`} onChange={() => void commands.tick(subtask)} />
+            <SubtaskTitle task={task} subtask={subtask} rename={commands.rename} />
+            <button class="link" aria-label={`Turn ${subtask.title} into a task`} title="Turn into a task" onClick={() => void commands.toTask(subtask)}>
               ↗
             </button>
-            <button class="link danger" aria-label={`Delete ${subtask.title}`} onClick={() => void change((subtasks) => subtasks.filter((item) => item.id !== subtask.id))}>×</button>
+            <button class="link danger" aria-label={`Delete ${subtask.title}`} onClick={() => void commands.remove(subtask)}>×</button>
           </li>
         ))}
       </ul>
+      {commands.problems.map((problem) => (
+        <ConflictBanner
+          key={problem.id}
+          lines={[problem.line]}
+          onTheirs={() => commands.settle(problem.id)}
+          onMine={() => {
+            commands.settle(problem.id);
+            problem.mine();
+          }}
+        />
+      ))}
       {event ? (
         <p class="hint subtasks-event">{EVENT_SUBTASKS_HINT}</p>
       ) : (
@@ -444,7 +490,7 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
         {planned.failed && <RetryBanner text={notCheckedText(planned.failed)} onRetry={planned.retry} />}
 
         <NotesField task={task} className="detail-notes" key={`notes-${task.id}`} />
-        <Subtasks task={task} />
+        <Subtasks task={task} key={`subtasks-${task.id}`} />
         {task.sessionRef && (
           <section class="detail-section" aria-label="From chat">
             <h3>From chat <span class="count">{task.sessionRef.title}</span></h3>

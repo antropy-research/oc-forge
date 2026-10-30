@@ -8,6 +8,12 @@ const where = (placement: Placement): string =>
 
 const PRIORITY = { urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' } as const;
 
+/** A subtask as its activity line names it: as the change saw it, else as it is now, else "a subtask" (deleted since). */
+const subtaskName = (state: PlannerState, taskId: string, subtaskId: string, seen?: string): string => {
+  const title = seen ?? state.tasks[taskId]?.subtasks.find((subtask) => subtask.id === subtaskId)?.title;
+  return title ? `“${title}”` : 'a subtask';
+};
+
 /** Does this event concern `taskId`? */
 export const touchesTask = (event: PlannerEvent, taskId: string): boolean => {
   if (event.type === 'task.created') return event.task.id === taskId;
@@ -34,6 +40,18 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
       });
       return parts.join(', ');
     }
+    case 'subtask.added':
+      return `updated subtasks: added “${event.subtask.title}”`;
+    case 'subtask.updated': {
+      const name = subtaskName(state, event.taskId, event.subtaskId, event.seen?.title);
+      if (event.patch.title !== undefined) return `updated subtasks: renamed ${name} to “${event.patch.title}”`;
+      if (event.patch.done !== undefined) return `updated subtasks: ${event.patch.done ? 'checked off' : 'unchecked'} ${name}`;
+      return `updated subtasks: updated ${name}`;
+    }
+    case 'subtask.deleted':
+      return `updated subtasks: deleted ${subtaskName(state, event.taskId, event.subtaskId, event.seen?.title)}`;
+    case 'subtask.moved':
+      return `updated subtasks: moved ${subtaskName(state, event.taskId, event.subtaskId)}`;
     case 'task.moved':
       return `moved this to ${where(event.placement)}`;
     case 'task.completed':

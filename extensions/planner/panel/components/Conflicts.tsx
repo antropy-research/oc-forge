@@ -5,7 +5,9 @@
 // there now, it says so and writes nothing (`RetryBanner`): unknown is never
 // taken for unchanged. For a Google task's form (`TaskConflict`,
 // `FreshnessError`) and for the Planner's own fields edited in place
-// (`useDraft`: a task's notes, title and planned time, a subtask's title).
+// (`useDraft`: a task's notes, title and planned time, a subtask's title),
+// and a subtask ticked, deleted or turned into a task over one renamed or
+// deleted elsewhere (TaskDetail's `useSubtaskCommands`, MergedSection).
 import { useState } from 'preact/hooks';
 import { GOOGLE_FIELDS, type FormField, type FormValues } from '../../src/domain/gtaskForm.ts';
 import { VISIBILITY_LABELS, keptTimeLabel } from '../../src/domain/gtaskKept.ts';
@@ -125,9 +127,12 @@ export const taskConflictLines = (conflict: Pick<TaskConflict, 'fields' | 'now' 
  * meanwhile too, as the plan has it then (`latest`), which is asked
  * (`conflict`: `theirs` drops the draft, `mine` saves it). When that cannot
  * be read, nothing is saved: the draft stays, with why (`failed`), and
- * `retry` reads again.
+ * `retry` reads again. `save` gets the value it replaces as read (`seen`);
+ * one the service checks against the plan as it is when it gets there (a
+ * subtask's title) may answer what it found instead, changed elsewhere in
+ * between, which is asked the same way.
  */
-export const useDraft = <T,>(value: T, save: (value: T) => void, latest: () => Promise<T>, same: (a: T, b: T) => boolean = Object.is) => {
+export const useDraft = <T,>(value: T, save: (value: T, seen: T) => void | Promise<{ theirs: T } | null>, latest: () => Promise<T>, same: (a: T, b: T) => boolean = Object.is) => {
   const [draft, setDraft] = useState<{ base: T; mine: T } | null>(null);
   const [conflict, setConflict] = useState<{ theirs: T; mine: T } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -136,6 +141,12 @@ export const useDraft = <T,>(value: T, save: (value: T) => void, latest: () => P
     setConflict(null);
     setFailed(null);
   };
+  const persist = (mine: T, seen: T) =>
+    void Promise.resolve(save(mine, seen)).then((found) => {
+      if (!found) return;
+      setDraft((current) => current ?? { base: found.theirs, mine });
+      setConflict({ theirs: found.theirs, mine });
+    });
   /** Editing ends (the field left, Enter): with `mine`, the draft's last value when the field gives it. */
   const end = async (mine?: T) => {
     if (!draft) return;
@@ -152,7 +163,7 @@ export const useDraft = <T,>(value: T, save: (value: T) => void, latest: () => P
       return;
     }
     if (same(now, draft.base) || same(now, typed)) {
-      if (!same(now, typed)) save(typed);
+      if (!same(now, typed)) persist(typed, now);
       return done();
     }
     setConflict({ theirs: now, mine: typed });
@@ -168,7 +179,7 @@ export const useDraft = <T,>(value: T, save: (value: T) => void, latest: () => P
     retry: () => void end(),
     theirs: done,
     mine: () => {
-      if (conflict) save(conflict.mine);
+      if (conflict) persist(conflict.mine, conflict.theirs);
       done();
     },
     /** The draft dropped (Escape): the value as it is shows. */

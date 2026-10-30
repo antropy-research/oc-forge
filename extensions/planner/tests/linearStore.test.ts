@@ -373,10 +373,11 @@ describe("Sunsama's prompts to update the status in Linear (round 12)", () => {
 
   test('an issue merged into a task asks when it is checked off there, and moves that issue; with "complete", it just moves', async () => {
     const triage: EventBody = { type: 'task.created', task: { id: 'triage', title: 'Triage', placement: { kind: 'day', date: '2026-10-26' }, position: 1024 } };
-    const merged = (done: boolean): EventBody => ({ type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 's1', title: 'issue 1', done, source: source(1, STATES[1]!) }] } });
+    const merged: EventBody = { type: 'subtask.added', taskId: 'triage', subtask: { id: 's1', title: 'issue 1', done: false, source: source(1, STATES[1]!) } };
+    const ticked: EventBody = { type: 'subtask.updated', taskId: 'triage', subtaskId: 's1', patch: { done: true }, seen: { done: false } };
     const asking = await ready();
-    asking.commit([triage, merged(false)]);
-    asking.commit([merged(true)]);
+    asking.commit([triage, merged]);
+    asking.commit([ticked]);
     const prompt = asking.store.getView().prompt!;
     expect(prompt).toEqual({ kind: 'complete', taskId: 'triage', key: 'HAR-1', subtaskId: 's1' });
     expect(asking.store.promptSource(prompt)?.id).toBe('i1');
@@ -385,23 +386,23 @@ describe("Sunsama's prompts to update the status in Linear (round 12)", () => {
     await asking.flush();
     expect(asking.moves()).toEqual([{ id: 'i1', stateId: 's-done' }]);
     const moving = await ready({ linearOnComplete: 'complete' });
-    moving.commit([triage, merged(false)]);
-    moving.commit([merged(true)]);
+    moving.commit([triage, merged]);
+    moving.commit([ticked]);
     await moving.flush();
     expect([moving.store.getView().prompt, moving.moves()]).toEqual([null, [{ id: 'i1', stateId: 's-done' }]]);
   });
 
   test("completing a task completes its issue and the issues merged into it, as checking each off would (not one checked off on its own, nor one closed); asked, once for all; reopening asks nothing", async () => {
     const triage: EventBody = { type: 'task.created', task: { id: 'triage', title: 'Triage', placement: { kind: 'backlog', bucket: 'later' } as never, position: 1024, source: source(1, STATES[1]!) } };
-    const merged = (aloneDone: boolean): EventBody => ({
-      type: 'task.updated',
-      taskId: 'triage',
-      patch: { subtasks: [{ id: 's2', title: 'issue 2', done: false, source: source(2, STATES[2]!) }, { id: 's100', title: 'issue 100', done: aloneDone, source: source(100, STATES[1]!) }, { id: 's3', title: 'issue 3', done: false, source: source(3, STATES[4]!) }] },
-    });
+    const merged: EventBody[] = [
+      { type: 'subtask.added', taskId: 'triage', subtask: { id: 's2', title: 'issue 2', done: false, source: source(2, STATES[2]!) } },
+      { type: 'subtask.added', taskId: 'triage', subtask: { id: 's100', title: 'issue 100', done: false, source: source(100, STATES[1]!) } },
+      { type: 'subtask.added', taskId: 'triage', subtask: { id: 's3', title: 'issue 3', done: false, source: source(3, STATES[4]!) } },
+    ];
     const moving = await ready({ linearOnComplete: 'complete' });
-    moving.commit([triage, merged(false)]);
+    moving.commit([triage, ...merged]);
     // HAR-100 checked off on its own first: moved then.
-    moving.commit([merged(true)]);
+    moving.commit([{ type: 'subtask.updated', taskId: 'triage', subtaskId: 's100', patch: { done: true }, seen: { done: false } }]);
     await moving.flush();
     expect(moving.moves()).toEqual([{ id: 'i100', stateId: 's-done' }]);
     moving.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-26' }]);
@@ -412,7 +413,7 @@ describe("Sunsama's prompts to update the status in Linear (round 12)", () => {
     expect(moving.moves().every((move) => move.stateId === 's-done')).toBe(true);
 
     const asking = await ready();
-    asking.commit([triage, merged(false)]);
+    asking.commit([triage, ...merged]);
     asking.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-26' }]);
     expect(asking.store.getView().prompt).toEqual({ kind: 'complete', taskId: 'triage', key: 'HAR-1 and 2 more', many: { own: true, subtaskIds: ['s2', 's100'] } });
     // Several issues, several teams maybe: no status picker, each to its team's Done.

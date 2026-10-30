@@ -1,5 +1,5 @@
 // Fold events into state. Pure apart from mutating the batch-local copy it creates.
-import { emptyState, googleTaskKey, ritualKey, type GoogleTaskKept, type PlannerState, type Task } from './types.ts';
+import { emptyState, googleTaskKey, ritualKey, type GoogleTaskKept, type PlannerState, type Subtask, type Task } from './types.ts';
 import type { NewTask, PlannerEvent } from './events.ts';
 import { daysBetween, zonedDateMinutes } from './dates.ts';
 import { samePlacement } from './selectors.ts';
@@ -37,6 +37,23 @@ const touch = (state: PlannerState, taskId: string, at: string, change: (task: T
   if (!task) return;
   state.tasks[taskId] = { ...change(task), updatedAt: at };
 };
+
+/** A task's subtasks changed by identity; a list left as it was (a subtask no longer there) leaves the task as it was. */
+const changeSubtasks = (state: PlannerState, taskId: string, at: string, change: (subtasks: Subtask[]) => Subtask[]): void => {
+  const task = state.tasks[taskId];
+  if (!task) return;
+  const subtasks = change(task.subtasks);
+  if (subtasks !== task.subtasks) state.tasks[taskId] = { ...task, subtasks, updatedAt: at };
+};
+
+/** A subtask put after another (`after`), first (null), or last (undefined, or after one no longer there). */
+const placeSubtask = (subtasks: readonly Subtask[], subtask: Subtask, after: string | null | undefined): Subtask[] => {
+  if (after === null) return [subtask, ...subtasks];
+  const index = after === undefined ? -1 : subtasks.findIndex((item) => item.id === after);
+  return index < 0 ? [...subtasks, subtask] : [...subtasks.slice(0, index + 1), subtask, ...subtasks.slice(index + 1)];
+};
+
+const hasSubtask = (subtasks: readonly Subtask[], id: string): boolean => subtasks.some((item) => item.id === id);
 
 /** Close the running timer into a time entry ending at `at`. */
 const stopTimer = (state: PlannerState, at: string, entryId: string): void => {
@@ -88,11 +105,29 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       createTask(state, event.task, event.at);
       return;
     case 'task.updated':
+      // An old log's `subtasks` (the whole list, as subtasks were written before `subtask.*`) replaces the list, as then.
       touch(state, event.taskId, event.at, (task) => ({
         ...task,
         ...event.patch,
         ...(event.patch.title !== undefined ? { title: event.patch.title.trim() } : {}),
       }));
+      return;
+    case 'subtask.added':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => (hasSubtask(subtasks, event.subtask.id) ? subtasks : placeSubtask(subtasks, event.subtask, event.after)));
+      return;
+    case 'subtask.updated':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) =>
+        hasSubtask(subtasks, event.subtaskId) ? subtasks.map((item) => (item.id === event.subtaskId ? { ...item, ...event.patch } : item)) : subtasks,
+      );
+      return;
+    case 'subtask.deleted':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => (hasSubtask(subtasks, event.subtaskId) ? subtasks.filter((item) => item.id !== event.subtaskId) : subtasks));
+      return;
+    case 'subtask.moved':
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => {
+        const subtask = subtasks.find((item) => item.id === event.subtaskId);
+        return subtask && event.after !== subtask.id ? placeSubtask(subtasks.filter((item) => item !== subtask), subtask, event.after) : subtasks;
+      });
       return;
     case 'task.moved': {
       // Dragging a card to another day drops its working sessions on the day it left;

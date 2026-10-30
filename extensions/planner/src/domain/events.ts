@@ -29,8 +29,22 @@ export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' |
 /** A pull request as gh shows it; the log adds when the Planner saw it. */
 export type SeenPullRequest = Omit<RunPullRequest, 'seenAt'>;
 
-export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'subtasks', 'source'] as const;
+export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'source'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
+
+/**
+ * What a `subtask.updated` sets; the subtask's other fields stay as the plan has them (a merged item keeps its notes,
+ * planned time and link, Sunsama's Merge tasks).
+ */
+export const SUBTASK_PATCH_FIELDS = ['title', 'done', 'notes', 'plannedMinutes', 'source'] as const;
+export type SubtaskPatch = Partial<Pick<Subtask, (typeof SUBTASK_PATCH_FIELDS)[number]>>;
+/** What the writer saw of the fields it sets (`subtaskConflict`). */
+export type SubtaskSeen = Partial<Pick<Subtask, 'title' | 'done'>>;
+
+/** What the service says to a whole subtask list from a window that predates subtask commands. */
+export const SUBTASKS_ONE_BY_ONE = 'Subtasks are changed one at a time now: reload the Planner and try again';
+/** What the service says when a subtask a command changes was changed elsewhere since (409, with `SubtaskConflict`). */
+export const SUBTASK_CHANGED = 'This subtask was changed in another window since';
 
 export type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
 export type ChannelPatch = Partial<Pick<Channel, 'name' | 'color' | 'context'>>;
@@ -44,6 +58,16 @@ export interface RolledTask {
 export type EventBody =
   | { type: 'task.created'; task: NewTask }
   | { type: 'task.updated'; taskId: string; patch: TaskPatch }
+  /**
+   * A task's subtasks, changed one at a time by identity: the service applies each to the plan as it has it then, so
+   * another window's change to another subtask, or to another field, stays. `after`: the subtask it goes after (null:
+   * first; none, or one no longer there: last). `seen`: what the writer saw (`subtaskConflict`). Logs from before
+   * these have `task.updated` with the whole list, replayed as it was.
+   */
+  | { type: 'subtask.added'; taskId: string; subtask: Subtask; after?: string | null }
+  | { type: 'subtask.updated'; taskId: string; subtaskId: string; patch: SubtaskPatch; seen?: SubtaskSeen }
+  | { type: 'subtask.deleted'; taskId: string; subtaskId: string; seen?: Pick<SubtaskSeen, 'title'> }
+  | { type: 'subtask.moved'; taskId: string; subtaskId: string; after: string | null }
   | { type: 'task.moved'; taskId: string; placement: Placement; position: number }
   | { type: 'task.completed'; taskId: string; on: DateKey }
   | { type: 'task.reopened'; taskId: string }
@@ -130,13 +154,28 @@ export const isPlacement = (value: unknown): value is Placement => {
   return false;
 };
 
-const isSubtasks = (value: unknown): value is Subtask[] =>
-  Array.isArray(value) && value.length <= 200 && value.every((item) =>
-    isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean' &&
-    // A task merged in keeps its notes, planned time and source (Sunsama's Merge tasks).
-    (item.notes === undefined || (typeof item.notes === 'string' && item.notes.length <= NOTES_MAX)) &&
-    (item.plannedMinutes === undefined || item.plannedMinutes === null || (Number.isInteger(item.plannedMinutes) && (item.plannedMinutes as number) >= 0 && (item.plannedMinutes as number) <= 24 * 60)) &&
-    (item.source === undefined || isSource(item.source)));
+/** A task has at most this many subtasks. */
+export const SUBTASKS_MAX = 200;
+
+const isSubtask = (item: unknown): item is Subtask =>
+  isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean' &&
+  // A task merged in keeps its notes, planned time and source (Sunsama's Merge tasks).
+  (item.notes === undefined || (typeof item.notes === 'string' && item.notes.length <= NOTES_MAX)) &&
+  (item.plannedMinutes === undefined || item.plannedMinutes === null || (Number.isInteger(item.plannedMinutes) && (item.plannedMinutes as number) >= 0 && (item.plannedMinutes as number) <= 24 * 60)) &&
+  (item.source === undefined || isSource(item.source));
+
+const isSubtasks = (value: unknown): value is Subtask[] => Array.isArray(value) && value.length <= SUBTASKS_MAX && value.every(isSubtask);
+
+/** A subtask patch: some of its fields, each as a subtask has it. */
+const subtaskPatchProblem = (patch: unknown): string | null => {
+  if (!isRecord(patch) || !Object.keys(patch).length) return 'patch must set a field of the subtask';
+  const unknown = Object.keys(patch).find((key) => !(SUBTASK_PATCH_FIELDS as readonly string[]).includes(key));
+  if (unknown) return `unknown field ${unknown}`;
+  return isSubtask({ id: 'patch', title: 'patch', done: false, ...patch }) ? null : 'subtask patch is invalid';
+};
+
+const isSeen = (value: unknown, fields: readonly string[]): boolean =>
+  value === undefined || (isRecord(value) && Object.entries(value).every(([key, item]) => fields.includes(key) && (key === 'done' ? typeof item === 'boolean' : isShortText(item, TITLE_MAX))));
 
 /** One of Gmail's actions; applying or removing a label names it. */
 const isGmailAction = (value: unknown): boolean =>
@@ -294,7 +333,8 @@ const validatePatch = (patch: unknown, channels: Record<string, Channel>, object
     else if (key === 'channelId' && !(value === null || (isId(value) && channels[value as string]))) return 'unknown channel';
     else if (key === 'objectiveId' && !(value === null || (isId(value) && objectives[value as string]))) return 'unknown objective';
     else if (key === 'folderId' && !(value === null || (isId(value) && folders[value as string] && !folders[value as string]!.deletedAt))) return 'unknown folder';
-    else if (key === 'subtasks' && !isSubtasks(value)) return 'subtasks are invalid';
+    // A whole list from a window that read it earlier would put back what another window changed since (`subtask.*`).
+    else if (key === 'subtasks') return SUBTASKS_ONE_BY_ONE;
     else if (key === 'source' && !(value === null || isSource(value))) return 'source is invalid';
     else if (!(PATCH_FIELDS as readonly string[]).includes(key)) return `unknown field ${key}`;
   }
@@ -499,15 +539,26 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef)) return 'sessionRef is invalid';
       return null;
     }
-    case 'task.updated': {
-      const error = needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+    case 'task.updated':
+      return needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+    case 'subtask.added': {
+      const error = needTask();
       if (error) return error;
+      const task = tasks[command.taskId as string]!;
+      if (!isSubtask(command.subtask)) return 'subtask is invalid';
+      if (task.subtasks.some((item) => item.id === (command.subtask as Subtask).id)) return 'subtask id already exists';
+      if (!(command.after === undefined || command.after === null || isId(command.after))) return 'after must be a subtask id or null';
       // A calendar event task has no subtasks at all (Sunsama): none is added to one; the ones it had before stay, to
       // tick, rename, convert or remove.
-      const task = tasks[command.taskId as string]!;
-      const subtasks = (command.patch as TaskPatch).subtasks;
-      return isEventTask(task) && subtasks?.some((subtask) => !task.subtasks.some((item) => item.id === subtask.id)) ? EVENT_NO_SUBTASKS : null;
+      if (isEventTask(task)) return EVENT_NO_SUBTASKS;
+      return task.subtasks.length < SUBTASKS_MAX ? null : `a task has at most ${SUBTASKS_MAX} subtasks`;
     }
+    case 'subtask.updated':
+      return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? subtaskPatchProblem(command.patch) ?? (isSeen(command.seen, ['title', 'done']) ? null : 'seen is invalid');
+    case 'subtask.deleted':
+      return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? (isSeen(command.seen, ['title']) ? null : 'seen is invalid');
+    case 'subtask.moved':
+      return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? (command.after === null || isId(command.after) ? null : 'after must be a subtask id or null');
     case 'task.moved':
       if (!isPlacement(command.placement)) return 'placement is invalid';
       if (typeof command.position !== 'number' || !Number.isFinite(command.position)) return 'position must be a number';
@@ -691,4 +742,30 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
 export const commandBody = (command: Command): EventBody => {
   const { cmd: _cmd, ...body } = command;
   return body as EventBody;
+};
+
+/**
+ * A subtask command that can't apply as it was meant to the plan as it is: the subtask was deleted elsewhere since
+ * (`now` null), or a field it sets was changed since to a value other than the one it sets (`now`: the subtask as it
+ * is). The service writes nothing of its batch and answers 409 with this and the plan.
+ */
+export interface SubtaskConflict {
+  taskId: string;
+  subtaskId: string;
+  now: Subtask | null;
+}
+
+/**
+ * The conflict a subtask command meets in the plan as it is, if any. A rename, or a delete, of a subtask renamed since
+ * it was seen is one; a tick never is (it sets done, so done changed since is done as it sets it: two windows ticking
+ * the same subtask agree). Changing or moving a subtask deleted since is one; deleting it again is not (it is gone).
+ */
+export const subtaskConflict = (body: EventBody, context: Pick<CommandContext, 'tasks'>): SubtaskConflict | null => {
+  if (body.type !== 'subtask.updated' && body.type !== 'subtask.deleted' && body.type !== 'subtask.moved') return null;
+  const now = context.tasks[body.taskId]?.subtasks.find((subtask) => subtask.id === body.subtaskId) ?? null;
+  if (!now) return body.type === 'subtask.deleted' ? null : { taskId: body.taskId, subtaskId: body.subtaskId, now };
+  const seen: SubtaskSeen = body.type === 'subtask.moved' ? {} : (body.seen ?? {});
+  const sets: SubtaskPatch = body.type === 'subtask.updated' ? body.patch : {};
+  const changed = (['title', 'done'] as const).some((field) => seen[field] !== undefined && now[field] !== seen[field] && now[field] !== sets[field]);
+  return changed ? { taskId: body.taskId, subtaskId: body.subtaskId, now } : null;
 };

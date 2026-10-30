@@ -226,6 +226,21 @@ var touch = (state, taskId, at, change) => {
     return;
   state.tasks[taskId] = { ...change(task), updatedAt: at };
 };
+var changeSubtasks = (state, taskId, at, change) => {
+  const task = state.tasks[taskId];
+  if (!task)
+    return;
+  const subtasks = change(task.subtasks);
+  if (subtasks !== task.subtasks)
+    state.tasks[taskId] = { ...task, subtasks, updatedAt: at };
+};
+var placeSubtask = (subtasks, subtask, after) => {
+  if (after === null)
+    return [subtask, ...subtasks];
+  const index = after === undefined ? -1 : subtasks.findIndex((item) => item.id === after);
+  return index < 0 ? [...subtasks, subtask] : [...subtasks.slice(0, index + 1), subtask, ...subtasks.slice(index + 1)];
+};
+var hasSubtask = (subtasks, id) => subtasks.some((item) => item.id === id);
 var stopTimer = (state, at, entryId) => {
   const timer = state.timer;
   if (!timer)
@@ -279,6 +294,21 @@ var applyInto = (state, event) => {
         ...event.patch,
         ...event.patch.title !== undefined ? { title: event.patch.title.trim() } : {}
       }));
+      return;
+    case "subtask.added":
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => hasSubtask(subtasks, event.subtask.id) ? subtasks : placeSubtask(subtasks, event.subtask, event.after));
+      return;
+    case "subtask.updated":
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => hasSubtask(subtasks, event.subtaskId) ? subtasks.map((item) => item.id === event.subtaskId ? { ...item, ...event.patch } : item) : subtasks);
+      return;
+    case "subtask.deleted":
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => hasSubtask(subtasks, event.subtaskId) ? subtasks.filter((item) => item.id !== event.subtaskId) : subtasks);
+      return;
+    case "subtask.moved":
+      changeSubtasks(state, event.taskId, event.at, (subtasks) => {
+        const subtask = subtasks.find((item) => item.id === event.subtaskId);
+        return subtask && event.after !== subtask.id ? placeSubtask(subtasks.filter((item) => item !== subtask), subtask, event.after) : subtasks;
+      });
       return;
     case "task.moved": {
       const before = state.tasks[event.taskId];
@@ -1080,7 +1110,10 @@ var EVENT_NO_SUBTASKS = "Calendar event tasks can't have subtasks";
 var isEventTask = (task) => task?.source?.kind === "event";
 
 // src/domain/events.ts
-var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "folderId", "objectiveId", "subtasks", "source"];
+var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "folderId", "objectiveId", "source"];
+var SUBTASK_PATCH_FIELDS = ["title", "done", "notes", "plannedMinutes", "source"];
+var SUBTASKS_ONE_BY_ONE = "Subtasks are changed one at a time now: reload the Planner and try again";
+var SUBTASK_CHANGED = "This subtask was changed in another window since";
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver", "tasks.recurred"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
@@ -1098,7 +1131,18 @@ var isPlacement = (value) => {
     return typeof value.bucket === "string" && BUCKET_IDS.has(value.bucket);
   return false;
 };
-var isSubtasks = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean" && (item.notes === undefined || typeof item.notes === "string" && item.notes.length <= NOTES_MAX) && (item.plannedMinutes === undefined || item.plannedMinutes === null || Number.isInteger(item.plannedMinutes) && item.plannedMinutes >= 0 && item.plannedMinutes <= 24 * 60) && (item.source === undefined || isSource(item.source)));
+var SUBTASKS_MAX = 200;
+var isSubtask = (item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean" && (item.notes === undefined || typeof item.notes === "string" && item.notes.length <= NOTES_MAX) && (item.plannedMinutes === undefined || item.plannedMinutes === null || Number.isInteger(item.plannedMinutes) && item.plannedMinutes >= 0 && item.plannedMinutes <= 24 * 60) && (item.source === undefined || isSource(item.source));
+var isSubtasks = (value) => Array.isArray(value) && value.length <= SUBTASKS_MAX && value.every(isSubtask);
+var subtaskPatchProblem = (patch) => {
+  if (!isRecord2(patch) || !Object.keys(patch).length)
+    return "patch must set a field of the subtask";
+  const unknown = Object.keys(patch).find((key) => !SUBTASK_PATCH_FIELDS.includes(key));
+  if (unknown)
+    return `unknown field ${unknown}`;
+  return isSubtask({ id: "patch", title: "patch", done: false, ...patch }) ? null : "subtask patch is invalid";
+};
+var isSeen = (value, fields) => value === undefined || isRecord2(value) && Object.entries(value).every(([key, item]) => fields.includes(key) && (key === "done" ? typeof item === "boolean" : isShortText(item, TITLE_MAX)));
 var isGmailAction = (value) => isRecord2(value) && GMAIL_ACTIONS.includes(value.kind) && (value.kind === "addLabel" || value.kind === "removeLabel" ? isShortText(value.label, 225) && value.label.trim().length > 0 : value.label === undefined);
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
 var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && (value.kind === "link" ? /^https?:\/\// : /^https:\/\//).test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due)) && (value.event === undefined || isRecord2(value.event) && isShortText(value.event.calendarId, 2000) && isInstant(value.event.start) && isInstant(value.event.end) && typeof value.event.allDay === "boolean" && typeof value.event.invitees === "boolean" && (value.event.auto === undefined || typeof value.event.auto === "boolean"));
@@ -1271,8 +1315,8 @@ var validatePatch = (patch, channels, objectives, folders) => {
       return "unknown objective";
     else if (key === "folderId" && !(value === null || isId(value) && folders[value] && !folders[value].deletedAt))
       return "unknown folder";
-    else if (key === "subtasks" && !isSubtasks(value))
-      return "subtasks are invalid";
+    else if (key === "subtasks")
+      return SUBTASKS_ONE_BY_ONE;
     else if (key === "source" && !(value === null || isSource(value)))
       return "source is invalid";
     else if (!PATCH_FIELDS.includes(key))
@@ -1518,14 +1562,29 @@ var validateCommand = (command, context) => {
         return "sessionRef is invalid";
       return null;
     }
-    case "task.updated": {
-      const error = needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+    case "task.updated":
+      return needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+    case "subtask.added": {
+      const error = needTask();
       if (error)
         return error;
       const task = tasks[command.taskId];
-      const subtasks = command.patch.subtasks;
-      return isEventTask(task) && subtasks?.some((subtask) => !task.subtasks.some((item) => item.id === subtask.id)) ? EVENT_NO_SUBTASKS : null;
+      if (!isSubtask(command.subtask))
+        return "subtask is invalid";
+      if (task.subtasks.some((item) => item.id === command.subtask.id))
+        return "subtask id already exists";
+      if (!(command.after === undefined || command.after === null || isId(command.after)))
+        return "after must be a subtask id or null";
+      if (isEventTask(task))
+        return EVENT_NO_SUBTASKS;
+      return task.subtasks.length < SUBTASKS_MAX ? null : `a task has at most ${SUBTASKS_MAX} subtasks`;
     }
+    case "subtask.updated":
+      return needTask() ?? (isId(command.subtaskId) ? null : "subtask needs an id") ?? subtaskPatchProblem(command.patch) ?? (isSeen(command.seen, ["title", "done"]) ? null : "seen is invalid");
+    case "subtask.deleted":
+      return needTask() ?? (isId(command.subtaskId) ? null : "subtask needs an id") ?? (isSeen(command.seen, ["title"]) ? null : "seen is invalid");
+    case "subtask.moved":
+      return needTask() ?? (isId(command.subtaskId) ? null : "subtask needs an id") ?? (command.after === null || isId(command.after) ? null : "after must be a subtask id or null");
     case "task.moved":
       if (!isPlacement(command.placement))
         return "placement is invalid";
@@ -1771,6 +1830,17 @@ var commandBody = (command) => {
   const { cmd: _cmd, ...body } = command;
   return body;
 };
+var subtaskConflict = (body, context) => {
+  if (body.type !== "subtask.updated" && body.type !== "subtask.deleted" && body.type !== "subtask.moved")
+    return null;
+  const now = context.tasks[body.taskId]?.subtasks.find((subtask) => subtask.id === body.subtaskId) ?? null;
+  if (!now)
+    return body.type === "subtask.deleted" ? null : { taskId: body.taskId, subtaskId: body.subtaskId, now };
+  const seen = body.type === "subtask.moved" ? {} : body.seen ?? {};
+  const sets = body.type === "subtask.updated" ? body.patch : {};
+  const changed = ["title", "done"].some((field) => seen[field] !== undefined && now[field] !== seen[field] && now[field] !== sets[field]);
+  return changed ? { taskId: body.taskId, subtaskId: body.subtaskId, now } : null;
+};
 
 // src/domain/recurrence.ts
 var RECURRENCE_HORIZON_DAYS = 7;
@@ -1957,6 +2027,24 @@ var inverseOne = (state, body) => {
         patch[key] = task[key];
       return [{ type: "task.updated", taskId: task.id, patch }];
     }
+    case "subtask.added":
+      return [{ type: "subtask.deleted", taskId: task.id, subtaskId: body.subtask.id }];
+    case "subtask.updated": {
+      const subtask = task.subtasks.find((item) => item.id === body.subtaskId);
+      const patch = {};
+      for (const key of Object.keys(body.patch))
+        if (subtask?.[key] !== undefined)
+          patch[key] = subtask[key];
+      return Object.keys(patch).length ? [{ type: "subtask.updated", taskId: task.id, subtaskId: body.subtaskId, patch }] : [];
+    }
+    case "subtask.deleted": {
+      const index = task.subtasks.findIndex((item) => item.id === body.subtaskId);
+      return index < 0 ? [] : [{ type: "subtask.added", taskId: task.id, subtask: task.subtasks[index], after: index ? task.subtasks[index - 1].id : null }];
+    }
+    case "subtask.moved": {
+      const index = task.subtasks.findIndex((item) => item.id === body.subtaskId);
+      return index < 0 ? [] : [{ type: "subtask.moved", taskId: task.id, subtaskId: body.subtaskId, after: index ? task.subtasks[index - 1].id : null }];
+    }
     default:
       return null;
   }
@@ -1987,6 +2075,30 @@ var comparable = (collection, field, value) => {
   return canonical(value);
 };
 var canonical = (value) => JSON.stringify(value, (_key, inner) => inner && typeof inner === "object" && !Array.isArray(inner) ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => a.localeCompare(b))) : inner) ?? "undefined";
+var listOf = (value) => Array.isArray(value) ? value : [];
+var subtasksChanged = (path, wasList, isList, willList, removed) => {
+  const [was, is, will] = [listOf(wasList), listOf(isList), listOf(willList)];
+  const byId = (list) => new Map(list.map((subtask) => [subtask.id, subtask]));
+  const [a, n, u] = [byId(was), byId(is), byId(will)];
+  const value = (map, id, field) => {
+    const subtask = map.get(id);
+    if (field === "there")
+      return String(Boolean(subtask));
+    return subtask ? comparable("tasks", field, subtask[field]) : "absent";
+  };
+  const changed = [];
+  for (const id of new Set([...a.keys(), ...n.keys(), ...u.keys()])) {
+    for (const field of ["there", ...SUBTASK_PATCH_FIELDS]) {
+      const since = value(n, id, field) !== value(a, id, field);
+      if (since && (removed || value(u, id, field) !== value(n, id, field)))
+        changed.push(`${path}/${id}/${field}`);
+    }
+  }
+  const throughout = (list) => list.flatMap((subtask) => a.has(subtask.id) && n.has(subtask.id) && u.has(subtask.id) ? [subtask.id] : []).join();
+  if (throughout(is) !== throughout(was) && (removed || throughout(will) !== throughout(is)))
+    changed.push(`${path}/order`);
+  return changed;
+};
 var changedSince = (after, now, undone) => {
   const changed = [];
   for (const collection of COLLECTIONS) {
@@ -2002,6 +2114,10 @@ var changedSince = (after, now, undone) => {
       for (const field of new Set([...Object.keys(a ?? {}), ...Object.keys(n ?? {}), ...Object.keys(u ?? {})])) {
         if (ignored(collection, field))
           continue;
+        if (collection === "tasks" && field === "subtasks") {
+          changed.push(...subtasksChanged(`tasks/${id}/subtasks`, a?.subtasks, n?.subtasks, u?.subtasks, removed));
+          continue;
+        }
         const since = comparable(collection, field, n?.[field]) !== comparable(collection, field, a?.[field]);
         if (removed) {
           if (since && !(linked && field === "dueDate"))
@@ -2044,6 +2160,14 @@ var summarize = (events, titleOf) => {
       return `Add task: ${event.task.title}`;
     case "task.updated":
       return `Edit task: ${titleOf(event.taskId)}`;
+    case "subtask.added":
+      return `Add subtask: ${event.subtask.title} (${titleOf(event.taskId)})`;
+    case "subtask.updated":
+      return `Edit subtask: ${titleOf(event.taskId)}`;
+    case "subtask.deleted":
+      return `Delete subtask: ${titleOf(event.taskId)}`;
+    case "subtask.moved":
+      return `Move subtask: ${titleOf(event.taskId)}`;
     case "task.moved":
       return `Move task: ${titleOf(event.taskId)} → ${event.placement.kind === "day" ? event.placement.date : event.placement.bucket}`;
     case "task.completed":
@@ -2207,6 +2331,9 @@ class Planner {
       const error = validateCommand(command, working);
       if (error)
         return { ok: false, error, index };
+      const conflict = subtaskConflict(command, working);
+      if (conflict)
+        return { ok: false, error: SUBTASK_CHANGED, index, conflict };
       const event = this.toEvent(commandBody(command), command.cmd);
       events.push(event);
       working = applyEvents(working, [event]);
@@ -2229,6 +2356,9 @@ class Planner {
       const error = validateCommand(command, working);
       if (error)
         return { ok: false, reason: "changed", changed: [error] };
+      const conflict = subtaskConflict(body, working);
+      if (conflict)
+        return { ok: false, reason: "changed", changed: [`tasks/${conflict.taskId}/subtasks/${conflict.subtaskId}`] };
       const event = this.toEvent(body, command.cmd);
       events.push(event);
       working = applyEvents(working, [event]);
@@ -8194,7 +8324,10 @@ ${event.location}`.toLocaleLowerCase().includes(needle));
       await sync.idle();
       const result = planner.execute(body.commands, { undo: body.undo === true });
       if (!result.ok) {
-        json(res, 400, { error: result.error, index: result.index });
+        if (result.conflict)
+          json(res, 409, { error: result.error, index: result.index, conflict: result.conflict, ...snapshot() });
+        else
+          json(res, 400, { error: result.error, index: result.index });
         return;
       }
       json(res, 200, { applied: result.applied, ...snapshot() });
