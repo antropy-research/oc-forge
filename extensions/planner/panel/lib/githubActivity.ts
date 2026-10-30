@@ -47,6 +47,24 @@ export const readGitHubActivity = async (client: Pick<PlannerClient, 'call'>, fr
 };
 
 const kept = new Map<string, { at: number; read: ActivityRead }>();
+/** Each day's latest read asked for: one asked before it (a Refresh's, a day gone back to) answering last is not kept. */
+const asking = new Map<string, number>();
+let asks = 0;
+
+/** A day's activity, kept a few minutes for going back to it, unless the day was asked for again meanwhile. */
+export const readAndKeep = async (client: Pick<PlannerClient, 'call'>, key: string, from: string, to: string): Promise<ActivityRead> => {
+  const ask = ++asks;
+  asking.set(key, ask);
+  const read = await readGitHubActivity(client, from, to);
+  if (asking.get(key) === ask) kept.set(key, { at: Date.now(), read });
+  return read;
+};
+
+/** What `readAndKeep` kept of a day, while it is fresh. */
+export const keptRead = (key: string): ActivityRead | null => {
+  const entry = kept.get(key);
+  return entry && Date.now() - entry.at < KEEP_MS ? entry.read : null;
+};
 
 export interface ActivityState {
   loading: boolean;
@@ -59,10 +77,7 @@ export interface ActivityState {
 /** A day's GitHub work in `zone`, read while `enabled` (GitHub is connected). */
 export const useGitHubActivity = (client: Pick<PlannerClient, 'call'>, date: DateKey, zone: string, enabled: boolean): ActivityState => {
   const key = `${date}|${zone}`;
-  const fresh = () => {
-    const entry = kept.get(key);
-    return entry && Date.now() - entry.at < KEEP_MS ? entry.read : null;
-  };
+  const fresh = () => keptRead(key);
   const [state, setState] = useState<{ key: string; loading: boolean; read: ActivityRead | null; error: string | null }>(() => ({ key, loading: false, read: fresh(), error: null }));
   const [asked, setAsked] = useState(0);
   useEffect(() => {
@@ -75,9 +90,8 @@ export const useGitHubActivity = (client: Pick<PlannerClient, 'call'>, date: Dat
     let live = true;
     // Another day's activity never shows under this one while it loads.
     setState((current) => ({ key, loading: true, read: current.key === key ? current.read : null, error: null }));
-    readGitHubActivity(client, instantAt(date, 0, zone), instantAt(addDays(date, 1), 0, zone))
+    readAndKeep(client, key, instantAt(date, 0, zone), instantAt(addDays(date, 1), 0, zone))
       .then((read) => {
-        kept.set(key, { at: Date.now(), read });
         if (live) setState({ key, loading: false, read, error: null });
       })
       .catch((error) => {

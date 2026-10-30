@@ -25,6 +25,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { defaultGithubWorld, ghConfigFiles } from './fakeGithub.mjs';
+import { watchPlannerRequests } from './drain.mjs';
 
 const base = process.argv[2] ?? 'http://100.116.120.66:35310';
 const out = process.argv[3] ?? '/tmp/opencode/planner-agentpr';
@@ -82,6 +83,8 @@ const restoreContainer = () => {
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+// Closed only once no Planner request is on its way (drain.mjs, as the harness's close()).
+const drain = watchPlannerRequests(context);
 const page = await context.newPage();
 const shot = (name) => page.screenshot({ path: join(out, `${name}.png`) });
 const serviceCall = async (method, path, body) => {
@@ -320,7 +323,7 @@ try {
   } catch (error) {
     console.log(`INFO container restore: ${String(error).split('\n')[0]}`);
   }
-  await browser.close();
+  await drain.close(browser, { label: 'agentpr.mjs' });
 }
 const failed = results.filter((result) => !result.ok);
 console.log(`${results.length - failed.length}/${results.length} checks passed; screenshots in ${out}`);

@@ -241,7 +241,7 @@ const More = ({ listId, count }: { listId: ListId; count: number }) => {
   return (
     <div class="lin-more" ref={sentinel}>
       <span class="muted" aria-live="polite">{count} loaded · Linear has more</span>
-      <button type="button" class="lin-button" disabled={list.loadingMore} onClick={() => void linear.loadMore(listId)}>{list.loadingMore ? 'Loading…' : 'Load more'}</button>
+      <button type="button" class="lin-button" disabled={list.loadingMore || list.loading} onClick={() => void linear.loadMore(listId)}>{list.loadingMore || list.loading ? 'Loading…' : 'Load more'}</button>
     </div>
   );
 };

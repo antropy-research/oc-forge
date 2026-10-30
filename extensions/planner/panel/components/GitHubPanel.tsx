@@ -154,8 +154,8 @@ export const GitHubItems = () => {
         <div class="gh-more" role="status" aria-label="GitHub items shown">
           <span class="hint">{gv.next ? `Showing ${gv.items.length} of ${gv.total}` : `All ${gv.items.length} shown`}</span>
           {gv.next && (
-            <button class="link" disabled={gv.loadingMore} onClick={() => void github.loadMore()}>
-              {gv.loadingMore ? 'Loading…' : 'Load more'}
+            <button class="link" disabled={gv.loadingMore || gv.loading} onClick={() => void github.loadMore()}>
+              {gv.loadingMore || gv.loading ? 'Loading…' : 'Load more'}
             </button>
           )}
           {gv.total > SEARCH_MAX && <p class="hint">GitHub's search gives the first {SEARCH_MAX.toLocaleString('en-US')} of {gv.total.toLocaleString('en-US')}: narrow it with words or repo:owner/name.</p>}

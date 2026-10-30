@@ -269,6 +269,62 @@ fake GitHub), `linearStore.test.ts`, `pastedUrl.test.ts` and `sunsama.mjs` (its 
 | Google Calendar, Google Tasks | | Round 11 | [Google's limits, one by one](#googles-limits-one-by-one) |
 | Daily planning's sources | | | The same panels as the board's (Linear, GitHub, Gmail, Google Tasks), so the same paging; its meetings are the day's events |
 
+## A read that a newer one overtakes
+
+Review 12 found GitHub's Load more stuck: with page two on its way, another search showed its own first page, but the
+list stayed "Showing 50 of 101 / Loading…", disabled, and Refresh did not help. The superseded Load more returned
+without clearing its flag, and nothing else cleared it. Every read that a newer one can overtake was audited for the
+same thing. The rule now: an older answer, or its error, never shows over a newer one's; nothing is left loading; and
+a Load more button says "Loading…" while any read of its list is under way.
+
+| Read | Before | Now | Checked by |
+|---|---|---|---|
+| GitHub: the source's list, and its Load more (`panel/lib/github.ts`) | Another search, repository or list kind, or Refresh, during a Load more: "Loading…" for good. During a Refresh the button said Load more and did nothing. The 5-minute refresh could drop a Load more the user asked for | Another list (`replace`) or Refresh drops what was under way for the one before, its Load more flag with it; a late page changes nothing. The 5-minute refresh waits for a Load more | `github.test.ts` (each change, the old page answering before and after the new one, an old error, Load more during a Refresh, the 5-minute refresh); `sunsama.mjs`'s GitHub part at 1440 and 1024: each change during a held Load more, then the list's own Load more to #101, planned |
+| Linear: issue lists (`loadList`, `loadMore`) | A newer read cleared `loadingMore` only when it succeeded; one that failed (a view gone) left it set. A workspace taken off during Load more got its page back into the list. The button said Load more, doing nothing, while the list was read again | A read clears it as it starts. A page of a workspace taken off is dropped, its cursor with it. "Loading…" while the list is read | `linearStore.test.ts` |
+| Linear: saved views (`loadViews`, Load more views) | Read again during Load more views, the old page joined the views read since (a view deleted in Linear came back); an older read could replace a newer one | The newest read stands; Load more views adds only to the views it was asked for | `linearStore.test.ts` |
+| Linear: projects | Right as is: one flag for both reads; Load more projects waits for a read; a newer read drops an older Load more and clears the flag itself | A workspace taken off: its page is dropped, as for issue lists | Reading |
+| Linear: favorites; issue options and filter catalogs | Right as is: favorites come with the views' read (its guard now). Options and catalogs have no paging control and no loading flag: they are read whole and cached per team or workspace, and two reads at once read the same | — | — |
+| Gmail: a search and Load more messages (`searchMail`) | A search left behind that failed showed its error over the newer one, and cleared its loading. Refresh during Load more let the old page join the list read again. An account gone during a search left the list loading (the panel searches only when nothing is), with the old account's cursor | The newest search's answer stands. Another account clears loading and the cursor, so the panel searches it | `superseded.test.ts` |
+| Gmail: an email task's thread (`loadThread`) | Two reads at once (after an action): the older answer, or its error, could show last | The newest read of each thread stands | `superseded.test.ts` |
+| Google Tasks: the Tasks panel's list (`refreshTasks`) | The older of two reads could show over the newer; a failed read left behind showed its error | The newest read stands | `superseded.test.ts` |
+| Google Tasks: the Tasks view's lists (`loadBoard`) | Two reads at once (after changes made there): the older answer replaced the newer, and was followed up (series, moves) | The newest read of each list shows, and only it is followed up | `superseded.test.ts` |
+| Google Drive: More files in the attachment picker | A search typed while More files was on its way: the page joined the new search's files and set its cursor. Clicked again while loading, it asked again | Dropped once the search changed; "Loading…", disabled, while on its way | Reading only: the picker's state is a component's, and the unit tests have no DOM. `tasks-calendar.mjs`'s `advanced` part runs the picker |
+| Google Calendar: event search; an event's declined meetings | Right as is: one request a query, dropped by its effect's cleanup when another query comes; no paging (Google's "more" says to narrow the search) | — | — |
+| Daily highlights: GitHub activity (`readAndKeep`) | A day's read is kept a few minutes for going back to it: one asked before a Refresh, answering last, replaced the newer one in what was kept | What is kept is the read asked for last | `superseded.test.ts` |
+| The agents and models to assign to (`loadCatalog`) | Look again during a read: the older answer could show last. Another folder before the models came: the first folder's follow-up read it again, over the second | The newest read stands; only it reads the models again | `superseded.test.ts` |
+| Other effects with a `live` flag (the calendar's feed, oc-forge's state) | Right as is: an effect's cleanup drops what it asked for | — | — |
+
+## The journeys across midnight
+
+`sunsama.mjs` read its dates once, at the start. A run that crossed midnight in Los Angeles compared the plan with
+yesterday's dates, then waited for a menu item, "Plan HAR-3 on Saturday, October 31", that had become "Tomorrow".
+Each phase now reads its dates as it begins: a part at a size, or the main flow. Before that it waits out any
+midnight less than `SUNSAMA_MIDNIGHT_MARGIN_MIN` minutes away (default 20; a phase takes a few minutes), so no phase
+crosses one (`tests/e2e/days.mjs`). The browser's zone stays Los Angeles, with its daylight saving and its midnights;
+`SUNSAMA_ZONE` picks another one for every part and the main flow. The product's own day logic is tested as before:
+each phase compares the day the Planner shows with the one the journey computes for that zone.
+
+| Journey | Its dates | Now |
+|---|---|---|
+| `sunsama.mjs` | Read once at the start; Los Angeles hard-coded in two places. Its GitHub part dates the day's work at today's hours, and the Repository choice's order then held only after 4 PM (before, that work was still to come and outranked the repository meant to be the latest) | Read per phase, after `waitOutMidnight`; one zone, `SUNSAMA_ZONE`. The latest repository is updated after the end of today |
+| `calendar.mjs` | Today read once, for a run of about 20 minutes | Waits out a midnight less than 30 minutes away, then reads today |
+| `linear.mjs` | `dayKey` read the clock at each use, in steps of 24 hours (on a 25-hour day such as November 1, "tomorrow" in its first hour was today) | Today read once at the start, after waiting out a midnight less than 10 minutes away; calendar days from it |
+| `run.mjs` | Today from the plan's first read, for the rest of the run | Waits out a midnight less than 30 minutes away in the plan's zone, then reads it again (not run here: it uses the installed Planner) |
+| `forge.mjs` | Today from its plan, for a run of a minute | Waits out a midnight less than 10 minutes away in the plan's zone |
+| `undo.mjs` | Today read once; its tasks are seeded there and looked for in the column marked today | The same assumption. The file belongs to the subtask work under way, so it is left to it: the same `waitOutMidnight` before reading today |
+| `smoke.mjs` | No dates | — |
+| `agentpr.mjs` | Adds its task in the column marked today and finds it there seconds later; no stored date | — |
+| `tasks-calendar.mjs` | Already runs in a zone where it is between 10 AM and 10 PM | — |
+
+## A journey's clean shutdown
+
+`harness.mjs`'s `close()` waits until the Planner's requests have been taken by its routes, plus a moment of quiet,
+before closing (9ed53cf): a request still paused for a route when the page or the routes go reaches the real service.
+`run.mjs`, `agentpr.mjs` and `forge.mjs` do not use the harness. They now close through `tests/e2e/drain.mjs`, attached
+right after `newContext`: it waits until no Planner request is in flight (each answered, by its route or the service,
+or failed) and none was sent for 1.5 s, at most 15 s; then it closes the pages while the routes still answer, removes
+the routes, and closes the browser.
+
 ## Sunsama's integration pages, behaviour by behaviour
 
 Round 12's inventory of help.sunsama.com's integration pages for the sources the Planner has

@@ -562,6 +562,8 @@ export class LinearStore {
     let error: string | null = null;
     settled.forEach((result, index) => {
       const workspaceId = cursors[index]![0];
+      // A workspace taken off meanwhile: its page is no longer the list's.
+      if (!this.workspace(workspaceId)) return;
       if (result.status === 'rejected') {
         error = messageOf(result.reason);
         more[workspaceId] = cursors[index]![1];
@@ -620,6 +622,7 @@ export class LinearStore {
     const more: Record<string, string> = {};
     settled.forEach((result, index) => {
       const [workspaceId, after] = pending[index]!;
+      if (!this.workspace(workspaceId)) return;
       if (result.status === 'rejected') {
         more[workspaceId] = after;
         this.set({ error: messageOf(result.reason) });
@@ -677,7 +680,9 @@ export class LinearStore {
     await this.loadKeyWorkspaces();
     const keep = <T extends { workspaceId?: string }>(items: T[]) => items.filter((item) => item.workspaceId !== id);
     const fixList = (list: IssueList): IssueList =>
-      (list.source.kind === 'view' || list.source.kind === 'project') && list.source.workspaceId === id ? emptyList() : { ...list, issues: keep(list.issues), projects: list.projects ? keep(list.projects) : null };
+      (list.source.kind === 'view' || list.source.kind === 'project') && list.source.workspaceId === id
+        ? emptyList()
+        : { ...list, issues: keep(list.issues), projects: list.projects ? keep(list.projects) : null, more: Object.fromEntries(Object.entries(list.more).filter(([workspaceId]) => workspaceId !== id)) };
     const catalogs = { ...this.view.catalogs };
     delete catalogs[id];
     this.set({
@@ -1271,7 +1276,8 @@ export class LinearStore {
     await this.restoring;
     const seq = ++this.listSeq[id];
     let list = this.list(id);
-    this.patchList(id, { loading: true, error: null });
+    // A Load more still on its way belongs to the read before this one: dropped when it answers, its flag here.
+    this.patchList(id, { loading: true, loadingMore: false, error: null });
     try {
       if (list.source.kind === 'view' && (!list.view || list.view.id !== list.source.id || refreshing)) {
         const workspaceId = list.source.workspaceId;
@@ -1399,8 +1405,11 @@ export class LinearStore {
 
   /** Saved views and favorites of every workspace; optional, My issues works without. */
   private async loadViews(): Promise<void> {
+    const seq = ++this.viewsSeq;
     const workspaces = this.view.workspaces;
     const settled = await Promise.allSettled(workspaces.map((workspace) => this.fetchViewsIn(workspace.id)));
+    // A newer read of them since: its answer stands.
+    if (seq !== this.viewsSeq) return;
     const views: LinearSavedView[] = [];
     const favorites: LinearFavorite[] = [];
     const more: Record<string, string> = {};
@@ -1445,12 +1454,15 @@ export class LinearStore {
     const pending = Object.entries(this.view.viewsMore);
     if (!pending.length || this.loadingViews) return;
     this.loadingViews = true;
+    const shown = this.view.views;
     try {
       const settled = await Promise.allSettled(
         pending.map(([workspaceId, after]) =>
           readPages<LinearSavedView>((cursor) => this.graphqlIn<{ customViews: Page<LinearSavedView> }>(workspaceId, VIEWS_QUERY, { after: cursor }).then((data) => data.customViews), { after, maxPages: MAX_VIEW_PAGES }),
         ),
       );
+      // The views read again meanwhile, or a workspace's taken off: these pages follow a list no longer shown.
+      if (this.view.views !== shown) return;
       const known = new Set(this.view.views.map((view) => `${view.workspaceId}:${view.id}`));
       const views = [...this.view.views];
       const more: Record<string, string> = {};
@@ -1475,6 +1487,8 @@ export class LinearStore {
   }
 
   private loadingViews = false;
+  /** The saved views being read: an older read's answer (`loadViews`) is dropped. */
+  private viewsSeq = 0;
 
   private async fetchCatalog(workspaceId: string): Promise<FilterCatalog> {
     // What Linear has more of than this read (its bound of pages): the filter menu says so.

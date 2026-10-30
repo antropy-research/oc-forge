@@ -245,3 +245,142 @@ describe("the GitHub source's list: Load more, Refresh, words", () => {
     expect(asked.filter((call) => call.startsWith('POST'))).toEqual(['POST /github/items 100', 'POST /github/items 100', 'POST /github/items 30']);
   });
 });
+
+describe('a list changed while its Load more is on the way (round 12 review, P1-2)', () => {
+  const make = (repo: string, word: string, number: number, kind: GitHubItem['kind'] = 'issue'): GitHubItem => ({
+    id: `${repo}#${number}`, kind, repo, number, key: `${repo}#${number}`, title: `${word} ${number}`, url: `https://github.com/${repo}/${kind === 'pull' ? 'pull' : 'issues'}/${number}`, state: 'OPEN', draft: false, updatedAt: '2026-10-24T10:00:00Z',
+  });
+  const hundredAndOne = (repo: string, word: string, kind?: GitHubItem['kind']) => Array.from({ length: 101 }, (_, n) => make(repo, word, n + 1, kind));
+  /**
+   * The service's lists, 50 a page, cursors as offsets: assigned has 101 "beta" issues of acme/beta and 101 "alpha"
+   * ones of acme/app; review has 101 "alpha" pull requests of acme/pulls. A request `hold` picks waits until the test
+   * answers it or fails it.
+   */
+  const panel = () => {
+    const lists: Record<string, GitHubItem[]> = { assigned: [...hundredAndOne('acme/beta', 'beta'), ...hundredAndOne('acme/app', 'alpha')], review: hundredAndOne('acme/pulls', 'alpha', 'pull'), mine: [] };
+    const held: { path: string; answer: () => void; fail: (error: Error) => void }[] = [];
+    const asked: string[] = [];
+    const client = {
+      getView: () => ({ state: foldEvents([]) }),
+      call: async (_method: string, path: string) => {
+        asked.push(path);
+        if (hold(path)) await new Promise<void>((answer, fail) => held.push({ path, answer, fail }));
+        const query = new URL(path, 'http://x').searchParams;
+        const words = (query.get('q') ?? '').split(' ').filter(Boolean);
+        const matching = lists[query.get('kind')!]!.filter((item) => words.every((word) => (word.startsWith('repo:') ? item.repo === word.slice(5) : item.title.includes(word))));
+        const from = Number(query.get('after') ?? 0);
+        return { items: matching.slice(from, from + 50), total: matching.length, next: from + 50 < matching.length ? String(from + 50) : null };
+      },
+      dispatch: async () => {},
+    } as unknown as ConstructorParameters<typeof GitHubStore>[0];
+    let hold = (path: string) => path.includes('after=');
+    const store = new GitHubStore(client, 'page');
+    (store as unknown as { view: { status: unknown } }).view.status = { available: true, login: 'me', message: null };
+    return { store, held, asked, holdWhen: (next: (path: string) => boolean) => (hold = next) };
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const shown = (store: GitHubStore) => {
+    const view = store.getView();
+    return { count: view.items.length, first: view.items[0]?.key, last: view.items.at(-1)?.key, next: view.next, loading: view.loading, loadingMore: view.loadingMore, error: view.error };
+  };
+
+  const changes = [
+    { name: 'a new search', from: '', change: (store: GitHubStore) => store.setText('alpha'), repo: 'acme/app' },
+    { name: 'another repository', from: '', change: (store: GitHubStore) => store.setText(withRepo(store.getView().text, 'acme/app')), repo: 'acme/app' },
+    { name: 'another list kind', from: '', change: (store: GitHubStore) => store.setKind('review'), repo: 'acme/pulls' },
+    { name: 'Refresh', from: 'beta', change: (store: GitHubStore) => void store.refresh(), repo: 'acme/beta' },
+  ];
+  for (const { name, from, change, repo } of changes) {
+    for (const order of ['before', 'after'] as const) {
+      test(`${name} during Load more, its old page answering ${order} the new first page: the new list's own Load more reaches #101`, async () => {
+        const { store, held, holdWhen } = panel();
+        if (from) store.setText(from);
+        await store.refresh();
+        expect(shown(store)).toMatchObject({ count: 50, next: '50', loadingMore: false });
+        const old = store.loadMore();
+        await settle();
+        expect([store.getView().loadingMore, held.map((call) => call.path)]).toEqual([true, [`/github/list?kind=assigned${from ? `&q=${from}` : ''}&after=50`]]);
+        holdWhen(() => true);
+        change(store);
+        await settle();
+        // The new list is being read; nothing of the old one is still loading.
+        expect(shown(store)).toMatchObject({ loading: true, loadingMore: false, count: name === 'Refresh' ? 50 : 0 });
+        const [oldPage, newPage] = held;
+        if (order === 'before') {
+          oldPage!.answer();
+          await old;
+          expect(shown(store)).toMatchObject({ loading: true, loadingMore: false, count: name === 'Refresh' ? 50 : 0, next: name === 'Refresh' ? '50' : null });
+          newPage!.answer();
+          await settle();
+        } else {
+          newPage!.answer();
+          await settle();
+          oldPage!.answer();
+          await old;
+        }
+        expect(shown(store)).toEqual({ count: 50, first: `${repo}#1`, last: `${repo}#50`, next: '50', loading: false, loadingMore: false, error: null });
+        holdWhen(() => false);
+        await store.loadMore();
+        expect(shown(store)).toMatchObject({ count: 100, last: `${repo}#100`, next: '100' });
+        await store.loadMore();
+        expect(shown(store)).toMatchObject({ count: 101, last: `${repo}#101`, next: null, loadingMore: false });
+        expect(store.getView().items.every((item) => item.repo === repo)).toBe(true);
+        expect(new Set(store.getView().items.map((item) => item.id)).size).toBe(101);
+      });
+    }
+  }
+
+  test("an old Load more that fails says nothing over the new list, and leaves nothing loading", async () => {
+    const { store, held } = panel();
+    await store.refresh();
+    const old = store.loadMore();
+    await settle();
+    store.setText('alpha');
+    await settle();
+    held[0]!.fail(new Error('gh: HTTP 502'));
+    await old;
+    expect(shown(store)).toEqual({ count: 50, first: 'acme/app#1', last: 'acme/app#50', next: '50', loading: false, loadingMore: false, error: null });
+  });
+
+  test('Load more waits while the list is read again, then goes on from the new read', async () => {
+    const { store, held, asked, holdWhen } = panel();
+    await store.refresh();
+    holdWhen(() => true);
+    const reading = store.refresh();
+    await settle();
+    asked.length = 0;
+    await store.loadMore();
+    expect([asked, store.getView().loadingMore]).toEqual([[], false]);
+    holdWhen(() => false);
+    held[0]!.answer();
+    await reading;
+    await store.loadMore();
+    expect(shown(store)).toMatchObject({ count: 100, last: 'acme/beta#100', next: '100' });
+  });
+
+  test('the five-minute refresh leaves a Load more under way alone', async () => {
+    const { store, held, asked } = panel();
+    const timers: (() => void)[] = [];
+    const real = { setInterval: globalThis.setInterval, document: (globalThis as { document?: unknown }).document };
+    globalThis.setInterval = ((fn: () => void) => timers.push(fn)) as unknown as typeof setInterval;
+    (globalThis as { document?: unknown }).document = { hidden: false };
+    try {
+      (store as unknown as { checkStatus: () => Promise<void> }).checkStatus = () => store.refresh();
+      await store.start();
+      const more = store.loadMore();
+      await settle();
+      asked.length = 0;
+      timers[0]!();
+      expect(asked).toEqual([]);
+      held[0]!.answer();
+      await more;
+      expect(shown(store)).toMatchObject({ count: 100, next: '100', loadingMore: false });
+      timers[0]!();
+      await settle();
+      expect(asked).toEqual(['/github/list?kind=assigned', '/github/list?kind=assigned&after=50']);
+    } finally {
+      globalThis.setInterval = real.setInterval;
+      (globalThis as { document?: unknown }).document = real.document;
+    }
+  });
+});

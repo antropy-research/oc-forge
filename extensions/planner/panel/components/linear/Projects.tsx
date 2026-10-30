@@ -104,7 +104,7 @@ export const ProjectCollection = () => {
       {more && (
         <div class="lin-more">
           <span class="muted">{projects.length} loaded · Linear has more</span>
-          <button type="button" class="lin-button" disabled={list.loadingMore} onClick={() => void linear.loadMore('page')}>{list.loadingMore ? 'Loading…' : 'Load more'}</button>
+          <button type="button" class="lin-button" disabled={list.loadingMore || list.loading} onClick={() => void linear.loadMore('page')}>{list.loadingMore || list.loading ? 'Loading…' : 'Load more'}</button>
         </div>
       )}
     </div>

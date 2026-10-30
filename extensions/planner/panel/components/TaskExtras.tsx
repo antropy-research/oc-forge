@@ -122,10 +122,15 @@ const DrivePicker = ({ account, have, onClose, onInsert }: { account: string; ha
   const [chosen, setChosen] = useState<DriveFile[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  /** The search shown: words typed since "More files" was asked make its page another search's. */
+  const search = useRef(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   useEffect(() => {
     if (!allowed) return;
     let live = true;
+    search.current++;
     setNext(null);
+    setLoadingMore(false);
     const timer = setTimeout(() => {
       google
         .searchDrive(account, text)
@@ -145,14 +150,19 @@ const DrivePicker = ({ account, have, onClose, onInsert }: { account: string; ha
   useEffect(() => {
     if (allowed) searchRef.current?.focus();
   }, [allowed]);
-  const more = () =>
-    google
+  const more = () => {
+    const asked = search.current;
+    setLoadingMore(true);
+    return google
       .searchDrive(account, text, next)
       .then((found) => {
-        setFiles([...(files ?? []), ...found.files.filter((file) => !files?.some((other) => other.id === file.id))]);
+        if (asked !== search.current) return;
+        setFiles((shown) => [...(shown ?? []), ...found.files.filter((file) => !shown?.some((other) => other.id === file.id))]);
         setNext(found.next);
       })
-      .catch((error) => setProblem(messageOf(error)));
+      .catch((error) => asked === search.current && setProblem(messageOf(error)))
+      .finally(() => asked === search.current && setLoadingMore(false));
+  };
   const room = ATTACHMENTS_MAX - have.length;
   const signingIn = gv.signIn && gv.signIn.result.status !== 'connected';
   return (
@@ -216,7 +226,11 @@ const DrivePicker = ({ account, have, onClose, onInsert }: { account: string; ha
                 })}
               </ul>
             )}
-            {files !== null && next && <button class="link drive-more" onClick={() => void more()}>More files</button>}
+            {files !== null && next && (
+              <button class="link drive-more" disabled={loadingMore} onClick={() => void more()}>
+                {loadingMore ? 'Loading…' : 'More files'}
+              </button>
+            )}
             <div class="row drive-actions">
               <span class="muted">{chosen.length > room ? `A task has at most ${ATTACHMENTS_MAX} attachments: ${Math.max(0, room)} more fit` : `${chosen.length} selected`}</span>
               <span class="nav-spacer" />

@@ -8,6 +8,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 import { makeFilters, page as linearPage } from './linearFake.mjs';
+import { minutesToMidnight, waitOutMidnight } from './days.mjs';
+import { watchPlannerRequests } from './drain.mjs';
 
 const base = process.argv[2] ?? 'http://127.0.0.1:35310';
 const out = process.argv[3] ?? '/tmp/opencode/planner-e2e';
@@ -28,6 +30,8 @@ const check = (name, ok, detail = '') => {
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+// Closed only once no Planner request is on its way (drain.mjs, as the harness's close()).
+const drain = watchPlannerRequests(context);
 // oc-forge's adapted OpenChamber sends service requests over a WebSocket (adapters/openchamber, Transport), past the
 // HTTP routes that answer them here, to the container's own Planner service: its switch keeps them on HTTP, and any
 // that still come over the socket are refused loudly instead of reaching the real plan.
@@ -398,8 +402,13 @@ try {
     await frame.locator('.save-state.is-saving').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => {});
     return serviceState();
   };
-  const snapshot = await serviceState();
+  let snapshot = await serviceState();
   const zone = snapshot.state?.settings?.timezone ?? 'UTC';
+  // Today is the plan's, read once for the rest of the run: within half an hour of midnight in its zone, the new day first.
+  if (minutesToMidnight(zone) < 30) {
+    await waitOutMidnight(zone, 30, 'run.mjs');
+    snapshot = await serviceState();
+  }
   const todayKey = snapshot.today;
   const tomorrowKey = (() => { const d = new Date(`${todayKey}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
   const localToUtc = (minutes, dayKey = todayKey) => {
@@ -1770,7 +1779,7 @@ try {
   // Remove every e2e task and calendar through the service, so a failed run cannot leak into the next.
   await cleanUp(true);
   check('no page errors from the extension', problems.length === 0, problems.slice(0, 3).join(' | '));
-  await browser.close();
+  await drain.close(browser, { label: 'run.mjs' });
 }
 
 const failed = results.filter((result) => !result.ok);

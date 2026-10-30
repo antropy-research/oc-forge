@@ -327,6 +327,10 @@ export class GoogleStore {
   private readonly looking = new Set<string>();
   /** Each task's merged Google tasks being written, in turn (`writeMerged`). */
   private readonly mergedWrites = new Map<string, Promise<void>>();
+  /** The newest Gmail search, Tasks list read and Tasks-view read of each list: an older one's answer or error is dropped. */
+  private mailSeq = 0;
+  private tasksSeq = 0;
+  private readonly boardSeq = new Map<string, number>();
 
   constructor(private readonly host: HostClient, private readonly client: PlannerClient, private readonly surface: string) {}
 
@@ -414,7 +418,7 @@ export class GoogleStore {
       const seen = this.client.getView().state.settings.googleCalendarsIntroduced ?? [];
       if (status.accounts.some((account) => account.features.includes('calendar') && !seen.includes(account.email))) void this.loadCalendars();
       const mailAccounts = status.accounts.filter((account) => account.features.includes('mail'));
-      if (!mailAccounts.some((account) => account.email === this.view.mailAccount)) this.set({ mailAccount: mailAccounts[0]?.email ?? null, mail: [] });
+      if (!mailAccounts.some((account) => account.email === this.view.mailAccount)) this.set({ mailAccount: mailAccounts[0]?.email ?? null, mail: [], mailNext: null });
       if (status.accounts.some((account) => account.features.includes('tasks'))) {
         await this.loadLists();
         void this.sync();
@@ -557,13 +561,15 @@ export class GoogleStore {
   async refreshTasks(): Promise<void> {
     const list = this.view.list;
     if (!list) return;
+    const seq = ++this.tasksSeq;
     this.set({ tasksLoading: true, tasksError: null });
     try {
       const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('GET', `/google/tasks?account=${encodeURIComponent(list.account)}&list=${encodeURIComponent(list.id)}`);
+      if (seq !== this.tasksSeq) return;
       // Another list may have been chosen meanwhile.
-      if (this.view.list === list) this.set({ tasks: answer.tasks, tasksLoading: false });
+      this.set(this.view.list === list ? { tasks: answer.tasks, tasksLoading: false } : { tasksLoading: false });
     } catch (error) {
-      this.set({ tasksLoading: false, tasksError: messageOf(error) });
+      if (seq === this.tasksSeq) this.set({ tasksLoading: false, tasksError: messageOf(error) });
     }
   }
 
@@ -593,14 +599,18 @@ export class GoogleStore {
     if (!account) return;
     const pageToken = more ? this.view.mailNext : null;
     if (more && !pageToken) return;
+    // Another search, or Refresh, while this one (or its Load more) is on its way: the newest one's answer stands.
+    const seq = ++this.mailSeq;
     this.set({ mailLoading: true, mailError: null });
     try {
       const answer = await this.client.call<{ messages: MailItem[]; nextPageToken?: string | null }>('GET', `/google/mail?account=${encodeURIComponent(account)}&q=${encodeURIComponent(query)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`);
-      if (this.view.mailAccount !== account || this.view.mailQuery !== query) return;
+      if (seq !== this.mailSeq) return;
+      // Another account since, not searched yet: the panel searches it once nothing is loading.
+      if (this.view.mailAccount !== account) return this.set({ mailLoading: false });
       const mail = more ? [...this.view.mail, ...answer.messages.filter((item) => !this.view.mail.some((known) => known.id === item.id))] : answer.messages;
       this.set({ mail, mailNext: answer.nextPageToken ?? null, mailLoading: false });
     } catch (error) {
-      this.set({ mailLoading: false, mailError: messageOf(error) });
+      if (seq === this.mailSeq) this.set({ mailLoading: false, mailError: this.view.mailAccount === account ? messageOf(error) : null });
     }
   }
 
@@ -1083,10 +1093,14 @@ export class GoogleStore {
    */
   async loadBoard(account: string, listId: string): Promise<void> {
     const key = listKey(account, listId);
+    const seq = (this.boardSeq.get(key) ?? 0) + 1;
+    this.boardSeq.set(key, seq);
     const current = this.view.board[key];
     this.setBoard(key, { items: current?.items ?? [], loading: true, error: null, complete: current?.complete ?? true });
     try {
       const answer = await this.client.call<{ tasks: GoogleTaskItem[]; complete: boolean }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}`);
+      // Read again meanwhile (after a change made here): the newer read shows the list, and follows it up.
+      if (this.boardSeq.get(key) !== seq) return;
       this.setBoard(key, { items: answer.tasks, loading: false, error: null, complete: answer.complete });
       const state = this.client.getView().state;
       const moved: EventBody[] = answer.tasks.flatMap((item) => {
@@ -1098,7 +1112,7 @@ export class GoogleStore {
       await this.makeNextOccurrences(answer.tasks);
       if (answer.complete) this.missingHeads(account, listId, answer.tasks);
     } catch (error) {
-      this.setBoard(key, { items: current?.items ?? [], loading: false, error: messageOf(error), complete: true });
+      if (this.boardSeq.get(key) === seq) this.setBoard(key, { items: current?.items ?? [], loading: false, error: messageOf(error), complete: true });
     }
   }
 

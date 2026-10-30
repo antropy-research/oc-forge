@@ -11,6 +11,9 @@
 // as OpenCode's read-only plan agent, through a command file this journey writes
 // to the container (oc-planner-harness-plan.md) and removes, with the chats and
 // their worktrees, at the end.
+// Each phase (a part at a size, the main flow) reads its dates when it begins, in the browser's zone (SUNSAMA_ZONE, else
+// Los Angeles), after waiting out a midnight less than SUNSAMA_MIDNIGHT_MARGIN_MIN minutes away (20; a phase takes a few
+// minutes): a run that crosses midnight goes on with the new day's dates, and no phase crosses it.
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { startHarness } from './harness.mjs';
 import { defaultGithubWorld, fakeIssue, ghConfigFiles, startFakeGithub } from './fakeGithub.mjs';
 import { CONTACTS_SCOPES, DEFAULT_SCOPES, GMAIL_MODIFY_SCOPE, defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
+import { addDays, waitOutMidnight } from './days.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-sunsama';
 const run = `harness-${Date.now().toString(36)}`;
@@ -31,12 +35,19 @@ const check = (name, ok, detail = '') => {
 };
 const docker = (script) => execFileSync('docker', ['exec', CONTAINER, 'sh', '-c', script], { encoding: 'utf8' });
 
-// Today and tomorrow where the browser is (the harness uses Los Angeles).
-const zone = 'America/Los_Angeles';
-const dayKey = (offset) => new Date(Date.now() + offset * 86_400_000).toLocaleDateString('en-CA', { timeZone: zone });
-const today = dayKey(0);
-const tomorrow = dayKey(1);
-const after = dayKey(2);
+// Today, tomorrow and the day after where the browser is, read again as each phase begins (round 12's review: read once
+// at the start, a run that crossed midnight compared yesterday's dates and looked for a menu label become "Tomorrow").
+const zone = process.env.SUNSAMA_ZONE ?? 'America/Los_Angeles';
+const MIDNIGHT_MARGIN_MIN = Number(process.env.SUNSAMA_MIDNIGHT_MARGIN_MIN ?? 20);
+let today = '';
+let tomorrow = '';
+let after = '';
+const freshDays = async (phase) => {
+  today = await waitOutMidnight(zone, MIDNIGHT_MARGIN_MIN, `sunsama.mjs ${phase}`);
+  tomorrow = addDays(today, 1);
+  after = addDays(today, 2);
+  console.log(`INFO ${phase}: ${today} in ${zone}`);
+};
 const ACCOUNT = 'harness@example.com';
 
 const githubItem = (n, kind = 'issue') => ({
@@ -90,12 +101,8 @@ const githubPart = async (viewport) => {
   // Issue 1 updated last: GitHub's search (updated, newest first) gives 1 to 50 a page, then 51.
   world.issues = Array.from({ length: 51 }, (_, n) => fakeIssue(repo, n + 1, { title: `${run} gh issue ${n + 1}`, assignees: [world.viewer], updatedAt: new Date(Date.now() - n * 60_000).toISOString() }));
   world.issues.push(fakeIssue(repo, 52, { title: `${run} gh unassigned 52`, assignees: ['someone-else'] }));
-  // Another repository the viewer works in, updated last: the Repository choice lists it first.
-  const sideRepo = 'harness-org/side-project';
-  world.issues.push(fakeIssue(sideRepo, 9, { title: `${run} side issue`, assignees: ['someone-else'], updatedAt: new Date(Date.now() + 60_000).toISOString() }));
-  // Today in the harness's zone, and an hour of it as an instant.
-  const zone = 'America/Los_Angeles';
-  const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  // Today in the browser's zone, and an hour of it as an instant.
+  const localDate = today;
   const offsetAt = (instant) => {
     const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(instant).map((part) => [part.type, part.value]));
     return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second)) - Math.floor(instant / 1000) * 1000;
@@ -104,6 +111,13 @@ const githubPart = async (viewport) => {
     const wall = Date.parse(`${localDate}T00:00:00Z`) + hours * 3_600_000;
     return new Date(wall - offsetAt(wall)).toISOString();
   };
+  // Another repository the viewer works in, updated last: the Repository choice lists it first. Last whatever the hour
+  // the run starts: after the day's work below too, which is dated at today's hours (before 4 PM, still to come).
+  const sideRepo = 'harness-org/side-project';
+  world.issues.push(fakeIssue(sideRepo, 9, { title: `${run} side issue`, assignees: ['someone-else'], updatedAt: new Date(Math.max(Date.now(), Date.parse(localAt(24))) + 60_000).toISOString() }));
+  // And one with nothing in it yet, listed after them: the Load more checks at the end fill it (the service keeps the
+  // list of repositories ten minutes, so it has to be there from the start).
+  world.repos.push({ id: 'R_harness-org_paging-repo', owner: 'harness-org', name: 'paging-repo', defaultBranch: 'main', bare: null });
   world.pulls.push({ id: 'PR_planner_gh_7', number: 7, repo, url: `https://github.com/${repo}/pull/7`, title: `${run} gh pull 7`, body: '', headRefName: 'harness-feature', baseRefName: 'main', headOid: 'fake', isDraft: false, state: 'OPEN', createdAt: localAt(-20), updatedAt: new Date().toISOString(), reviewRequested: [world.viewer] });
   // The day's GitHub work, for Daily Highlights: a pull request opened, Ann's reviewed twice, mine merged by Ann, Bo's
   // reviewed and merged by me, 51 comments on issue 52 and one on Ann's pull request (past a page of 50), a discussion
@@ -127,12 +141,34 @@ const githubPart = async (viewport) => {
   // The private service's gh is the real one, its config sending every request to the fake's socket (nothing reaches GitHub).
   // Signed out, for the last check: GitHub's status says so (the harness answers it, as gh would).
   let signedOut = false;
+  // Round 12's review (P1-2): the next page a Load more asks for, held on its way (as a slow GitHub would) until released.
+  let pageTwo = null;
+  const gates = [];
+  const holdPageTwo = () => {
+    const held = {};
+    held.gate = new Promise((resolve) => (held.release = resolve));
+    held.reached = new Promise((resolve) => (held.arrive = resolve));
+    gates.push(held);
+    pageTwo = held;
+    return held;
+  };
   const g = await startHarness({
     out,
     viewport,
+    timezoneId: zone,
     serviceEnv: { PATH: `${dirname(gh)}:/usr/bin:/bin`, GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' },
     homeFiles: { '.config/gh/config.yml': config['config.yml'], '.config/gh/hosts.yml': config['hosts.yml'] },
-    serviceOverride: ({ path }) => (signedOut && path === '/github/status' ? { available: false, login: null, message: 'You are not signed in to GitHub (gh auth login).', reason: 'signed-out', container: null } : undefined),
+    serviceOverride: async ({ path }) => {
+      if (signedOut && path === '/github/status') return { available: false, login: null, message: 'You are not signed in to GitHub (gh auth login).', reason: 'signed-out', container: null };
+      const url = new URL(path, 'http://x');
+      if (pageTwo && url.pathname === '/github/list' && url.searchParams.has('after')) {
+        const held = pageTwo;
+        pageTwo = null;
+        held.arrive(path);
+        await held.gate;
+      }
+      return undefined;
+    },
   });
   const f = g.frame;
   const plannerErrors = [];
@@ -196,7 +232,7 @@ const githubPart = async (viewport) => {
     const repoChoice = ghPanel().getByRole('combobox', { name: 'Repository' });
     await repoChoice.waitFor({ timeout: 15_000 });
     const repoOptions = await repoChoice.locator('option').allInnerTexts();
-    check(`${size}: a Repository choice lists the repositories the viewer works in, the latest updated first`, repoOptions.join('|') === `All repositories|${sideRepo}|${repo}`, repoOptions.join(' | '));
+    check(`${size}: a Repository choice lists the repositories the viewer works in, the latest updated first`, repoOptions.join('|') === `All repositories|${sideRepo}|${repo}|harness-org/paging-repo`, repoOptions.join(' | '));
     await repoChoice.selectOption(repo);
     for (let i = 0; i < 50 && !String(lists().at(-1)?.variables?.q).includes(`repo:${repo}`); i++) await new Promise((resolve) => setTimeout(resolve, 200));
     check(`${size}: choosing one narrows the list to it (repo: in GitHub's search)`, String(lists().at(-1)?.variables?.q).includes(`repo:${repo}`) && (await ghPanel().getByRole('searchbox', { name: 'Search GitHub items' }).inputValue()) === `repo:${repo}`, String(lists().at(-1)?.variables?.q));
@@ -323,11 +359,102 @@ const githubPart = async (viewport) => {
     await signIn.scrollIntoViewIfNeeded().catch(() => {});
     await shotHere('gh-highlights-signin');
     signedOut = false;
+
+    // ── Round 12's review (P1-2): the list changed while its Load more is on the way ──
+    // For each change a list of 101 (a repository's issues, or pull requests asking for my review), updated three days
+    // ago (none of today's activity): #1 the latest, #101 alone on a third page. Page two of the list shown is held on
+    // its way; the list changes (another search, repository or list kind, or Refresh) and the new list's first page
+    // shows; then the old page answers. It never joins the new list nor leaves it loading: the list's own Load more goes
+    // on from its own cursor to #101, which plans as a task linked to it.
+    const daysAgo = (n) => new Date(Date.now() - 3 * 86_400_000 - n * 60_000).toISOString();
+    const pagingRepo = (name) => `harness-org/paging-${name}`;
+    for (const name of ['search', 'repo', 'refresh']) {
+      for (let n = 1; n <= 101; n++) world.issues.push(fakeIssue(pagingRepo(name), n, { title: `${run} paging ${name} ${n}`, assignees: [world.viewer], updatedAt: daysAgo(n) }));
+    }
+    for (let n = 1; n <= 101; n++) {
+      const kindRepo = pagingRepo('kind');
+      world.pulls.push({ id: `PR_paging_kind_${n}`, number: n, repo: kindRepo, url: `https://github.com/${kindRepo}/pull/${n}`, title: `${run} paging kind ${n}`, body: '', headRefName: `paging-${n}`, baseRefName: 'main', headOid: 'fake', isDraft: false, state: 'OPEN', author: 'carol', createdAt: daysAgo(n), updatedAt: daysAgo(n), reviewRequested: [world.viewer] });
+    }
+    const assignedTotal = world.issues.filter((issue) => issue.state === 'OPEN' && issue.assignees.includes(world.viewer)).length;
+    await g.openPlanner();
+    await f.getByRole('navigation', { name: 'Sources' }).getByRole('tab', { name: 'GitHub', exact: true }).click();
+    const kinds = ghPanel().getByRole('combobox', { name: 'GitHub items to show' });
+    const words = ghPanel().getByRole('searchbox', { name: 'Search GitHub items' });
+    const repos = ghPanel().getByRole('combobox', { name: 'Repository' });
+    const loadMore = ghPanel().getByRole('button', { name: 'Load more', exact: true });
+    const statusNow = () => status().innerText().catch(() => '');
+    const canLoadMore = async () => (await loadMore.count()) === 1 && (await loadMore.isEnabled());
+    const until = async (test, timeout = 20_000) => {
+      for (const end = Date.now() + timeout; Date.now() < end; await new Promise((resolve) => setTimeout(resolve, 200))) if (await test()) return true;
+      return false;
+    };
+    const showing = (total) => until(async () => (await statusNow()).startsWith(`Showing 50 of ${total}`) && (await canLoadMore()));
+    const cursorOf = (request) => Buffer.from(String(request.variables?.after ?? ''), 'base64').toString('utf8');
+    const cases = [
+      { name: 'search', label: 'another search', total: 101, start: async () => {}, change: () => words.fill(`${run} paging search`), mine: /paging search \d/, query: (q) => q.includes('assignee:@me') && q.endsWith(`${run} paging search`) },
+      { name: 'repo', label: 'another repository', total: 101, start: () => words.fill(''), change: () => repos.selectOption(pagingRepo('repo')), mine: /paging repo \d/, query: (q) => q.includes('assignee:@me') && q.includes(`repo:${pagingRepo('repo')}`) },
+      { name: 'kind', label: 'another list kind (Review requests)', total: 102, start: () => repos.selectOption(''), change: () => kinds.selectOption({ label: 'Review requests' }), mine: /paging kind \d|gh pull 7/, query: (q) => q.includes('review-requested:@me') },
+      {
+        name: 'refresh', label: 'Refresh', total: 101,
+        start: async () => {
+          await kinds.selectOption({ label: 'Issues assigned to me' });
+          await words.fill(`${run} paging refresh`);
+        },
+        change: () => ghPanel().getByRole('button', { name: 'Refresh GitHub' }).click(), mine: /paging refresh \d/, query: (q) => q.includes('assignee:@me') && q.endsWith(`${run} paging refresh`),
+      },
+    ];
+    for (const { name, label, total, start, change, mine, query } of cases) {
+      await start();
+      const ready = await showing(name === 'refresh' ? total : assignedTotal);
+      const held = holdPageTwo();
+      await loadMore.click();
+      const heldPath = await Promise.race([held.reached, new Promise((resolve) => setTimeout(() => resolve(null), 15_000))]);
+      const whileHeld = await statusNow();
+      const asked = lists().length;
+      await change();
+      // The new list's first page (Refresh: the list's, read again) shows, Load more ready for it.
+      const fresh = await until(async () => lists().slice(asked).some((request) => !request.variables?.after && query(String(request.variables?.q))) && (await statusNow()).startsWith(`Showing 50 of ${total}`) && (await canLoadMore()));
+      // Then the old page answers: it reaches the fake GitHub, and the panel has a moment to take its answer.
+      const released = lists().length;
+      held.release();
+      const oldAnswered = await until(async () => lists().slice(released).some((request) => request.variables?.after), 15_000);
+      await g.page.waitForTimeout(1500);
+      const rows = await ghPanel().locator('li.issue-row').allInnerTexts();
+      const settled = await statusNow();
+      const ready2 = await canLoadMore();
+      check(`${size}: ${label} while Load more is on its way: the new list shows its first 50, the old page never joins it, and nothing is left loading`,
+        Boolean(ready && heldPath && fresh && oldAnswered) && rows.length === 50 && rows.every((row) => mine.test(row)) && settled.startsWith(`Showing 50 of ${total}`) && ready2,
+        JSON.stringify({ ready, held: heldPath, whileHeld: whileHeld.replace(/\n/g, ' / '), fresh, oldAnswered, rows: rows.length, notTheList: rows.filter((row) => !mine.test(row)).length, status: settled.replace(/\n/g, ' / '), loadMore: ready2 }));
+      await status().scrollIntoViewIfNeeded();
+      await shotHere(`gh-paging-${name}`);
+      // The list's own Load more, from its own cursor: to 100, then #101.
+      const own = lists().length;
+      await loadMore.click();
+      await until(async () => (await shown()) === 100 && (await canLoadMore()));
+      await loadMore.click();
+      const reached = await ghRow(`${run} paging ${name} 101`).waitFor({ timeout: 15_000 }).then(() => true).catch(() => false);
+      const pages = lists().slice(own).map((request) => ({ q: String(request.variables?.q), at: cursorOf(request) }));
+      const end = await statusNow();
+      check(`${size}: ${label}: the list's own Load more reads on from its own cursor (50, then 100) to #101`,
+        reached && pages.length === 2 && pages.every((page) => query(page.q)) && pages[0].at === 'cursor:50' && pages[1].at === 'cursor:100' && end.startsWith(`All ${total} shown`),
+        JSON.stringify({ reached, pages: pages.map((page) => `${page.at} ${page.q.slice(-40)}`), status: end.replace(/\n/g, ' / ') }));
+      // #101 planned from the list: a task linked to it.
+      const target = name === 'kind' ? world.pulls.find((pull) => pull.id === 'PR_paging_kind_101') : world.issues.find((issue) => issue.repo === pagingRepo(name) && issue.number === 101);
+      await ghRow(`${run} paging ${name} 101`).hover();
+      await ghRow(`${run} paging ${name} 101`).getByRole('button', { name: new RegExp(`^Plan ${pagingRepo(name)}#101 `) }).first().click();
+      let planned101 = null;
+      for (let i = 0; i < 50 && !planned101; i++) {
+        planned101 = Object.values((await latestState()).tasks).find((task) => task.source?.id === target.id && !task.deletedAt) ?? null;
+        if (!planned101) await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      check(`${size}: ${label}: #101 plans as a task linked to it`, planned101?.title === target.title && planned101.source.kind === 'github' && planned101.source.key === `${pagingRepo(name)}#101` && planned101.source.url === target.url, JSON.stringify(planned101?.source ?? null));
+    }
     check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
   } catch (error) {
     check(`${size}: the GitHub part ran to its end`, false, error?.stack ?? String(error));
     await shotHere('gh-failure').catch(() => {});
   } finally {
+    for (const held of gates) held.release();
     await g.close();
     await fake.close();
     rmSync(dir, { recursive: true, force: true });
@@ -619,8 +746,8 @@ const gmailPart = async (viewport) => {
 // its calendar; Google Contacts suggested as guests. SUNSAMA_PARTS=meetings runs it alone.
 const meetingsPart = async (viewport) => {
   const size = String(viewport.width);
-  const yesterday = dayKey(-1);
-  const inThree = dayKey(3);
+  const yesterday = addDays(today, -1);
+  const inThree = addDays(today, 3);
   /** An instant of a day's wall-clock hour where the harness is. */
   const zoned = (date, hours) => {
     const wall = Date.parse(`${date}T00:00:00Z`) + hours * 3_600_000;
@@ -835,10 +962,16 @@ const meetingsPart = async (viewport) => {
     // Settings → Meeting import: Auto-sync from the calendars chosen, with an import channel.
     await go('Settings');
     const settings = f.locator('fieldset', { has: f.locator('legend', { hasText: 'Meeting import' }) });
-    await settings.getByRole('combobox', { name: /Configure how meetings get added/ }).selectOption('autoSync');
+    const importMode = settings.getByRole('combobox', { name: /Configure how meetings get added/ });
+    await importMode.selectOption('autoSync');
     check(`${size}: Auto-sync says calendars must be chosen first`, await settings.getByRole('alert').filter({ hasText: 'You must select Calendars to import from' }).isVisible({ timeout: 5000 }).catch(() => false));
+    // The calendar and its import channel are chosen under Show prompt, then Auto-sync goes on. Ticked under Auto-sync,
+    // a calendar syncs at once, while its channel's menu is only just showing: a meeting that sync imports keeps no
+    // channel (the run of 2026-10-30, at 1024, lost that race; every run before won it).
+    await importMode.selectOption('prompt');
     await settings.getByRole('group', { name: 'Calendars to import from' }).getByRole('checkbox', { name: /Harness work/ }).check();
     await settings.getByRole('combobox', { name: 'Import channel for Harness work' }).selectOption('work');
+    await importMode.selectOption('autoSync');
     let demo = null;
     await until(async () => Boolean((demo = await eventTask('hdemo'))), 20_000);
     check(`${size}: Auto-sync adds the week's meetings by itself, in the calendar's import channel`, demo?.placement?.date === inThree && demo.channelId === 'work' && demo.source.event?.auto === true, JSON.stringify(demo ? { date: demo.placement.date, channel: demo.channelId, auto: demo.source.event?.auto } : null));
@@ -887,7 +1020,11 @@ const parts = process.env.SUNSAMA_PARTS ?? 'all';
 const wanted = (name) => parts === 'all' || parts.split(',').includes(name);
 mkdirSync(out, { recursive: true });
 for (const [name, part] of [['github', githubPart], ['gmail', gmailPart], ['meetings', meetingsPart]]) {
-  if (wanted(name)) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await part(viewport);
+  if (!wanted(name)) continue;
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) {
+    await freshDays(`${name} ${viewport.width}`);
+    await part(viewport);
+  }
 }
 if (parts !== 'all') {
   const failed = results.filter((result) => !result.ok);
@@ -896,8 +1033,9 @@ if (parts !== 'all') {
 }
 
 mkdirSync(out, { recursive: true });
+await freshDays('main flow');
 let h = null;
-h = await startHarness({ out, serviceOverride });
+h = await startHarness({ out, serviceOverride, timezoneId: zone });
 const { page, frame } = h;
 
 // `opencode` where the private service runs: OpenCode's background server is "stopped", three models.
