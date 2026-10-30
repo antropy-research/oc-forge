@@ -35,6 +35,8 @@ export interface EditorInput {
   isDirty(): boolean;
   toUntyped(options?: unknown): unknown;
   matches(other: unknown): boolean;
+  /** The editor of the file at `target` instead (VS Code's move of an editor): `{ editor, options }`, or undefined. */
+  rename(group: number, target: Uri): Promise<{ editor: unknown; options?: unknown } | undefined>;
 }
 
 /** `IEditorIdentifier`. */
@@ -58,6 +60,8 @@ export interface EditorService {
   openEditor: OpenEditor;
   openEditors: OpenEditors;
   closeEditor(editor: EditorIdentifier, options?: unknown): Promise<void>;
+  /** Puts these editors in place of those, where they are (`IUntypedEditorReplacement`). */
+  replaceEditors(replacements: { editor: EditorInput; replacement: unknown }[], group: number): Promise<void>;
 }
 
 /** `IEditorGroup`. */
@@ -65,6 +69,9 @@ export interface EditorGroup {
   readonly id: number;
   readonly activeEditor: EditorInput | null;
   isSticky(editor: EditorInput): boolean;
+  isPinned(editor: EditorInput): boolean;
+  isActive(editor: EditorInput): boolean;
+  getIndexOfEditor(editor: EditorInput): number;
 }
 
 /** `IEditorGroupsService` (these members are its base's, `IEditorGroupsContainer`). */
@@ -116,6 +123,18 @@ export interface PaneCompositePartService {
 /** `IViewsService`. */
 export interface ViewsService {
   openViewContainer(id: string, focus?: boolean): Promise<unknown>;
+}
+
+/** `IViewContainerModel`: a view container's views, and which of them it shows. */
+export interface ViewContainerModel {
+  /** Shows or hides one of its views, as its title's "Hide" does (kept in the workbench's storage). */
+  setVisible(id: string, visible: boolean): void;
+}
+
+/** `IViewDescriptorService`. */
+export interface ViewDescriptorService {
+  getViewContainerByViewId(id: string): unknown;
+  getViewContainerModel(viewContainer: unknown): ViewContainerModel;
 }
 
 /** `IQuickPickItem`. */
@@ -256,6 +275,12 @@ export interface TerminalService {
   createTerminal(options?: unknown): Promise<TerminalInstance>;
 }
 
+/** `ITerminalService`: the members that hide and show a terminal. */
+export interface TerminalBackground {
+  /** Shows a terminal that was hidden from the user (`hideFromUser`), as `terminal.show()` does. */
+  showBackgroundTerminal(instance: TerminalInstance, suppressSetActive?: boolean): Promise<void>;
+}
+
 /** `ITerminalInstanceHost`, `ITerminalService`'s base. */
 export interface TerminalInstanceHost {
   readonly activeInstance: TerminalInstance | undefined;
@@ -293,9 +318,102 @@ export interface AdapterManager {
   getDebugger(type: string): unknown;
 }
 
+/** `IUndoRedoService`: per resource (a file's URI), or per source. */
+export interface UndoRedoService {
+  canUndo(resource: Uri): boolean;
+  undo(resource: Uri): Promise<void> | void;
+  canRedo(resource: Uri): boolean;
+  redo(resource: Uri): Promise<void> | void;
+}
+
+/** `ITextModel`. */
+export interface TextModel {
+  readonly uri: Uri;
+  readonly onWillDispose: Event<void>;
+  getValue(): string;
+  setValue(value: string): void;
+}
+
+/** `IModelService`. */
+export interface ModelService {
+  readonly onModelAdded: Event<TextModel>;
+}
+
+/** `ITextModelService`: a reference keeps a model (`IReference`, disposed to let it go). */
+export interface TextModelService {
+  createModelReference(resource: Uri): Promise<Disposable>;
+}
+
+/** `IWorkingCopyIdentifier`. */
+export interface WorkingCopyIdentifier {
+  readonly resource: Uri;
+}
+
+/** `IWorkingCopy`. */
+export interface WorkingCopy {
+  isDirty(): boolean;
+  /** `soft`: marked saved, its text kept (no save writes it), as VS Code does to a working copy it moves. */
+  revert(options?: { soft?: boolean }): Promise<void>;
+}
+
+/** `ITextEditorModel`. */
+export interface TextEditorModel {
+  readonly textEditorModel: TextModel | null;
+}
+
+/** `ITextFileEditorModel`: these members are its bases'. */
+export type TextFileEditorModel = WorkingCopyIdentifier & WorkingCopy & TextEditorModel;
+
+/** `ITextFileEditorModelManager`. */
+export interface TextFileEditorModelManager {
+  readonly models: readonly TextFileEditorModel[];
+  /** The file's model, resolved (`{ reload }`: read again from the file). */
+  resolve(resource: Uri, options?: { reload?: { async: boolean } }): Promise<TextFileEditorModel>;
+}
+
+/** `ITextFileService`. */
+export interface TextFileService {
+  readonly files: TextFileEditorModelManager;
+}
+
+/** `IConfigurationManager`: the launch configuration chosen to start. */
+export interface ConfigurationManager {
+  readonly selectedConfiguration: { readonly launch: Launch | undefined; readonly name: string | undefined };
+}
+
+/** `IStackFrame`. */
+export interface StackFrame {
+  readonly frameId: number;
+}
+
+/** `IThread`. */
+export interface DebugThread {
+  getCallStack(): readonly StackFrame[];
+}
+
+/** `IDebugSession`. */
+export interface DebugSession {
+  getThread(threadId: number): DebugThread | undefined;
+}
+
+/** `IDebugModel`. */
+export interface DebugModel {
+  getSession(sessionId: string | undefined): DebugSession | undefined;
+}
+
+/** `IViewModel` (the debug view model: what is focused). */
+export interface DebugViewModel {
+  readonly focusedStackFrame: StackFrame | undefined;
+}
+
 /** `IDebugService`. */
 export interface DebugService {
   getAdapterManager(): AdapterManager;
+  getModel(): DebugModel;
+  getViewModel(): DebugViewModel;
+  /** Focuses a frame (the Debug Console evaluates in it), and opens its source. */
+  focusStackFrame(frame: StackFrame | undefined, thread?: DebugThread, session?: DebugSession, options?: { explicit?: boolean; preserveFocus?: boolean }): Promise<void>;
+  getConfigurationManager(): ConfigurationManager;
   startDebugging(launch: Launch | undefined, configOrName?: unknown, options?: { noDebug?: boolean }, saveBeforeStart?: boolean): Promise<boolean>;
 }
 
@@ -322,6 +440,9 @@ export const SHUTDOWN = 1;
 
 /** `StorageScope`: APPLICATION, PROFILE, WORKSPACE (APPLICATION_SHARED is the Sessions app's). */
 export const STORAGE_SCOPES = [-1, 0, 1] as const;
+/** `StorageScope.PROFILE`, `StorageTarget.MACHINE`. */
+export const STORAGE_PROFILE = 0;
+export const STORAGE_MACHINE = 1;
 
 /** What `IStorageService.onDidChangeValue` asks for to keep its filtered event: a `DisposableStore`, of which it uses `add`. */
 export interface DisposableStore {
@@ -337,6 +458,9 @@ export interface StorageService {
   flush(reason?: number): Promise<void>;
   /** A value stored or removed in `scope` (any key when `key` is undefined). */
   onDidChangeValue(scope: number, key: string | undefined, disposable: DisposableStore): Event<unknown>;
+  get(key: string, scope: number, fallbackValue?: string): string | undefined;
+  store(key: string, value: string, scope: number, target: number): void;
+  remove(key: string, scope: number): void;
 }
 
 /** `IWebview`. */

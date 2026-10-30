@@ -1,9 +1,10 @@
 // The bridge's bus between the parts of a window (bridge/src/bus.ts), on real Unix sockets.
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Bus, busFiles } from '../bridge/src/bus.ts';
+import { Bus, busFiles, sweepStale } from '../bridge/src/bus.ts';
 import { waitFor } from '../bridge/src/events.ts';
 
 const PARTS = ['view', 'editor', 'terminal'] as const;
@@ -105,6 +106,24 @@ describe('bus', () => {
     expect(view.has('editor')).toBe(false);
     await editor.rejoin();
     expect(await all([view, editor], 2)).toBe(true);
+  });
+
+  test("old sockets nobody answers on (a window whose parts were killed) are swept; a live one and a new one stay", async () => {
+    const dir = scratch();
+    const old = (Date.now() - 10 * 60_000) / 1000;
+    const dead = busFiles(dir, 'host|file:///w|gone');
+    writeFileSync(dead.socket, '');
+    writeFileSync(dead.lock, '1');
+    utimesSync(dead.socket, old, old);
+    const fresh = busFiles(dir, 'host|file:///w|starting');
+    writeFileSync(fresh.socket, '');
+    const live = busFiles(dir, 'host|file:///w|live');
+    const server = net.createServer(() => undefined);
+    await new Promise<void>((resolve) => server.listen(live.socket, resolve));
+    utimesSync(live.socket, old, old);
+    expect(await sweepStale(dir, '')).toBe(1);
+    expect([existsSync(dead.socket), existsSync(dead.lock), existsSync(fresh.socket), existsSync(live.socket)]).toEqual([false, false, true, true]);
+    await new Promise((resolve) => server.close(resolve));
   });
 
   test("two windows on one folder are two buses: a request in one never reaches the other's runtime", async () => {

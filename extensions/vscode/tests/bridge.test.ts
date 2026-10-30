@@ -1,16 +1,18 @@
 // The bridge extension's parts that need no VS Code (bridge/src) and the service's .vsix (service/bridge.ts).
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { applyDelta, BreakpointStore, diff, sameList, union, type BreakpointData } from '../bridge/src/breakpoints.ts';
 import { BreakpointTracker, toMainThread, type BreakpointState, type DapMessage } from '../bridge/src/dap.ts';
 import { Heartbeat } from '../bridge/src/heartbeat.ts';
 import { tryLock, withLock } from '../bridge/src/lock.ts';
 import { Mirror, type MirrorLink } from '../bridge/src/mirror.ts';
+import { follow, outputFiles } from '../bridge/src/outputFiles.ts';
 import { askVariables, editorValues, needsFront, replaceVariables, variablesIn } from '../bridge/src/variables.ts';
-import { subtractDiagnostics, symbolPath, type WireDiagnostic, type WireSymbol } from '../bridge/src/wire.ts';
+import { gitFingerprint, subtractDiagnostics, symbolPath, type GitStateData, type WireDiagnostic, type WireSymbol } from '../bridge/src/wire.ts';
 import { BridgeBuilder, Claims, crc32, zip } from '../service/bridge.ts';
 import { taskSpecOf } from '../workbench/bridge.ts';
 
@@ -263,12 +265,66 @@ describe('what goes between the parts', () => {
     expect(subtractDiagnostics([d('a')], [d('c')]).map((item) => item.message)).toEqual(['a']);
   });
 
+  test("a repository's state, compared across parts: the same once both parts' Git saw the same repository", () => {
+    const change = (path: string, status: number) => ({ uri: { toString: () => `file:///w/${path}` }, status });
+    const state = (index: ReturnType<typeof change>[], head = 'abc'): GitStateData => ({ HEAD: { name: 'main', commit: head }, indexChanges: index, workingTreeChanges: [change('b.js', 5)], mergeChanges: [] });
+    expect(gitFingerprint(state([change('a.js', 0), change('c.js', 0)]))).toBe(gitFingerprint(state([change('c.js', 0), change('a.js', 0)])));
+    expect(gitFingerprint(state([change('a.js', 0)]))).not.toBe(gitFingerprint(state([])));
+    expect(gitFingerprint(state([], 'abc'))).not.toBe(gitFingerprint(state([], 'def')));
+  });
+
   test("the Outline follows the cursor to the innermost symbol around it", () => {
     const s = (name: string, range: [number, number, number, number], children: WireSymbol[] = []): WireSymbol => ({ name, detail: '', kind: 4, range, selectionRange: range, children });
     const tree = [s('A', [0, 0, 10, 0], [s('m', [2, 0, 4, 0]), s('n', [5, 0, 8, 0])]), s('B', [11, 0, 20, 0])];
     expect(symbolPath(tree, 6, 3).map((item) => item.name)).toEqual(['A', 'n']);
     expect(symbolPath(tree, 10, 5).map((item) => item.name)).toEqual([]);
     expect(symbolPath(tree, 12, 0).map((item) => item.name)).toEqual(['B']);
+  });
+});
+
+describe("Output: the page's and the rail's channels, followed at the bottom", () => {
+  test("an extension host's channels: its plain ones and its extensions' log ones, with something in them", () => {
+    const root = temporary();
+    mkdirSync(join(root, 'output_logging_20261030T101010'));
+    writeFileSync(join(root, 'output_logging_20261030T101010', '1-Tasks.log'), 'ran\n');
+    writeFileSync(join(root, 'output_logging_20261030T101010', '2-Empty.log'), '');
+    mkdirSync(join(root, 'vscode.git'));
+    writeFileSync(join(root, 'vscode.git', 'Git.log'), '2026-10-30 10:10:10.000 [info] ok\n');
+    writeFileSync(join(root, 'vscode.git', 'notes.txt'), 'x');
+    mkdirSync(join(root, 'tsserver-logs'));
+    writeFileSync(join(root, 'tsserver-logs', 'a.log'), 'x');
+    writeFileSync(join(root, 'remoteexthost.log'), 'x');
+    expect(outputFiles(root).map(({ label, log }) => [label, log])).toEqual([['Git', true], ['Tasks', false]]);
+    expect(outputFiles(join(root, 'missing'))).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test('a file followed: what it gains, a character cut between two reads whole, and from the start again when cut', () => {
+    const root = temporary();
+    const file = join(root, 'a.log');
+    writeFileSync(file, 'one\n');
+    const followed = { file, offset: 0, decoder: new StringDecoder('utf8') };
+    let shown = '';
+    const append = (text: string): void => {
+      shown += text;
+    };
+    const clear = (): void => {
+      shown = '';
+    };
+    followed.offset = follow(followed, append, clear);
+    expect(shown).toBe('one\n');
+    const euro = Buffer.from('€', 'utf8');
+    appendFileSync(file, Buffer.concat([Buffer.from('two '), euro.subarray(0, 1)]));
+    followed.offset = follow(followed, append, clear);
+    appendFileSync(file, Buffer.concat([euro.subarray(1), Buffer.from('\n')]));
+    followed.offset = follow(followed, append, clear);
+    expect(shown).toBe('one\ntwo €\n');
+    expect(follow(followed, append, clear)).toBe(followed.offset);
+    truncateSync(file, 0);
+    appendFileSync(file, 'three\n');
+    followed.offset = follow(followed, append, clear);
+    expect(shown).toBe('three\n');
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

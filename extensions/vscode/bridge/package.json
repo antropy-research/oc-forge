@@ -27,7 +27,21 @@
     "onCommand:workbench.action.tasks.restartTask",
     "onCommand:workbench.action.tasks.terminate",
     "onCommand:workbench.action.tasks.showTasks",
-    "onCommand:workbench.action.tasks.showLog"
+    "onCommand:workbench.action.tasks.showLog",
+    "onCommand:workbench.action.terminal.newWithCwd",
+    "onCommand:workbench.action.terminal.newLocal",
+    "onCommand:workbench.action.terminal.splitActiveTab",
+    "onCommand:workbench.action.terminal.splitInActiveWorkspace",
+    "onCommand:workbench.action.createTerminalEditor",
+    "onCommand:workbench.action.createTerminalEditorSameGroup",
+    "onCommand:workbench.action.createTerminalEditorSide",
+    "onCommand:openInIntegratedTerminal",
+    "onCommand:openInTerminal",
+    "onCommand:workbench.action.togglePanel",
+    "onCommand:workbench.action.focusPanel",
+    "onCommand:workbench.actions.view.problems",
+    "onCommand:workbench.action.output.toggleOutput",
+    "onCommand:workbench.debug.action.toggleRepl"
   ],
   "contributes": {
     "debuggers": [

@@ -5,7 +5,7 @@ import type { Bus } from './bus.ts';
 import type { BreakpointState } from './dap.ts';
 import { waitFor, waitForAsync } from './events.ts';
 import { Mirror, type MirrorLink } from './mirror.ts';
-import { BRIDGE, FRAME, type BridgePart, type OutputSpec, type Routed, type TaskSpec, type TerminalSpec } from './protocol.ts';
+import { BRIDGE, FRAME, type BridgePart, type Routed, type TaskSpec, type TerminalSpec } from './protocol.ts';
 import { askVariables, editorValues, needsFront, replaceVariables, variablesIn, type InputDefinition } from './variables.ts';
 
 export const MIRROR = 'openchamber-mirror';
@@ -47,11 +47,15 @@ export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: v
   });
 
   // ── The runtime, opened when it isn't there ──
+  // What the user starts here (a launch, a terminal, a task) shows at OpenChamber's bottom, as VS Code shows its panel
+  // for it: the bottom opens (as it is if it shows already). Without the runtime yet, this waits for it to come.
   let noticed = 0;
-  const ensureRuntime = async (what: string): Promise<boolean> => {
+  const ensureRuntime = async (what: string, reveal = true): Promise<boolean> => {
+    const opening = reveal || !bus.has('terminal')
+      ? vscode.commands.executeCommand<boolean>(FRAME.openBottom).then((value) => value === true, () => false)
+      : Promise.resolve(false);
     if (bus.has('terminal')) return true;
-    const opened = await vscode.commands.executeCommand<boolean>(FRAME.openBottom).then((value) => value === true, () => false);
-    if (opened && await waitFor(() => bus.has('terminal'), 45_000)) return true;
+    if (await opening && await waitFor(() => bus.has('terminal'), 45_000)) return true;
     if (Date.now() - noticed > 10_000) {
       noticed = Date.now();
       void vscode.window.showInformationMessage(`${what} runs in this part of VS Code: open VS Code's terminal at OpenChamber's bottom (its icon on the rail) to run it there, with the rest.`);
@@ -142,6 +146,13 @@ export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: v
     entry?.adapter?.event('terminated');
   };
   bus.on('session.ended', (message) => end(String(message.realId)));
+  // The stack frame chosen here (the rail's call stack) is the runtime's too: the bottom's Debug Console evaluates in it.
+  context.subscriptions.push(vscode.debug.onDidChangeActiveStackItem((item) => {
+    if (!(item instanceof vscode.DebugStackFrame)) return;
+    const realId = (item.session.configuration.__openchamber as { realId?: string } | undefined)?.realId;
+    const owner = realId ? mirrors.get(realId)?.owner : undefined;
+    if (realId && owner) bus.send({ type: 'debug.focus', to: owner, realId, threadId: item.threadId, frameId: item.frameId });
+  }));
   // A runtime that went (its window closed) ends the mirrors of its sessions: after a moment, as the parts find each
   // other again when the one that listened went.
   context.subscriptions.push({ dispose: bus.onMembers(() => setTimeout(() => {
@@ -226,8 +237,25 @@ export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: v
   const routed: [string, string?, string?][] = [
     ['workbench.action.terminal.new', undefined, 'A new terminal'],
     ['workbench.action.terminal.newWithProfile', undefined, 'A new terminal'],
+    ['workbench.action.terminal.newWithCwd', undefined, 'A new terminal'],
+    ['workbench.action.terminal.newLocal', 'workbench.action.terminal.new', 'A new terminal'],
     ['workbench.action.terminal.newInActiveWorkspace', 'workbench.action.terminal.new', 'A new terminal'],
     ['workbench.action.terminal.split', undefined, 'A new terminal'],
+    ['workbench.action.terminal.splitActiveTab', 'workbench.action.terminal.split', 'A new terminal'],
+    ['workbench.action.terminal.splitInActiveWorkspace', 'workbench.action.terminal.split', 'A new terminal'],
+    // A terminal editor would be in the bottom's editor area, which doesn't show: a terminal at the bottom instead.
+    ['workbench.action.createTerminalEditor', 'workbench.action.terminal.new', 'A new terminal'],
+    ['workbench.action.createTerminalEditorSameGroup', 'workbench.action.terminal.new', 'A new terminal'],
+    ['workbench.action.createTerminalEditorSide', 'workbench.action.terminal.new', 'A new terminal'],
+    // The Explorer's "Open in Integrated Terminal" (and "Open in Terminal", the same on a remote): in that folder.
+    ['openInIntegratedTerminal', undefined, 'A new terminal'],
+    ['openInTerminal', 'openInIntegratedTerminal', 'A new terminal'],
+    // The panel's views are the bottom's: Ctrl+J, Problems, Output, the Debug Console open it on that view.
+    ['workbench.action.togglePanel', 'workbench.action.focusPanel', 'The panel'],
+    ['workbench.action.focusPanel', undefined, 'The panel'],
+    ['workbench.actions.view.problems', 'workbench.panel.markers.view.focus', 'Problems'],
+    ['workbench.action.output.toggleOutput', 'workbench.panel.output.focus', 'Output'],
+    ['workbench.debug.action.toggleRepl', 'workbench.panel.repl.view.focus', 'The Debug Console'],
     // The bottom shows the terminal: OpenChamber opens and closes its zone (the panel there is all it shows).
     ['workbench.action.terminal.toggleTerminal', 'workbench.action.terminal.focus', 'The terminal'],
     ['workbench.action.terminal.focus', undefined, 'The terminal'],
@@ -267,17 +295,13 @@ export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: v
     return { routed: true, ok: await bus.request<boolean>('terminal', 'debug.start', { name, noDebug: Boolean(noDebug) }, 120_000) };
   }));
   context.subscriptions.push(vscode.commands.registerCommand(BRIDGE.moveTerminal, async (terminal: TerminalSpec): Promise<Routed> => {
-    if (!(await ensureRuntime(`The terminal "${terminal.title}"`))) return { routed: false };
+    if (!(await ensureRuntime(`The terminal "${terminal.title}"`, false))) return { routed: false };
     await bus.request('terminal', 'terminal.attach', { terminal }, 30_000);
     return { routed: true, ok: true };
   }));
   context.subscriptions.push(vscode.commands.registerCommand(BRIDGE.showTerminal, async (process: number, focus?: boolean): Promise<Routed> => {
-    if (!(await ensureRuntime('The terminal'))) return { routed: false };
+    if (!(await ensureRuntime('The terminal', false))) return { routed: false };
     return { routed: true, ok: Boolean(await bus.request('terminal', 'terminal.show', { process, focus: Boolean(focus) }, 30_000)) };
-  }));
-  context.subscriptions.push(vscode.commands.registerCommand(BRIDGE.outputChannels, async (channels: OutputSpec[]) => {
-    bus.send({ type: 'output.channels', to: 'terminal', channels });
-    return true;
   }));
 
   return { ensureRuntime };

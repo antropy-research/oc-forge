@@ -71,8 +71,8 @@ __export(exports_extension, {
 module.exports = __toCommonJS(exports_extension);
 var crypto2 = __toESM(require("node:crypto"));
 var os = __toESM(require("node:os"));
-var path3 = __toESM(require("node:path"));
-var vscode6 = __toESM(require("vscode"));
+var path5 = __toESM(require("node:path"));
+var vscode10 = __toESM(require("vscode"));
 
 // bridge/src/breakpointSync.ts
 var vscode = __toESM(require("vscode"));
@@ -339,6 +339,43 @@ var busFiles = (dir, key) => {
   const name = crypto.createHash("sha1").update(key).digest("hex").slice(0, 20);
   return { socket: path2.join(dir, `${name}.sock`), lock: path2.join(dir, `${name}.lock`) };
 };
+var sweepStale = async (dir, keep, olderThanMs = 5 * 60000) => {
+  let removed = 0;
+  let names;
+  try {
+    names = fs3.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    const file = path2.join(dir, name);
+    if (!name.endsWith(".sock") || file === keep)
+      continue;
+    try {
+      if (Date.now() - fs3.statSync(file).mtimeMs < olderThanMs)
+        continue;
+    } catch {
+      continue;
+    }
+    const answers = await new Promise((resolve) => {
+      const socket = net.connect(file);
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("error", () => resolve(false));
+    });
+    if (answers)
+      continue;
+    for (const target of [file, file.replace(/\.sock$/, ".lock")]) {
+      try {
+        fs3.unlinkSync(target);
+      } catch {}
+    }
+    removed++;
+  }
+  return removed;
+};
 
 class Bus {
   options;
@@ -376,6 +413,9 @@ class Bus {
       this.starting = null;
     });
     return this.starting;
+  }
+  sweep(olderThanMs) {
+    return sweepStale(this.options.dir, this.files.socket, olderThanMs);
   }
   async join() {
     for (let attempt = 0;attempt < 100 && !this.disposed && !this.away; attempt++) {
@@ -784,18 +824,20 @@ var FRAME = {
   info: "openchamber.vscode.bridge.info",
   hello: "openchamber.vscode.bridge.hello",
   allowFocus: "openchamber.vscode.bridge.allowFocus",
+  focusFrame: "openchamber.vscode.bridge.focusFrame",
   debuggerKnown: "openchamber.vscode.bridge.debuggerKnown",
+  filesChange: "openchamber.vscode.bridge.filesChange",
+  undo: "openchamber.vscode.bridge.undo",
   openBottom: "openchamber.vscode.bridge.openBottom",
   attachTerminal: "openchamber.vscode.bridge.attachTerminal",
-  showTerminal: "openchamber.vscode.bridge.showTerminal",
-  outputChannels: "openchamber.vscode.bridge.outputChannels"
+  showTerminal: "openchamber.vscode.bridge.showTerminal"
 };
 var BRIDGE = {
   runTask: "openchamber.bridge.runTask",
   startDebugging: "openchamber.bridge.startDebugging",
   moveTerminal: "openchamber.bridge.moveTerminal",
   showTerminal: "openchamber.bridge.showTerminal",
-  outputChannels: "openchamber.bridge.outputChannels"
+  undo: "openchamber.bridge.undo"
 };
 
 // bridge/src/variables.ts
@@ -923,11 +965,11 @@ var startFront = (bus, context, folder, part, log) => {
     send: (type, payload) => bus.send({ ...payload, type, to: owner })
   });
   let noticed = 0;
-  const ensureRuntime = async (what) => {
+  const ensureRuntime = async (what, reveal = true) => {
+    const opening = reveal || !bus.has("terminal") ? vscode2.commands.executeCommand(FRAME.openBottom).then((value) => value === true, () => false) : Promise.resolve(false);
     if (bus.has("terminal"))
       return true;
-    const opened = await vscode2.commands.executeCommand(FRAME.openBottom).then((value) => value === true, () => false);
-    if (opened && await waitFor(() => bus.has("terminal"), 45000))
+    if (await opening && await waitFor(() => bus.has("terminal"), 45000))
       return true;
     if (Date.now() - noticed > 1e4) {
       noticed = Date.now();
@@ -1015,6 +1057,14 @@ var startFront = (bus, context, folder, part, log) => {
     entry?.adapter?.event("terminated");
   };
   bus.on("session.ended", (message) => end(String(message.realId)));
+  context.subscriptions.push(vscode2.debug.onDidChangeActiveStackItem((item) => {
+    if (!(item instanceof vscode2.DebugStackFrame))
+      return;
+    const realId = item.session.configuration.__openchamber?.realId;
+    const owner = realId ? mirrors.get(realId)?.owner : undefined;
+    if (realId && owner)
+      bus.send({ type: "debug.focus", to: owner, realId, threadId: item.threadId, frameId: item.frameId });
+  }));
   context.subscriptions.push({ dispose: bus.onMembers(() => setTimeout(() => {
     for (const [realId, entry] of mirrors)
       if (entry.owner && !bus.members.has(entry.owner))
@@ -1094,8 +1144,22 @@ var startFront = (bus, context, folder, part, log) => {
   const routed = [
     ["workbench.action.terminal.new", undefined, "A new terminal"],
     ["workbench.action.terminal.newWithProfile", undefined, "A new terminal"],
+    ["workbench.action.terminal.newWithCwd", undefined, "A new terminal"],
+    ["workbench.action.terminal.newLocal", "workbench.action.terminal.new", "A new terminal"],
     ["workbench.action.terminal.newInActiveWorkspace", "workbench.action.terminal.new", "A new terminal"],
     ["workbench.action.terminal.split", undefined, "A new terminal"],
+    ["workbench.action.terminal.splitActiveTab", "workbench.action.terminal.split", "A new terminal"],
+    ["workbench.action.terminal.splitInActiveWorkspace", "workbench.action.terminal.split", "A new terminal"],
+    ["workbench.action.createTerminalEditor", "workbench.action.terminal.new", "A new terminal"],
+    ["workbench.action.createTerminalEditorSameGroup", "workbench.action.terminal.new", "A new terminal"],
+    ["workbench.action.createTerminalEditorSide", "workbench.action.terminal.new", "A new terminal"],
+    ["openInIntegratedTerminal", undefined, "A new terminal"],
+    ["openInTerminal", "openInIntegratedTerminal", "A new terminal"],
+    ["workbench.action.togglePanel", "workbench.action.focusPanel", "The panel"],
+    ["workbench.action.focusPanel", undefined, "The panel"],
+    ["workbench.actions.view.problems", "workbench.panel.markers.view.focus", "Problems"],
+    ["workbench.action.output.toggleOutput", "workbench.panel.output.focus", "Output"],
+    ["workbench.debug.action.toggleRepl", "workbench.panel.repl.view.focus", "The Debug Console"],
     ["workbench.action.terminal.toggleTerminal", "workbench.action.terminal.focus", "The terminal"],
     ["workbench.action.terminal.focus", undefined, "The terminal"],
     ["workbench.action.tasks.reRunTask", undefined, "The task"],
@@ -1138,19 +1202,15 @@ var startFront = (bus, context, folder, part, log) => {
     return { routed: true, ok: await bus.request("terminal", "debug.start", { name, noDebug: Boolean(noDebug) }, 120000) };
   }));
   context.subscriptions.push(vscode2.commands.registerCommand(BRIDGE.moveTerminal, async (terminal) => {
-    if (!await ensureRuntime(`The terminal "${terminal.title}"`))
+    if (!await ensureRuntime(`The terminal "${terminal.title}"`, false))
       return { routed: false };
     await bus.request("terminal", "terminal.attach", { terminal }, 30000);
     return { routed: true, ok: true };
   }));
   context.subscriptions.push(vscode2.commands.registerCommand(BRIDGE.showTerminal, async (process2, focus) => {
-    if (!await ensureRuntime("The terminal"))
+    if (!await ensureRuntime("The terminal", false))
       return { routed: false };
     return { routed: true, ok: Boolean(await bus.request("terminal", "terminal.show", { process: process2, focus: Boolean(focus) }, 30000)) };
-  }));
-  context.subscriptions.push(vscode2.commands.registerCommand(BRIDGE.outputChannels, async (channels) => {
-    bus.send({ type: "output.channels", to: "terminal", channels });
-    return true;
   }));
   return { ensureRuntime };
 };
@@ -1246,6 +1306,11 @@ var subtractDiagnostics = (all, mine) => {
     return false;
   });
 };
+var gitFingerprint = (state) => JSON.stringify([
+  state.HEAD?.name ?? null,
+  state.HEAD?.commit ?? null,
+  ...[state.indexChanges, state.workingTreeChanges, state.mergeChanges, state.untrackedChanges ?? []].map((changes) => changes.map((change) => `${change.status} ${change.uri.toString()}`).sort())
+]);
 var contains = (outer, line, character) => (line > outer[0] || line === outer[0] && character >= outer[1]) && (line < outer[2] || line === outer[2] && character <= outer[3]);
 var symbolPath = (symbols, line, character) => {
   for (const symbol of symbols) {
@@ -1385,8 +1450,54 @@ var startProblems = (bus, context, log) => {
   refresh().catch((error) => log(`problems: ${error}`));
 };
 
-// bridge/src/runtime.ts
+// bridge/src/replace.ts
 var vscode4 = __toESM(require("vscode"));
+var PREVIEW_SCHEME = "private";
+var PREVIEW_FRAGMENT = "replacePreview";
+var startReplacePreview = (bus, context, part) => {
+  if (part === "editor") {
+    const changed = new vscode4.EventEmitter;
+    context.subscriptions.push(changed, vscode4.workspace.registerTextDocumentContentProvider(PREVIEW_SCHEME, {
+      onDidChange: changed.event,
+      provideTextDocumentContent: async (uri) => {
+        if (uri.fragment !== PREVIEW_FRAGMENT || !bus.has("view"))
+          return;
+        const text = await bus.request("view", "replace.preview", { uri: uri.toString() }, 1e4).catch(() => null);
+        return text ?? undefined;
+      }
+    }));
+    bus.on("replace.changed", (message) => changed.fire(vscode4.Uri.parse(String(message.uri))));
+    const isPreview = (uri) => uri.scheme === PREVIEW_SCHEME && uri.fragment === PREVIEW_FRAGMENT;
+    context.subscriptions.push(vscode4.workspace.onDidOpenTextDocument((document) => {
+      if (isPreview(document.uri))
+        changed.fire(document.uri);
+    }));
+    for (const document of vscode4.workspace.textDocuments)
+      if (isPreview(document.uri))
+        changed.fire(document.uri);
+    return;
+  }
+  if (part !== "view")
+    return;
+  const following = new Set;
+  bus.on("replace.preview", async (message) => {
+    const uri = vscode4.Uri.parse(String(message.uri));
+    if (uri.scheme !== PREVIEW_SCHEME || uri.fragment !== PREVIEW_FRAGMENT)
+      return null;
+    const document = await vscode4.workspace.openTextDocument(uri);
+    following.add(document.uri.toString());
+    return document.getText();
+  });
+  context.subscriptions.push(vscode4.workspace.onDidChangeTextDocument((event) => {
+    const key = event.document.uri.toString();
+    if (following.has(key))
+      bus.send({ type: "replace.changed", to: "editor", uri: key });
+  }));
+  context.subscriptions.push(vscode4.workspace.onDidCloseTextDocument((document) => void following.delete(document.uri.toString())));
+};
+
+// bridge/src/runtime.ts
+var vscode5 = __toESM(require("vscode"));
 
 // bridge/src/dap.ts
 var FORWARDED = new Set(["stopped", "continued", "exited", "terminated", "thread", "module", "loadedSource", "process", "capabilities", "invalidated", "memory"]);
@@ -1505,7 +1616,7 @@ var startRuntime = (bus, context, folder, authority, log) => {
     data.dirty.clear();
     bus.send({ type: "bp.state", realId: data.session.id, sources });
   };
-  context.subscriptions.push(vscode4.debug.registerDebugAdapterTrackerFactory("*", {
+  context.subscriptions.push(vscode5.debug.registerDebugAdapterTrackerFactory("*", {
     createDebugAdapterTracker: (session) => {
       const data = dataOf(session);
       return {
@@ -1536,11 +1647,11 @@ var startRuntime = (bus, context, folder, authority, log) => {
       };
     }
   }));
-  context.subscriptions.push(vscode4.debug.onDidStartDebugSession((session) => {
+  context.subscriptions.push(vscode5.debug.onDidStartDebugSession((session) => {
     dataOf(session).session = session;
     announce(session);
   }));
-  context.subscriptions.push(vscode4.debug.onDidTerminateDebugSession((session) => {
+  context.subscriptions.push(vscode5.debug.onDidTerminateDebugSession((session) => {
     const data = sessions.get(session.id);
     if (!data)
       return;
@@ -1563,7 +1674,7 @@ var startRuntime = (bus, context, folder, authority, log) => {
   bus.on("debug.start", async (message) => {
     const started = Date.now();
     const target = message.config ?? message.name;
-    const ok = await vscode4.debug.startDebugging(folder, target, { ...RUNTIME_SESSION_OPTIONS, noDebug: Boolean(message.noDebug) });
+    const ok = await vscode5.debug.startDebugging(folder, target, { ...RUNTIME_SESSION_OPTIONS, noDebug: Boolean(message.noDebug) });
     log(`debug.start ${typeof target === "string" ? target : target.name}: ${ok} in ${Date.now() - started} ms`);
     return ok;
   });
@@ -1588,56 +1699,294 @@ var startRuntime = (bus, context, folder, authority, log) => {
     }
     return session.customRequest(command, toMainThread(args, authority));
   });
+  bus.on("debug.focus", (message) => vscode5.commands.executeCommand(FRAME.focusFrame, { sessionId: String(message.realId), threadId: Number(message.threadId), frameId: Number(message.frameId) }).then(undefined, () => {
+    return;
+  }));
   bus.on("session.stop", async (message) => {
     const data = sessions.get(String(message.realId));
     if (data)
-      await vscode4.debug.stopDebugging(data.session);
+      await vscode5.debug.stopDebugging(data.session);
   });
   bus.on("session.restart", async (message) => {
     sessionOf(message);
-    await vscode4.commands.executeCommand("workbench.action.debug.restart", undefined, { sessionId: String(message.realId) });
+    await vscode5.commands.executeCommand("workbench.action.debug.restart", undefined, { sessionId: String(message.realId) });
     return true;
   });
-  const userAsked = () => vscode4.commands.executeCommand(FRAME.allowFocus).then(undefined, () => {
+  const userAsked = () => vscode5.commands.executeCommand(FRAME.allowFocus).then(undefined, () => {
     return;
   });
   bus.on("run.command", async (message) => {
     await userAsked();
     log(`run.command ${String(message.command)}`);
-    await vscode4.commands.executeCommand(String(message.command), ...message.args ?? []);
+    await vscode5.commands.executeCommand(String(message.command), ...message.args ?? []);
     return true;
   });
   bus.on("terminal.send", async (message) => {
     await userAsked();
-    const terminal = vscode4.window.activeTerminal ?? vscode4.window.createTerminal();
+    const terminal = vscode5.window.activeTerminal ?? vscode5.window.createTerminal();
     terminal.show(false);
     terminal.sendText(String(message.text), message.execute !== false);
     return true;
   });
   bus.on("task.run", async (message) => {
     const spec = message.task;
-    const tasks2 = await vscode4.tasks.fetchTasks(spec.definitionType ? { type: spec.definitionType } : undefined);
-    const same = tasks2.filter((task) => task.name === spec.label && task.source === spec.source);
+    const tasks2 = await vscode5.tasks.fetchTasks(spec.definitionType ? { type: spec.definitionType } : undefined);
+    const same = tasks2.filter((task) => task.source === spec.source && (task.name === spec.label || `${task.source}: ${task.name}` === spec.label));
     const task = same.find((item) => JSON.stringify(item.definition) === JSON.stringify(spec.definition)) ?? same[0];
     if (!task)
       throw new Error(`No task "${spec.source}: ${spec.label}" here`);
     await userAsked();
-    await vscode4.tasks.executeTask(task);
+    await vscode5.tasks.executeTask(task);
     log(`task.run ${spec.source}: ${spec.label}`);
     return true;
   });
-  bus.on("terminal.attach", (message) => vscode4.commands.executeCommand(FRAME.attachTerminal, message.terminal));
+  bus.on("terminal.attach", (message) => vscode5.commands.executeCommand(FRAME.attachTerminal, message.terminal));
   bus.on("terminal.show", async (message) => {
     if (message.focus)
       await userAsked();
-    return vscode4.commands.executeCommand(FRAME.showTerminal, { process: message.process, focus: Boolean(message.focus) });
+    return vscode5.commands.executeCommand(FRAME.showTerminal, { process: message.process, focus: Boolean(message.focus) });
+  });
+};
+
+// bridge/src/files.ts
+var vscode6 = __toESM(require("vscode"));
+var startFiles = (bus, context, part, log) => {
+  if (part !== "editor") {
+    const tell = (phase, kind, files) => {
+      if (!bus.has("editor"))
+        return;
+      if (phase === "did") {
+        bus.send({ type: "files.change", to: "editor", phase, kind, files });
+        return;
+      }
+      return bus.request("editor", "files.change", { phase, kind, files }, 4000).catch((error) => log(`files: ${error}`));
+    };
+    const renamed = (files) => files.map((file) => ({ from: file.oldUri.toString(), to: file.newUri.toString() }));
+    const deleted = (files) => files.map((file) => ({ from: file.toString() }));
+    context.subscriptions.push(vscode6.workspace.onWillRenameFiles((event) => {
+      const waiting = tell("will", "rename", renamed(event.files));
+      if (waiting)
+        event.waitUntil(waiting);
+    }));
+    context.subscriptions.push(vscode6.workspace.onDidRenameFiles((event) => void tell("did", "rename", renamed(event.files))));
+    context.subscriptions.push(vscode6.workspace.onWillDeleteFiles((event) => {
+      const waiting = tell("will", "delete", deleted(event.files));
+      if (waiting)
+        event.waitUntil(waiting);
+    }));
+    context.subscriptions.push(vscode6.workspace.onDidDeleteFiles((event) => void tell("did", "delete", deleted(event.files))));
+  } else {
+    bus.on("files.change", (message) => vscode6.commands.executeCommand(FRAME.filesChange, { phase: message.phase, kind: message.kind, files: message.files }));
+  }
+  context.subscriptions.push(vscode6.commands.registerCommand(BRIDGE.undo, async (resource, redo) => {
+    for (const member of [...bus.members.keys()]) {
+      if (member === bus.me.member)
+        continue;
+      if (await bus.request(member, "undo.try", { resource, redo: Boolean(redo) }, 120000).catch(() => false)) {
+        log(`${redo ? "redo" : "undo"} of ${resource} ran in the ${bus.members.get(member)}`);
+        return true;
+      }
+    }
+    return false;
+  }));
+  bus.on("undo.try", (message) => vscode6.commands.executeCommand(FRAME.undo, { resource: String(message.resource), redo: Boolean(message.redo) }).then((done) => done === true, () => false));
+};
+
+// bridge/src/git.ts
+var vscode7 = __toESM(require("vscode"));
+var api = null;
+var gitApi = () => {
+  api ??= (async () => {
+    const extension = vscode7.extensions.getExtension("vscode.git");
+    if (!extension)
+      return null;
+    const exports2 = extension.isActive ? extension.exports : await extension.activate();
+    return exports2?.getAPI(1) ?? null;
+  })().catch(() => null);
+  return api;
+};
+var startGitSync = (bus, context, log) => {
+  const known = new Map;
+  const watch = (repository) => {
+    const root = repository.rootUri.toString();
+    known.set(root, gitFingerprint(repository.state));
+    context.subscriptions.push(repository.state.onDidChange(() => {
+      const now = gitFingerprint(repository.state);
+      if (known.get(root) === now)
+        return;
+      known.set(root, now);
+      bus.send({ type: "git.changed", root, fingerprint: now });
+    }));
+  };
+  gitApi().then((git) => {
+    if (!git)
+      return;
+    for (const repository of git.repositories)
+      watch(repository);
+    context.subscriptions.push(git.onDidOpenRepository(watch));
+    bus.on("git.changed", async (message) => {
+      const root = String(message.root);
+      const repository = git.repositories.find((item) => item.rootUri.toString() === root);
+      if (!repository)
+        return;
+      known.set(root, String(message.fingerprint));
+      if (gitFingerprint(repository.state) === message.fingerprint)
+        return;
+      await repository.status().catch((error) => log(`git status: ${error}`));
+    });
+  });
+};
+
+// bridge/src/output.ts
+var path4 = __toESM(require("node:path"));
+var import_node_string_decoder2 = require("node:string_decoder");
+var vscode8 = __toESM(require("vscode"));
+
+// bridge/src/outputFiles.ts
+var fs4 = __toESM(require("node:fs"));
+var path3 = __toESM(require("node:path"));
+var import_node_string_decoder = require("node:string_decoder");
+var FIRST_READ_MAX = 1 << 20;
+var outputFiles = (root) => {
+  const found = [];
+  const add = (file, label, log) => {
+    try {
+      if (fs4.statSync(file).size > 0)
+        found.push({ label, file, log });
+    } catch {}
+  };
+  let entries;
+  try {
+    entries = fs4.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory())
+      continue;
+    const plain = entry.name.startsWith("output_logging_");
+    if (!plain && !/^[^.]+\.[^.]+$/.test(entry.name))
+      continue;
+    const dir = path3.join(root, entry.name);
+    let names;
+    try {
+      names = fs4.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!name.endsWith(".log"))
+        continue;
+      if (!plain)
+        add(path3.join(dir, name), name.slice(0, -".log".length), true);
+      else {
+        const match = /^\d+-(.+)\.log$/.exec(name);
+        if (match)
+          add(path3.join(dir, name), match[1], false);
+      }
+    }
+  }
+  return found.sort((a, b) => a.label.localeCompare(b.label) || a.file.localeCompare(b.file));
+};
+var follow = (mirrored, append, clear) => {
+  const size = fs4.statSync(mirrored.file).size;
+  let offset = mirrored.offset;
+  if (size < offset) {
+    clear();
+    offset = 0;
+    mirrored.decoder = new import_node_string_decoder.StringDecoder("utf8");
+  }
+  if (size === offset)
+    return offset;
+  const start = offset === 0 && size > FIRST_READ_MAX ? size - FIRST_READ_MAX : offset;
+  const buffer = Buffer.alloc(size - start);
+  const fd = fs4.openSync(mirrored.file, "r");
+  try {
+    fs4.readSync(fd, buffer, 0, buffer.length, start);
+  } finally {
+    fs4.closeSync(fd);
+  }
+  append(mirrored.decoder.write(buffer));
+  return size;
+};
+
+// bridge/src/output.ts
+var PART_NAMES = { view: "rail", editor: "page" };
+var startOutputSource = (bus, context) => {
+  const root = path4.dirname(context.logUri.fsPath);
+  let last = "";
+  const publish = (always) => {
+    if (!bus.has("terminal"))
+      return;
+    const list = outputFiles(root);
+    const key = JSON.stringify(list);
+    if (key === last && !always)
+      return;
+    last = key;
+    bus.send({ type: "output.channels", to: "terminal", channels: list });
+  };
+  const timer = setInterval(() => publish(false), 3000);
+  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+  context.subscriptions.push({ dispose: bus.onMembers(() => publish(true)).dispose });
+  publish(true);
+};
+var startOutputMirror = (bus, context, log) => {
+  const mirrors = new Map;
+  const drop = (key) => {
+    mirrors.get(key)?.channel.dispose();
+    mirrors.delete(key);
+  };
+  const pump = () => {
+    if (bus.away)
+      return;
+    for (const mirrored of mirrors.values()) {
+      try {
+        mirrored.offset = follow(mirrored, (text) => mirrored.channel.append(text), () => mirrored.channel.clear());
+      } catch {}
+    }
+  };
+  bus.on("output.channels", (message) => {
+    const member = message.from?.member;
+    const part = message.from?.part;
+    if (!member || !part)
+      return;
+    const keep = new Set;
+    for (const spec of message.channels ?? []) {
+      const key = `${member}|${spec.file}`;
+      keep.add(key);
+      if (mirrors.has(key))
+        continue;
+      const channel = vscode8.window.createOutputChannel(`${spec.label} (${PART_NAMES[part] ?? part})`, spec.log ? "log" : undefined);
+      mirrors.set(key, { channel, file: spec.file, offset: 0, decoder: new import_node_string_decoder2.StringDecoder("utf8"), member });
+    }
+    for (const [key, mirrored] of mirrors)
+      if (mirrored.member === member && !keep.has(key))
+        drop(key);
+    pump();
+  });
+  const timer = setInterval(pump, 1000);
+  context.subscriptions.push({
+    dispose: () => {
+      clearInterval(timer);
+      for (const key of [...mirrors.keys()])
+        drop(key);
+    }
+  });
+  context.subscriptions.push({
+    dispose: bus.onMembers(() => {
+      const gone = [...mirrors].filter(([, mirrored]) => !bus.members.has(mirrored.member)).map(([key]) => key);
+      for (const key of gone)
+        drop(key);
+      if (gone.length)
+        log(`output: ${gone.length} channel(s) of a part that left`);
+    }).dispose
   });
 };
 
 // bridge/src/views.ts
-var vscode5 = __toESM(require("vscode"));
+var vscode9 = __toESM(require("vscode"));
 var wireRange = (range) => [range.start.line, range.start.character, range.end.line, range.end.character];
-var toRange = ([sl, sc, el, ec]) => new vscode5.Range(sl, sc, el, ec);
+var toRange = ([sl, sc, el, ec]) => new vscode9.Range(sl, sc, el, ec);
 var fromDocumentSymbols = (symbols) => {
   const nested = symbols.filter((symbol) => ("children" in symbol));
   if (nested.length === symbols.length) {
@@ -1680,11 +2029,11 @@ var startPageSide = (bus, context, log) => {
   let version = 0;
   const publish = async () => {
     const mine = ++version;
-    const editor = vscode5.window.activeTextEditor;
+    const editor = vscode9.window.activeTextEditor;
     if (!editor) {
       state = { uri: null, symbols: [], provides: false };
     } else {
-      const symbols = await vscode5.commands.executeCommand("vscode.executeDocumentSymbolProvider", editor.document.uri).then((value) => value, () => {
+      const symbols = await vscode9.commands.executeCommand("vscode.executeDocumentSymbolProvider", editor.document.uri).then((value) => value, () => {
         return;
       });
       if (mine !== version)
@@ -1702,18 +2051,18 @@ var startPageSide = (bus, context, log) => {
       publish().catch((error) => log(`outline: ${error}`));
     }, ms);
   };
-  context.subscriptions.push(vscode5.window.onDidChangeActiveTextEditor(() => soon(50)));
-  context.subscriptions.push(vscode5.workspace.onDidChangeTextDocument((event) => {
-    if (event.document === vscode5.window.activeTextEditor?.document)
+  context.subscriptions.push(vscode9.window.onDidChangeActiveTextEditor(() => soon(50)));
+  context.subscriptions.push(vscode9.workspace.onDidChangeTextDocument((event) => {
+    if (event.document === vscode9.window.activeTextEditor?.document)
       soon(400);
   }));
-  context.subscriptions.push(vscode5.languages.onDidChangeDiagnostics(() => {
-    if (!state.provides && vscode5.window.activeTextEditor)
+  context.subscriptions.push(vscode9.languages.onDidChangeDiagnostics(() => {
+    if (!state.provides && vscode9.window.activeTextEditor)
       soon(800);
   }));
   let cursorTimer = null;
-  context.subscriptions.push(vscode5.window.onDidChangeTextEditorSelection((event) => {
-    if (event.textEditor !== vscode5.window.activeTextEditor)
+  context.subscriptions.push(vscode9.window.onDidChangeTextEditorSelection((event) => {
+    if (event.textEditor !== vscode9.window.activeTextEditor)
       return;
     if (cursorTimer)
       clearTimeout(cursorTimer);
@@ -1724,12 +2073,12 @@ var startPageSide = (bus, context, log) => {
   }));
   bus.on("editor.current", () => state);
   bus.on("editor.reveal", async (message) => {
-    await vscode5.commands.executeCommand(FRAME.allowFocus).then(undefined, () => {
+    await vscode9.commands.executeCommand(FRAME.allowFocus).then(undefined, () => {
       return;
     });
-    const document = await vscode5.workspace.openTextDocument(vscode5.Uri.parse(String(message.uri)));
+    const document = await vscode9.workspace.openTextDocument(vscode9.Uri.parse(String(message.uri)));
     const selection = toRange(message.range);
-    await vscode5.window.showTextDocument(document, { selection: new vscode5.Range(selection.start, selection.start), preserveFocus: message.preserveFocus === true });
+    await vscode9.window.showTextDocument(document, { selection: new vscode9.Range(selection.start, selection.start), preserveFocus: message.preserveFocus === true });
     return true;
   });
   context.subscriptions.push({ dispose: bus.onMembers(() => soon(50)).dispose });
@@ -1739,7 +2088,7 @@ var startPageSide = (bus, context, log) => {
 class OutlineProvider {
   state = { uri: null, symbols: [], provides: false };
   parents = new Map;
-  changed = new vscode5.EventEmitter;
+  changed = new vscode9.EventEmitter;
   onDidChangeTreeData = this.changed.event;
   set(state) {
     this.state = state;
@@ -1754,9 +2103,9 @@ class OutlineProvider {
     this.changed.fire();
   }
   getTreeItem(symbol) {
-    const item = new vscode5.TreeItem(symbol.name, symbol.children.length ? vscode5.TreeItemCollapsibleState.Expanded : vscode5.TreeItemCollapsibleState.None);
+    const item = new vscode9.TreeItem(symbol.name, symbol.children.length ? vscode9.TreeItemCollapsibleState.Expanded : vscode9.TreeItemCollapsibleState.None);
     item.description = symbol.detail || undefined;
-    item.iconPath = new vscode5.ThemeIcon(`symbol-${SYMBOL_ICONS[symbol.kind] ?? "misc"}`);
+    item.iconPath = new vscode9.ThemeIcon(`symbol-${SYMBOL_ICONS[symbol.kind] ?? "misc"}`);
     item.command = { command: "openchamber.bridge.revealSymbol", title: "Reveal", arguments: [this.state.uri, symbol.selectionRange] };
     item.id = `${symbol.range.join(",")}|${symbol.name}`;
     return item;
@@ -1773,30 +2122,50 @@ class TimelineProvider {
   git;
   uri = null;
   commits = [];
-  changed = new vscode5.EventEmitter;
+  changed = new vscode9.EventEmitter;
   onDidChangeTreeData = this.changed.event;
   constructor(git) {
     this.git = git;
   }
   async load(uri) {
     this.uri = uri;
-    this.commits = [];
-    if (uri) {
-      const git = await this.git();
-      const repository = git?.getRepository(uri);
-      this.commits = repository ? await repository.log({ path: uri.fsPath, maxEntries: 50 }).catch(() => []) : [];
-    }
-    if (this.uri === uri)
-      this.changed.fire();
+    const repository = uri ? (await this.git())?.getRepository(uri) ?? null : null;
+    const commits = repository && uri ? await repository.log({ path: uri.fsPath, maxEntries: 50 }).catch(() => []) : [];
+    if (this.uri !== uri)
+      return;
+    this.commits = commits;
+    this.changed.fire();
+  }
+  follow(git, loaded) {
+    const heads = new Map;
+    const watching = [];
+    const again = () => void this.load(this.uri).then(loaded);
+    const watch = (repository) => {
+      heads.set(repository, repository.state.HEAD?.commit);
+      watching.push(repository.state.onDidChange(() => {
+        const head = repository.state.HEAD?.commit;
+        if (head === heads.get(repository))
+          return;
+        heads.set(repository, head);
+        if (this.uri && git.getRepository(this.uri) === repository)
+          again();
+      }));
+      if (this.uri && git.getRepository(this.uri) === repository)
+        again();
+    };
+    for (const repository of git.repositories)
+      watch(repository);
+    watching.push(git.onDidOpenRepository(watch));
+    return { dispose: () => watching.forEach((item) => item.dispose()) };
   }
   getTreeItem(commit) {
-    const item = new vscode5.TreeItem(commit.message.split(`
-`)[0] ?? commit.hash.slice(0, 7), vscode5.TreeItemCollapsibleState.None);
+    const item = new vscode9.TreeItem(commit.message.split(`
+`)[0] ?? commit.hash.slice(0, 7), vscode9.TreeItemCollapsibleState.None);
     item.description = [commit.authorName, commit.authorDate ? relative(commit.authorDate) : undefined].filter(Boolean).join(", ");
     item.tooltip = `${commit.hash.slice(0, 8)} ${commit.authorName ?? ""}
 
 ${commit.message}`;
-    item.iconPath = new vscode5.ThemeIcon("git-commit");
+    item.iconPath = new vscode9.ThemeIcon("git-commit");
     if (this.uri)
       item.command = { command: "openchamber.bridge.openCommit", title: "Open Changes", arguments: [this.uri.toString(), commit.hash, commit.parents[0] ?? null] };
     return item;
@@ -1815,27 +2184,25 @@ var relative = (date) => {
 };
 var startRailSide = (bus, context, log) => {
   const outline = new OutlineProvider;
-  const outlineView = vscode5.window.createTreeView("openchamber.outline", { treeDataProvider: outline, showCollapseAll: true });
-  const gitApi = async () => {
-    const extension = vscode5.extensions.getExtension("vscode.git");
-    if (!extension)
-      return null;
-    const exports2 = extension.isActive ? extension.exports : await extension.activate();
-    return exports2?.getAPI(1) ?? null;
-  };
+  const outlineView = vscode9.window.createTreeView("openchamber.outline", { treeDataProvider: outline, showCollapseAll: true });
   const timeline = new TimelineProvider(gitApi);
-  const timelineView = vscode5.window.createTreeView("openchamber.timeline", { treeDataProvider: timeline });
+  const timelineView = vscode9.window.createTreeView("openchamber.timeline", { treeDataProvider: timeline });
   context.subscriptions.push(outlineView, timelineView);
   const NO_EDITOR = "The page's active editor cannot provide outline information.";
   const apply = (state) => {
     outline.set(state);
     outlineView.message = !state.uri ? "There is no editor open in the page." : state.provides ? undefined : NO_EDITOR;
-    const uri = state.uri ? vscode5.Uri.parse(state.uri) : null;
+    const uri = state.uri ? vscode9.Uri.parse(state.uri) : null;
     if (uri?.toString() !== timeline.uri?.toString())
-      timeline.load(uri).then(() => {
-        timelineView.message = !uri ? "There is no editor open in the page." : timeline.commits.length ? undefined : "The page's active file has no Git history.";
-      });
+      timeline.load(uri).then(timelineLoaded);
   };
+  const timelineLoaded = () => {
+    timelineView.message = !timeline.uri ? "There is no editor open in the page." : timeline.commits.length ? undefined : "The page's active file has no Git history.";
+  };
+  gitApi().then((git) => {
+    if (git)
+      context.subscriptions.push(timeline.follow(git, timelineLoaded));
+  });
   bus.on("editor.active", (message) => apply({ uri: message.uri ?? null, symbols: message.symbols ?? [], provides: Boolean(message.provides) }));
   bus.on("editor.cursor", async (message) => {
     if (message.uri !== outline.state.uri || !outlineView.visible)
@@ -1847,30 +2214,18 @@ var startRailSide = (bus, context, log) => {
         return;
       });
   });
-  context.subscriptions.push(vscode5.commands.registerCommand("openchamber.bridge.revealSymbol", async (uri, range) => {
+  context.subscriptions.push(vscode9.commands.registerCommand("openchamber.bridge.revealSymbol", async (uri, range) => {
     if (uri)
       await bus.request("editor", "editor.reveal", { uri, range }, 1e4).catch((error) => log(`reveal: ${error}`));
   }));
-  context.subscriptions.push(vscode5.commands.registerCommand("openchamber.bridge.openCommit", async (uri, hash, parent) => {
+  context.subscriptions.push(vscode9.commands.registerCommand("openchamber.bridge.openCommit", async (uri, hash, parent) => {
     const git = await gitApi();
     if (!git)
       return;
-    const file = vscode5.Uri.parse(uri);
+    const file = vscode9.Uri.parse(uri);
     const name = file.path.slice(file.path.lastIndexOf("/") + 1);
-    await vscode5.commands.executeCommand("vscode.diff", git.toGitUri(file, parent ?? `${hash}~`), git.toGitUri(file, hash), `${name} (${hash.slice(0, 7)})`);
+    await vscode9.commands.executeCommand("vscode.diff", git.toGitUri(file, parent ?? `${hash}~`), git.toGitUri(file, hash), `${name} (${hash.slice(0, 7)})`);
   }));
-  const hideNative = () => {
-    for (const id of ["outline", "timeline"])
-      vscode5.commands.executeCommand(`${id}.removeView`).then(undefined, () => {
-        return;
-      });
-  };
-  context.subscriptions.push(outlineView.onDidChangeVisibility((event) => {
-    if (event.visible)
-      hideNative();
-  }));
-  if (outlineView.visible)
-    hideNative();
   const ask = async () => {
     if (!bus.has("editor")) {
       apply({ uri: null, symbols: [], provides: false });
@@ -1887,13 +2242,13 @@ var startRailSide = (bus, context, log) => {
 // bridge/src/extension.ts
 var PARTS = ["view", "editor", "terminal"];
 var activate = async (context) => {
-  const channel = vscode6.window.createOutputChannel("OpenChamber Bridge", { log: true });
+  const channel = vscode10.window.createOutputChannel("OpenChamber Bridge", { log: true });
   context.subscriptions.push(channel);
-  const info = await vscode6.commands.executeCommand(FRAME.info).then((value) => value, () => {
+  const info = await vscode10.commands.executeCommand(FRAME.info).then((value) => value, () => {
     return;
   });
   const part = info?.role;
-  const folder = vscode6.workspace.workspaceFolders?.[0];
+  const folder = vscode10.workspace.workspaceFolders?.[0];
   if (!info || !part || !PARTS.includes(part) || !folder) {
     channel.info(`not one of OpenChamber's parts (${part ?? "no frame"}): nothing to do`);
     return;
@@ -1902,18 +2257,21 @@ var activate = async (context) => {
   const log = (line) => channel.info(`[${role}] ${line}`);
   const folderKey = `${os.hostname()}|${folder.uri.toString()}`;
   const uid = typeof process.getuid === "function" ? process.getuid() : "user";
-  const bus = new Bus({ dir: path3.join(os.tmpdir(), `ocvsb-${uid}`), key: `${folderKey}|${info.window ?? "folder"}`, part: role, parts: PARTS, log });
+  const bus = new Bus({ dir: path5.join(os.tmpdir(), `ocvsb-${uid}`), key: `${folderKey}|${info.window ?? "folder"}`, part: role, parts: PARTS, log });
   context.subscriptions.push(bus);
   const heartbeat = new Heartbeat({
-    ping: () => vscode6.commands.executeCommand(FRAME.info),
+    ping: () => vscode10.commands.executeCommand(FRAME.info),
     onAway: () => bus.leave(),
     onBack: () => void bus.rejoin().catch((error) => log(String(error)))
   });
   context.subscriptions.push({ dispose: () => heartbeat.stop() });
   await bus.start();
   heartbeat.start();
+  bus.sweep().then((removed) => removed && log(`removed ${removed} stale socket(s) of closed windows`), () => {
+    return;
+  });
   const name = crypto2.createHash("sha1").update(folderKey).digest("hex").slice(0, 20);
-  const breakpoints = syncBreakpoints(bus, new BreakpointStore(path3.join(context.globalStorageUri.fsPath, `${name}.breakpoints.json`)), log);
+  const breakpoints = syncBreakpoints(bus, new BreakpointStore(path5.join(context.globalStorageUri.fsPath, `${name}.breakpoints.json`)), log);
   context.subscriptions.push(breakpoints);
   if (role === "terminal")
     startRuntime(bus, context, folder, info.authority || undefined, log);
@@ -1921,9 +2279,16 @@ var activate = async (context) => {
     startFront(bus, context, folder, role, log);
   startProblems(bus, context, log);
   startViews(bus, context, role, log);
-  vscode6.commands.executeCommand("setContext", "openchamber.bridge.part", role);
+  if (role === "terminal")
+    startOutputMirror(bus, context, log);
+  else
+    startOutputSource(bus, context);
+  startFiles(bus, context, role, log);
+  startReplacePreview(bus, context, role);
+  startGitSync(bus, context, log);
+  vscode10.commands.executeCommand("setContext", "openchamber.bridge.part", role);
   const manifest = context.extension.packageJSON;
-  vscode6.commands.executeCommand(FRAME.hello, { build: manifest.openchamberBuild ?? null, version: manifest.version ?? "" }).then(undefined, () => {
+  vscode10.commands.executeCommand(FRAME.hello, { build: manifest.openchamberBuild ?? null, version: manifest.version ?? "" }).then(undefined, () => {
     return;
   });
   breakpoints.join().then(() => log("breakpoints joined"), (error) => log(`breakpoints: ${error}`));

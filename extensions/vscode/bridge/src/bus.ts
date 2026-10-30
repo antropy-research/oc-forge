@@ -44,6 +44,47 @@ export const busFiles = (dir: string, key: string): { socket: string; lock: stri
   return { socket: path.join(dir, `${name}.sock`), lock: path.join(dir, `${name}.lock`) };
 };
 
+/**
+ * Removes the sockets (and locks) of buses nobody answers on any more, older than `olderThanMs`: a window whose
+ * extension hosts were killed leaves its socket behind (a server closed in time removes its own). Answers how many.
+ */
+export const sweepStale = async (dir: string, keep: string, olderThanMs = 5 * 60_000): Promise<number> => {
+  let removed = 0;
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    const file = path.join(dir, name);
+    if (!name.endsWith('.sock') || file === keep) continue;
+    try {
+      if (Date.now() - fs.statSync(file).mtimeMs < olderThanMs) continue;
+    } catch {
+      continue;
+    }
+    const answers = await new Promise<boolean>((resolve) => {
+      const socket = net.connect(file);
+      socket.once('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once('error', () => resolve(false));
+    });
+    if (answers) continue;
+    for (const target of [file, file.replace(/\.sock$/, '.lock')]) {
+      try {
+        fs.unlinkSync(target);
+      } catch {
+        // Gone already.
+      }
+    }
+    removed++;
+  }
+  return removed;
+};
+
 type Handler = (message: Message) => unknown;
 
 export class Bus {
@@ -86,6 +127,11 @@ export class Bus {
       this.starting = null;
     });
     return this.starting;
+  }
+
+  /** Sweeps other buses' stale sockets out of the directory (once a part started). */
+  sweep(olderThanMs?: number): Promise<number> {
+    return sweepStale(this.options.dir, this.files.socket, olderThanMs);
   }
 
   private async join(): Promise<void> {

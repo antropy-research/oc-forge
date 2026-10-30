@@ -36,6 +36,23 @@ export const subtractDiagnostics = (all: readonly WireDiagnostic[], mine: readon
   });
 };
 
+/** What a part's Git knows of a repository (the Git extension's `RepositoryState`, as far as compared). */
+export interface GitStateData {
+  readonly HEAD?: { readonly name?: string; readonly commit?: string };
+  readonly indexChanges: readonly { readonly uri: { toString(): string }; readonly status: number }[];
+  readonly workingTreeChanges: readonly { readonly uri: { toString(): string }; readonly status: number }[];
+  readonly mergeChanges: readonly { readonly uri: { toString(): string }; readonly status: number }[];
+  readonly untrackedChanges?: readonly { readonly uri: { toString(): string }; readonly status: number }[];
+}
+
+/** A repository's state as a string: the same in two parts once their Git saw the same repository. */
+export const gitFingerprint = (state: GitStateData): string => JSON.stringify([
+  state.HEAD?.name ?? null,
+  state.HEAD?.commit ?? null,
+  ...[state.indexChanges, state.workingTreeChanges, state.mergeChanges, state.untrackedChanges ?? []]
+    .map((changes) => changes.map((change) => `${change.status} ${change.uri.toString()}`).sort()),
+]);
+
 export interface WireSymbol {
   name: string;
   detail: string;

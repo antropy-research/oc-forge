@@ -10,16 +10,21 @@ export const FRAME = {
   hello: 'openchamber.vscode.bridge.hello',
   /** The user asked for something this part shows (from another part): it may take the keyboard focus. */
   allowFocus: 'openchamber.vscode.bridge.allowFocus',
+  /** The runtime: focuses a stack frame another part chose (`{ sessionId, threadId, frameId }`): the bottom's Debug
+   * Console evaluates in it. */
+  focusFrame: 'openchamber.vscode.bridge.focusFrame',
   /** Whether this workbench knows a debugger type yet (an extension installed while it runs comes in a moment). */
   debuggerKnown: 'openchamber.vscode.bridge.debuggerKnown',
+  /** The page: a file another part renames, moves or deletes (`FilesChange`): its editors here follow. */
+  filesChange: 'openchamber.vscode.bridge.filesChange',
+  /** Undo or Redo on a file (`{ resource, redo }`), if this part has it: true once done, else false. */
+  undo: 'openchamber.vscode.bridge.undo',
   /** Opens OpenChamber's bottom, VS Code's terminal (`forge.rail.open`): true once it is open, false if it can't. */
   openBottom: 'openchamber.vscode.bridge.openBottom',
   /** The runtime: shows a terminal another part's extension made (`TerminalSpec`), its process attached here. */
   attachTerminal: 'openchamber.vscode.bridge.attachTerminal',
   /** The runtime: shows the terminal attached to a process (`{ process, focus }`). */
   showTerminal: 'openchamber.vscode.bridge.showTerminal',
-  /** The runtime: the page's or the rail's output channels as files (`OutputSpec[]`), listed in the Output view. */
-  outputChannels: 'openchamber.vscode.bridge.outputChannels',
 } as const;
 
 /** The bridge's commands, for the frame. */
@@ -32,8 +37,8 @@ export const BRIDGE = {
   moveTerminal: 'openchamber.bridge.moveTerminal',
   /** The page or the rail: shows a moved terminal at the bottom (`{ process, focus }`). */
   showTerminal: 'openchamber.bridge.showTerminal',
-  /** The page or the rail: this part's output channels (`OutputSpec[]`) for the runtime's Output view. */
-  outputChannels: 'openchamber.bridge.outputChannels',
+  /** Undo or Redo on a file this part has nothing for (`resource`, `redo`): the part that has it does it. */
+  undo: 'openchamber.bridge.undo',
 } as const;
 
 export type BridgePart = 'view' | 'editor' | 'terminal';
@@ -86,13 +91,18 @@ export interface TerminalSpec {
   focus?: boolean;
 }
 
-/** An output channel as the runtime lists it: its name and its file on the server. */
+/** A file operation another part runs (`will`, before it: VS Code waits) or ran (`did`). */
+export interface FilesChange {
+  phase: 'will' | 'did';
+  kind: 'rename' | 'delete';
+  /** URIs; `to` for a rename or move. */
+  files: { from: string; to?: string }[];
+}
+
+/** An output channel of the page's or the rail's extension host: its name, and its file on the server. */
 export interface OutputSpec {
-  id: string;
   label: string;
-  /** `file://` URIs as the server names them (the extension host's view). */
-  files: string[];
+  file: string;
+  /** A log channel (`createOutputChannel(name, { log: true })`): its lines are log lines. */
   log: boolean;
-  /** Which part's (for its name in the list). */
-  part: BridgePart;
 }

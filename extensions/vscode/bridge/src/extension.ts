@@ -14,7 +14,11 @@ import { startFront } from './front.ts';
 import { Heartbeat } from './heartbeat.ts';
 import { startProblems } from './problems.ts';
 import { FRAME, type BridgeHello, type BridgePart, type FrameInfo } from './protocol.ts';
+import { startReplacePreview } from './replace.ts';
 import { startRuntime } from './runtime.ts';
+import { startFiles } from './files.ts';
+import { startGitSync } from './git.ts';
+import { startOutputMirror, startOutputSource } from './output.ts';
 import { startViews } from './views.ts';
 
 const PARTS: readonly BridgePart[] = ['view', 'editor', 'terminal'];
@@ -46,6 +50,7 @@ export const activate = async (context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => heartbeat.stop() });
   await bus.start();
   heartbeat.start();
+  void bus.sweep().then((removed) => removed && log(`removed ${removed} stale socket(s) of closed windows`), () => undefined);
   // The folder's breakpoints, in the bridge's global storage (the workspace storage is each window's own: VS Code
   // gives a window open on the folder while another is a folder of its own, `<id>-1`).
   const name = crypto.createHash('sha1').update(folderKey).digest('hex').slice(0, 20);
@@ -55,6 +60,11 @@ export const activate = async (context: vscode.ExtensionContext): Promise<void> 
   else startFront(bus, context, folder, role, log);
   startProblems(bus, context, log);
   startViews(bus, context, role, log);
+  if (role === 'terminal') startOutputMirror(bus, context, log);
+  else startOutputSource(bus, context);
+  startFiles(bus, context, role, log);
+  startReplacePreview(bus, context, role);
+  startGitSync(bus, context, log);
   void vscode.commands.executeCommand('setContext', 'openchamber.bridge.part', role);
   // The frame catches what VS Code would run here (a task, a compound launch, an extension's terminal) once it knows
   // the bridge runs, and which build.

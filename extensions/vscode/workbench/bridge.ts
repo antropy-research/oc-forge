@@ -5,26 +5,39 @@
 // before it runs: a task VS Code starts (its pickers, an extension through the API), a compound launch (its own
 // preLaunchTask), a terminal an extension makes. Until the bridge says hello in this workbench, VS Code's own runs.
 import type { OcForgeClient } from '../../../adapters/openchamber/client/index.ts';
-import { BRIDGE, FRAME, type BridgeHello, type BridgePart, type FrameInfo, type OutputSpec, type Routed, type TaskSpec, type TerminalSpec } from '../bridge/src/protocol.ts';
+import { BRIDGE, FRAME, type BridgeHello, type BridgePart, type FilesChange, type FrameInfo, type Routed, type TaskSpec, type TerminalSpec } from '../bridge/src/protocol.ts';
 import type { FocusGuard } from '../src/focus.ts';
 import {
   PARTS,
   SEVERITY_INFO,
+  STORAGE_MACHINE,
+  STORAGE_PROFILE,
   VscodeServices,
   type CommandService,
   type DebugService,
+  type EditorGroupsService,
+  type EditorInput,
+  type EditorService,
   type ExtensionService,
   type FileService,
+  type ModelService,
   type LayoutService,
   type Launch,
   type NotificationService,
   type RemoteAgentService,
+  type StorageService,
   type Task,
   type TaskService,
+  type TerminalBackground,
   type TerminalGroupService,
   type TerminalInstance,
   type TerminalInstanceHost,
   type TerminalService,
+  type TextFileService,
+  type TextModelService,
+  type UndoRedoService,
+  type Uri,
+  type ViewDescriptorService,
 } from './vscode.ts';
 
 /** The rail entry whose zone is OpenChamber's bottom: VS Code's terminal (src/surfaces.ts `TERMINAL_ENTRY_ID`). */
@@ -107,6 +120,30 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
     return true;
   };
 
+  // ── The rail: the bridge's Outline and Timeline (fed from the page) stand in for VS Code's own, which follow the
+  // rail's active editor (it has none). VS Code's own are hidden while the bridge runs; those this frame hid show
+  // again when it doesn't (it keeps which in the rail's storage). ──
+  const NATIVE_VIEWS = ['outline', 'timeline'];
+  const HIDDEN_VIEWS = 'openchamber.bridge.hiddenViews';
+  const showNativeViews = (visible: boolean): void => {
+    if (options.role !== 'view' || !services) return;
+    try {
+      const storage = services.get<StorageService>('storageService');
+      const views = services.get<ViewDescriptorService>('viewDescriptorService');
+      const hidden = new Set<string>(JSON.parse(storage.get(HIDDEN_VIEWS, STORAGE_PROFILE) ?? '[]') as string[]);
+      for (const id of visible ? [...hidden] : NATIVE_VIEWS) {
+        const container = views.getViewContainerByViewId(id);
+        if (container) views.getViewContainerModel(container).setVisible(id, visible);
+        if (visible) hidden.delete(id);
+        else hidden.add(id);
+      }
+      if (hidden.size) storage.store(HIDDEN_VIEWS, JSON.stringify([...hidden]), STORAGE_PROFILE, STORAGE_MACHINE);
+      else storage.remove(HIDDEN_VIEWS, STORAGE_PROFILE);
+    } catch (error) {
+      options.log(visible ? "could not show VS Code's own Outline and Timeline again" : "VS Code's own Outline and Timeline stay in the rail", error);
+    }
+  };
+
   // ── The runtime: terminals another part's extension made, attached to their process here ──
   const terminals = (): (TerminalService & TerminalInstanceHost) | null => services?.get<TerminalService & TerminalInstanceHost>('terminalService') ?? null;
   const reveal = async (instance: TerminalInstance, focus: boolean): Promise<void> => {
@@ -143,11 +180,23 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
     return true;
   };
 
-  // ── The page and the rail: a terminal an extension made here goes to the runtime ──
+  // ── The page and the rail: no terminal of their own. One an extension makes here (its handle on the process) is
+  // hidden here (`hideFromUser`) and shown at the bottom, attached to its process (`move`). ──
+  /** The launch configurations of the terminals hidden here. */
+  const hiddenHere = new WeakSet<object>();
+  /** Terminals VS Code was asked to show before they reached the bottom: with the focus or not. */
+  const showWanted = new WeakMap<TerminalInstance, boolean>();
+  /** The terminal `terminal.show()` shows (its `showPanel` comes next, with the focus wanted). */
+  let pendingReveal: TerminalInstance | null = null;
+  const revealAtBottom = (instance: TerminalInstance, focus: boolean): void => {
+    const process = moved.get(instance.instanceId);
+    if (process === undefined) showWanted.set(instance, focus);
+    else void command()?.executeCommand(BRIDGE.showTerminal, process, focus).catch(() => undefined);
+  };
   const revealMoved = (focus: boolean): void => {
-    const active = terminals()?.activeInstance;
-    const process = active ? moved.get(active.instanceId) : undefined;
-    if (process !== undefined) void command()?.executeCommand(BRIDGE.showTerminal, process, focus).catch(() => undefined);
+    const target = pendingReveal ?? terminals()?.activeInstance;
+    pendingReveal = null;
+    if (target) revealAtBottom(target, focus);
   };
   let pseudoNoticed = false;
   const move = async (instance: TerminalInstance): Promise<void> => {
@@ -174,16 +223,105 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
       color: config.color,
       hasChildProcesses: instance.hasChildProcesses,
       isFeatureTerminal: config.isFeatureTerminal,
-      hideFromUser: config.hideFromUser,
+      // Hidden here by this frame, not by the extension: shown at the bottom.
+      hideFromUser: hiddenHere.has(config) ? false : config.hideFromUser,
       type: config.type,
-      show: Date.now() - panelWanted < 5_000 && terminals()?.activeInstance === instance,
-      focus: false,
+      show: showWanted.has(instance) || (Date.now() - panelWanted < 5_000 && terminals()?.activeInstance === instance),
+      focus: showWanted.get(instance) ?? false,
     };
     const result = await command()?.executeCommand(BRIDGE.moveTerminal, spec).catch((error) => {
       options.log('could not show the terminal at the bottom', error);
       return null;
     }) as Routed | null | undefined;
     if (result?.routed) moved.set(instance.instanceId, process);
+  };
+
+  // ── The page: a file another part renames, moves or deletes: its editors here follow, as one window's would ──
+  /** Unsaved text of files another part moves or deletes, by the file it ends up as. */
+  const keptText = new Map<string, string>();
+  const filesChange = async (change: FilesChange): Promise<boolean> => {
+    if (options.role !== 'editor' || !services) return false;
+    const uris = services.uriClass();
+    const textFiles = services.get<TextFileService>('textFileService');
+    // An extension host names the server's files `file:///…`; this window, `vscode-remote://<authority>/…`.
+    const here = (uri: string): Uri => {
+      const parsed = uris.parse(uri);
+      return parsed.scheme === 'file' && options.authority ? parsed.with({ scheme: 'vscode-remote', authority: options.authority }) : parsed;
+    };
+    const pairs = change.files.map((file) => ({ from: here(file.from), to: file.to ? here(file.to) : null }));
+    const inside = (resource: Uri, folder: Uri): boolean => resource.scheme === folder.scheme && resource.authority === folder.authority
+      && (resource.path === folder.path || resource.path.startsWith(folder.path.endsWith('/') ? folder.path : `${folder.path}/`));
+    const pairOf = (resource: Uri): { from: Uri; to: Uri | null } | undefined => pairs.find((pair) => inside(resource, pair.from));
+    const movedTo = (resource: Uri, pair: { from: Uri; to: Uri | null }): Uri | null => (pair.to ? pair.to.with({ path: `${pair.to.path}${resource.path.slice(pair.from.path.length)}` }) : null);
+    // Before (and after, if the before didn't come): the unsaved text kept, the model marked saved (VS Code's soft
+    // revert, its text shown still), so that no save, the user's or auto-save's, writes the old name again.
+    for (const model of [...textFiles.files.models]) {
+      const pair = pairOf(model.resource);
+      if (!pair || !model.isDirty()) continue;
+      const kept = model.textEditorModel?.getValue();
+      if (kept !== undefined) keptText.set((movedTo(model.resource, pair) ?? model.resource).toString(), kept);
+      await model.revert({ soft: true });
+    }
+    options.log(`${change.phase} ${change.kind} of ${pairs.length} file(s): ${keptText.size} unsaved kept`);
+    if (change.phase === 'will') return true;
+    if (change.kind === 'delete') {
+      // Marked deleted (VS Code's own mark, once it reads the file again); its text stays shown, unsaved no more.
+      for (const model of [...textFiles.files.models]) if (pairOf(model.resource)) await textFiles.files.resolve(model.resource, { reload: { async: false } }).catch(() => undefined);
+      for (const key of [...keptText.keys()]) if (pairOf(uris.parse(key))) keptText.delete(key);
+      return true;
+    }
+    // Moved: each editor of it replaced by the new name's where it was, with its view state (VS Code's own move).
+    const editorService = services.get<EditorService>('editorService');
+    const groups = services.get<EditorGroupsService>('editorGroupsService');
+    const byGroup = new Map<number, { editor: EditorInput; replacement: unknown }[]>();
+    for (const { editor, groupId } of editorService.getEditors(1)) {
+      const resource = editor.resource;
+      const pair = resource ? pairOf(resource) : undefined;
+      const target = resource && pair ? movedTo(resource, pair) : null;
+      const group = groups.getGroup(groupId);
+      if (!target || !group) continue;
+      const result = await editor.rename(groupId, target).catch(() => undefined);
+      const untyped = result?.editor as { typeId?: unknown; options?: Record<string, unknown> } | undefined;
+      if (!untyped || typeof untyped !== 'object' || 'typeId' in untyped) continue;
+      const list = byGroup.get(groupId) ?? [];
+      list.push({ editor, replacement: { ...untyped, options: { ...untyped.options, preserveFocus: true, pinned: group.isPinned(editor), sticky: group.isSticky(editor), index: group.getIndexOfEditor(editor), inactive: !group.isActive(editor) } } });
+      byGroup.set(groupId, list);
+    }
+    for (const [groupId, replacements] of byGroup) await editorService.replaceEditors(replacements, groupId);
+    options.log(`moved ${[...byGroup.values()].flat().length} editor(s)`);
+    // The unsaved text, unsaved in the new name's model.
+    for (const [key, kept] of [...keptText]) {
+      const target = uris.parse(key);
+      if (!pairs.some((pair) => pair.to && inside(target, pair.to))) continue;
+      keptText.delete(key);
+      const model = await textFiles.files.resolve(target);
+      const same = model.textEditorModel?.getValue() === kept;
+      if (model.textEditorModel && !same) model.textEditorModel.setValue(kept);
+      options.log(`unsaved text of ${target.path.split('/').pop()}: ${same ? 'the same as the file' : 'put back'} (unsaved ${model.isDirty()})`);
+    }
+    return true;
+  };
+  // ── The runtime: the stack frame the rail chose in a mirror's call stack, focused here (the Debug Console's) ──
+  const focusFrame = async ({ sessionId, threadId, frameId }: { sessionId: string; threadId: number; frameId: number }): Promise<boolean> => {
+    if (options.role !== 'terminal' || !services) return false;
+    const debug = services.get<DebugService>('debugService');
+    const session = debug.getModel().getSession(sessionId);
+    const thread = session?.getThread(threadId);
+    const frame = thread?.getCallStack().find((item) => item.frameId === frameId);
+    // Already it (VS Code focuses the top frame as a thread stops, here and in each mirror).
+    if (!frame || debug.getViewModel().focusedStackFrame === frame) return false;
+    await debug.focusStackFrame(frame, thread, session, { explicit: true, preserveFocus: true });
+    return true;
+  };
+  // Another part's Undo or Redo this part may have: VS Code's own (not the catch in `prepare`, which asks the others).
+  const undoHere = async ({ resource, redo }: { resource: string; redo: boolean }): Promise<boolean> => {
+    if (!services) return false;
+    const undoRedo = services.get<UndoRedoService>('undoRedoService');
+    const uri = services.uriClass().parse(resource);
+    if (!(redo ? undoRedo.canRedo(uri) : undoRedo.canUndo(uri))) return false;
+    const own = Object.getPrototypeOf(undoRedo) as UndoRedoService;
+    await (redo ? own.redo : own.undo).call(undoRedo, uri);
+    return true;
   };
 
   const prepare = (ready: VscodeServices): void => {
@@ -207,12 +345,17 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
     } catch (error) {
       options.log('tasks run in this part of VS Code', error);
     }
-    // A compound launch: its own preLaunchTask runs before its configurations reach the bridge's launch provider.
+    // A compound launch: its own preLaunchTask runs before its configurations reach the bridge's launch provider. Named,
+    // or the one chosen (F5, Select and Start Debugging).
     try {
-      replaceMethod(ready.get<DebugService>('debugService'), 'startDebugging', (original) => function (this: unknown, launch: Launch | undefined, configOrName?: unknown, startOptions?: { noDebug?: boolean }, saveBeforeStart?: boolean) {
+      const debug = ready.get<DebugService>('debugService');
+      replaceMethod(debug, 'startDebugging', (original) => function (this: unknown, launch: Launch | undefined, configOrName?: unknown, startOptions?: { noDebug?: boolean }, saveBeforeStart?: boolean) {
         const here = (): Promise<boolean> => original.call(this, launch, configOrName, startOptions, saveBeforeStart);
-        if (!hello || typeof configOrName !== 'string' || !launch?.getCompound(configOrName)) return here();
-        return Promise.resolve(command()?.executeCommand(BRIDGE.startDebugging, configOrName, Boolean(startOptions?.noDebug))).then(
+        if (!hello || (configOrName !== undefined && typeof configOrName !== 'string')) return here();
+        const selected = configOrName === undefined ? debug.getConfigurationManager().selectedConfiguration : null;
+        const name = typeof configOrName === 'string' ? configOrName : selected?.name;
+        if (!name || !(launch ?? selected?.launch)?.getCompound(name)) return here();
+        return Promise.resolve(command()?.executeCommand(BRIDGE.startDebugging, name, Boolean(startOptions?.noDebug))).then(
           (result) => ((result as Routed | undefined)?.routed ? Boolean((result as Routed).ok) : here()),
           () => here(),
         );
@@ -220,11 +363,63 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
     } catch (error) {
       options.log('compound launches run in this part of VS Code', error);
     }
+    // Undo or Redo on a file with nothing for it here (Ctrl+Z in the page after the rail's Explorer deleted the file):
+    // the part that ran the operation on it does it, as one window's undo would.
+    try {
+      const undoRedo = ready.get<UndoRedoService>('undoRedoService');
+      const isUri = (value: unknown): value is Uri => typeof (value as Uri | null)?.scheme === 'string' && typeof (value as Uri).path === 'string';
+      for (const redo of [false, true]) {
+        replaceMethod(undoRedo, redo ? 'redo' : 'undo', (original) => function (this: unknown, resource: Uri) {
+          if (!hello || !isUri(resource) || (redo ? undoRedo.canRedo(resource) : undoRedo.canUndo(resource))) return original.call(this, resource);
+          return Promise.resolve(command()?.executeCommand(BRIDGE.undo, resource.toString(), redo)).then(() => undefined, () => undefined);
+        });
+      }
+    } catch (error) {
+      options.log('undo stays in this part of VS Code', error);
+    }
+    // The rail: Search's replace previews. VS Code makes a preview's model, applies the replacements once and lets the
+    // model go: the editor that would hold it is the page's. A reference taken as the model is made keeps it (with its
+    // replacements, and their updates) while its search result lives, for the page to read (bridge/src/replace.ts).
+    if (options.role === 'view') {
+      try {
+        const textModels = ready.get<TextModelService>('textModelService');
+        ready.get<ModelService>('modelService').onModelAdded((model) => {
+          if (!hello || model.uri.scheme !== 'private' || model.uri.fragment !== 'replacePreview') return;
+          void textModels.createModelReference(model.uri).then((reference) => {
+            const gone = model.onWillDispose(() => {
+              gone.dispose();
+              reference.dispose();
+            });
+          }, () => undefined);
+        });
+      } catch (error) {
+        options.log("Search's replace previews stay in the rail", error);
+      }
+    }
     // A terminal an extension makes here shows at the bottom, attached to its process; this part's panel stays closed.
     // `terminal.show()` (VS Code's `$show`) makes the terminal active and shows the panel: it shows at the bottom.
     try {
-      const service = ready.get<TerminalService>('terminalService');
+      const service = ready.get<TerminalService & TerminalBackground>('terminalService');
       service.onDidCreateInstance((instance) => void move(instance).catch((error) => options.log('could not move the terminal', error)));
+      // VS Code's own commands that make a terminal run at the bottom (the bridge): one made here is an extension's.
+      replaceMethod(service, 'createTerminal', (original) => function (this: unknown, createOptions?: { config?: Record<string, unknown> }) {
+        const config = createOptions?.config;
+        if (!hello || !config || config.customPtyImplementation || config.attachPersistentProcess || config.hideFromUser || 'profileName' in config) return original.call(this, createOptions);
+        const hidden = { ...config, hideFromUser: true };
+        hiddenHere.add(hidden);
+        return original.call(this, { ...createOptions, config: hidden });
+      });
+      // `terminal.show()` of one hidden here: shown at the bottom, and still hidden here.
+      replaceMethod(service, 'showBackgroundTerminal', (original) => function (this: unknown, instance: TerminalInstance, suppressSetActive?: boolean) {
+        if (!hello || !hiddenHere.has(instance.shellLaunchConfig)) return original.call(this, instance, suppressSetActive);
+        pendingReveal = instance;
+        queueMicrotask(() => {
+          if (pendingReveal !== instance) return;
+          pendingReveal = null;
+          revealAtBottom(instance, false);
+        });
+        return Promise.resolve();
+      });
       replaceMethod(ready.get<TerminalGroupService>('terminalGroupService'), 'showPanel', (original) => function (this: unknown, focus?: boolean) {
         if (!hello) return original.call(this, focus);
         panelWanted = Date.now();
@@ -319,6 +514,8 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
       if (claimed) await install(ready, call).catch((error) => options.log('could not install the bridge', error));
       if (await waitHello(60_000)) return;
     }
+    // VS Code's own, as without the bridge.
+    showNativeViews(true);
     await notice(ready, call, meta.id);
   };
 
@@ -328,6 +525,7 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
       id: FRAME.hello,
       handler: ((value: BridgeHello) => {
         hello = value;
+        showNativeViews(false);
         for (const listener of [...helloListeners]) listener();
       }) as (...args: never[]) => unknown,
     },
@@ -337,12 +535,15 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
       handler: ((type: string) => Boolean(services?.get<DebugService>('debugService').getAdapterManager().getDebugger(type))) as (...args: never[]) => unknown,
     },
     { id: FRAME.openBottom, handler: () => openBottom().catch(() => false) },
+    { id: FRAME.filesChange, handler: ((change: FilesChange) => filesChange(change).catch((error) => {
+      options.log('could not follow a file operation', error);
+      return false;
+    })) as (...args: never[]) => unknown },
+    { id: FRAME.focusFrame, handler: ((frame: { sessionId: string; threadId: number; frameId: number }) => focusFrame(frame).catch(() => false)) as (...args: never[]) => unknown },
+    { id: FRAME.undo, handler: ((request: { resource: string; redo: boolean }) => undoHere(request).catch(() => false)) as (...args: never[]) => unknown },
     { id: FRAME.attachTerminal, handler: ((spec: TerminalSpec) => attach(spec)) as (...args: never[]) => unknown },
     { id: FRAME.showTerminal, handler: ((value: { process: number; focus: boolean }) => showTerminal(value)) as (...args: never[]) => unknown },
-    { id: FRAME.outputChannels, handler: ((channels: OutputSpec[]) => outputChannels(channels)) as (...args: never[]) => unknown },
   ];
-  // The runtime's Output view lists the page's and the rail's channels (see output.ts); set by the frame's boot.
-  let outputChannels: (channels: OutputSpec[]) => unknown = () => false;
 
   return {
     commands,
@@ -351,8 +552,5 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
     get running() {
       return hello !== null;
     },
-    set outputs(handler: (channels: OutputSpec[]) => unknown) {
-      outputChannels = handler;
-    },
-  } as BridgeFrame & { outputs: (channels: OutputSpec[]) => unknown };
+  };
 };

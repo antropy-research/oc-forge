@@ -122,6 +122,7 @@ export const startRuntime = (bus: Bus, context: vscode.ExtensionContext, folder:
     }
     return session.customRequest(command, toMainThread(args, authority));
   });
+  bus.on('debug.focus', (message) => vscode.commands.executeCommand(FRAME.focusFrame, { sessionId: String(message.realId), threadId: Number(message.threadId), frameId: Number(message.frameId) }).then(undefined, () => undefined));
   bus.on('session.stop', async (message) => {
     const data = sessions.get(String(message.realId));
     if (data) await vscode.debug.stopDebugging(data.session);
@@ -154,7 +155,8 @@ export const startRuntime = (bus: Bus, context: vscode.ExtensionContext, folder:
   bus.on('task.run', async (message) => {
     const spec = message.task as TaskSpec;
     const tasks = await vscode.tasks.fetchTasks(spec.definitionType ? { type: spec.definitionType } : undefined);
-    const same = tasks.filter((task) => task.name === spec.label && task.source === spec.source);
+    // VS Code's own label of an extension's task names its source too ("npm: build"), the API's doesn't.
+    const same = tasks.filter((task) => task.source === spec.source && (task.name === spec.label || `${task.source}: ${task.name}` === spec.label));
     const task = same.find((item) => JSON.stringify(item.definition) === JSON.stringify(spec.definition)) ?? same[0];
     if (!task) throw new Error(`No task "${spec.source}: ${spec.label}" here`);
     await userAsked();

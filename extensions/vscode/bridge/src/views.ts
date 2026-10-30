@@ -5,6 +5,7 @@
 // They stand in for VS Code's own Outline and Timeline in the rail, which it hides.
 import * as vscode from 'vscode';
 import type { Bus } from './bus.ts';
+import { gitApi, type Commit, type GitApi, type GitRepository } from './git.ts';
 import { FRAME, type BridgePart } from './protocol.ts';
 import { SYMBOL_ICONS, symbolPath, type WireRange, type WireSymbol } from './wire.ts';
 
@@ -135,19 +136,6 @@ class OutlineProvider implements vscode.TreeDataProvider<WireSymbol> {
   }
 }
 
-interface Commit {
-  hash: string;
-  message: string;
-  parents: string[];
-  authorName?: string;
-  authorDate?: Date;
-}
-
-interface GitApi {
-  getRepository(uri: vscode.Uri): { log(options: { path?: string; maxEntries?: number }): Promise<Commit[]> } | null;
-  toGitUri(uri: vscode.Uri, ref: string): vscode.Uri;
-}
-
 class TimelineProvider implements vscode.TreeDataProvider<Commit> {
   uri: vscode.Uri | null = null;
   commits: Commit[] = [];
@@ -156,15 +144,34 @@ class TimelineProvider implements vscode.TreeDataProvider<Commit> {
 
   constructor(private readonly git: () => Promise<GitApi | null>) {}
 
+  /** The file's history (again when its repository opens or its HEAD moves: see `follow`). */
   async load(uri: vscode.Uri | null): Promise<void> {
     this.uri = uri;
-    this.commits = [];
-    if (uri) {
-      const git = await this.git();
-      const repository = git?.getRepository(uri);
-      this.commits = repository ? await repository.log({ path: uri.fsPath, maxEntries: 50 }).catch(() => []) : [];
-    }
-    if (this.uri === uri) this.changed.fire();
+    const repository = uri ? (await this.git())?.getRepository(uri) ?? null : null;
+    const commits = repository && uri ? await repository.log({ path: uri.fsPath, maxEntries: 50 }).catch(() => []) : [];
+    if (this.uri !== uri) return;
+    this.commits = commits;
+    this.changed.fire();
+  }
+
+  /** Loads the file's history again when Git finds its repository (a moment after it starts) or its HEAD moves. */
+  follow(git: GitApi, loaded: () => void): vscode.Disposable {
+    const heads = new Map<GitRepository, string | undefined>();
+    const watching: vscode.Disposable[] = [];
+    const again = (): void => void this.load(this.uri).then(loaded);
+    const watch = (repository: GitRepository): void => {
+      heads.set(repository, repository.state.HEAD?.commit);
+      watching.push(repository.state.onDidChange(() => {
+        const head = repository.state.HEAD?.commit;
+        if (head === heads.get(repository)) return;
+        heads.set(repository, head);
+        if (this.uri && git.getRepository(this.uri) === repository) again();
+      }));
+      if (this.uri && git.getRepository(this.uri) === repository) again();
+    };
+    for (const repository of git.repositories) watch(repository);
+    watching.push(git.onDidOpenRepository(watch));
+    return { dispose: () => watching.forEach((item) => item.dispose()) };
   }
 
   getTreeItem(commit: Commit): vscode.TreeItem {
@@ -191,12 +198,6 @@ const relative = (date: Date): string => {
 const startRailSide = (bus: Bus, context: vscode.ExtensionContext, log: (line: string) => void): void => {
   const outline = new OutlineProvider();
   const outlineView = vscode.window.createTreeView('openchamber.outline', { treeDataProvider: outline, showCollapseAll: true });
-  const gitApi = async (): Promise<GitApi | null> => {
-    const extension = vscode.extensions.getExtension<{ getAPI(version: 1): GitApi }>('vscode.git');
-    if (!extension) return null;
-    const exports = extension.isActive ? extension.exports : await extension.activate();
-    return exports?.getAPI(1) ?? null;
-  };
   const timeline = new TimelineProvider(gitApi);
   const timelineView = vscode.window.createTreeView('openchamber.timeline', { treeDataProvider: timeline });
   context.subscriptions.push(outlineView, timelineView);
@@ -205,10 +206,14 @@ const startRailSide = (bus: Bus, context: vscode.ExtensionContext, log: (line: s
     outline.set(state);
     outlineView.message = !state.uri ? 'There is no editor open in the page.' : state.provides ? undefined : NO_EDITOR;
     const uri = state.uri ? vscode.Uri.parse(state.uri) : null;
-    if (uri?.toString() !== timeline.uri?.toString()) void timeline.load(uri).then(() => {
-      timelineView.message = !uri ? 'There is no editor open in the page.' : timeline.commits.length ? undefined : 'The page\'s active file has no Git history.';
-    });
+    if (uri?.toString() !== timeline.uri?.toString()) void timeline.load(uri).then(timelineLoaded);
   };
+  const timelineLoaded = (): void => {
+    timelineView.message = !timeline.uri ? 'There is no editor open in the page.' : timeline.commits.length ? undefined : "The page's active file has no Git history.";
+  };
+  void gitApi().then((git) => {
+    if (git) context.subscriptions.push(timeline.follow(git, timelineLoaded));
+  });
   bus.on('editor.active', (message) => apply({ uri: (message.uri as string | null) ?? null, symbols: (message.symbols as WireSymbol[]) ?? [], provides: Boolean(message.provides) }));
   bus.on('editor.cursor', async (message) => {
     if (message.uri !== outline.state.uri || !outlineView.visible) return;
@@ -227,14 +232,8 @@ const startRailSide = (bus: Bus, context: vscode.ExtensionContext, log: (line: s
     // VS Code's own diff of the commit's change to the file, which the rail hands to the page.
     await vscode.commands.executeCommand('vscode.diff', git.toGitUri(file, parent ?? `${hash}~`), git.toGitUri(file, hash), `${name} (${hash.slice(0, 7)})`);
   }));
-  // VS Code's own Outline and Timeline follow the rail's active editor, which it has none of: ours stand in for them.
-  const hideNative = (): void => {
-    for (const id of ['outline', 'timeline']) void vscode.commands.executeCommand(`${id}.removeView`).then(undefined, () => undefined);
-  };
-  context.subscriptions.push(outlineView.onDidChangeVisibility((event) => {
-    if (event.visible) hideNative();
-  }));
-  if (outlineView.visible) hideNative();
+  // VS Code's own Outline and Timeline follow the rail's active editor, which it has none of: the frame hides them while
+  // the bridge runs (workbench/bridge.ts), and these stand in for them.
   const ask = async (): Promise<void> => {
     if (!bus.has('editor')) {
       apply({ uri: null, symbols: [], provides: false });
