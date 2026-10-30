@@ -3,7 +3,9 @@
 // Run on the host after `bun run build`:
 //   node extensions/planner/tests/e2e/sunsama.mjs [outDir]
 // Google and the Linear workspace are fixtures, GitHub too but in its own part: the real gh against a fake GitHub
-// (fakeGithub.mjs), at 1440 and 1024 (SUNSAMA_PARTS=github runs it alone); `opencode` is a stand-in
+// (fakeGithub.mjs), at 1440 and 1024 (SUNSAMA_PARTS=github runs it alone). Gmail and the meeting import have parts of
+// their own against a fake Google (fakeGoogle.mjs), at both sizes too (SUNSAMA_PARTS=gmail, meetings; a comma-separated
+// list runs several; anything but all skips the agent phases); `opencode` is a stand-in
 // that lists three models, and one custom agent sits in the private service's
 // OpenCode config. The agent phases start real chats in /home/node/projects/planner-demo-a
 // as OpenCode's read-only plan agent, through a command file this journey writes
@@ -15,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { startHarness } from './harness.mjs';
 import { defaultGithubWorld, fakeIssue, ghConfigFiles, startFakeGithub } from './fakeGithub.mjs';
+import { CONTACTS_SCOPES, DEFAULT_SCOPES, GMAIL_MODIFY_SCOPE, defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-sunsama';
 const run = `harness-${Date.now().toString(36)}`;
@@ -87,6 +90,9 @@ const githubPart = async (viewport) => {
   // Issue 1 updated last: GitHub's search (updated, newest first) gives 1 to 50 a page, then 51.
   world.issues = Array.from({ length: 51 }, (_, n) => fakeIssue(repo, n + 1, { title: `${run} gh issue ${n + 1}`, assignees: [world.viewer], updatedAt: new Date(Date.now() - n * 60_000).toISOString() }));
   world.issues.push(fakeIssue(repo, 52, { title: `${run} gh unassigned 52`, assignees: ['someone-else'] }));
+  // Another repository the viewer works in, updated last: the Repository choice lists it first.
+  const sideRepo = 'harness-org/side-project';
+  world.issues.push(fakeIssue(sideRepo, 9, { title: `${run} side issue`, assignees: ['someone-else'], updatedAt: new Date(Date.now() + 60_000).toISOString() }));
   // Today in the harness's zone, and an hour of it as an instant.
   const zone = 'America/Los_Angeles';
   const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -145,6 +151,8 @@ const githubPart = async (viewport) => {
   const shown = () => ghPanel().locator('li.issue-row').count();
   const status = () => ghPanel().getByRole('status', { name: 'GitHub items shown' });
   try {
+    // Nothing reaches github.com: a tab the Planner opens there gets a stub page.
+    await g.context.route('https://github.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>GitHub (harness stub)</title><p>stub</p>' }));
     await g.openPlanner();
     await f.getByRole('navigation', { name: 'Sources' }).getByRole('tab', { name: 'GitHub', exact: true }).click();
     await ghRow(`${run} gh issue 50`).waitFor({ timeout: 30_000 });
@@ -183,6 +191,31 @@ const githubPart = async (viewport) => {
     for (let i = 0; i < 50 && (await shown()) !== 1; i++) await new Promise((resolve) => setTimeout(resolve, 200));
     check(`${size}: the search field narrows the list (sent to GitHub's search)`, (await shown()) === 1 && (await ghRow(`${run} gh issue 51`).count()) === 1 && String(lists().at(-1)?.variables?.q).endsWith(`${run} gh issue 51`), String(lists().at(-1)?.variables?.q));
     await ghPanel().getByRole('searchbox', { name: 'Search GitHub items' }).fill('');
+    // Round 12: the repositories the viewer works in (Sunsama surfaces "the most relevant repositories"); one chosen
+    // narrows the search to it, as its repo: words do.
+    const repoChoice = ghPanel().getByRole('combobox', { name: 'Repository' });
+    await repoChoice.waitFor({ timeout: 15_000 });
+    const repoOptions = await repoChoice.locator('option').allInnerTexts();
+    check(`${size}: a Repository choice lists the repositories the viewer works in, the latest updated first`, repoOptions.join('|') === `All repositories|${sideRepo}|${repo}`, repoOptions.join(' | '));
+    await repoChoice.selectOption(repo);
+    for (let i = 0; i < 50 && !String(lists().at(-1)?.variables?.q).includes(`repo:${repo}`); i++) await new Promise((resolve) => setTimeout(resolve, 200));
+    check(`${size}: choosing one narrows the list to it (repo: in GitHub's search)`, String(lists().at(-1)?.variables?.q).includes(`repo:${repo}`) && (await ghPanel().getByRole('searchbox', { name: 'Search GitHub items' }).inputValue()) === `repo:${repo}`, String(lists().at(-1)?.variables?.q));
+    await shotHere('gh-repository');
+    await repoChoice.selectOption('');
+    // The planned issue's card: GitHub's icon opens it there; right-click opens the task's menu; G opens it too.
+    const card51 = f.locator('li.task-card', { has: f.locator('.task-title', { hasText: `${run} gh issue 51` }) }).first();
+    const icon51 = card51.locator('a.source-open');
+    check(`${size}: the planned issue's card shows GitHub's icon, linked to the issue`, (await icon51.getAttribute('aria-label')) === `Open ${repo}#51 in GitHub` && (await icon51.getAttribute('href')) === issue51.url, await icon51.getAttribute('href'));
+    await card51.click({ button: 'right' });
+    check(`${size}: right-click opens the task's menu, with Open in GitHub`, await card51.getByRole('menuitem', { name: 'Open in GitHub' }).isVisible());
+    await shotHere('gh-card-menu');
+    await f.getByRole('heading', { name: 'Home' }).click();
+    await card51.hover();
+    const gTab = g.context.waitForEvent('page', { timeout: 15_000 }).catch(() => null);
+    await g.page.keyboard.press('g');
+    const opened51 = await gTab;
+    check(`${size}: G over a linked task opens it in its tool (GitHub), in a new tab`, opened51?.url() === issue51.url, opened51?.url() ?? 'no new tab');
+    await opened51?.close();
 
     // Pasted alone into Add task: issue 52 (not assigned to me, so in no list) and pull request 7, as Sunsama imports them.
     const today = f.locator('section.day-column[aria-label^="Today"]').first();
@@ -204,14 +237,29 @@ const githubPart = async (viewport) => {
     }
     check(`${size}: the paste was looked up on GitHub by its URL`, fake.requests.filter((request) => request.operation === 'query PlannerGitHubResource').map((request) => request.variables?.url).join() === `${world.issues[51].url},${world.pulls[0].url}`);
     await shotHere('gh-paste-tasks');
+    // `>` in Add task (Sunsama's merge during task creation): a pasted issue imported straight into an open task.
+    await today.getByRole('button', { name: 'Add task' }).click();
+    await today.getByRole('textbox', { name: 'New task' }).fill(`${run} gh triage`);
+    await today.getByRole('textbox', { name: 'New task' }).press('Enter');
+    const side = world.issues.at(-1);
+    await today.getByRole('textbox', { name: 'New task' }).fill(`${side.url} >${run} gh tri`);
+    const mergeChip = await today.locator('.merge-chip').innerText().catch(() => '');
+    check(`${size}: > names the task it goes into, as the field says`, mergeChip === `Merges into ${run} gh triage as a subtask`, mergeChip);
+    await shotHere('gh-merge-into');
+    await today.getByRole('textbox', { name: 'New task' }).press('Enter');
+    await today.getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
+    let triage = null;
+    for (let i = 0; i < 50 && !triage?.subtasks?.length; i++) {
+      triage = Object.values((await latestState()).tasks).find((task) => task.title === `${run} gh triage` && !task.deletedAt) ?? null;
+      if (!triage?.subtasks?.length) await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    check(`${size}: the issue becomes a subtask of that task, linked to GitHub, and no task of its own`, triage?.subtasks?.[0]?.title === side.title && triage.subtasks[0].source?.kind === 'github' && triage.subtasks[0].source?.key === `${sideRepo}#9` && !Object.values((await latestState()).tasks).some((task) => task.title === side.title && !task.deletedAt), JSON.stringify(triage?.subtasks ?? null));
 
     // ── Daily Highlights: the day's GitHub work in Other activities, read through the real gh ──
     const go = async (name) => {
       if (!(await g.nav(name).isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
       await g.nav(name).click();
     };
-    // Nothing reaches github.com: a tab the Planner opens there gets a stub page.
-    await g.context.route('https://github.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>GitHub (harness stub)</title><p>stub</p>' }));
     await go('Daily highlights');
     await f.getByRole('heading', { name: 'Daily highlights' }).waitFor();
     const other = f.getByRole('region', { name: 'Other activities' });
@@ -286,10 +334,491 @@ const githubPart = async (viewport) => {
   }
 };
 
+
+// ── Round 12: Gmail as Sunsama's integration has it, against a fake Google (fakeGoogle.mjs), at 1440 and 1024 ──────
+// (help.sunsama.com/docs/integrations/gmail) Shift G; labels one at a time, Cmd/Ctrl adds; the Archived, Spam and Trash
+// filters; already imported emails left out; the import and completion automations (set in Settings, done in the
+// fake's Gmail) and their prompt; an email task's thread and its actions; Superhuman as the email client (S opens it);
+// an account without Gmail actions is told how; an email merged straight into a task (Alt/Option + drop), G, Convert
+// to task; the card's Gmail icon and its right-click menu; Re-add Gmail account. SUNSAMA_PARTS=gmail runs it alone.
+// Nothing reaches Google: the private service's Google is the fake; pages opened at Gmail or Superhuman get a stub.
+const gmailPart = async (viewport) => {
+  const size = String(viewport.width);
+  const SECOND = 'second@example.com';
+  const world = defaultFakeWorld({ account: ACCOUNT, today, zone });
+  world.granted = [...DEFAULT_SCOPES, GMAIL_MODIFY_SCOPE];
+  world.mailLabels = [{ id: 'Label_7', name: 'In progress' }];
+  const at = (hours) => new Date(Date.now() - hours * 3_600_000).toUTCString();
+  const message = (n, subject, extra = {}) => ({ id: `gm${n}-${run}`, threadId: `gt${n}-${run}`, subject: `${run} ${subject}`, from: 'Ann Lee <ann@example.com>', date: at(n), snippet: `About ${subject}`, ...extra });
+  world.mail = [
+    message(1, 'budget', { body: 'Hi,\nhere is the first draft of the budget.', date: at(9) }),
+    { ...message(1, 'budget'), id: `gm1b-${run}`, subject: `Re: ${run} budget`, from: 'Bo <bo@example.com>', snippet: 'Looks good to me', body: 'Looks good to me.', unread: true, date: at(8) },
+    message(2, 'lunch', { unread: true }),
+    message(3, 'archived note', { labels: ['Label_7'] }),
+    message(4, 'in progress', { labels: ['INBOX', 'Label_7'] }),
+    message(5, 'spam offer', { labels: ['SPAM', 'Label_7'] }),
+    message(6, 'merge me', { unread: true }),
+  ];
+  const fake = await startFakeGoogle(world);
+  const file = JSON.parse(fake.accountsFile());
+  // Two accounts: this one allowed Gmail actions; the second one only reads Gmail.
+  file.accounts = [{ ...file.accounts[0], scopes: world.granted }, { ...file.accounts[0], email: SECOND, scopes: DEFAULT_SCOPES }];
+  const g = await startHarness({ out, viewport, timezoneId: zone, serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base }, homeFiles: { 'google-accounts.json': JSON.stringify(file) } });
+  const f = g.frame;
+  const plannerErrors = [];
+  g.page.on('pageerror', (error) => plannerErrors.push(`pageerror: ${error.message}`));
+  g.page.on('console', (entry) => {
+    if (entry.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(entry.location().url ?? '')) plannerErrors.push(entry.text().slice(0, 300));
+  });
+  await g.context.route(/^https:\/\/mail\.(google|superhuman)\.com\//, (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>Mail (harness stub)</title><p>stub</p>' }));
+  const shotHere = async (name) => {
+    await g.page.waitForTimeout(250);
+    await g.shot(`${name}-${size}`);
+  };
+  const latestState = async () => (await g.call('GET', '/state')).json.state;
+  const until = async (test, ms = 15_000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise((resolve) => setTimeout(resolve, 200))) if (await test()) return true;
+    return false;
+  };
+  const go = async (name) => {
+    if (!(await g.nav(name).isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
+    await g.nav(name).click();
+  };
+  const panel = () => f.locator('aside.source-panel');
+  const mailRow = (subject) => panel().locator('li.issue-row', { hasText: subject }).first();
+  const rowNames = () => panel().locator('li.issue-row .issue-title').allInnerTexts();
+  const label = (name) => panel().getByRole('group', { name: 'Gmail labels' }).getByRole('button', { name, exact: true });
+  const searches = () => fake.requests.filter((request) => request.path === '/gmail/v1/users/me/messages').map((request) => request.query.q ?? '');
+  const labelsOf = (id) => [...(fake.world.mail.find((one) => one.id === id)?.labels ?? [])].sort();
+  const todayColumn = () => f.locator('section.day-column[aria-label^="Today"]').first();
+  const card = (title) => f.locator('li.task-card', { has: f.locator('.task-title', { hasText: title }) }).first();
+  const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const newTab = async (action) => {
+    const opened = g.context.waitForEvent('page', { timeout: 15_000 }).catch(() => null);
+    await action();
+    const tab = await opened;
+    if (tab) await tab.waitForLoadState('domcontentloaded').catch(() => {});
+    const url = tab?.url() ?? '';
+    await tab?.close();
+    return url;
+  };
+  try {
+    await g.openPlanner();
+    await f.getByRole('heading', { name: 'Home' }).click();
+    // Shift G opens Gmail in the right-hand panel (Sunsama's shortcut).
+    await g.page.keyboard.press('Shift+G');
+    await mailRow(`${run} budget`).waitFor({ timeout: 30_000 });
+    check(`${size}: Shift G opens Gmail in the right-hand panel, the Inbox shown at first`, (await panel().getAttribute('aria-label')) === 'Gmail' && (await label('Inbox').getAttribute('aria-pressed')) === 'true' && searches().at(-1) === 'in:inbox');
+    const inbox = await rowNames();
+    check(`${size}: the Inbox lists its emails, not archived, spam or trash ones`, inbox.includes(`Re: ${run} budget`) && inbox.includes(`${run} lunch`) && inbox.includes(`${run} in progress`) && !inbox.some((name) => /archived note|spam offer/.test(name)), inbox.join(' | '));
+    check(`${size}: the account's labels: Gmail's own, then the user's`, (await panel().getByRole('group', { name: 'Gmail labels' }).getByRole('button').allInnerTexts()).join('|') === 'Inbox|Starred|Important|Unread|Sent|Drafts|Spam|Trash|In progress');
+    await shotHere('gm-01-inbox');
+    // A label alone; Cmd/Ctrl adds one (an email must have every one shown).
+    await label('In progress').click();
+    await until(async () => (await rowNames()).length === 1);
+    check(`${size}: a click on a label shows that label alone (in the Inbox, archived ones left out)`, (await rowNames()).join() === `${run} in progress` && searches().at(-1) === 'label:in-progress in:inbox' && (await label('Inbox').getAttribute('aria-pressed')) === 'false', `${(await rowNames()).join()} / ${searches().at(-1)}`);
+    await label('Unread').click({ modifiers: [modifier] });
+    await until(async () => searches().at(-1) === 'label:in-progress is:unread in:inbox');
+    check(`${size}: Cmd/Ctrl+click adds a label to the ones shown (both must match)`, (await label('In progress').getAttribute('aria-pressed')) === 'true' && (await label('Unread').getAttribute('aria-pressed')) === 'true' && searches().at(-1) === 'label:in-progress is:unread in:inbox', searches().at(-1));
+    await label('In progress').click();
+    // Filters: archived, spam and trash, already imported.
+    await panel().getByRole('button', { name: 'Gmail filters' }).click();
+    const filters = f.getByRole('menu', { name: 'Show' });
+    await filters.getByRole('checkbox', { name: 'Archived' }).check();
+    await until(async () => (await rowNames()).length === 2);
+    check(`${size}: Archived shows the label's archived emails too`, (await rowNames()).sort().join() === [`${run} archived note`, `${run} in progress`].sort().join() && searches().at(-1) === 'label:in-progress', `${(await rowNames()).join()} / ${searches().at(-1)}`);
+    await filters.getByRole('checkbox', { name: 'Spam and Trash' }).check();
+    await until(async () => (await rowNames()).length === 3);
+    check(`${size}: Spam and Trash shows those too`, (await rowNames()).includes(`${run} spam offer`) && searches().at(-1) === 'label:in-progress in:anywhere', searches().at(-1));
+    await shotHere('gm-02-filters');
+    await filters.getByRole('checkbox', { name: 'Archived' }).uncheck();
+    await filters.getByRole('checkbox', { name: 'Spam and Trash' }).uncheck();
+    await panel().getByRole('button', { name: 'Gmail filters' }).click();
+    await label('Inbox').click();
+    await mailRow(`${run} lunch`).waitFor();
+    // Planned, an email leaves the list (Sunsama's "Already imported" filter, off at first).
+    await mailRow(`${run} lunch`).hover();
+    await mailRow(`${run} lunch`).getByRole('button', { name: `Plan ${run} lunch today` }).click();
+    await until(async () => !(await rowNames()).includes(`${run} lunch`));
+    const note = await panel().getByRole('status').filter({ hasText: 'already imported' }).innerText().catch(() => '');
+    check(`${size}: an imported email leaves the list, which says so (Show them)`, !(await rowNames()).includes(`${run} lunch`) && /1 already imported, not shown/.test(note), note);
+    await shotHere('gm-03-imported-hidden');
+
+    // Settings → Gmail: Sunsama's "Inbox Zero" set-up: on import Mark as read and Remove a label: Inbox; on completion
+    // Archive, with Show prompt; Superhuman as the email client.
+    await go('Settings');
+    const importGroup = f.getByRole('group', { name: 'Import automations' });
+    await importGroup.getByRole('checkbox', { name: 'Mark as read', exact: true }).check();
+    await importGroup.getByRole('combobox', { name: 'A label for Import automations' }).selectOption('Inbox');
+    await importGroup.getByRole('button', { name: 'Remove a label' }).click();
+    const completeGroup = f.getByRole('group', { name: 'Completion automations' });
+    await completeGroup.getByRole('checkbox', { name: 'Archive', exact: true }).check();
+    await completeGroup.getByRole('checkbox', { name: /Show prompt/ }).check();
+    await until(async () => (await latestState()).settings.gmailCompletePrompt === true);
+    const settings = (await latestState()).settings;
+    check(`${size}: Settings → Gmail keeps the automations as Sunsama names them`, JSON.stringify(settings.gmailOnImport) === JSON.stringify([{ kind: 'markRead' }, { kind: 'removeLabel', label: 'Inbox' }]) && JSON.stringify(settings.gmailOnComplete) === JSON.stringify([{ kind: 'archive' }]) && settings.gmailCompletePrompt === true, JSON.stringify([settings.gmailOnImport, settings.gmailOnComplete]));
+    await importGroup.scrollIntoViewIfNeeded();
+    await shotHere('gm-04-settings');
+
+    // Import: the automations happen in Gmail.
+    await go('Home');
+    await mailRow(`Re: ${run} budget`).waitFor({ timeout: 20_000 });
+    await mailRow(`Re: ${run} budget`).hover();
+    await mailRow(`Re: ${run} budget`).getByRole('button', { name: `Plan Re: ${run} budget today` }).click();
+    const imported = await until(() => labelsOf(`gm1b-${run}`).join() === '' && labelsOf(`gm1-${run}`).join() === '');
+    check(`${size}: importing an email marks it read and takes it out of the Inbox, in Gmail`, imported, JSON.stringify([labelsOf(`gm1-${run}`), labelsOf(`gm1b-${run}`)]));
+    // The task embeds the thread: its conversation, the latest open, what Gmail has it in, and the actions.
+    await card(`Re: ${run} budget`).locator('button.task-body').click();
+    const detail = f.getByRole('dialog', { name: 'Task details' });
+    const section = detail.getByRole('region', { name: 'Gmail' });
+    const thread = section.getByRole('list', { name: 'The conversation' });
+    await thread.waitFor({ timeout: 20_000 });
+    const where = await section.getByLabel('In Gmail', { exact: true }).innerText().catch(() => '');
+    check(`${size}: the task shows the thread, the latest message open, and where Gmail has it (Archived)`, (await thread.locator('li').count()) === 2 && (await thread.locator('li.is-open').innerText()).includes('Looks good to me.') && where === 'Archived', `${where} / ${await thread.locator('li').count()}`);
+    await thread.locator('li').first().getByRole('button').click();
+    check(`${size}: a message of the thread opens with its text, to browse the conversation`, (await thread.locator('li').first().innerText()).includes('here is the first draft of the budget.'));
+    check(`${size}: Archive waits for an email in the Inbox; Move to trash and Mark as unread are there`, (await section.getByRole('button', { name: 'Archive' }).isDisabled()) && (await section.getByRole('button', { name: 'Move to trash' }).isEnabled()) && (await section.getByRole('button', { name: 'Mark as unread' }).isEnabled()));
+    await section.getByRole('button', { name: 'Mark as unread' }).click();
+    const unread = await until(() => labelsOf(`gm1b-${run}`).includes('UNREAD'));
+    await until(async () => (await section.getByLabel('In Gmail', { exact: true }).innerText().catch(() => '')) === 'Archived · Unread');
+    check(`${size}: Mark as unread happens in Gmail, and the task says so`, unread && (await section.getByLabel('In Gmail', { exact: true }).innerText()) === 'Archived · Unread', JSON.stringify(labelsOf(`gm1b-${run}`)));
+    await shotHere('gm-05-thread');
+    await detail.press('Escape');
+
+    // Superhuman as the email client: the task, its card and S open the email there.
+    await go('Settings');
+    await f.getByRole('combobox', { name: 'Custom email client' }).selectOption('superhuman');
+    await until(async () => (await latestState()).settings.emailClient === 'superhuman');
+    await go('Home');
+    const superhuman = `https://mail.superhuman.com/${encodeURIComponent(ACCOUNT)}/thread/gt1-${run}`;
+    const icon = card(`Re: ${run} budget`).locator('a.source-open');
+    check(`${size}: the card shows its tool's icon, which opens the email in the email client (Superhuman)`, (await icon.getAttribute('aria-label')) === 'Open Email in Superhuman' && (await icon.getAttribute('href')) === superhuman, await icon.getAttribute('href'));
+    await card(`Re: ${run} budget`).click({ button: 'right' });
+    const menu = card(`Re: ${run} budget`).getByRole('menu');
+    check(`${size}: right-click opens the task's menu, with Open in Superhuman`, await menu.getByRole('menuitem', { name: 'Open in Superhuman' }).isVisible());
+    await shotHere('gm-06-card-menu');
+    await g.page.keyboard.press('Escape');
+    await f.getByRole('heading', { name: 'Home' }).click();
+    await card(`Re: ${run} budget`).locator('button.task-body').click();
+    await section.getByRole('link', { name: 'Open in Superhuman' }).waitFor();
+    const opened = await newTab(() => g.page.keyboard.press('s'));
+    check(`${size}: S opens the email in Superhuman, in a new tab`, opened === superhuman, opened);
+    await detail.press('Escape');
+
+    // Completing it asks (Show prompt), the configured action ticked; the ones picked are done in Gmail.
+    await card(`Re: ${run} budget`).getByRole('button', { name: 'Mark complete' }).click();
+    const prompt = f.getByRole('alertdialog', { name: `Gmail: Re: ${run} budget` });
+    await prompt.waitFor({ timeout: 10_000 });
+    check(`${size}: completing it asks which actions to take, Archive ticked as set`, (await prompt.getByRole('checkbox', { name: 'Archive', exact: true }).isChecked()) && !(await prompt.getByRole('checkbox', { name: 'Star', exact: true }).isChecked()));
+    await prompt.getByRole('checkbox', { name: 'Star', exact: true }).check();
+    await shotHere('gm-07-complete-prompt');
+    await prompt.getByRole('button', { name: 'Do it' }).click();
+    const starred = await until(() => labelsOf(`gm1b-${run}`).includes('STARRED'));
+    check(`${size}: the actions picked are done in Gmail (starred)`, starred, JSON.stringify(labelsOf(`gm1b-${run}`)));
+
+    // An account that has not allowed Gmail actions: its email task says how, without the actions.
+    await panel().getByRole('combobox', { name: 'Gmail account' }).selectOption(SECOND);
+    await mailRow(`${run} in progress`).waitFor({ timeout: 20_000 });
+    await mailRow(`${run} in progress`).hover();
+    await mailRow(`${run} in progress`).getByRole('button', { name: `Plan ${run} in progress today` }).click();
+    await card(`${run} in progress`).waitFor({ timeout: 15_000 });
+    await card(`${run} in progress`).locator('button.task-body').click();
+    const allow = detail.getByRole('region', { name: 'Gmail' }).getByRole('button', { name: 'Allow Gmail actions' });
+    check(`${size}: an email of an account without Gmail actions offers to allow them, with no actions`, (await allow.isVisible({ timeout: 10_000 }).catch(() => false)) && (await detail.getByRole('region', { name: 'Gmail' }).getByRole('button', { name: 'Archive' }).count()) === 0);
+    await shotHere('gm-08-allow');
+    await detail.press('Escape');
+    await panel().getByRole('combobox', { name: 'Gmail account' }).selectOption(ACCOUNT);
+
+    // Merge (Alt/Option + drop) an email straight from the panel into a task: a subtask, still the email, its import
+    // automations done; G opens it; Convert to task gives it back.
+    await todayColumn().getByRole('button', { name: 'Add task' }).click();
+    await todayColumn().getByRole('textbox', { name: 'New task' }).fill(`${run} inbox triage`);
+    await todayColumn().getByRole('textbox', { name: 'New task' }).press('Enter');
+    await todayColumn().getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
+    await card(`${run} inbox triage`).waitFor();
+    await mailRow(`${run} merge me`).waitFor({ timeout: 20_000 });
+    await g.page.keyboard.down('Alt');
+    await mailRow(`${run} merge me`).dragTo(card(`${run} inbox triage`));
+    await g.page.keyboard.up('Alt');
+    let triage = null;
+    await until(async () => {
+      triage = Object.values((await latestState()).tasks).find((task) => task.title === `${run} inbox triage`);
+      return triage?.subtasks?.length === 1;
+    });
+    check(`${size}: Alt/Option + drop merges the email into the task as a subtask, still linked to it`, triage?.subtasks?.[0]?.title === `${run} merge me` && triage.subtasks[0].source?.kind === 'email' && !Object.values((await latestState()).tasks).some((task) => task.title === `${run} merge me` && !task.deletedAt), JSON.stringify(triage?.subtasks ?? null));
+    check(`${size}: merged straight from the panel, it is imported: its import automations happen in Gmail`, await until(() => labelsOf(`gm6-${run}`).join() === ''), JSON.stringify(labelsOf(`gm6-${run}`)));
+    await card(`${run} inbox triage`).locator('button.task-body').click();
+    const mergedSection = detail.getByRole('region', { name: 'Merged in' });
+    await mergedSection.waitFor();
+    await mergedSection.locator('li').first().hover();
+    const gOpened = await newTab(() => g.page.keyboard.press('g'));
+    check(`${size}: the task lists it under Merged in; G over it opens it in its tool`, gOpened === `https://mail.superhuman.com/${encodeURIComponent(ACCOUNT)}/thread/gt6-${run}`, gOpened);
+    await shotHere('gm-09-merged');
+    await mergedSection.getByRole('button', { name: `Convert ${run} merge me to a task` }).click();
+    await detail.press('Escape');
+    let converted = null;
+    await until(async () => {
+      converted = Object.values((await latestState()).tasks).find((task) => task.title === `${run} merge me` && !task.deletedAt) ?? null;
+      return Boolean(converted);
+    });
+    check(`${size}: Convert to task gives it back as a task, still the email`, converted?.source?.kind === 'email' && (await card(`${run} merge me`).isVisible()), JSON.stringify(converted?.source ?? null));
+
+    // Access Google took back: the panel offers Re-add Gmail account (not clicked: nothing signs in here).
+    fake.world.revoked = true;
+    await go('Home');
+    await f.getByRole('heading', { name: 'Home' }).click();
+    await g.page.keyboard.press('Shift+G');
+    await panel().getByRole('button', { name: 'Refresh Gmail' }).click();
+    const readd = panel().getByRole('button', { name: 'Re-add Gmail account' });
+    check(`${size}: when Google no longer accepts the access, the Gmail panel says so and offers Re-add Gmail account`, await readd.waitFor({ timeout: 15_000 }).then(() => true).catch(() => false), await panel().getByRole('alert').innerText().catch(() => ''));
+    await shotHere('gm-10-readd');
+    fake.world.revoked = false;
+    check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
+  } catch (error) {
+    check(`${size}: the Gmail part ran to its end`, false, error?.stack ?? String(error));
+    await shotHere('gm-failure').catch(() => {});
+  } finally {
+    await g.close();
+    await fake.close();
+  }
+};
+
+// ── Round 12: Sunsama's meeting import and calendar integration, against a fake Google (fakeGoogle.mjs), at 1440 and 1024 ──
+// (help.sunsama.com/docs/usage-guides/importing-meetings, …/timeboxing/timeboxing-choosing-calendar, …/integrations/calendar)
+// Shift C; a day's name shows its calendar in the panel; Calendars there; "Add to tasks" from an event's details and on
+// hover; auto-complete when it ends; daily planning's "Fill in calendar events" (import the suggested, Pick events);
+// Remove from tasks (right-click), never added back; "Cannot merge events"; Settings → Meeting import (Auto-sync from
+// the calendars chosen, an import channel, an exclusion turned off and on); a Timeboxing Channel's sessions written to
+// its calendar; Google Contacts suggested as guests. SUNSAMA_PARTS=meetings runs it alone.
+const meetingsPart = async (viewport) => {
+  const size = String(viewport.width);
+  const yesterday = dayKey(-1);
+  const inThree = dayKey(3);
+  /** An instant of a day's wall-clock hour where the harness is. */
+  const zoned = (date, hours) => {
+    const wall = Date.parse(`${date}T00:00:00Z`) + hours * 3_600_000;
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(wall).map((part) => [part.type, part.value]));
+    return new Date(wall - (Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second) - wall)).toISOString();
+  };
+  const guests = [{ email: ACCOUNT, self: true, responseStatus: 'accepted' }, { email: 'ann@example.com', displayName: 'Ann Lee', responseStatus: 'accepted' }];
+  const meeting = (id, summary, date, from, to, extra = {}) => ({ id, summary, start: { dateTime: zoned(date, from) }, end: { dateTime: zoned(date, to) }, organizer: { email: ACCOUNT, self: true }, attendees: guests, ...extra });
+  const world = defaultFakeWorld({ account: ACCOUNT, today, zone });
+  world.granted = [...DEFAULT_SCOPES, ...CONTACTS_SCOPES];
+  world.contacts = [{ name: 'Ann Lee', email: 'ann@example.com' }, { name: 'Andy Roe', email: 'andy@example.com' }];
+  world.otherContacts = [{ name: 'Annika Berg', email: 'annika@example.org' }];
+  world.events.primary.push(
+    meeting('hretro', 'Harness retro', yesterday, 15, 16),
+    meeting('hoo', 'Harness 1:1', tomorrow, 9, 9.5),
+    meeting('hkickoff', 'Harness kickoff', tomorrow, 10, 11),
+    meeting('hfocus', 'Harness focus', tomorrow, 13, 14, { transparency: 'transparent' }),
+    meeting('hsolo', 'Harness dentist', tomorrow, 15, 15.5, { attendees: undefined }),
+    meeting('hdemo', 'Harness demo day', inThree, 15, 16),
+  );
+  const fake = await startFakeGoogle(world);
+  // The plan starts with the account's work and team calendars shown, and two channels.
+  const seeded = [
+    { type: 'settings.updated', patch: { timezone: zone } },
+    { type: 'channel.created', channel: { id: 'work', name: 'work', color: '#e8590c', context: 'work' } },
+    { type: 'channel.created', channel: { id: 'personal', name: 'personal', color: '#1c7ed6', context: 'personal' } },
+    { type: 'calendar.added', calendar: { id: 'gcal-work', name: 'Harness work', url: 'https://calendar.google.com/calendar/r', color: '#039be5', google: { account: ACCOUNT, calendarId: 'primary' } } },
+    { type: 'calendar.added', calendar: { id: 'gcal-team', name: 'Team', url: 'https://calendar.google.com/calendar/r', color: '#33b679', google: { account: ACCOUNT, calendarId: 'team@group.calendar.google.com' } } },
+  ].map((body, index) => ({ v: 1, id: `seed${index}`, at: zoned(yesterday, 8), ...body }));
+  const g = await startHarness({
+    out,
+    viewport,
+    timezoneId: zone,
+    serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base },
+    homeFiles: { 'google-accounts.json': fake.accountsFile(), [`data/events/${yesterday.slice(0, 7)}.jsonl`]: `${seeded.map((event) => JSON.stringify(event)).join('\n')}\n` },
+  });
+  const f = g.frame;
+  const plannerErrors = [];
+  g.page.on('pageerror', (error) => plannerErrors.push(`pageerror: ${error.message}`));
+  g.page.on('console', (entry) => {
+    if (entry.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(entry.location().url ?? '')) plannerErrors.push(entry.text().slice(0, 300));
+  });
+  const shotHere = async (name) => {
+    await g.page.waitForTimeout(250);
+    await g.shot(`${name}-${size}`);
+  };
+  const latestState = async () => (await g.call('GET', '/state')).json.state;
+  const until = async (test, ms = 15_000) => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise((resolve) => setTimeout(resolve, 200))) if (await test()) return true;
+    return false;
+  };
+  const go = async (name) => {
+    if (!(await g.nav(name).isVisible().catch(() => false))) await f.getByRole('button', { name: 'Planner menu' }).click();
+    await g.nav(name).click();
+  };
+  const panel = () => f.locator('aside.source-panel');
+  const eventTask = async (eventId) => Object.values((await latestState()).tasks).find((task) => task.source?.kind === 'event' && task.source.id === `${ACCOUNT}|primary|${eventId}`) ?? null;
+  const column = (name) => f.locator(`section.day-column[aria-label^="${name}"]`).first();
+  const card = (title) => f.locator('li.task-card', { has: f.locator('.task-title', { hasText: title }) }).first();
+  const gridEvent = (title) => panel().locator('.grid-item.is-event', { hasText: title }).first();
+  try {
+    await g.openPlanner();
+    await f.getByRole('heading', { name: 'Home' }).click();
+    // Shift C: the calendar in the right-hand panel; a day's name at the top of its list shows that day there.
+    await f.getByRole('navigation', { name: 'Sources' }).getByRole('tab', { name: 'Backlog', exact: true }).click();
+    await f.getByRole('heading', { name: 'Home' }).click();
+    await g.page.keyboard.press('Shift+C');
+    check(`${size}: Shift C opens the calendar in the right-hand panel`, await until(async () => (await panel().getAttribute('aria-label').catch(() => '')) === 'Calendar'));
+    await column('Tomorrow').locator('button.day-name').click();
+    check(`${size}: a day's name at the top of its list shows that day's calendar in the panel`, await until(async () => (await panel().locator('.source-day-label').innerText().catch(() => '')).startsWith('Tomorrow')), await panel().locator('.source-day-label').innerText().catch(() => ''));
+    await gridEvent('Harness kickoff').waitFor({ timeout: 20_000 });
+    // Calendars, at the top of the calendar: which show (only what is shown changes).
+    await panel().getByRole('button', { name: 'Calendars' }).click();
+    const shownMenu = f.getByRole('menu', { name: 'Calendars shown' });
+    await shownMenu.getByRole('checkbox', { name: 'Team' }).uncheck();
+    check(`${size}: Calendars at the top of the panel's calendar hides one`, await until(async () => (await latestState()).calendars['gcal-team']?.visible === false));
+    await shotHere('mt-01-calendars');
+    await shownMenu.getByRole('checkbox', { name: 'Team' }).check();
+    await panel().getByRole('button', { name: 'Calendars' }).click();
+
+    // "Add to tasks" from an event's details: a task linked to the event, its length planned.
+    await panel().getByRole('button', { name: 'Previous day' }).click();
+    await gridEvent('Quarter planning').click();
+    const details = f.getByRole('dialog', { name: 'Event: Quarter planning' });
+    await details.getByRole('button', { name: 'Add to tasks' }).click();
+    let planning = null;
+    await until(async () => Boolean((planning = await eventTask('planning'))));
+    check(`${size}: "Add to tasks" in an event's details adds it to its day, linked to the event, its length planned`, planning?.placement?.date === today && planning.plannedMinutes === 60 && planning.source.event?.invitees === true && !planning.source.event?.auto, JSON.stringify(planning?.source ?? null));
+    check(`${size}: the event's details then say it is in your plan`, await details.getByRole('button', { name: /In your plan/ }).isVisible({ timeout: 5000 }).catch(() => false));
+    await shotHere('mt-02-add-to-tasks');
+    // Google Contacts: the event's account's contacts, and the people it emailed, as guests are typed.
+    await details.getByRole('button', { name: 'Edit event' }).click();
+    const editor = f.getByRole('dialog', { name: 'Edit event' });
+    await editor.getByRole('combobox', { name: 'Add guests' }).or(editor.getByRole('textbox', { name: 'Add guests' })).fill('ann');
+    const offered = await until(async () => (await editor.locator('datalist#ee-guest-contacts option').count()) >= 2, 10_000);
+    const options = await editor.locator('datalist#ee-guest-contacts option').evaluateAll((items) => items.map((item) => `${item.textContent} <${item.value}>`));
+    check(`${size}: typing a guest suggests the account's Google contacts and the people it emailed`, offered && options.join() === 'Ann Lee <ann@example.com>,Annika Berg <annika@example.org>', options.join());
+    await shotHere('mt-03-contacts');
+    await editor.getByRole('button', { name: 'Cancel' }).or(editor.getByRole('button', { name: 'Close' })).first().click();
+    await f.getByRole('button', { name: 'Discard' }).click({ timeout: 2000 }).catch(() => {});
+
+    // On hover: Add to tasks (yesterday's ended meeting), then completed when its event has ended (Always, at first).
+    await panel().getByRole('button', { name: 'Previous day' }).click();
+    await gridEvent('Harness retro').hover();
+    await gridEvent('Harness retro').getByRole('button', { name: 'Add Harness retro as a task' }).click();
+    let retro = null;
+    await until(async () => Boolean((retro = await eventTask('hretro'))));
+    await g.call('POST', '/meetings/sync');
+    await until(async () => Boolean((retro = await eventTask('hretro'))?.completedAt));
+    check(`${size}: added on hover; its event over, the task is completed (auto-complete: Always)`, Boolean(retro?.completedAt) && retro.completedOn === yesterday && !(await eventTask('planning'))?.completedAt === (Date.now() < Date.parse(zoned(today, 15))), JSON.stringify({ completedOn: retro?.completedOn ?? null }));
+
+    // Daily planning, for tomorrow: "Fill in calendar events", the suggested ones ticked, the others saying why.
+    await go('Daily planning');
+    await f.getByRole('tablist', { name: 'Planning day' }).getByRole('tab', { name: 'Tomorrow' }).click();
+    await f.getByRole('button', { name: 'Next', exact: true }).click();
+    const fill = f.getByRole('region', { name: 'Fill in calendar events' });
+    await fill.waitFor({ timeout: 20_000 });
+    await fill.getByRole('button', { name: 'Pick events' }).click();
+    const picks = await fill.locator('.meetings-pick li').evaluateAll((items) => items.map((item) => [item.querySelector('input')?.checked, item.textContent?.replace(/\s+/g, ' ').trim()]));
+    const ticked = picks.filter(([on]) => on).map(([, text]) => text);
+    const reasons = picks.filter(([on]) => !on).map(([, text]) => text);
+    check(`${size}: the suggestions are tomorrow's meetings, ticked; the excluded kinds unticked, each saying why`,
+      ticked.length === 2 && /Harness 1:1/.test(ticked[0]) && /Harness kickoff/.test(ticked[1]) && reasons.some((text) => /Vendor demo · events where attendance is not confirmed/.test(text)) && reasons.some((text) => /Harness focus · non-blocking events/.test(text)) && reasons.some((text) => /Harness dentist · events without other attendees/.test(text)),
+      JSON.stringify(picks));
+    await shotHere('mt-04-fill-in');
+    await fill.getByRole('button', { name: 'Import 2 events' }).click();
+    let tomorrowList = [];
+    await until(async () => {
+      const state = await latestState();
+      tomorrowList = Object.values(state.tasks).filter((task) => !task.deletedAt && task.placement.kind === 'day' && task.placement.date === tomorrow).sort((a, b) => a.position - b.position).map((task) => task.title);
+      return tomorrowList.length >= 2;
+    });
+    check(`${size}: the green button imports them, in time order`, tomorrowList.slice(0, 2).join() === 'Harness 1:1,Harness kickoff', tomorrowList.join());
+    await go('Home');
+
+    // Remove from tasks (right-click): off the list, the event left in the calendar.
+    await card('Harness kickoff').click({ button: 'right' });
+    await card('Harness kickoff').getByRole('menuitem', { name: 'Remove from tasks' }).click();
+    const removed = await until(async () => Boolean((await eventTask('hkickoff'))?.deletedAt));
+    check(`${size}: Remove from tasks takes it off the list and leaves the event in Google Calendar`, removed && fake.calendars.get('primary').events.has('hkickoff'));
+    // An event task neither merges nor takes a merge (a task beside it, on its day).
+    await column('Tomorrow').getByRole('button', { name: 'Add task' }).click();
+    await column('Tomorrow').getByRole('textbox', { name: 'New task' }).fill('Harness notes');
+    await column('Tomorrow').getByRole('textbox', { name: 'New task' }).press('Enter');
+    await column('Tomorrow').getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
+    await g.page.keyboard.down('Alt');
+    await card('Harness notes').dragTo(card('Harness 1:1'));
+    await g.page.keyboard.up('Alt');
+    const refused = await f.getByRole('alert').filter({ hasText: 'Cannot merge events' }).waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+    await shotHere('mt-05-cannot-merge');
+    check(`${size}: merging into an event says "Cannot merge events", and changes nothing`, refused && !(await latestState()).tasks[(await eventTask('hoo'))?.id ?? '']?.subtasks?.length && (await card('Harness notes').isVisible()));
+    // A task onto a task (Alt/Option + drop): merged in as a subtask with its planned time, the task gone.
+    await column('Today').getByRole('button', { name: 'Add task' }).click();
+    await column('Today').getByRole('textbox', { name: 'New task' }).fill('Harness inbox');
+    await column('Today').getByRole('textbox', { name: 'New task' }).press('Enter');
+    await column('Today').getByRole('textbox', { name: 'New task' }).fill('Harness reply ~15m');
+    await column('Today').getByRole('textbox', { name: 'New task' }).press('Enter');
+    await column('Today').getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
+    await card('Harness reply').waitFor();
+    await g.page.keyboard.down('Alt');
+    await card('Harness reply').dragTo(card('Harness inbox'));
+    await g.page.keyboard.up('Alt');
+    let inbox = null;
+    await until(async () => (inbox = Object.values((await latestState()).tasks).find((task) => task.title === 'Harness inbox'))?.subtasks?.length === 1);
+    check(`${size}: a task dropped onto another with Alt/Option merges in as a subtask, its planned time kept, and is no longer a task`,
+      inbox?.subtasks?.[0]?.title === 'Harness reply' && inbox.subtasks[0].plannedMinutes === 15 && !Object.values((await latestState()).tasks).some((task) => task.title === 'Harness reply' && !task.deletedAt), JSON.stringify(inbox?.subtasks ?? null));
+
+    // Settings → Meeting import: Auto-sync from the calendars chosen, with an import channel.
+    await go('Settings');
+    const settings = f.locator('fieldset', { has: f.locator('legend', { hasText: 'Meeting import' }) });
+    await settings.getByRole('combobox', { name: /Configure how meetings get added/ }).selectOption('autoSync');
+    check(`${size}: Auto-sync says calendars must be chosen first`, await settings.getByRole('alert').filter({ hasText: 'You must select Calendars to import from' }).isVisible({ timeout: 5000 }).catch(() => false));
+    await settings.getByRole('group', { name: 'Calendars to import from' }).getByRole('checkbox', { name: /Harness work/ }).check();
+    await settings.getByRole('combobox', { name: 'Import channel for Harness work' }).selectOption('work');
+    let demo = null;
+    await until(async () => Boolean((demo = await eventTask('hdemo'))), 20_000);
+    check(`${size}: Auto-sync adds the week's meetings by itself, in the calendar's import channel`, demo?.placement?.date === inThree && demo.channelId === 'work' && demo.source.event?.auto === true, JSON.stringify(demo ? { date: demo.placement.date, channel: demo.channelId, auto: demo.source.event?.auto } : null));
+    check(`${size}: a meeting removed from the tasks is not added back`, Boolean((await eventTask('hkickoff'))?.deletedAt));
+    await settings.scrollIntoViewIfNeeded();
+    await shotHere('mt-06-meeting-settings');
+    // An exclusion turned off adds what it left out; on again, takes it off.
+    const exclusions = settings.getByRole('group', { name: 'Exclude certain types of events' });
+    await exclusions.getByRole('checkbox', { name: 'Exclude events where attendance is not confirmed' }).uncheck();
+    const added = await until(async () => Boolean(await eventTask('invite')), 20_000);
+    await exclusions.getByRole('checkbox', { name: 'Exclude events where attendance is not confirmed' }).check();
+    const gone = await until(async () => Boolean((await eventTask('invite'))?.deletedAt), 20_000);
+    check(`${size}: a changed exclusion adds or removes those meetings at once`, added && gone);
+    await settings.getByRole('combobox', { name: 'Auto-complete imported calendar events' }).selectOption('invitees');
+    check(`${size}: auto-complete can be Never or Only if the event has invitees`, await until(async () => (await latestState()).settings.meetingAutoComplete === 'invitees'));
+
+    // Timeboxing Channel: #personal's sessions go to the Team calendar, though no default is set.
+    const personal = f.getByRole('group', { name: 'Timeboxing channels' }).getByRole('combobox', { name: 'Calendar for #personal working sessions' });
+    await personal.selectOption({ label: 'Team' });
+    await until(async () => (await latestState()).settings.channelTimebox?.personal?.calendarId === 'team@group.calendar.google.com');
+    await personal.scrollIntoViewIfNeeded();
+    await shotHere('mt-07-timebox-channel');
+    await go('Home');
+    await column('Today').getByRole('button', { name: 'Add task' }).click();
+    await column('Today').getByRole('textbox', { name: 'New task' }).fill('Harness errands #personal');
+    await column('Today').getByRole('textbox', { name: 'New task' }).press('Enter');
+    await column('Today').getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
+    let errands = null;
+    await until(async () => Boolean((errands = Object.values((await latestState()).tasks).find((task) => task.title === 'Harness errands'))));
+    // Its session, as dragging it onto the calendar makes one.
+    await g.call('POST', '/commands', { commands: [{ cmd: `harness-block-${size}`, type: 'block.created', block: { id: `hblock${size}`, taskId: errands.id, start: zoned(tomorrow, 8), end: zoned(tomorrow, 9) } }] });
+    const teamEvents = () => [...fake.calendars.get('team@group.calendar.google.com').events.values()].map((event) => event.summary);
+    const written = await until(() => teamEvents().includes('Harness errands'), 20_000);
+    check(`${size}: a #personal task's session is written to the Team calendar (its Timeboxing Channel), none to the others`, written && ![...fake.calendars.get('primary').events.values()].some((event) => event.summary === 'Harness errands'), teamEvents().join());
+    check(`${size}: no error from the Planner's page`, plannerErrors.length === 0, plannerErrors.join(' | '));
+  } catch (error) {
+    check(`${size}: the meetings part ran to its end`, false, error?.stack ?? String(error));
+    await shotHere('mt-failure').catch(() => {});
+  } finally {
+    await g.close();
+    await fake.close();
+  }
+};
+
 const parts = process.env.SUNSAMA_PARTS ?? 'all';
+const wanted = (name) => parts === 'all' || parts.split(',').includes(name);
 mkdirSync(out, { recursive: true });
-if (parts === 'all' || parts === 'github') for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await githubPart(viewport);
-if (parts === 'github') {
+for (const [name, part] of [['github', githubPart], ['gmail', gmailPart], ['meetings', meetingsPart]]) {
+  if (wanted(name)) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await part(viewport);
+}
+if (parts !== 'all') {
   const failed = results.filter((result) => !result.ok);
   console.log(`${results.length - failed.length}/${results.length} checks passed`);
   process.exit(failed.length ? 1 : 0);

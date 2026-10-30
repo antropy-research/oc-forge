@@ -24,6 +24,8 @@ export interface FakeWorld {
   driveFiles?: { id: string; name: string; mimeType: string; webViewLink: string; modifiedTime?: string; trashed?: boolean }[];
   /** The account's Gmail messages: `labels` (Gmail's ids) once something changed them, else `unread` and the Inbox. */
   mail?: { id: string; threadId: string; subject: string; from: string; date: string; snippet: string; unread?: boolean; body?: string; labels?: string[] }[];
+  /** Access taken back: tokens are refused (invalid_grant) and requests answered 401, until it is false again. */
+  revoked?: boolean;
   /** The user's own Gmail labels. */
   mailLabels?: { id: string; name: string }[];
   /** The People API's contacts, and the people the account emailed ("other contacts"). */

@@ -128,6 +128,14 @@ describe('the import and completion automations', () => {
     expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => [call.body.thread, call.body.actions])).toEqual([['th9', [{ kind: 'markRead' }]], ['th9', [{ kind: 'archive' }]]]);
   });
 
+  test('Convert to task gives back a merged email as a task: not an import, nothing done in Gmail again', async () => {
+    const fake = setup({ gmailOnImport: [{ kind: 'markRead' }] });
+    fake.commit([{ type: 'task.created', task: { id: 'triage', title: 'Inbox triage', placement: { kind: 'day', date: '2026-10-29' }, position: 1024 } }, { type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 's1', title: 'Budget', done: false, source: email('th9', 'Budget') }] } }]);
+    fake.commit([{ type: 'task.updated', taskId: 'triage', patch: { subtasks: [] } }, created('back', email('th9', 'Budget'))]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => call.body.actions)).toEqual([[{ kind: 'markRead' }]]);
+  });
+
   test('the Work Status frame and the background never act', () => {
     for (const surface of ['status', 'background']) {
       const fake = setup({ gmailOnImport: [{ kind: 'archive' }] }, { surface });
@@ -246,6 +254,16 @@ describe('the service, against the fake Google', () => {
     const refused = await call('GET', `/google/contacts?account=${encodeURIComponent(OTHER)}&q=ann`);
     expect([refused.status, refused.body.reason]).toEqual([403, 'not-allowed']);
     expect((await call('GET', `/google/contacts?account=${encodeURIComponent(ME)}&q=`)).status).toBe(400);
+  });
+
+  test("access Google took back: the list says to connect the account again (the panel's Re-add Gmail account)", async () => {
+    fake.world.revoked = true;
+    try {
+      const refused = await call('GET', `/google/mail?account=${encodeURIComponent(OTHER)}&q=in%3Ainbox`);
+      expect([refused.status, refused.body.error]).toEqual([401, `Google no longer accepts the Planner's access to ${OTHER}; connect it again`]);
+    } finally {
+      fake.world.revoked = false;
+    }
   });
 
   test('POST /meetings/sync runs the meeting import at once (nothing to do while it is set to Show prompt)', async () => {

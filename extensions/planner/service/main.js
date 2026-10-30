@@ -4080,17 +4080,21 @@ var meetingTask = (state, event, options) => {
     return null;
   const date = eventDay(event, options.zone);
   const minutes = event.allDay ? null : Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000);
-  const subscription = subscriptionOf(state, event);
-  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
+  const channelId = importChannel(state, event);
   return {
     id: options.id,
     title: event.title,
     placement: { kind: "day", date },
     position: options.position ?? meetingPosition(state, date, Date.parse(event.start)),
     ...minutes && minutes > 0 ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {},
-    ...channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? { channelId } : {},
+    ...channelId ? { channelId } : {},
     source
   };
+};
+var importChannel = (state, event) => {
+  const subscription = subscriptionOf(state, event);
+  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
+  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
 };
 var hasTime = (state, taskId) => Object.values(state.entries).some((entry) => entry.taskId === taskId);
 var planMeetingSync = (state, events, options) => {
@@ -4132,6 +4136,9 @@ var planMeetingSync = (state, events, options) => {
       const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000));
       push({ type: "task.updated", taskId: task.id, patch: { title: event.title, source, ...minutes && minutes > 0 ? { plannedMinutes: minutes } : {} } });
     }
+    const channelId = importChannel(working, event);
+    if (channelId && !working.tasks[task.id].channelId)
+      push({ type: "task.updated", taskId: task.id, patch: { channelId } });
   }
   for (const task of Object.values(working.tasks)) {
     const event = task.source?.kind === "event" ? task.source.event : undefined;

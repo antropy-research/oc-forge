@@ -1,4 +1,5 @@
 import type { ComponentChildren } from 'preact';
+import { addMeetingCommands, eventKey, taskForEvent as taskForEventKey } from '../../src/domain/meetings.ts';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
 import type { DateKey, Placement, WorkBlock } from '../../src/domain/types.ts';
@@ -74,15 +75,28 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
   const { setUi } = useUi();
   const calendar = useCalendarUi();
   const zone = view.state.settings.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-  /** Sunsama's "add an event as a task": on its day, with the event's length as planned time. */
-  const addEventAsTask = (title: string, date: DateKey, minutes: number | null, note: string) => {
+  /**
+   * Sunsama's "Add to tasks" on an event: a Google event becomes a task linked to it, by its start time (its import
+   * settings apply to it); a calendar feed's, a task on its day with the event's length as planned time.
+   */
+  const addEventAsTask = (event: CalendarEvent, title: string, date: DateKey, minutes: number | null, note: string) => {
+    if (eventKey(event)) {
+      const linked = addMeetingCommands(view.state, event, zone, newId);
+      if (linked.length) void client.dispatch(linked, { undo: 'Added to tasks' });
+      return;
+    }
     const placement = { kind: 'day' as const, date };
     void client.dispatch(
       [{ type: 'task.created', task: { id: newId(), title, placement, position: edgePosition(view.state, placement, 'bottom'), ...(minutes ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {}), notes: note } }],
       { undo: 'Task added from the calendar' },
     );
   };
-  const inPlan = (title: string, date: DateKey) => Object.values(view.state.tasks).some((task) => task.title === title && !task.deletedAt && task.placement.kind === 'day' && task.placement.date === date);
+  const inPlan = (event: CalendarEvent, title: string, date: DateKey) => {
+    const key = eventKey(event);
+    const linked = key ? taskForEventKey(view.state, key) : null;
+    if (linked && !linked.deletedAt) return true;
+    return Object.values(view.state.tasks).some((task) => task.title === title && !task.deletedAt && task.placement.kind === 'day' && task.placement.date === date);
+  };
   const scroller = useRef<HTMLDivElement>(null);
   const lanes = useRef<Record<string, HTMLDivElement | null>>({});
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -627,8 +641,8 @@ export const TimeGrid = ({ dates, events, onDay }: { dates: DateKey[]; events: C
                         }}
                       >
                         <BlockText text={text} time={compactClock(start)} timeLine={dragging ? compactRange(start, end) : item.detail}>{item.title}</BlockText>
-                        {!inPlan(item.title, date) && (
-                          <button class="item-add" aria-label={`Add ${item.title} as a task`} title="Add it to this day as a task, its length as planned time" onClick={() => addEventAsTask(item.title, date, item.end - item.start, `${item.detail}, from the calendar`)}>+</button>
+                        {!inPlan(event, item.title, date) && (
+                          <button class="item-add" aria-label={`Add ${item.title} as a task`} title="Add to tasks: on its day, its length as planned time" onClick={() => addEventAsTask(event, item.title, date, item.end - item.start, `${item.detail}, from the calendar`)}>+</button>
                         )}
                         {movable && <div class="resize-handle" aria-hidden="true" onPointerDown={(pointer) => startDrag(pointer, 'resize')} />}
                       </div>

@@ -92,6 +92,10 @@ export const convertSubtaskCommands = (state: PlannerState, taskId: string, subt
 
 const sourceKey = (source: Pick<TaskSourceRef, 'kind' | 'id'>): string => `${source.kind}|${source.id}`;
 
+/** A task made from an item merged before (Convert to task): no import, its item was imported when it was merged. */
+export const wasMerged = (before: PlannerState, source: Pick<TaskSourceRef, 'kind' | 'id'>): boolean =>
+  Object.values(before.tasks).some((task) => task.subtasks.some((subtask) => subtask.source && sourceKey(subtask.source) === sourceKey(source)));
+
 /** Merged items a change checked off (a subtask with a link, done now and not before): their completion automations run. */
 export const mergedDone = (before: Task | undefined, after: Task | undefined): Subtask[] =>
   (after?.subtasks ?? []).filter((subtask) => {

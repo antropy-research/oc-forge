@@ -5,7 +5,7 @@
 import type { Command } from '../../src/domain/events.ts';
 import { DEFAULT_MAIL_FILTER, gmailActionKey, mailQuery, threadIdOf, type GmailLabel, type MailFilter, type MailThread } from '../../src/domain/gmail.ts';
 import type { GmailAction, PlannerState, Task, TaskSourceRef } from '../../src/domain/types.ts';
-import { mergedDone, mergedImports } from '../../src/domain/merge.ts';
+import { mergedDone, mergedImports, wasMerged } from '../../src/domain/merge.ts';
 import type { Origin, PlannerClient } from './client.ts';
 import type { GoogleStore } from './google.ts';
 
@@ -170,8 +170,10 @@ export class GmailStore {
       const when = command.type === 'task.created' ? 'import' : command.type === 'task.completed' ? 'complete' : null;
       if (!when) continue;
       const taskId = command.type === 'task.created' ? command.task.id : command.type === 'task.completed' ? command.taskId : '';
-      // An email task made again (planned anew after a delete) is an import; one that existed before is not.
+      // An email task made again (planned anew after a delete) is an import; one that existed before is not, nor one
+      // given back by Convert to task (its email was imported when it was merged).
       if (when === 'import' && before.tasks[taskId] && !before.tasks[taskId]!.deletedAt) continue;
+      if (command.type === 'task.created' && command.task.source && wasMerged(before, command.task.source)) continue;
       this.automate(when, taskId, mailOf(after.tasks[taskId]), after);
     }
   }

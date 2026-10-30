@@ -168,6 +168,20 @@ describe('auto-sync', () => {
     expect(planMeetingSync(state, [moved], options())).toEqual([]);
   });
 
+  test("an import channel chosen after they were added: the meetings it added take it, unless given one", () => {
+    let state = run(base({ meetingImport: 'autoSync', meetingCalendars: ['work'] }), [
+      { type: 'channel.created', channel: { id: 'meet', name: 'meetings', color: '#e8590c', context: 'work' } },
+      { type: 'channel.created', channel: { id: 'mine', name: 'mine', color: '#1c7ed6', context: 'personal' } },
+    ]);
+    state = synced(state, [planning, standup]);
+    const planningId = taskForEvent(state, eventKey(planning)!)!.id;
+    const standupId = taskForEvent(state, eventKey(standup)!)!.id;
+    state = run(state, [{ type: 'task.updated', taskId: standupId, patch: { channelId: 'mine' } }, { type: 'settings.updated', patch: { meetingChannels: { work: 'meet' } } }]);
+    state = synced(state, [planning, standup]);
+    expect([state.tasks[planningId]!.channelId, state.tasks[standupId]!.channelId]).toEqual(['meet', 'mine']);
+    expect(planMeetingSync(state, [planning, standup], options())).toEqual([]);
+  });
+
   test('a calendar that could not be read keeps its meetings; one no longer chosen takes them off', () => {
     let state = synced(base({ meetingImport: 'autoSync', meetingCalendars: ['work'] }), [planning]);
     const task = taskForEvent(state, eventKey(planning)!)!;

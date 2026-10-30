@@ -109,7 +109,7 @@ const findEvent = async (sources: AddSources, url: Extract<PastedUrl, { kind: 'g
 };
 
 /** Add a parsed line; a URL pasted alone becomes the task Sunsama's "Add via URL" makes of it. */
-export const addParsedTask = async (sources: AddSources, parsed: QuickAdd, fallback: Placement, edge: 'top' | 'bottom', today: DateKey, folderId: string | null = null, options: { linearStateId?: string } = {}): Promise<void> => {
+export const addParsedTask = async (sources: AddSources, parsed: QuickAdd, fallback: Placement, edge: 'top' | 'bottom', today: DateKey, folderId: string | null = null, options: { linearStateId?: string; linearStatusShown?: boolean } = {}): Promise<void> => {
   const { client } = sources;
   const url = pastedUrl(parsed.title);
   const placement = parsed.placement ?? fallback;
@@ -142,7 +142,8 @@ export const addParsedTask = async (sources: AddSources, parsed: QuickAdd, fallb
       if (issue) {
         const { bodies, taskId } = sources.linear.importCommands(issue, placement);
         await plan(bodies, taskId, `Planned ${issue.identifier}`);
-        // The status picked in the add field, as Sunsama updates it when adding via URL.
+        // The status picked in the add field, as Sunsama updates it when adding via URL: that was the import's question.
+        if (options.linearStatusShown || options.linearStateId) sources.linear.dismissImportPrompt(taskId);
         const task = client.getView().state.tasks[taskId];
         if (options.linearStateId && task && options.linearStateId !== issue.state.id) await sources.linear.setStatus(task, options.linearStateId);
         return;

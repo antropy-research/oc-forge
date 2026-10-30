@@ -206,6 +206,9 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       fail.next = null;
       return [status, { error: { code: status, message } }];
     }
+    // Access taken back (a password changed, the Planner removed in the account's permissions): every token and every
+    // request is refused, as Google refuses them.
+    if (world.revoked && path !== '/revoke') return path === '/token' ? [400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }] : [401, { error: { code: 401, message: 'Request had invalid authentication credentials.', status: 'UNAUTHENTICATED' } }];
     if (path === '/token' && body.grant_type === 'authorization_code') {
       // A sign-in: Google keeps what the account granted before (include_granted_scopes) and adds what it just allowed,
       // and says who it is in the ID token (`hd`: a work or school account's domain).

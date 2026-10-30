@@ -149,7 +149,7 @@ export const QuickAddModal = ({ onClose }: { onClose: () => void }) => {
           onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => {
             if (event.key !== 'Enter' || !parsed?.title.trim()) return;
-            void addParsedTask({ client, linear, github, google }, parsed, { kind: 'day', date: view.today }, 'bottom', view.today, null, { linearStateId: status.chosen });
+            void addParsedTask({ client, linear, github, google }, parsed, { kind: 'day', date: view.today }, 'bottom', view.today, null, { linearStateId: status.chosen, linearStatusShown: status.states.length > 0 });
             onClose();
           }}
         />

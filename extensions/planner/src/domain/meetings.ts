@@ -102,17 +102,23 @@ export const meetingTask = (state: PlannerState, event: CalendarEvent, options: 
   if (!source) return null;
   const date = eventDay(event, options.zone);
   const minutes = event.allDay ? null : Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60_000);
-  const subscription = subscriptionOf(state, event);
-  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
+  const channelId = importChannel(state, event);
   return {
     id: options.id,
     title: event.title,
     placement: { kind: 'day', date },
     position: options.position ?? meetingPosition(state, date, Date.parse(event.start)),
     ...(minutes && minutes > 0 ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {}),
-    ...(channelId && state.channels[channelId] && !state.channels[channelId]!.deletedAt ? { channelId } : {}),
+    ...(channelId ? { channelId } : {}),
     source,
   };
+};
+
+/** The channel meetings from an event's calendar get ("Import channel"), when it is a live channel. */
+const importChannel = (state: PlannerState, event: CalendarEvent): string | null => {
+  const subscription = subscriptionOf(state, event);
+  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
+  return channelId && state.channels[channelId] && !state.channels[channelId]!.deletedAt ? channelId : null;
 };
 
 /**
@@ -215,6 +221,10 @@ export const planMeetingSync = (state: PlannerState, events: readonly CalendarEv
       const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60_000));
       push({ type: 'task.updated', taskId: task.id, patch: { title: event.title, source, ...(minutes && minutes > 0 ? { plannedMinutes: minutes } : {}) } });
     }
+    // An import channel chosen after it was added (Settings shows the channel once its calendar is chosen); one the user
+    // gave a channel keeps it.
+    const channelId = importChannel(working, event);
+    if (channelId && !working.tasks[task.id]!.channelId) push({ type: 'task.updated', taskId: task.id, patch: { channelId } });
   }
   for (const task of Object.values(working.tasks)) {
     const event = task.source?.kind === 'event' ? task.source.event : undefined;

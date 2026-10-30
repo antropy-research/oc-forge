@@ -7,7 +7,7 @@
 // it (its own filter, plus what its display hides), page after page until
 // Linear has no more; temporary filters go to Linear as an IssueFilter, so the
 // answer is complete. The Linear page and the side panels keep a list each.
-import { mergedDone, mergedImports, planSubtaskSourceSync, subtaskSources } from '../../src/domain/merge.ts';
+import { mergedDone, mergedImports, planSubtaskSourceSync, subtaskSources, wasMerged } from '../../src/domain/merge.ts';
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
 import type { Command, EventBody } from '../../src/domain/events.ts';
 import {
@@ -798,6 +798,11 @@ export class LinearStore {
     return this.moveTo({ id: source.id, key: source.key, teamId: source.teamId, workspaceId: this.workspaceOf(source) }, { stateId }, task);
   }
 
+  /** No import prompt for this task: its status was offered as it was added (a pasted issue's, in the add field). */
+  dismissImportPrompt(taskId: string): void {
+    if (this.view.prompt?.kind === 'import' && this.view.prompt.taskId === taskId) this.set({ prompt: null });
+  }
+
   /** Move a merged issue (a subtask's link): to a state of its team, or to its first of a type; its subtask follows at the next sync. */
   moveSource(source: TaskSourceRef, to: 'completed' | 'started' | { stateId: string }): Promise<boolean> {
     if (source.kind !== 'linear') return Promise.resolve(false);
@@ -1123,7 +1128,7 @@ export class LinearStore {
         continue;
       }
       // Sunsama's import automation: right after an issue is imported, a prompt to update its status in Linear.
-      if (command.type === 'task.created' && command.task.source?.kind === 'linear' && settings.linearImportPrompt && !before.tasks[command.task.id]) {
+      if (command.type === 'task.created' && command.task.source?.kind === 'linear' && settings.linearImportPrompt && !before.tasks[command.task.id] && !wasMerged(before, command.task.source)) {
         ask({ kind: 'import', taskId: command.task.id, key: command.task.source.key });
         continue;
       }

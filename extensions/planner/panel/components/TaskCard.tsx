@@ -241,7 +241,8 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
         }
         event.preventDefault();
         event.stopPropagation();
-        event.dataTransfer!.dropEffect = 'copy';
+        // The effect the drag allows: a task card's is a move, a panel item's a copy (any other, and no drop comes).
+        event.dataTransfer!.dropEffect = types.includes(DRAG_TYPE) ? 'move' : 'copy';
         if (!merging) setMerging(true);
       }}
       onDragLeave={() => merging && setMerging(false)}

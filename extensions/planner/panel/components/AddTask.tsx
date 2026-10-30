@@ -69,7 +69,7 @@ export const AddTask = ({ placement, edge = 'bottom', folderId = null }: { place
 
   const submit = () => {
     if (!parsed || !parsed.title.trim()) return;
-    void addParsedTask({ client, linear, github, google }, parsed, placement, edge, view.today, folderId, { linearStateId: status.chosen });
+    void addParsedTask({ client, linear, github, google }, parsed, placement, edge, view.today, folderId, { linearStateId: status.chosen, linearStatusShown: status.states.length > 0 });
     setText('');
   };
 
