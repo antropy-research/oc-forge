@@ -15,6 +15,8 @@
 // Planner first. Never prints the UI password.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { waitOutMidnight } from './days.mjs';
+import { watchPlannerRequests } from './drain.mjs';
 
 const work = process.env.WORK ?? '/tmp/opencode/planner-forge/e2e';
 const out = process.argv[2] ?? '/tmp/opencode/planner-forge/screens';
@@ -45,6 +47,8 @@ const routeIn = (url) => new URL(url).searchParams.get('route');
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+// Closed only once no Planner request is on its way (drain.mjs, as the harness's close()).
+const drain = watchPlannerRequests(context);
 let cleanup = async () => {};
 const request = context.request;
 try {
@@ -81,6 +85,8 @@ try {
   // A plan no Planner window has opened yet knows no "today": its zone is the one the panel sets on its first load,
   // the browser's, here this machine's (a fresh stack's WORK).
   if (!(await service('GET', '/state')).today) await service('POST', '/commands', { commands: [{ cmd: `${run}-zone`, type: 'settings.updated', patch: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } }] });
+  // Today is the plan's, read once for a run of about a minute: within ten minutes of midnight in its zone, the new day first.
+  await waitOutMidnight((await service('GET', '/state')).state?.settings?.timezone ?? 'UTC', 10, 'forge.mjs');
   const today = (await service('GET', '/state')).today;
   const seeded = await service('POST', '/commands', { commands: [{ cmd: `${run}-c1`, type: 'task.created', task: { id: taskId, title: `${run} write the brief`, placement: { kind: 'day', date: today }, position: 1024, sessionRef: { sessionId: chatId, title: `${run} chat`, directory: project } } }] });
   if (!seeded.applied) throw new Error(`the Planner did not take the journey's task: ${JSON.stringify(seeded)}`);
@@ -234,7 +240,7 @@ try {
 } finally {
   // What this run made: its task and its chat, so the stack stays as the other checks expect it.
   await cleanup().catch(() => {});
-  await browser.close();
+  await drain.close(browser, { label: 'forge.mjs' });
   writeFileSync(join(out, 'results.json'), JSON.stringify(results, null, 2));
 }
 const passed = results.filter((result) => result.ok).length;

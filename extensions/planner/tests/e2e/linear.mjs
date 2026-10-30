@@ -11,6 +11,7 @@
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/linear.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { makeFilters, page } from './linearFake.mjs';
+import { addDays, waitOutMidnight } from './days.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-linear';
 const results = [];
@@ -21,7 +22,10 @@ const check = (name, ok, detail = '') => {
 
 // ── A Linear workspace in memory ────────────────────────────────────────────
 const ZONE = 'America/Los_Angeles';
-const dayKey = (offset) => new Intl.DateTimeFormat('en-CA', { timeZone: ZONE }).format(new Date(Date.now() + offset * 86_400_000));
+// Days from today, read once for a run of a minute or two (one starting within ten minutes of midnight in ZONE waits for
+// the new day first), as calendar days: 24 hours after the first hour of a 25-hour day is still that day.
+const TODAY = await waitOutMidnight(ZONE, 10, 'linear.mjs');
+const dayKey = (offset) => addDays(TODAY, offset);
 const ago = (hours) => new Date(Date.now() - hours * 3_600_000).toISOString();
 const S = (id, name, type, position, color) => ({ id, name, type, color, position });
 const har = { id: 'team-har', key: 'HAR', name: 'Harness' };

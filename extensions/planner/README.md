@@ -291,6 +291,37 @@ a Load more button says "Loading…" while any read of its list is under way.
 | The agents and models to assign to (`loadCatalog`) | Look again during a read: the older answer could show last. Another folder before the models came: the first folder's follow-up read it again, over the second | The newest read stands; only it reads the models again | `superseded.test.ts` |
 | Other effects with a `live` flag (the calendar's feed, oc-forge's state) | Right as is: an effect's cleanup drops what it asked for | — | — |
 
+## The journeys across midnight
+
+`sunsama.mjs` read its dates once, at the start. A run that crossed midnight in Los Angeles compared the plan with
+yesterday's dates, then waited for a menu item, "Plan HAR-3 on Saturday, October 31", that had become "Tomorrow".
+Each phase now reads its dates as it begins: a part at a size, or the main flow. Before that it waits out any
+midnight less than `SUNSAMA_MIDNIGHT_MARGIN_MIN` minutes away (default 20; a phase takes a few minutes), so no phase
+crosses one (`tests/e2e/days.mjs`). The browser's zone stays Los Angeles, with its daylight saving and its midnights;
+`SUNSAMA_ZONE` picks another one for every part and the main flow. The product's own day logic is tested as before:
+each phase compares the day the Planner shows with the one the journey computes for that zone.
+
+| Journey | Its dates | Now |
+|---|---|---|
+| `sunsama.mjs` | Read once at the start; Los Angeles hard-coded in two places. Its GitHub part dates the day's work at today's hours, and the Repository choice's order then held only after 4 PM (before, that work was still to come and outranked the repository meant to be the latest) | Read per phase, after `waitOutMidnight`; one zone, `SUNSAMA_ZONE`. The latest repository is updated after the end of today |
+| `calendar.mjs` | Today read once, for a run of about 20 minutes | Waits out a midnight less than 30 minutes away, then reads today |
+| `linear.mjs` | `dayKey` read the clock at each use, in steps of 24 hours (on a 25-hour day such as November 1, "tomorrow" in its first hour was today) | Today read once at the start, after waiting out a midnight less than 10 minutes away; calendar days from it |
+| `run.mjs` | Today from the plan's first read, for the rest of the run | Waits out a midnight less than 30 minutes away in the plan's zone, then reads it again (not run here: it uses the installed Planner) |
+| `forge.mjs` | Today from its plan, for a run of a minute | Waits out a midnight less than 10 minutes away in the plan's zone |
+| `undo.mjs` | Today read once; its tasks are seeded there and looked for in the column marked today | The same assumption. The file belongs to the subtask work under way, so it is left to it: the same `waitOutMidnight` before reading today |
+| `smoke.mjs` | No dates | — |
+| `agentpr.mjs` | Adds its task in the column marked today and finds it there seconds later; no stored date | — |
+| `tasks-calendar.mjs` | Already runs in a zone where it is between 10 AM and 10 PM | — |
+
+## A journey's clean shutdown
+
+`harness.mjs`'s `close()` waits until the Planner's requests have been taken by its routes, plus a moment of quiet,
+before closing (9ed53cf): a request still paused for a route when the page or the routes go reaches the real service.
+`run.mjs`, `agentpr.mjs` and `forge.mjs` do not use the harness. They now close through `tests/e2e/drain.mjs`, attached
+right after `newContext`: it waits until no Planner request is in flight (each answered, by its route or the service,
+or failed) and none was sent for 1.5 s, at most 15 s; then it closes the pages while the routes still answer, removes
+the routes, and closes the browser.
+
 ## Sunsama's integration pages, behaviour by behaviour
 
 Round 12's inventory of help.sunsama.com's integration pages for the sources the Planner has

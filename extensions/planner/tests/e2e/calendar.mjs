@@ -37,11 +37,15 @@
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/calendar.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
+import { waitOutMidnight } from './days.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-calendar';
 const ZONE = 'America/Los_Angeles';
 const ME = 'harness@example.com';
 const dayOf = (ms) => new Intl.DateTimeFormat('en-CA', { timeZone: ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
+// Today is read once, here, for a run of about 20 minutes: one starting within half an hour of midnight in ZONE waits
+// for the new day first, so the run is on one day (round 12's review: sunsama.mjs's dates went stale across midnight).
+await waitOutMidnight(ZONE, 30, 'calendar.mjs');
 const today = dayOf(Date.now());
 const addDays = (key, days) => new Date(Date.parse(`${key}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
