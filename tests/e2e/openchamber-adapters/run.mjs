@@ -7,7 +7,7 @@
 //   node tests/e2e/openchamber-adapters/run.mjs [outDir]
 //   node tests/e2e/openchamber-adapters/stack.mjs down
 //
-// OC_FORGE_E2E_PARTS=compare,extensions,api,many runs only those parts (all by default).
+// OC_FORGE_E2E_PARTS=compare,extensions,api,many,runtime runs only those parts (all by default).
 //
 // On a host whose network interfaces change often (Docker builds), Chromium
 // aborts requests with ERR_NETWORK_CHANGED; run all three inside one private
@@ -654,6 +654,174 @@ const manyTabsRound = async (browser, base, viewport, seeded, request) => {
   await context.close();
 };
 
+// R7 rail.open and R8 window.id, what one VS Code across a window's frames needs, in a window of its own. rail.open from
+// the page, the rail panel and the bottom shows one of the extension's own entries (the bottom one, a view entry) as a
+// click would, lit, and never closes it; another extension's entry, one nobody lists, and a frame of another extension
+// are refused, saying why. A frame that asks before the host has the extension's list waits for it. window.id is one
+// id in every frame of the window, kept across a frame's reload; another in a second browser tab and after the app
+// reloads.
+let railListWaitChecked = false;
+const runtimeRound = async (browser, base, viewport, seeded, request) => {
+  const size = `${viewport.width}x${viewport.height}`;
+  await ready(request, base, seeded);
+  const { context, page, errors } = await open(browser, base, viewport, seeded);
+  const entryId = (entry) => `plugin:${TEST}--${entry}`;
+  const right = zoneFrame(page, 'right');
+  const bottom = zoneFrame(page, 'bottom');
+  const otherBottom = page.frameLocator('[data-context-zone="bottom"] iframe[title="oc-forge bottom panel"]').first();
+  const dockShown = async () => (await text(bottom, '#entry')) === 'dock' && Boolean((await text(bottom, '#surface'))?.includes('own panel'));
+  /** rail.open(entry) from a frame, by its button: what it answered ("opened … in N ms", or "refused …: why"). */
+  const railOpen = async (frame, entry) => {
+    await frame.locator('#open-entry').fill(entry);
+    await frame.locator('#rail-open').click();
+    return until(async () => {
+      const result = await text(frame, '#rail-open-result');
+      return result && result !== '…' ? result : null;
+    }, 15_000);
+  };
+  const windowIdOf = async (frame) => {
+    const id = await text(frame, '#window-id');
+    return id && id !== '—' ? id : null;
+  };
+  const isWindowId = (id) => /^[0-9a-f]{32}$/.test(id ?? '');
+  try {
+    await setEntries(request, base, ENTRIES);
+    await until(async () => (await rail(page)).some((entry) => entry.id === entryId('dock')), 30_000);
+    // Three frames of the extension: the rail panel on alpha, the page on a tab; the bottom entry not open yet.
+    await page.locator(`[data-context-surface="${entryId('alpha')}"]`).click();
+    await until(async () => (await text(right, '#entry')) === 'alpha');
+    await right.locator('#open-a').click();
+    await until(async () => await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+    const status = await text(pageFrame(page), '#status');
+    check(`[${size}] R7 the hello says the host opens rail entries and names the window`, /\brail-open\b/.test(status ?? '') && /\bwindow-id\b/.test(status ?? '') && !await pressed(page, entryId('dock')), status ?? '');
+
+    // From the page, twice: open, then left open.
+    const fromPage = await railOpen(pageFrame(page), 'dock');
+    check(`[${size}] R7 rail.open from the page opens the bottom entry's own panel, and the rail lights it`,
+      fromPage?.startsWith('opened dock') && await until(dockShown) && await until(() => pressed(page, entryId('dock'))), `${fromPage}; lit ${await pressed(page, entryId('dock'))}`);
+    const dockLoaded = await text(bottom, '#loaded');
+    const again = await railOpen(pageFrame(page), 'dock');
+    await wait(1_000);
+    check(`[${size}] R7 a second rail.open leaves it open and lit, not toggled, its frame not reloaded`,
+      again?.startsWith('opened dock') && await dockShown() && await pressed(page, entryId('dock')) && (await text(bottom, '#loaded')) === dockLoaded,
+      `${again}; lit ${await pressed(page, entryId('dock'))}`);
+    await shot(page, `${size}-r7-from-page`);
+
+    // From the rail panel, once the user closed it (a click on the lit icon).
+    await page.locator(`[data-context-surface="${entryId('dock')}"]`).click();
+    await until(async () => !await pressed(page, entryId('dock')));
+    const fromPanel = await railOpen(right, 'dock');
+    check(`[${size}] R7 rail.open from the rail panel opens it again, lit`,
+      fromPanel?.startsWith('opened dock') && await until(dockShown) && await until(() => pressed(page, entryId('dock'))), fromPanel ?? '');
+
+    // From the bottom: its own entry stays open; a view entry shows the rail panel on it (the panel's frame is told, not
+    // reloaded), and opens that panel when the user had closed it.
+    const fromBottom = await railOpen(bottom, 'dock');
+    await wait(1_000);
+    check(`[${size}] R7 rail.open from the bottom, on its own entry, keeps it open and lit`, fromBottom?.startsWith('opened dock') && await dockShown() && await pressed(page, entryId('dock')), fromBottom ?? '');
+    const panelLoaded = await text(right, '#loaded');
+    const toGamma = await railOpen(bottom, 'gamma');
+    check(`[${size}] R7 rail.open from the bottom on a view entry shows the rail panel on it, its frame told, and lights it`,
+      toGamma?.startsWith('opened gamma') && await until(async () => (await text(right, '#entry')) === 'gamma') && (await text(right, '#loaded')) === panelLoaded
+        && await until(async () => await pressed(page, entryId('gamma')) && !await pressed(page, entryId('alpha'))) && await dockShown(),
+      `${toGamma}; the panel shows ${await text(right, '#entry')}`);
+    await page.locator(`[data-context-surface="${entryId('gamma')}"]`).click();
+    await until(async () => !await pressed(page, entryId('gamma')));
+    const toBeta = await railOpen(bottom, 'beta');
+    check(`[${size}] R7 …and opens the rail panel the user closed, on that entry`,
+      toBeta?.startsWith('opened beta') && await until(async () => (await text(right, '#entry')) === 'beta') && await until(() => pressed(page, entryId('beta'))), toBeta ?? '');
+    await shot(page, `${size}-r7-from-bottom`);
+
+    // R8: one id in every frame of the window, any surface, any extension; a frame's reload keeps it.
+    const ids = { page: await windowIdOf(pageFrame(page)), panel: await windowIdOf(right), bottom: await windowIdOf(bottom) };
+
+    // Refused, saying why: another extension's entry (VS Code's Explorer), one nobody lists, and a frame of another
+    // extension (the bottom panel extension's, which has no rail entries) naming this one's.
+    const other = await railOpen(right, 'explorer');
+    const unknown = await railOpen(right, 'nowhere');
+    check(`[${size}] R7 rail.open refuses another extension's entry, and one nobody lists, saying why`,
+      other === `refused explorer: ${TEST} has no rail entry "explorer"; a frame opens only its own extension's entries.`
+        && unknown === `refused nowhere: ${TEST} has no rail entry "nowhere"; a frame opens only its own extension's entries.` && await dockShown(),
+      `${other} | ${unknown}`);
+    await page.locator(`[data-context-surface="plugin:${ZONE}"]`).click();
+    await until(async () => (await text(otherBottom, '#status'))?.startsWith('oc-forge'), 30_000);
+    const foreign = await railOpen(otherBottom, 'dock');
+    await wait(1_000);
+    check(`[${size}] R7 …and a frame of another extension naming this one's entry, which stays closed`,
+      foreign === `refused dock: ${ZONE} has no rail entries: its package.json names no ocForge.rail.` && !await pressed(page, entryId('dock')), foreign ?? '');
+    ids.other = await windowIdOf(otherBottom);
+    check(`[${size}] R8 window.id is one id in every frame of the window: the page, the rail panel, the bottom, another extension's`,
+      isWindowId(ids.page) && Object.values(ids).every((id) => id === ids.page), JSON.stringify(ids));
+    const before = await text(right, '#loaded');
+    await right.locator('#reload-frame').click();
+    const reloaded = await until(async () => {
+      const loaded = await text(right, '#loaded');
+      return loaded && loaded !== before && await windowIdOf(right) ? loaded : null;
+    }, 30_000);
+    check(`[${size}] R8 a frame that reloads gets the same id`, Boolean(reloaded) && (await windowIdOf(right)) === ids.page, `reloaded ${Boolean(reloaded)}; ${await windowIdOf(right)}`);
+
+    // Another browser tab is another window. (Its panels are where this tab left them, the zones' state being the
+    // device's: open the rail panel only if it is closed.)
+    const second = await context.newPage();
+    await second.goto(`${base}/?session=${seeded.sessions[1]}`);
+    await until(async () => (await rail(second)).some((entry) => entry.id === entryId('alpha')), 60_000);
+    const secondRight = zoneFrame(second, 'right');
+    if (!await secondRight.locator('#window-id').isVisible({ timeout: 5_000 }).catch(() => false)) await second.locator(`[data-context-surface="${entryId('alpha')}"]`).click();
+    const secondId = await until(() => windowIdOf(secondRight), 30_000);
+    check(`[${size}] R8 a second browser tab has another id`, isWindowId(secondId) && secondId !== ids.page, `${secondId} | this tab's ${ids.page}`);
+    await second.close();
+    // A reload of the app is a new page load: a new window.
+    await page.reload();
+    await until(async () => (await rail(page)).some((entry) => entry.id === entryId('alpha')), 60_000);
+    if (!await right.locator('#window-id').isVisible({ timeout: 5_000 }).catch(() => false)) await page.locator(`[data-context-surface="${entryId('alpha')}"]`).click();
+    const afterReload = await until(() => windowIdOf(right), 30_000);
+    check(`[${size}] R8 after the app reloads, the window has a new id`, isWindowId(afterReload) && afterReload !== ids.page, `${afterReload} | before ${ids.page}`);
+    await shot(page, `${size}-r8-after-reload`);
+
+    // A frame that asks before the host has the extension's list (its first poll still out) waits for the list. The
+    // first rail poll of a new window is held 5 s (over HTTP, where a route sees it); the page opens on a deep link.
+    const fresh = await browser.newContext({ viewport });
+    await fresh.request.post(`${base}/auth/session`, { data: { password } });
+    await fresh.addInitScript(() => {
+      if (window.top === window) localStorage.setItem('oc-forge:service-socket', 'off');
+    });
+    let held = 0;
+    let released = 0;
+    await fresh.route((url) => new URL(url).pathname === `/api/guests/${TEST}/service/request`, async (route) => {
+      if (held === 0 && route.request().postData()?.includes('"/rail"')) {
+        held += 1;
+        await wait(5_000);
+        released = Date.now();
+      }
+      await route.continue().catch(() => {});
+    });
+    const slow = await fresh.newPage();
+    await slow.goto(`${base}/?session=${seeded.sessions[0]}&extension=${TEST}&route=%2Fwaits`);
+    const slowPage = slow.frameLocator(`[data-oc-forge-page="${TEST}"] iframe`);
+    await until(async () => (await text(slowPage, '#route')) === '/waits', 60_000);
+    const listedBefore = (await rail(slow)).some((entry) => entry.id === entryId('dock'));
+    if (held === 1 && !released && !listedBefore) {
+      railListWaitChecked = true;
+      const asked = Date.now();
+      const waited = await railOpen(slowPage, 'dock');
+      const answered = Date.now();
+      const slowBottom = zoneFrame(slow, 'bottom');
+      check(`[${size}] R7 a frame that asks before the host has the list waits for it, then the entry opens`,
+        waited?.startsWith('opened dock') && released > asked && answered >= released
+          && await until(async () => (await text(slowBottom, '#entry')) === 'dock') && await until(() => pressed(slow, entryId('dock'))),
+        `${waited}; asked ${((released - asked) / 1000).toFixed(1)} s before the list came`);
+    } else {
+      console.log(`INFO [${size}] R7 the first rail poll was back before the page could ask (held ${held}, listed ${listedBefore}); the wait is checked where it was not`);
+    }
+    await fresh.close();
+    await reset(page);
+  } catch (error) {
+    check(`[${size}] R7/R8 the check ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+  }
+  check(`[${size}] R7/R8 no page errors`, errors.length === 0, errors.slice(0, 3).join(' | '));
+  await context.close();
+};
+
 // The release vs the adapted build, with no extension using the APIs.
 const compare = async (browser, seeded, request, viewport) => {
   const size = `${viewport.width}x${viewport.height}`;
@@ -768,7 +936,7 @@ const plannerAndVscode = async (page, name) => {
   await page.screenshot({ path: join(out, `extensions-${name}-vscode.png`) });
 };
 
-const parts = new Set((process.env.OC_FORGE_E2E_PARTS ?? 'compare,extensions,api,many').split(','));
+const parts = new Set((process.env.OC_FORGE_E2E_PARTS ?? 'compare,extensions,api,many,runtime').split(','));
 const browser = await chromium.launch();
 const request = (await browser.newContext()).request;
 const seeded = {};
@@ -794,6 +962,10 @@ if (parts.has('api')) {
   check('R5 the deep link\'s late new-chat draft ran at one size at least', lateDraftChecked);
 }
 if (parts.has('many')) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await manyTabsRound(browser, base, viewport, seeded.adapted, request);
+if (parts.has('runtime')) {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await runtimeRound(browser, base, viewport, seeded.adapted, request);
+  check('R7 the wait for an extension\'s first list ran at one size at least', railListWaitChecked);
+}
 
 await browser.close();
 writeFileSync(join(out, 'results.json'), `${JSON.stringify({ results, restarts }, null, 2)}\n`);
