@@ -2,7 +2,7 @@
 // Commands apply locally through the same reducer the service uses, then the
 // service's answer replaces the view, so the UI never waits on a round trip.
 import { HostRequestError, type HostClient } from '@openchamber/sdk';
-import type { Command, EventBody, PlannerEvent } from '../../src/domain/events.ts';
+import type { Command, EventBody, PlannerEvent, SubtaskConflict } from '../../src/domain/events.ts';
 import { applyEvents } from '../../src/domain/reducer.ts';
 import { CHANGED_SINCE, asEvents, changedSince, inverseOfBatch } from '../../src/domain/undo.ts';
 import type { CalendarEvent } from '../../src/domain/ics.ts';
@@ -63,6 +63,12 @@ export interface DispatchOptions {
    * surface just reloads.
    */
   origin?: Origin;
+  /**
+   * Told, instead of an error, when the service refused the batch because a subtask it changes was changed elsewhere
+   * since (renamed or deleted meanwhile, `subtaskConflict`): nothing of it was written, and the plan as it is, theirs
+   * included, shows. For the surface that made the change to ask about it (Keep theirs, Save mine).
+   */
+  onConflict?: (conflict: SubtaskConflict) => void;
 }
 
 export type Origin = 'user' | 'linear' | 'github' | 'google' | 'agent';
@@ -89,6 +95,13 @@ const problemOf = (error: unknown): ServiceProblem => {
 };
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** The service's 409 for a batch meeting a subtask changed elsewhere since: what it is now, and the plan as it is. */
+class SubtaskConflictError extends Error {
+  constructor(message: string, readonly conflict: SubtaskConflict, readonly snapshot: Snapshot) {
+    super(message);
+  }
+}
 
 export class PlannerClient {
   private view: ClientView;
@@ -148,7 +161,7 @@ export class PlannerClient {
       const after = this.view.state;
       if (changedSince(before, after, applyEvents(after, asEvents(this.undoOffer.inverse))).length) this.clearUndo();
     }
-    this.queue = this.queue.then(() => this.send(commands, options.origin ?? 'user', Boolean(offered)));
+    this.queue = this.queue.then(() => this.send(commands, options.origin ?? 'user', Boolean(offered), options.onConflict));
     return this.queue;
   }
 
@@ -280,7 +293,7 @@ export class PlannerClient {
     this.set({ undoLabel: label });
   }
 
-  private async send(commands: Command[], origin: Origin, undoable = false): Promise<void> {
+  private async send(commands: Command[], origin: Origin, undoable = false, onConflict?: (conflict: SubtaskConflict) => void): Promise<void> {
     this.set({ saving: true });
     try {
       const snapshot = await this.request<Snapshot>('POST', '/commands', { commands, ...(undoable ? { undo: true } : {}) });
@@ -298,6 +311,16 @@ export class PlannerClient {
       // Drop the optimistic change and show what the service actually has; nothing was done, so nothing to undo.
       this.pending = this.pending.filter((command) => !commands.includes(command));
       if (this.undoOffer?.batch === commands[0]?.cmd) this.clearUndo();
+      if (error instanceof SubtaskConflictError) {
+        // A subtask changed elsewhere since: the plan as the service has it (theirs), and the change asked about where
+        // it was made; automation tries again on its next read.
+        if (error.snapshot.state.version >= this.confirmed.version) this.accept(error.snapshot);
+        else this.recompute();
+        if (onConflict) onConflict(error.conflict);
+        else if (origin === 'user') this.set({ error: error.message });
+        else console.warn(`[planner] ${origin} update skipped: ${error.message}`);
+        return;
+      }
       this.recompute();
       if (origin === 'user') this.set({ error: messageOf(error), ...(error instanceof HostRequestError ? { problem: problemOf(error) } : {}) });
       else console.warn(`[planner] ${origin} update skipped: ${messageOf(error)}`);
@@ -366,7 +389,8 @@ export class PlannerClient {
 
   private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
     const response = await this.host.serviceRequest({ method, path, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    const data = response.body ? (JSON.parse(response.body) as T & { error?: string }) : ({} as T & { error?: string });
+    const data = response.body ? (JSON.parse(response.body) as T & { error?: string; conflict?: SubtaskConflict; state?: PlannerState }) : ({} as T & { error?: string; conflict?: SubtaskConflict; state?: PlannerState });
+    if (response.status === 409 && data.conflict && data.state) throw new SubtaskConflictError(data.error ?? `Planner service answered ${response.status}`, data.conflict, data as unknown as Snapshot);
     if (response.status >= 400) throw new Error(data.error ?? `Planner service answered ${response.status}`);
     return data;
   }

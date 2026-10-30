@@ -112,7 +112,7 @@ const merge = async (p: Awaited<ReturnType<typeof plannerWith>>, draggedId: stri
   return p.state().tasks.inbox!.subtasks.find((subtask) => subtask.source?.kind === 'gtask' && subtask.title === p.state().tasks[draggedId]?.title)!;
 };
 const tick = (p: Awaited<ReturnType<typeof plannerWith>>, subtaskId: string, done: boolean) =>
-  p.client.dispatch([{ type: 'task.updated', taskId: 'inbox', patch: { subtasks: p.state().tasks.inbox!.subtasks.map((subtask) => (subtask.id === subtaskId ? { ...subtask, done } : subtask)) } }]);
+  p.client.dispatch([{ type: 'subtask.updated', taskId: 'inbox', subtaskId, patch: { done }, seen: { done: p.state().tasks.inbox!.subtasks.find((subtask) => subtask.id === subtaskId)!.done } }]);
 const sourceOf = (p: Awaited<ReturnType<typeof plannerWith>>, subtaskId: string): TaskSourceRef | undefined => p.state().tasks.inbox!.subtasks.find((subtask) => subtask.id === subtaskId)?.source;
 
 describe('a Google task merged into a task stays a synced Google task', () => {
@@ -233,15 +233,16 @@ describe('a calendar event task has no subtasks at all, as in Sunsama', () => {
   const event: TaskSourceRef = { kind: 'event', id: `${ME}|primary|e1`, key: 'Google Calendar', url: 'https://calendar.google.com/calendar/r/eventedit/e1' };
   const state = () => applyEvents(emptyState(), [ev({ type: 'task.created', task: { id: 'meeting', title: 'Harness 1:1', placement: day, position: 1024, source: event } }), ev({ type: 'task.created', task: { id: 'plain', title: 'Write notes', placement: day, position: 2048 } })]);
   test("the service adds none to one (Sunsama's words); a plain task takes them", () => {
-    const added = { cmd: 'c1', type: 'task.updated', taskId: 'meeting', patch: { subtasks: [{ id: 's1', title: 'Agenda', done: false }] } };
+    const added = { cmd: 'c1', type: 'subtask.added', taskId: 'meeting', subtask: { id: 's1', title: 'Agenda', done: false } };
     expect(validateCommand(added, state())).toBe("Calendar event tasks can't have subtasks");
     expect(validateCommand({ ...added, taskId: 'plain' }, state())).toBeNull();
   });
 
   test('the ones an event task had before stay: ticked, renamed, removed', () => {
-    // Made before the rule (as one could be).
-    const before = applyEvents(state(), [ev({ type: 'task.updated', taskId: 'meeting', patch: { subtasks: [{ id: 's1', title: 'Agenda', done: false }, { id: 's2', title: 'Notes', done: false }] } })]);
-    expect(validateCommand({ cmd: 'c2', type: 'task.updated', taskId: 'meeting', patch: { subtasks: [{ id: 's1', title: 'Agenda for Ann', done: true }] } }, before)).toBeNull();
-    expect(validateCommand({ cmd: 'c3', type: 'task.updated', taskId: 'meeting', patch: { subtasks: [{ id: 's1', title: 'Agenda', done: false }, { id: 's3', title: 'More', done: false }] } }, before)).toBe("Calendar event tasks can't have subtasks");
+    // Made before the rule (as one could be), in an old log's whole list.
+    const before = applyEvents(state(), [ev({ type: 'task.updated', taskId: 'meeting', patch: { subtasks: [{ id: 's1', title: 'Agenda', done: false }, { id: 's2', title: 'Notes', done: false }] } } as unknown as EventBody)]);
+    expect(validateCommand({ cmd: 'c2', type: 'subtask.updated', taskId: 'meeting', subtaskId: 's1', patch: { title: 'Agenda for Ann', done: true }, seen: { title: 'Agenda', done: false } }, before)).toBeNull();
+    expect(validateCommand({ cmd: 'c3', type: 'subtask.deleted', taskId: 'meeting', subtaskId: 's2', seen: { title: 'Notes' } }, before)).toBeNull();
+    expect(validateCommand({ cmd: 'c4', type: 'subtask.added', taskId: 'meeting', subtask: { id: 's3', title: 'More', done: false } }, before)).toBe("Calendar event tasks can't have subtasks");
   });
 });

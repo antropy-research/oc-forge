@@ -116,7 +116,7 @@ export const FocusView = ({ onExit }: { onExit: () => void }) => {
               )}
               {pomodoro?.cycles ? <span class="muted">{pomodoro.cycles} done</span> : null}
             </div>
-            <Subtasks task={task} />
+            <Subtasks task={task} key={`focus-subtasks-${task.id}`} />
             {/* Over the notes as they are: one left as it was writes nothing, one changed elsewhere too is asked. */}
             <NotesField task={task} className="detail-notes focus-notes" key={`focus-notes-${task.id}`} />
             <div class="focus-nav">

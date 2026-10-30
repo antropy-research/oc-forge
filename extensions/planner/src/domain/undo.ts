@@ -2,11 +2,11 @@
 // overwrite that changed since the action it takes back (`changedSince`): the service makes an Undo only when
 // nothing it would change was changed meanwhile, elsewhere, so a stale Undo never puts back an old value over a
 // newer one.
-import type { EventBody, PlannerEvent, TaskPatch } from './events.ts';
+import { SUBTASK_PATCH_FIELDS, type EventBody, type PlannerEvent, type SubtaskPatch, type TaskPatch } from './events.ts';
 import { zonedDateMinutes } from './dates.ts';
 import { applyEvents } from './reducer.ts';
 import { samePlacement } from './selectors.ts';
-import type { PlannerState, Task, WorkBlock } from './types.ts';
+import type { PlannerState, Subtask, Task, WorkBlock } from './types.ts';
 
 /** What an Undo says when something it would put back was changed since, in another window (or elsewhere). */
 export const CHANGED_SINCE = 'Changed in another window since; not undone';
@@ -81,6 +81,24 @@ const inverseOne = (state: PlannerState, body: EventBody): EventBody[] | null =>
       for (const key of Object.keys(body.patch)) patch[key] = task[key as keyof typeof task];
       return [{ type: 'task.updated', taskId: task.id, patch: patch as TaskPatch }];
     }
+    // A subtask, by identity, as it was: added, deleted again; deleted, back where it was (after the one before it);
+    // changed, its fields as they were; moved, back after the one it was after.
+    case 'subtask.added':
+      return [{ type: 'subtask.deleted', taskId: task.id, subtaskId: body.subtask.id }];
+    case 'subtask.updated': {
+      const subtask = task.subtasks.find((item) => item.id === body.subtaskId);
+      const patch: Record<string, unknown> = {};
+      for (const key of Object.keys(body.patch)) if (subtask?.[key as keyof Subtask] !== undefined) patch[key] = subtask[key as keyof Subtask];
+      return Object.keys(patch).length ? [{ type: 'subtask.updated', taskId: task.id, subtaskId: body.subtaskId, patch: patch as SubtaskPatch }] : [];
+    }
+    case 'subtask.deleted': {
+      const index = task.subtasks.findIndex((item) => item.id === body.subtaskId);
+      return index < 0 ? [] : [{ type: 'subtask.added', taskId: task.id, subtask: task.subtasks[index]!, after: index ? task.subtasks[index - 1]!.id : null }];
+    }
+    case 'subtask.moved': {
+      const index = task.subtasks.findIndex((item) => item.id === body.subtaskId);
+      return index < 0 ? [] : [{ type: 'subtask.moved', taskId: task.id, subtaskId: body.subtaskId, after: index ? task.subtasks[index - 1]!.id : null }];
+    }
     default:
       return null;
   }
@@ -139,6 +157,35 @@ const comparable = (collection: string, field: string, value: unknown): string =
 const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, inner: unknown) => (inner && typeof inner === 'object' && !Array.isArray(inner) ? Object.fromEntries(Object.entries(inner as Entity).sort(([a], [b]) => a.localeCompare(b))) : inner)) ?? 'undefined';
 
+const listOf = (value: unknown): Subtask[] => (Array.isArray(value) ? (value as Subtask[]) : []);
+
+/**
+ * A task's subtasks as an Undo would overwrite them: one at a time, by identity. A subtask counts when the Undo
+ * changes something of it that changed since: whether it is there, its title, done, what it kept, the item it links
+ * to. The order counts when the Undo reorders subtasks that are there throughout and they were reordered since. So
+ * another subtask added, ticked or renamed elsewhere meanwhile never stops an Undo.
+ */
+const subtasksChanged = (path: string, wasList: unknown, isList: unknown, willList: unknown, removed: boolean): string[] => {
+  const [was, is, will] = [listOf(wasList), listOf(isList), listOf(willList)] as const;
+  const byId = (list: readonly Subtask[]) => new Map(list.map((subtask) => [subtask.id, subtask]));
+  const [a, n, u] = [byId(was), byId(is), byId(will)] as const;
+  const value = (map: ReadonlyMap<string, Subtask>, id: string, field: string): string => {
+    const subtask = map.get(id);
+    if (field === 'there') return String(Boolean(subtask));
+    return subtask ? comparable('tasks', field, subtask[field as keyof Subtask]) : 'absent';
+  };
+  const changed: string[] = [];
+  for (const id of new Set([...a.keys(), ...n.keys(), ...u.keys()])) {
+    for (const field of ['there', ...SUBTASK_PATCH_FIELDS]) {
+      const since = value(n, id, field) !== value(a, id, field);
+      if (since && (removed || value(u, id, field) !== value(n, id, field))) changed.push(`${path}/${id}/${field}`);
+    }
+  }
+  const throughout = (list: readonly Subtask[]) => list.flatMap((subtask) => (a.has(subtask.id) && n.has(subtask.id) && u.has(subtask.id) ? [subtask.id] : [])).join();
+  if (throughout(is) !== throughout(was) && (removed || throughout(will) !== throughout(is))) changed.push(`${path}/order`);
+  return changed;
+};
+
 /**
  * What an Undo would overwrite that changed since the action it takes back,
  * as `collection/id/field`; empty when it may go ahead. `after` is the plan
@@ -150,6 +197,7 @@ const canonical = (value: unknown): string =>
  * being undone). A task the Undo deletes (taking back its creation), or a
  * session it removes, takes all it holds with it: any of it changed since
  * counts (except, for a linked task, a due date its source keeps in step).
+ * A task's subtasks count one at a time (`subtasksChanged`).
  */
 export const changedSince = (after: PlannerState, now: PlannerState, undone: PlannerState): string[] => {
   const changed: string[] = [];
@@ -164,6 +212,10 @@ export const changedSince = (after: PlannerState, now: PlannerState, undone: Pla
       const linked = collection === 'tasks' && Boolean(n?.source ?? a?.source);
       for (const field of new Set([...Object.keys(a ?? {}), ...Object.keys(n ?? {}), ...Object.keys(u ?? {})])) {
         if (ignored(collection, field)) continue;
+        if (collection === 'tasks' && field === 'subtasks') {
+          changed.push(...subtasksChanged(`tasks/${id}/subtasks`, a?.subtasks, n?.subtasks, u?.subtasks, removed));
+          continue;
+        }
         const since = comparable(collection, field, n?.[field]) !== comparable(collection, field, a?.[field]);
         if (removed) {
           if (since && !(linked && field === 'dueDate')) changed.push(`${collection}/${id}/${field}`);

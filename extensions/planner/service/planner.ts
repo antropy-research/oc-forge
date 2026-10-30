@@ -1,6 +1,6 @@
 // The service's planner core: validate commands, turn them into events, persist, fold.
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
-import { commandBody, validateCommand, type Command, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
+import { SUBTASK_CHANGED, commandBody, subtaskConflict, validateCommand, type Command, type EventBody, type PlannerEvent, type SubtaskConflict } from '../src/domain/events.ts';
 import { planRollover } from '../src/domain/rollover.ts';
 import { planInstances } from '../src/domain/recurrence.ts';
 import { touchesTask } from '../src/domain/activity.ts';
@@ -10,7 +10,8 @@ import { newId } from '../src/domain/ids.ts';
 import type { DateKey, PlannerState } from '../src/domain/types.ts';
 import type { EventStore } from './store.ts';
 
-export type ExecuteResult = { ok: true; applied: number } | { ok: false; error: string; index: number };
+/** `conflict`: a subtask the batch changes was changed elsewhere since (`subtaskConflict`); nothing of it was written. */
+export type ExecuteResult = { ok: true; applied: number } | { ok: false; error: string; index: number; conflict?: SubtaskConflict };
 
 /**
  * An Undo, as the service decides it: done (the commands it wrote, for the
@@ -38,6 +39,10 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
   switch (event.type) {
     case 'task.created': return `Add task: ${event.task.title}`;
     case 'task.updated': return `Edit task: ${titleOf(event.taskId)}`;
+    case 'subtask.added': return `Add subtask: ${event.subtask.title} (${titleOf(event.taskId)})`;
+    case 'subtask.updated': return `Edit subtask: ${titleOf(event.taskId)}`;
+    case 'subtask.deleted': return `Delete subtask: ${titleOf(event.taskId)}`;
+    case 'subtask.moved': return `Move subtask: ${titleOf(event.taskId)}`;
     case 'task.moved': return `Move task: ${titleOf(event.taskId)} → ${event.placement.kind === 'day' ? event.placement.date : event.placement.bucket}`;
     case 'task.completed': return `Complete task: ${titleOf(event.taskId)}`;
     case 'task.reopened': return `Reopen task: ${titleOf(event.taskId)}`;
@@ -160,6 +165,8 @@ export class Planner {
    * earlier ones produced, so one batch can create a task and then move it.
    * A command id seen before is skipped, which makes client retries safe.
    * With `undo`, what takes it back is kept, by its first command (`undo`).
+   * A subtask command meeting a change made elsewhere since refuses the
+   * batch with that conflict (`subtaskConflict`).
    */
   execute(commands: readonly unknown[], options: { undo?: boolean } = {}): ExecuteResult {
     const before = this.state;
@@ -170,6 +177,8 @@ export class Planner {
       if (command && typeof command === 'object' && typeof command.cmd === 'string' && this.applied.has(command.cmd)) continue;
       const error = validateCommand(command, working);
       if (error) return { ok: false, error, index };
+      const conflict = subtaskConflict(command, working);
+      if (conflict) return { ok: false, error: SUBTASK_CHANGED, index, conflict };
       const event = this.toEvent(commandBody(command), command.cmd);
       events.push(event);
       working = applyEvents(working, [event]);
@@ -184,8 +193,9 @@ export class Planner {
    * now, only if it changes nothing that was changed since the batch by
    * anyone else (`changedSince`): a field the batch set and someone has set
    * again since keeps their value, and nothing is written. A command of it
-   * that is no longer valid (a working session deleted since) is a change
-   * since too. Once: kept no longer, done or not.
+   * that is no longer valid (a working session deleted since), or that meets
+   * a subtask deleted since, is a change since too. Once: kept no longer,
+   * done or not.
    */
   undo(batch: string): UndoResult {
     const record = this.undos.get(batch);
@@ -197,6 +207,8 @@ export class Planner {
       const command = { ...body, cmd: newId() } as Command;
       const error = validateCommand(command, working);
       if (error) return { ok: false, reason: 'changed', changed: [error] };
+      const conflict = subtaskConflict(body, working);
+      if (conflict) return { ok: false, reason: 'changed', changed: [`tasks/${conflict.taskId}/subtasks/${conflict.subtaskId}`] };
       const event = this.toEvent(body, command.cmd);
       events.push(event);
       working = applyEvents(working, [event]);

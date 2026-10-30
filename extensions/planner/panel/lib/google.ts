@@ -43,7 +43,7 @@ import {
 } from '../../src/domain/gtaskKept.ts';
 import { SERIES_FIELDS, formChanges, formConflicts, formValuesOf, occurrenceNow, occurrenceOf, seriesShown, withOccurrence, type FormField, type FormValues } from '../../src/domain/gtaskForm.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
-import { mergedDone, mergedReopened } from '../../src/domain/merge.ts';
+import { mergedDone, mergedReopened, subtaskChange, subtasksChangedIn } from '../../src/domain/merge.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { addDays } from '../../src/domain/dates.ts';
 import { longDay } from '../../src/domain/gcalendar.ts';
@@ -764,10 +764,11 @@ export class GoogleStore {
 
   /**
    * Merged items changed in their tasks' subtasks as the plan has them now,
-   * read again first: the list is written whole, so a subtask another window
-   * ticked or added meanwhile stays. `change` gives a subtask its new self,
-   * or itself. Nothing is written when the plan can't be read (the next sync
-   * or write looks again), nor for a task none of whose subtasks changed.
+   * read again first, each by identity (`subtaskChange`): another window's
+   * change to another subtask stays, and one renamed by hand meanwhile keeps
+   * its name. `change` gives a subtask its new self, or itself. Nothing is
+   * written when the plan can't be read (the next sync or write looks
+   * again), nor for a subtask that did not change.
    */
   private async changeMerged(change: (task: Task, subtask: Subtask) => Subtask): Promise<void> {
     let state: PlannerState;
@@ -780,8 +781,11 @@ export class GoogleStore {
     const bodies: EventBody[] = [];
     for (const task of Object.values(state.tasks)) {
       if (task.deletedAt || !task.subtasks.some((subtask) => subtask.source?.kind === 'gtask')) continue;
-      const subtasks = task.subtasks.map((subtask) => change(task, subtask));
-      if (subtasks.some((subtask, index) => subtask !== task.subtasks[index])) bodies.push({ type: 'task.updated', taskId: task.id, patch: { subtasks } });
+      for (const subtask of task.subtasks) {
+        const next = change(task, subtask);
+        const body = next === subtask ? null : subtaskChange(task.id, subtask, next);
+        if (body) bodies.push(body);
+      }
     }
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
   }
@@ -1897,6 +1901,7 @@ export class GoogleStore {
     // Only the user's own changes reach Google, from the surface they were made in.
     if (origin !== 'user' || !this.accountsWith('tasks').length) return;
     const settings = after.settings;
+    const seen = new Set<string>();
     for (const command of commands) {
       if (command.type === 'task.completed' || command.type === 'task.reopened') {
         const task = after.tasks[command.taskId];
@@ -1915,13 +1920,16 @@ export class GoogleStore {
       }
       // A Google task merged into a task checked off, or opened again, on its own: completed or reopened in Google as
       // a linked one is (opened again only while its task is open: a completed task's merged items are done with it).
-      if (command.type === 'task.updated' && command.patch.subtasks) {
-        const task = after.tasks[command.taskId];
+      // (Once a task, for all of a batch's changes to its subtasks.)
+      const subtasksOf = subtasksChangedIn(command);
+      if (subtasksOf && !seen.has(subtasksOf)) {
+        seen.add(subtasksOf);
+        const task = after.tasks[subtasksOf];
         const google = (subtask: Subtask) => subtask.source?.kind === 'gtask' && subtask.source.status?.name !== GONE_STATUS.name;
         if (task && !task.deletedAt) {
-          const ticked = mergedDone(before.tasks[command.taskId], task).filter((subtask) => google(subtask) && !doneThere(subtask.source));
+          const ticked = mergedDone(before.tasks[subtasksOf], task).filter((subtask) => google(subtask) && !doneThere(subtask.source));
           if (ticked.length) this.completeInGoogle(settings, task, false, ticked, 'tick');
-          const opened = mergedReopened(before.tasks[command.taskId], task).filter((subtask) => google(subtask) && doneThere(subtask.source));
+          const opened = mergedReopened(before.tasks[subtasksOf], task).filter((subtask) => google(subtask) && doneThere(subtask.source));
           if (opened.length && !task.completedAt && settings.googleTasksOnComplete === 'complete') void this.writeMerged(task.id, opened.map((subtask) => subtask.id), false, 'tick');
         }
       }

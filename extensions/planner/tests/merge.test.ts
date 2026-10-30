@@ -9,7 +9,7 @@ import { followMergedGoogleTask, gtaskSource, type GoogleTaskItem } from '../src
 import { parseQuickAdd } from '../src/domain/quickAdd.ts';
 import { applyEvents } from '../src/domain/reducer.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
-import { emptyState, type PlannerState, type Task, type TaskSourceRef } from '../src/domain/types.ts';
+import { emptyState, type PlannerState, type Subtask, type Task, type TaskSourceRef } from '../src/domain/types.ts';
 import { addParsedTask, type AddSources } from '../panel/lib/addTask.ts';
 import { GitHubStore } from '../panel/lib/github.ts';
 import { GoogleStore } from '../panel/lib/google.ts';
@@ -30,13 +30,15 @@ const run = (state: PlannerState, bodies: readonly EventBody[]): PlannerState =>
   }
   return state;
 };
+/** Subtasks added to a task, one command each, as the Planner adds them. */
+const added = (taskId: string, ...subtasks: Subtask[]): EventBody[] => subtasks.map((subtask) => ({ type: 'subtask.added', taskId, subtask }));
 const linear = (id: string, key: string, title = key): TaskSourceRef => ({ kind: 'linear', id, key, url: `https://linear.app/acme/issue/${key}`, title, status: { name: 'Todo', type: 'unstarted', color: '#999' } });
 const day = (date = TODAY) => ({ kind: 'day' as const, date });
 const base = (): PlannerState =>
   run(emptyState(), [
     { type: 'task.created', task: { id: 'triage', title: 'Inbox triage', placement: day(), position: 1024 } },
     { type: 'task.created', task: { id: 'issue', title: 'NEX-1 Fix the crash', placement: day(), position: 2048, notes: 'Repro: open twice', plannedMinutes: 45, source: linear('L1', 'NEX-1', 'NEX-1 Fix the crash') } },
-    { type: 'task.updated', taskId: 'issue', patch: { subtasks: [{ id: 's1', title: 'Write a test', done: true }] } },
+    ...added('issue', { id: 's1', title: 'Write a test', done: true }),
     {
       type: 'task.created',
       task: { id: 'meeting', title: 'Standup', placement: day(), position: 512, plannedMinutes: 15, source: { kind: 'event', id: 'me@x.com|primary|ev1', key: 'Google Calendar', url: 'https://www.google.com/calendar/event?eid=ev1', title: 'Standup', account: 'me@x.com', event: { calendarId: 'primary', start: '2026-10-29T16:00:00.000Z', end: '2026-10-29T16:15:00.000Z', allDay: false, invitees: true } } },
@@ -72,7 +74,7 @@ describe('merging tasks (Alt/Option + drop)', () => {
   });
 
   test("merged items stay synced: their item's state and title follow it, a subtask renamed by hand keeps its name, done once the item closes", () => {
-    let state = run(base(), [{ type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 'a', title: 'NEX-2', done: false, source: linear('L2', 'NEX-2') }, { id: 'b', title: 'My own name', done: false, source: linear('L3', 'NEX-3') }] } }]);
+    let state = run(base(), added('triage', { id: 'a', title: 'NEX-2', done: false, source: linear('L2', 'NEX-2') }, { id: 'b', title: 'My own name', done: false, source: linear('L3', 'NEX-3') }));
     expect(subtaskSourceIds(state, 'linear')).toEqual(['L2', 'L3']);
     expect(subtaskSources(state, 'linear').map((source) => source.key)).toEqual(['NEX-2', 'NEX-3']);
     const items = new Map([
@@ -87,8 +89,8 @@ describe('merging tasks (Alt/Option + drop)', () => {
   });
 
   test('a merged item checked off runs its completion automations; one merged straight in runs the import ones, a task merged in does not', () => {
-    const state = run(base(), [{ type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 'a', title: 'NEX-2', done: false, source: linear('L2', 'NEX-2') }, { id: 'p', title: 'Plain', done: false }] } }]);
-    const checked = run(state, [{ type: 'task.updated', taskId: 'triage', patch: { subtasks: state.tasks.triage!.subtasks.map((subtask) => ({ ...subtask, done: true })) } }]);
+    const state = run(base(), added('triage', { id: 'a', title: 'NEX-2', done: false, source: linear('L2', 'NEX-2') }, { id: 'p', title: 'Plain', done: false }));
+    const checked = run(state, state.tasks.triage!.subtasks.map((subtask): EventBody => ({ type: 'subtask.updated', taskId: 'triage', subtaskId: subtask.id, patch: { done: true }, seen: { done: false } })));
     expect(mergedDone(state.tasks.triage, checked.tasks.triage).map((subtask) => subtask.id)).toEqual(['a']);
     // Straight from the panel: an import (L2 is merged already, so not again).
     expect(mergedImports(base(), state, 'triage').map((subtask) => subtask.id)).toEqual(['a']);

@@ -635,7 +635,10 @@ const server = http.createServer(async (req, res) => {
       // `undo`: the window offers Undo for this batch, so what takes it back is kept here (`/undo`).
       const result = planner.execute(body.commands, { undo: body.undo === true });
       if (!result.ok) {
-        json(res, 400, { error: result.error, index: result.index });
+        // A subtask changed elsewhere since: 409 with what it is now and the plan as it is (theirs included), as a
+        // refused Undo answers.
+        if (result.conflict) json(res, 409, { error: result.error, index: result.index, conflict: result.conflict, ...snapshot() });
+        else json(res, 400, { error: result.error, index: result.index });
         return;
       }
       json(res, 200, { applied: result.applied, ...snapshot() });

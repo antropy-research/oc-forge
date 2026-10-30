@@ -267,24 +267,72 @@ describe("the Planner's own Undo goes ahead only while nothing it would put back
     expect(result.said).toBe(CHANGED);
   });
 
-  test('Subtask became a task, then another subtask ticked in another window: not undone (the subtask list would go back)', async () => {
-    const subtasks = [{ id: next('s'), title: 'Harness sub one', done: false }, { id: next('s'), title: 'Harness sub two', done: false }];
+  test('Subtask became a task, then another subtask ticked in another window: undone, back in its place, their tick kept; the task it became renamed there: not undone', async () => {
+    const subtasks = [{ id: next('s'), title: 'Harness sub one', done: false }, { id: next('s'), title: 'Harness sub two', done: false }, { id: next('s'), title: 'Harness sub three', done: false }];
     const t = await task('Harness parent', { subtasks });
     let made = '';
-    const result = await undoAfter(
-      () => {
-        made = next('t');
+    const convert = (): EventBody[] => {
+      made = next('t');
+      return [
+        { type: 'task.created', task: { id: made, title: 'Harness sub two', placement: day(today), position: 5000 } },
+        { type: 'subtask.deleted', taskId: t, subtaskId: subtasks[1]!.id, seen: { title: 'Harness sub two' } },
+      ];
+    };
+    // Subtasks count one at a time: another one ticked since is not something the Undo puts back.
+    const ticked = await undoAfter(convert, 'Subtask became a task', () => [{ type: 'subtask.updated', taskId: t, subtaskId: subtasks[2]!.id, patch: { done: true }, seen: { done: false } }]);
+    expect(ticked.said).toBeNull();
+    expect(ticked.state.tasks[t]!.subtasks).toEqual([subtasks[0]!, subtasks[1]!, { ...subtasks[2]!, done: true }]);
+    expect(ticked.state.tasks[made]!.deletedAt).toBeTruthy();
+    const renamed = await undoAfter(convert, 'Subtask became a task', () => [{ type: 'task.updated', taskId: made, patch: { title: 'Harness sub two, renamed in B' } }]);
+    expect(renamed.said).toBe(CHANGED);
+    expect(renamed.written).toBe(0);
+    expect(renamed.state.tasks[t]!.subtasks.map((subtask) => subtask.id)).toEqual([subtasks[0]!.id, subtasks[2]!.id]);
+    expect(renamed.state.tasks[made]).toMatchObject({ title: 'Harness sub two, renamed in B', deletedAt: null });
+  });
+
+  test('Merged into a task, then a subtask added to it in another window: undone, theirs stays; the merged one ticked there: not undone, their tick stays', async () => {
+    const target = await task('Harness merge target', { subtasks: [{ id: next('s'), title: 'Harness kept', done: false }] });
+    let dragged = '';
+    let merged = '';
+    const merge = async (): Promise<(a: PlannerClient) => EventBody[]> => {
+      dragged = await task('Harness merged in');
+      return () => {
+        merged = next('s');
         return [
-          { type: 'task.created', task: { id: made, title: 'Harness sub one', placement: day(today), position: 5000 } },
-          { type: 'task.updated', taskId: t, patch: { subtasks: [subtasks[1]!] } },
+          { type: 'subtask.added', taskId: target, subtask: { id: merged, title: 'Harness merged in', done: false } },
+          { type: 'task.deleted', taskId: dragged },
         ];
-      },
-      'Subtask became a task',
-      () => [{ type: 'task.updated', taskId: t, patch: { subtasks: [{ ...subtasks[1]!, done: true }] } }],
-    );
-    expect(result.state.tasks[t]!.subtasks).toEqual([{ ...subtasks[1]!, done: true }]);
-    expect(result.state.tasks[made]!.deletedAt).toBeNull();
-    expect(result.said).toBe(CHANGED);
+      };
+    };
+    let theirs = '';
+    const added = await undoAfter(await merge(), 'Merged into "Harness merge target"', () => {
+      theirs = next('s');
+      return [{ type: 'subtask.added', taskId: target, subtask: { id: theirs, title: 'Harness added in B', done: false } }];
+    });
+    expect(added.said).toBeNull();
+    expect(added.state.tasks[target]!.subtasks.map((subtask) => subtask.title)).toEqual(['Harness kept', 'Harness added in B']);
+    expect(added.state.tasks[dragged]!.deletedAt).toBeNull();
+    const ticked = await undoAfter(await merge(), 'Merged into "Harness merge target"', () => [{ type: 'subtask.updated', taskId: target, subtaskId: merged, patch: { done: true }, seen: { done: false } }]);
+    expect(ticked.said).toBe(CHANGED);
+    expect(ticked.written).toBe(0);
+    expect(ticked.state.tasks[target]!.subtasks.find((subtask) => subtask.id === merged)?.done).toBe(true);
+    expect(ticked.state.tasks[dragged]!.deletedAt).toBeTruthy();
+  });
+
+  test('an Undo that would change a subtask deleted in another window since is not done; one taking back a delete puts it back where it was', async () => {
+    const subtasks = [{ id: next('s'), title: 'Harness first', done: false }, { id: next('s'), title: 'Harness middle', done: false }, { id: next('s'), title: 'Harness last', done: false }];
+    const t = await task('Harness undo subtasks', { subtasks });
+    const tick: EventBody = { type: 'subtask.updated', taskId: t, subtaskId: subtasks[1]!.id, patch: { done: true }, seen: { done: false } };
+    const gone = await undoAfter(() => [tick], 'Subtask checked off', () => [{ type: 'subtask.deleted', taskId: t, subtaskId: subtasks[1]!.id, seen: { title: 'Harness middle' } }]);
+    expect(gone.said).toBe(CHANGED);
+    expect(gone.written).toBe(0);
+    expect(gone.state.tasks[t]!.subtasks.map((subtask) => subtask.title)).toEqual(['Harness first', 'Harness last']);
+    const back = await undoAfter(() => [{ type: 'subtask.deleted', taskId: t, subtaskId: subtasks[2]!.id, seen: { title: 'Harness last' } }], 'Subtask deleted', () => []);
+    expect(back.said).toBeNull();
+    expect(back.state.tasks[t]!.subtasks.map((subtask) => subtask.title)).toEqual(['Harness first', 'Harness last']);
+    const first = await undoAfter(() => [{ type: 'subtask.deleted', taskId: t, subtaskId: subtasks[0]!.id, seen: { title: 'Harness first' } }], 'Subtask deleted', () => []);
+    expect(first.said).toBeNull();
+    expect(first.state.tasks[t]!.subtasks.map((subtask) => subtask.title)).toEqual(['Harness first', 'Harness last']);
   });
 
   test('Objective deleted (now undoable: back with its tasks aligned), then one of them aligned elsewhere in another window: not undone', async () => {

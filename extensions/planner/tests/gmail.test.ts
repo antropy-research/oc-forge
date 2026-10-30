@@ -122,25 +122,28 @@ describe('the import and completion automations', () => {
   test('an email merged straight into a task is imported; checked off there, it is completed (Sunsama keeps merged items integrated)', async () => {
     const fake = setup({ gmailOnImport: [{ kind: 'markRead' }], gmailOnComplete: [{ kind: 'archive' }] });
     fake.commit([{ type: 'task.created', task: { id: 'triage', title: 'Inbox triage', placement: { kind: 'day', date: '2026-10-29' }, position: 1024 } }]);
-    fake.commit([{ type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 's1', title: 'Budget', done: false, source: email('th9', 'Budget') }] } }]);
-    fake.commit([{ type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 's1', title: 'Budget', done: true, source: email('th9', 'Budget') }] } }]);
+    fake.commit([{ type: 'subtask.added', taskId: 'triage', subtask: { id: 's1', title: 'Budget', done: false, source: email('th9', 'Budget') } }]);
+    fake.commit([{ type: 'subtask.updated', taskId: 'triage', subtaskId: 's1', patch: { done: true }, seen: { done: false } }]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => [call.body.thread, call.body.actions])).toEqual([['th9', [{ kind: 'markRead' }]], ['th9', [{ kind: 'archive' }]]]);
   });
 
   test("completing a task completes its email and the emails merged into it, as checking each off would (not one checked off on its own: that ran then); asked, once for all; reopening does nothing in Gmail", async () => {
-    const merged = (lunchDone: boolean) => [{ id: 's1', title: 'Budget', done: false, source: email('th1', 'Budget') }, { id: 's2', title: 'Lunch', done: lunchDone, source: email('th2', 'Lunch') }];
+    const merged: EventBody[] = [
+      { type: 'subtask.added', taskId: 'triage', subtask: { id: 's1', title: 'Budget', done: false, source: email('th1', 'Budget') } },
+      { type: 'subtask.added', taskId: 'triage', subtask: { id: 's2', title: 'Lunch', done: false, source: email('th2', 'Lunch') } },
+    ];
     const acts = (calls: { path: string; body: any }[]) => calls.filter((call) => call.path === '/google/mail/act').map((call) => [call.body.thread, call.body.actions]);
     const doing = setup({ gmailOnComplete: [{ kind: 'archive' }] });
-    doing.commit([created('triage', email('th0', 'Inbox triage')), { type: 'task.updated', taskId: 'triage', patch: { subtasks: merged(false) } }]);
-    doing.commit([{ type: 'task.updated', taskId: 'triage', patch: { subtasks: merged(true) } }]);
+    doing.commit([created('triage', email('th0', 'Inbox triage')), ...merged]);
+    doing.commit([{ type: 'subtask.updated', taskId: 'triage', subtaskId: 's2', patch: { done: true }, seen: { done: false } }]);
     doing.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-29' }]);
     doing.commit([{ type: 'task.reopened', taskId: 'triage' }]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(acts(doing.calls)).toEqual([['th2', [{ kind: 'archive' }]], ['th0', [{ kind: 'archive' }]], ['th1', [{ kind: 'archive' }]]]);
 
     const asking = setup({ gmailOnComplete: [{ kind: 'archive' }], gmailCompletePrompt: true });
-    asking.commit([created('triage', email('th0', 'Inbox triage')), { type: 'task.updated', taskId: 'triage', patch: { subtasks: merged(false) } }]);
+    asking.commit([created('triage', email('th0', 'Inbox triage')), ...merged]);
     asking.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-29' }]);
     expect(asking.gmail.getView().prompt).toEqual({
       when: 'complete',
@@ -158,8 +161,8 @@ describe('the import and completion automations', () => {
 
   test('Convert to task gives back a merged email as a task: not an import, nothing done in Gmail again', async () => {
     const fake = setup({ gmailOnImport: [{ kind: 'markRead' }] });
-    fake.commit([{ type: 'task.created', task: { id: 'triage', title: 'Inbox triage', placement: { kind: 'day', date: '2026-10-29' }, position: 1024 } }, { type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 's1', title: 'Budget', done: false, source: email('th9', 'Budget') }] } }]);
-    fake.commit([{ type: 'task.updated', taskId: 'triage', patch: { subtasks: [] } }, created('back', email('th9', 'Budget'))]);
+    fake.commit([{ type: 'task.created', task: { id: 'triage', title: 'Inbox triage', placement: { kind: 'day', date: '2026-10-29' }, position: 1024 } }, { type: 'subtask.added', taskId: 'triage', subtask: { id: 's1', title: 'Budget', done: false, source: email('th9', 'Budget') } }]);
+    fake.commit([{ type: 'subtask.deleted', taskId: 'triage', subtaskId: 's1', seen: { title: 'Budget' } }, created('back', email('th9', 'Budget'))]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => call.body.actions)).toEqual([[{ kind: 'markRead' }]]);
   });
