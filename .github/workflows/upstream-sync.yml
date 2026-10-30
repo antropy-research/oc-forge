@@ -7,7 +7,10 @@ on:
     - cron: "17 * * * *"
   # By hand, the same sync for a working branch: its pin commit goes to an
   # `upstream-sync…` branch for that branch to merge, so vendor pins only ever
-  # change in a commit CI made. Only a sync of main is released.
+  # change in a commit CI made. Only a sync of main is released. The repository
+  # keeps only dev, main and planner: the release deletes `upstream-sync` once
+  # main has its commit, and an `upstream-sync-<name>` branch is deleted once its
+  # branch has merged it.
   workflow_dispatch:
     inputs:
       base:
