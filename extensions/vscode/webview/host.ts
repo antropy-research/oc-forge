@@ -194,7 +194,10 @@ on('message', (data) => {
   if (pending || !active) queued.push(data);
   else toContent('message', data, data.transfer ?? []);
 });
+// VS Code's own, sent after it focused this frame: passed on only while this frame has the focus, as when content
+// loads (above). One that comes late (this page still loading) doesn't take the focus back from where the user went.
 on('focus', () => {
+  if (!document.hasFocus()) return;
   if (active?.frame.contentWindow) active.frame.contentWindow.focus();
   else window.focus();
 });

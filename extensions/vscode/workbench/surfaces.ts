@@ -8,7 +8,7 @@
 // view or the terminal becomes a header tab, which shows the page, which opens
 // the editor; what to open waits in the extension's service.
 import type { OcForgeClient, OcForgeLimits, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
-import type { FocusGuard } from '../src/focus.ts';
+import { guardWebviews, type FocusGuard, type WebviewMaker } from '../src/focus.ts';
 import { followView, type RailEntry } from '../src/rail.ts';
 import {
   bounded,
@@ -1042,12 +1042,17 @@ class EditorArea {
 
 // ── Start ───────────────────────────────────────────────────────────────
 
-/** Called with the workbench's services as it starts, before it restores its parts. */
-export const prepareSurface = (role: SurfaceRole, services: VscodeServices): void => {
+/** Called with the workbench's services as it starts, before it restores its parts (a webview restored among them). */
+export const prepareSurface = (role: SurfaceRole, services: VscodeServices, focus: FocusGuard): void => {
   try {
     applyRoleLayout(role, services);
   } catch (error) {
     log('could not lay the workbench out', error);
+  }
+  try {
+    guardWebviews(services.get<WebviewMaker>('webviewService'), focus);
+  } catch (error) {
+    log("could not keep the webviews' focus for the user", error);
   }
 };
 

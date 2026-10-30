@@ -157,6 +157,21 @@ OpenChamber's own terminal does, but not when it reloads to follow the folder (t
 reload) takes the focus only on a click. The "OpenChamber is now in …" notification shows at the bottom of the rail
 view and takes no focus.
 
+A webview (Markdown's preview, an extension's page or view) goes by the same rule. VS Code focuses one through its
+frame's window: `WebviewElement._doFocus` calls `iframe.contentWindow.focus()`, a cross-origin call no `element.focus()`
+guard sees, then posts the webview `focus` for its content. A preview restored as the page's active editor took the
+focus that way each time the page started again behind a chat (the way back from "Open in VS Code", a reload). Now:
+- every webview the webview service makes (`IWebviewService.createWebviewElement`, the same in 1.140 to 1.144) has its
+  `focus()` guarded. The service is a delayed one, a proxy that keeps the first function read through it, so the
+  guard takes the original from the class and puts its own in before anything reads it (`guardWebviews`);
+- the `focus()` VS Code gives the webview's iframe goes through the guard too;
+- the host page (`webview/host.ts`) passes VS Code's `focus` on to the content only while its own frame has the
+  focus, as it already did when content loads, so a late one (the content still loading) doesn't take the focus back
+  from where the user went. This page serves the stock panel's webviews too; nothing the user does there changes.
+
+A click into a webview, choosing its header tab, Find (Ctrl+F, Enter, and Escape back into it) and Ctrl+C work as
+before.
+
 **Tunnels.** Each workbench holds 2 of the service's tunnels (its management connection and its extension host's).
 A browser window runs up to 3 workbenches, so 6, and 12 for the 45 s a reloaded frame's old tunnels linger; past
 `MAX_TUNNELS` the least recently polled one is closed, which ends a live workbench. The limit is 128 (was 32): room

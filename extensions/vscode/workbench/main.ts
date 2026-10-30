@@ -249,7 +249,7 @@ const boot = async (): Promise<void> => {
       const ids = hooks.serviceIds;
       if (!(ids instanceof Map)) return;
       const services = new VscodeServices(instantiation, ids);
-      if (surfaceRole) prepareSurface(surfaceRole, services);
+      if (surfaceRole && focus) prepareSurface(surfaceRole, services, focus);
       try {
         saveBeforeReload = saveThroughService(services.get<StorageService>('storageService'), storage.flush);
       } catch (error) {
