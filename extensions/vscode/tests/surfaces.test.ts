@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EditorRequests, readPart, readTabs, SavedTabs } from '../service/editors.ts';
@@ -318,5 +318,51 @@ describe('the service hands editors from frame to frame', () => {
     expect(SavedTabs.keyOf('srv', '/p/a')).toBe(SavedTabs.keyOf('srv', '/p/a'));
     expect(SavedTabs.keyOf('srv', 'relative')).toBe(SavedTabs.keyOf('srv', null));
     expect(SavedTabs.keyOf('srv', '/p/a')).toMatch(/^srv\.[0-9a-f]{16}$/);
+  });
+
+  test('requests for tabs opened unselected are found in one ask, for a minute', () => {
+    let now = 0;
+    const requests = new EditorRequests(() => now);
+    requests.put('a', { kind: 'command' });
+    requests.put('b', { kind: 'editor' });
+    expect(requests.keys()).toEqual(['a', 'b']);
+    requests.take('a');
+    expect(requests.keys()).toEqual(['b']);
+    now += 61_000;
+    expect(requests.keys()).toEqual([]);
+  });
+
+  test("each browser tab keeps its own list beside the folder's latest; a tab that kept none has no list of its own", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vscode-tabs-windows-'));
+    const tabs = new SavedTabs(dir, () => {});
+    const windowA = 'a'.repeat(32);
+    const windowB = 'b'.repeat(32);
+    const folderKey = SavedTabs.keyOf('srv', '/p/a');
+    expect(SavedTabs.keyOf('srv', '/p/a', windowA)).toBe(`${folderKey}.w-${windowA}`);
+    // A window id that isn't one is the folder's list.
+    expect(SavedTabs.keyOf('srv', '/p/a', 'not-an-id')).toBe(folderKey);
+    expect(SavedTabs.isWindow(windowA)).toBe(true);
+    expect(SavedTabs.isWindow('A'.repeat(32))).toBe(false);
+    await tabs.save(SavedTabs.keyOf('srv', '/p/a', windowA), [{ id: 'a.ts', title: 'a.ts' }]);
+    expect(await tabs.loadIfKept(SavedTabs.keyOf('srv', '/p/a', windowA))).toEqual([{ id: 'a.ts', title: 'a.ts' }]);
+    expect(await new SavedTabs(dir, () => {}).loadIfKept(SavedTabs.keyOf('srv', '/p/a', windowB))).toBeNull();
+    // An empty list is a list kept: the window closed its last tab.
+    await tabs.save(SavedTabs.keyOf('srv', '/p/a', windowB), []);
+    expect(await new SavedTabs(dir, () => {}).loadIfKept(SavedTabs.keyOf('srv', '/p/a', windowB))).toEqual([]);
+  });
+
+  test("past a folder's 64 newest browser tabs' lists, the oldest go; the folder's own list stays", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vscode-tabs-prune-'));
+    const tabs = new SavedTabs(dir, () => {});
+    await tabs.save(SavedTabs.keyOf('srv', '/p/a'), [{ id: 'latest', title: 'latest' }]);
+    for (let index = 0; index < 66; index++) {
+      await tabs.save(SavedTabs.keyOf('srv', '/p/a', index.toString(16).padStart(32, '0')), [{ id: `w${index}`, title: `w${index}` }]);
+      // Distinct modification times, oldest first.
+      await new Promise((done) => setTimeout(done, 2));
+    }
+    const kept = readdirSync(dir).filter((name) => name.includes('.w-'));
+    expect(kept).toHaveLength(64);
+    expect(kept.some((name) => name.includes(`.w-${'0'.repeat(32)}`))).toBe(false);
+    expect(await new SavedTabs(dir, () => {}).load(SavedTabs.keyOf('srv', '/p/a'))).toEqual([{ id: 'latest', title: 'latest' }]);
   });
 });

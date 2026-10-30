@@ -452,7 +452,7 @@ var transform = (path, body, codicon, missing = []) => {
 
 // service/editors.ts
 import { createHash as createHash2 } from "node:crypto";
-import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir2, readdir as readdir2, readFile as readFile2, rename as rename2, rm as rm2, stat as stat2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join2 } from "node:path";
 
 // ../../adapters/openchamber/host/protocol.ts
@@ -479,6 +479,8 @@ var TABS_MAX = OC_FORGE_LIMITS.tabs;
 var TITLE_MAX = OC_FORGE_LIMITS.title;
 var REVISIONS_MAX = 4;
 var PARTS_MAX = 256;
+var WINDOW_MARK = ".w-";
+var WINDOWS_MAX = 64;
 
 class EditorRequests {
   now;
@@ -546,20 +548,44 @@ class SavedTabs {
     this.dir = dir;
     this.log = log;
   }
-  static keyOf(serverKey, folder) {
+  static keyOf(serverKey, folder, window) {
     const name = typeof folder === "string" && folder.startsWith("/") ? folder : "";
-    return `${serverKey}.${createHash2("sha256").update(name).digest("hex").slice(0, 16)}`;
+    const key = `${serverKey}.${createHash2("sha256").update(name).digest("hex").slice(0, 16)}`;
+    return SavedTabs.isWindow(window) ? `${key}${WINDOW_MARK}${window}` : key;
+  }
+  static isWindow(window) {
+    return typeof window === "string" && /^[0-9a-f]{32}$/.test(window);
   }
   file(key) {
     return join2(this.dir, `${key}.tabs.json`);
   }
   async load(key) {
+    return await this.loadIfKept(key) ?? [];
+  }
+  async loadIfKept(key) {
     const cached = this.tabs.get(key);
     if (cached)
       return cached;
-    const tabs = await readFile2(this.file(key), "utf8").then((text) => readTabs(JSON.parse(text)), () => []);
-    this.tabs.set(key, tabs);
+    const tabs = await readFile2(this.file(key), "utf8").then((text) => readTabs(JSON.parse(text)), () => null);
+    if (tabs)
+      this.tabs.set(key, tabs);
     return tabs;
+  }
+  async prune(key) {
+    const at = key.indexOf(WINDOW_MARK);
+    if (at === -1)
+      return;
+    const prefix = `${key.slice(0, at)}${WINDOW_MARK}`;
+    const names = (await readdir2(this.dir).catch(() => [])).filter((name) => name.startsWith(prefix) && name.endsWith(".tabs.json"));
+    if (names.length <= WINDOWS_MAX)
+      return;
+    const dated = await Promise.all(names.map(async (name) => ({ name, at: (await stat2(join2(this.dir, name)).catch(() => null))?.mtimeMs ?? 0 })));
+    for (const { name } of dated.sort((a, b) => b.at - a.at).slice(WINDOWS_MAX)) {
+      this.tabs.delete(name.slice(0, -".tabs.json".length));
+      await rm2(join2(this.dir, name), { force: true }).catch(() => {
+        return;
+      });
+    }
   }
   async savePart(key, part, tabs) {
     const revisions = this.incoming.get(key) ?? new Map;
@@ -594,6 +620,7 @@ class SavedTabs {
       const tmp = `${this.file(key)}.tmp-${process.pid}`;
       await writeFile2(tmp, JSON.stringify(tabs), { mode: 384 });
       await rename2(tmp, this.file(key));
+      await this.prune(key);
     } catch (error) {
       this.log(`could not keep the page's tabs: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -990,7 +1017,7 @@ class VscodeServer {
 
 // service/state.ts
 import { createHash as createHash3 } from "node:crypto";
-import { mkdir as mkdir4, readFile as readFile4, rename as rename4, stat as stat2, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdir as mkdir4, readFile as readFile4, rename as rename4, stat as stat3, writeFile as writeFile4 } from "node:fs/promises";
 import { join as join3 } from "node:path";
 var LOAD_MAX = 7000000;
 var NAME = /^[\w.:@ -]{1,200}$/;
@@ -1115,7 +1142,7 @@ class WorkbenchState {
       await this.apply(key, shared);
   }
   async exists(key) {
-    return stat2(this.file(key)).then(() => true, () => false);
+    return stat3(this.file(key)).then(() => true, () => false);
   }
   file(key) {
     return join3(this.dir, `${key}.json`);
@@ -1537,20 +1564,25 @@ var routes = {
   "/editors/pending": async () => ({ keys: editorRequests.keys() }),
   "/tabs/save": async (body) => {
     const server = serverOf(body);
-    const key = SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder);
+    const serverKey = WorkbenchState.keyOf(server.url, null);
+    const keys = [SavedTabs.keyOf(serverKey, body.folder), ...SavedTabs.isWindow(body.window) ? [SavedTabs.keyOf(serverKey, body.folder, body.window)] : []];
     if (body.part === undefined) {
-      await savedTabs.save(key, readTabs(body.tabs));
+      for (const key of keys)
+        await savedTabs.save(key, readTabs(body.tabs));
       return { ok: true };
     }
     const part = readPart(body.part);
     if (!part)
       throw new ServerError("part is { revision, index, count }", 400);
-    await savedTabs.savePart(key, part, readTabs(body.tabs));
+    for (const key of keys)
+      await savedTabs.savePart(key, part, readTabs(body.tabs));
     return { ok: true };
   },
   "/tabs/load": async (body) => {
     const server = serverOf(body);
-    return { tabs: await savedTabs.load(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder)) };
+    const serverKey = WorkbenchState.keyOf(server.url, null);
+    const own = SavedTabs.isWindow(body.window) ? await savedTabs.loadIfKept(SavedTabs.keyOf(serverKey, body.folder, body.window)) : null;
+    return { tabs: own ?? await savedTabs.load(SavedTabs.keyOf(serverKey, body.folder)) };
   },
   "/assets/prepare": async (body) => {
     const server = serverOf(body);

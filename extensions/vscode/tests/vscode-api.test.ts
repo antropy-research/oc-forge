@@ -39,6 +39,9 @@ const REVIEWED: Record<string, Reviewed> = {
   // IQuickPickItem extends it.
   QuickPickItem: { name: 'IQuickItem', file: 'platform/quickinput/common/quickInput.ts' },
   QuickInputService: { name: 'IQuickInputService', file: 'platform/quickinput/common/quickInput.ts' },
+  Badge: { name: 'IBadge', file: 'workbench/services/activity/common/activity.ts' },
+  Activity: { name: 'IActivity', file: 'workbench/services/activity/common/activity.ts' },
+  ActivityService: { name: 'IActivityService', file: 'workbench/services/activity/common/activity.ts' },
   NotificationService: { name: 'INotificationService', file: 'platform/notification/common/notification.ts' },
   ConfigurationValue: { name: 'IConfigurationValue', file: 'platform/configuration/common/configuration.ts' },
   ConfigurationChangeEvent: { name: 'IConfigurationChangeEvent', file: 'platform/configuration/common/configuration.ts' },

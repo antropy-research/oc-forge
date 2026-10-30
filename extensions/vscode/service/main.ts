@@ -109,23 +109,27 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
   },
   // The tabs whose editors wait: a frame opened them without selecting them, and the page selects each once it is open.
   '/editors/pending': async () => ({ keys: editorRequests.keys() }),
-  // The page's header tabs for a folder, so a frame can bring them back after OpenChamber reloads. More than one
-  // request takes come in parts (`part`: the list's revision, this part's index, how many).
+  // The page's header tabs for a folder, so a frame can bring them back after OpenChamber reloads: the browser tab's
+  // own (`window`), and the folder's latest, which a new browser tab starts from. More than one request takes come in
+  // parts (`part`: the list's revision, this part's index, how many).
   '/tabs/save': async (body) => {
     const server = serverOf(body);
-    const key = SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder);
+    const serverKey = WorkbenchState.keyOf(server.url, null);
+    const keys = [SavedTabs.keyOf(serverKey, body.folder), ...(SavedTabs.isWindow(body.window) ? [SavedTabs.keyOf(serverKey, body.folder, body.window)] : [])];
     if (body.part === undefined) {
-      await savedTabs.save(key, readTabs(body.tabs));
+      for (const key of keys) await savedTabs.save(key, readTabs(body.tabs));
       return { ok: true };
     }
     const part = readPart(body.part);
     if (!part) throw new ServerError('part is { revision, index, count }', 400);
-    await savedTabs.savePart(key, part, readTabs(body.tabs));
+    for (const key of keys) await savedTabs.savePart(key, part, readTabs(body.tabs));
     return { ok: true };
   },
   '/tabs/load': async (body) => {
     const server = serverOf(body);
-    return { tabs: await savedTabs.load(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder)) };
+    const serverKey = WorkbenchState.keyOf(server.url, null);
+    const own = SavedTabs.isWindow(body.window) ? await savedTabs.loadIfKept(SavedTabs.keyOf(serverKey, body.folder, body.window)) : null;
+    return { tabs: own ?? await savedTabs.load(SavedTabs.keyOf(serverKey, body.folder)) };
   },
   // Start (or follow) preparing the compiled workbench of the server's commit.
   '/assets/prepare': async (body) => {

@@ -29,6 +29,9 @@ export const roleOf = (hello: HostHello | null, surfaces: boolean): Role => {
   return hello.rail.entry ? 'view' : 'classic';
 };
 
+/** Below this page width (CSS pixels) the page shows no minimap (`workbench/minimap.ts`). */
+export const MINIMAP_MIN_WIDTH = 600;
+
 /**
  * Settings that make a workbench its part. They are its defaults from the
  * start, and they are set again in memory once it runs (VS Code's MEMORY

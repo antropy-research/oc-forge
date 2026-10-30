@@ -6,7 +6,7 @@
 // are kept too, so a frame can bring them back after OpenChamber reloads,
 // before the page has started again.
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { OC_FORGE_LIMITS } from '../../../adapters/openchamber/host/protocol.ts';
 
@@ -18,6 +18,10 @@ const TITLE_MAX = OC_FORGE_LIMITS.title;
 /** Revisions of one list being sent in parts at once (two browser windows on a folder): the older ones go. */
 const REVISIONS_MAX = 4;
 const PARTS_MAX = 256;
+/** A browser tab's own list sits beside its folder's: `<folder's key>.w-<window id>`. */
+const WINDOW_MARK = '.w-';
+/** Browser tabs' lists kept per folder, the newest. */
+const WINDOWS_MAX = 64;
 
 export class EditorRequests {
   private readonly pending = new Map<string, { open: unknown; at: number }>();
@@ -88,10 +92,18 @@ export class SavedTabs {
 
   constructor(private readonly dir: string, private readonly log: (message: string) => void) {}
 
-  /** One list per server and folder: a folder's editors are its own. */
-  static keyOf(serverKey: string, folder: unknown): string {
+  /**
+   * One list per server and folder, a folder's editors being its own: the latest any browser tab kept. With `window`
+   * (a browser tab's id, kept across its reloads), that tab's own list, which its reload brings back.
+   */
+  static keyOf(serverKey: string, folder: unknown, window?: unknown): string {
     const name = typeof folder === 'string' && folder.startsWith('/') ? folder : '';
-    return `${serverKey}.${createHash('sha256').update(name).digest('hex').slice(0, 16)}`;
+    const key = `${serverKey}.${createHash('sha256').update(name).digest('hex').slice(0, 16)}`;
+    return SavedTabs.isWindow(window) ? `${key}${WINDOW_MARK}${window}` : key;
+  }
+
+  static isWindow(window: unknown): window is string {
+    return typeof window === 'string' && /^[0-9a-f]{32}$/.test(window);
   }
 
   private file(key: string): string {
@@ -99,11 +111,30 @@ export class SavedTabs {
   }
 
   async load(key: string): Promise<SavedTab[]> {
+    return (await this.loadIfKept(key)) ?? [];
+  }
+
+  /** The list kept under this key, or null when none was (a window that never kept one). */
+  async loadIfKept(key: string): Promise<SavedTab[] | null> {
     const cached = this.tabs.get(key);
     if (cached) return cached;
-    const tabs = await readFile(this.file(key), 'utf8').then((text) => readTabs(JSON.parse(text)), () => []);
-    this.tabs.set(key, tabs);
+    const tabs = await readFile(this.file(key), 'utf8').then((text) => readTabs(JSON.parse(text)), () => null);
+    if (tabs) this.tabs.set(key, tabs);
     return tabs;
+  }
+
+  /** Windows' lists past the newest WINDOWS_MAX of a folder go (browser tabs closed long ago). */
+  private async prune(key: string): Promise<void> {
+    const at = key.indexOf(WINDOW_MARK);
+    if (at === -1) return;
+    const prefix = `${key.slice(0, at)}${WINDOW_MARK}`;
+    const names = (await readdir(this.dir).catch(() => [] as string[])).filter((name) => name.startsWith(prefix) && name.endsWith('.tabs.json'));
+    if (names.length <= WINDOWS_MAX) return;
+    const dated = await Promise.all(names.map(async (name) => ({ name, at: (await stat(join(this.dir, name)).catch(() => null))?.mtimeMs ?? 0 })));
+    for (const { name } of dated.sort((a, b) => b.at - a.at).slice(WINDOWS_MAX)) {
+      this.tabs.delete(name.slice(0, -'.tabs.json'.length));
+      await rm(join(this.dir, name), { force: true }).catch(() => undefined);
+    }
   }
 
   /**
@@ -139,6 +170,7 @@ export class SavedTabs {
       const tmp = `${this.file(key)}.tmp-${process.pid}`;
       await writeFile(tmp, JSON.stringify(tabs), { mode: 0o600 });
       await rename(tmp, this.file(key));
+      await this.prune(key);
     } catch (error) {
       this.log(`could not keep the page's tabs: ${error instanceof Error ? error.message : String(error)}`);
     }

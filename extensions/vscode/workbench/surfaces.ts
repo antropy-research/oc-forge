@@ -9,8 +9,10 @@
 // the editor; what to open waits in the extension's service.
 import type { OcForgeClient, OcForgeLimits, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
 import { guardWebviews, type FocusGuard, type WebviewMaker } from '../src/focus.ts';
+import { feedRailBadges } from './badges.ts';
 import { commandHandoff, ELSEWHERE, showingCommands, WALKTHROUGH_INPUT } from './handoff.ts';
 import { guardLayout } from './layoutGuard.ts';
+import { fitMinimap } from './minimap.ts';
 import { entryOfView, readViewRequest, REVEAL, sideBarsToRail, takeViewRequest, viewRequestKey, type FrameStorage, type ViewRequest } from './sideBars.ts';
 import { followView, type RailEntry } from '../src/rail.ts';
 import {
@@ -415,9 +417,15 @@ const keepLastClose = (context: SurfaceContext): void => {
   // The host's new list comes after the close: the closed tab is still in it.
   forge.tabs.onClose((id) => {
     if (forge.tabs.state().list.some((tab) => tab.id !== id)) return;
-    void context.call('/tabs/save', { folder: context.folder, tabs: [] }).catch(() => undefined);
+    void context.call('/tabs/save', { folder: context.folder, window: windowOf(forge), tabs: [] }).catch(() => undefined);
   });
 };
+
+/**
+ * The browser tab the header tabs are kept for (`forge.window.id()`, kept across the tab's reloads): its reload brings
+ * back its own tabs, another browser tab on the folder keeps its own, and a new one starts from the folder's latest.
+ */
+const windowOf = (forge: OcForgeClient): string | null => (forge.has('window-id') ? forge.window.id() : null);
 
 /** What the frame's boot can ask of its part once it runs. */
 export interface SurfaceController {
@@ -562,9 +570,12 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   }
   // From here on: before, VS Code restoring its last container would light it over the entry chosen to open the panel.
   following = true;
+  // The page starts now, hidden, rather than when the first file opens in it: that file shows at once (row 15). It
+  // stays while this view does, and after it while it has tabs.
+  if (forge.has('page-warm')) void forge.page.warm(true).catch((error) => log('could not start the page ahead', error));
   // After OpenChamber reloads, the page's tabs come back with the rail view, which starts the page behind them.
   if (forge.has('tabs') && forge.tabs.state().list.length === 0) {
-    const saved = await context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: context.folder }).catch(() => ({ tabs: [] }));
+    const saved = await context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: context.folder, window: windowOf(forge) }).catch(() => ({ tabs: [] }));
     // Saved under a host that took more (a longer title, more tabs) than this one: as much as it takes.
     const limits = forge.limits();
     for (const tab of (saved.tabs ?? []).slice(0, limits.tabs)) await forge.tabs.open(withRoute({ ...tab, title: tabTitle(tab.title, limits.title) })).catch(() => undefined);
@@ -652,7 +663,6 @@ class EditorArea {
     // A file opened in a rail view or the terminal starts the page with its tab: that is what the user asked for. Only
     // otherwise does the page's route count as a link, as OpenChamber keeps it after the page went with its last tab.
     const active = forge.tabs.state().active;
-    if (active) this.asked.add(active);
     const handed = active ? await this.take(active) : null;
     const route = handed ? null : forge.links.route();
     this.linked = readEditorRoute(route)?.key ?? null;
@@ -684,7 +694,6 @@ class EditorArea {
     // A tab activated (a click in the header, an editor a rail view or the terminal handed over): OpenChamber shows the
     // page on it, and its editor takes the focus as it opens (`show`).
     forge.tabs.onActivate((id) => {
-      this.asked.add(id);
       this.chosen = true;
       void this.show(id, null, true).catch((error) => log('could not show the tab', error));
     });
@@ -718,10 +727,14 @@ class EditorArea {
     return readOpenRequest(taken.open);
   }
 
+  /** Restored editors the page is closing as it starts (`dropClosedEditors`): they get no tab while they go. */
+  private readonly closing = new Set<string>();
+
   private current(): Map<string, { identifier: EditorIdentifier; title: string; dirty: boolean }> {
     const current = new Map<string, { identifier: EditorIdentifier; title: string; dirty: boolean }>();
     for (const identifier of this.editorService.getEditors(1)) {
       const key = keyOfEditor(identifier.editor);
+      if (this.closing.has(key)) continue;
       if (!current.has(key)) current.set(key, { identifier, title: tabTitle(identifier.editor.getName(), this.limits.title), dirty: identifier.editor.isDirty() });
     }
     return current;
@@ -888,8 +901,9 @@ class EditorArea {
     const parts = tabChunks(tabs);
     const revision = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     try {
+      const window = windowOf(this.context.forge);
       for (const [index, part] of parts.entries()) {
-        const body = parts.length === 1 ? { folder: this.context.folder, tabs: part } : { folder: this.context.folder, tabs: part, part: { revision, index, count: parts.length } };
+        const body = parts.length === 1 ? { folder: this.context.folder, window, tabs: part } : { folder: this.context.folder, window, tabs: part, part: { revision, index, count: parts.length } };
         await this.context.call('/tabs/save', body);
       }
     } catch (error) {
@@ -908,8 +922,11 @@ class EditorArea {
    */
   private async dropClosedEditors(restored: ReadonlySet<EditorInput>): Promise<void> {
     const { forge } = this.context;
-    const saved = await this.context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: this.context.folder }).catch(() => null);
+    const saved = await this.context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: this.context.folder, window: windowOf(forge) }).catch(() => null);
     if (!saved) return;
+    // Kept already: the page that brings them back unchanged doesn't make them the folder's latest again, over the
+    // browser tab that changed its tabs last.
+    if (!this.saved) this.saved = JSON.stringify((saved.tabs ?? []).map((tab) => ({ id: tab.id, title: tab.title, icon: tabIcon(tab.id) })));
     const tabs = [...(saved.tabs ?? []), ...forge.tabs.state().list];
     const current = this.editorService.getEditors(1).map((identifier) => ({ identifier, key: keyOfEditor(identifier.editor) }));
     const taken = new Set(current.map((editor) => editor.key));
@@ -921,8 +938,14 @@ class EditorArea {
         taken.add(tab);
         await this.replaceTab(tab, withRoute({ id: key, title, icon: tabIcon(key), dirty: identifier.editor.isDirty() }));
       } else if (!(this.linked && routeNames(this.linked, key)) && !identifier.editor.isDirty()) {
-        // Not waited on for long: the page's start (and its header) must not hang on one.
-        await Promise.race([this.editorService.closeEditor(identifier).catch(() => undefined), later(2_000)]);
+        // Not waited on for long: the page's start (and its header) must not hang on one. Until it has gone it gets no
+        // tab: VS Code's page state is one for every browser tab, which may restore another tab's editors here.
+        this.closing.add(key);
+        const closed = this.editorService.closeEditor(identifier).catch(() => undefined).finally(() => {
+          this.closing.delete(key);
+          this.schedule();
+        });
+        await Promise.race([closed, later(2_000)]);
       }
     }
   }
@@ -1023,28 +1046,41 @@ class EditorArea {
     }
   }
 
-  /** Tabs this page has asked the service about (`takeWaiting`). */
-  private readonly asked = new Set<string>();
+  private taking = false;
+  private takeAgain = false;
 
   /**
-   * Tabs a rail view or the terminal opened without selecting them, their editors waiting in the service (`show`): each
-   * opens here, then shows. One request for all the tabs new to the page (after a reload, every tab the rail brought back).
+   * Tabs a rail view or the terminal opened without selecting them, their editors waiting in the service (`show`), the
+   * page's own among them (Settings chosen again from the rail): each opens here, then shows. One request each time the
+   * header's tabs change, one at a time. A tab the user selected meanwhile is `show`'s, which takes its request first.
    */
   private async takeWaiting(): Promise<void> {
-    const fresh = [...this.hostTabs.keys()].filter((id) => !this.asked.has(id) && !this.adopted.has(id));
-    if (fresh.length === 0) return;
-    for (const id of fresh) this.asked.add(id);
-    const waiting = await this.context.call<{ keys?: string[] }>('/editors/pending').catch(() => ({ keys: [] as string[] }));
-    for (const key of (waiting.keys ?? []).filter((id) => fresh.includes(id))) {
-      const request = await this.take(key);
-      if (!request) continue;
-      const title = this.hostTabs.get(key)?.title ?? 'The editor';
-      await this.open(request, key).catch(async (error) => {
-        log('could not open what another part handed over', error);
-        await this.context.forge.tabs.close(key).catch(() => undefined);
-        this.hostTabs.delete(key);
-        notify(this.context.services, `${title} didn't open: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    if (this.taking) {
+      this.takeAgain = true;
+      return;
+    }
+    this.taking = true;
+    try {
+      const waiting = await this.context.call<{ keys?: string[] }>('/editors/pending').catch(() => ({ keys: [] as string[] }));
+      for (const key of (waiting.keys ?? []).filter((id) => this.hostTabs.has(id))) {
+        const request = await this.take(key);
+        if (!request) continue;
+        const title = this.hostTabs.get(key)?.title ?? 'The editor';
+        await this.open(request, key).catch(async (error) => {
+          log('could not open what another part handed over', error);
+          if (!this.current().has(key)) {
+            await this.context.forge.tabs.close(key).catch(() => undefined);
+            this.hostTabs.delete(key);
+          }
+          notify(this.context.services, `${title} didn't open: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+    } finally {
+      this.taking = false;
+      if (this.takeAgain) {
+        this.takeAgain = false;
+        void this.takeWaiting();
+      }
     }
   }
 
@@ -1209,9 +1245,13 @@ export const startSurface = async (context: SurfaceContext): Promise<SurfaceCont
     }
   });
   keepLayout(role, services);
+  // VS Code's activity badges on the rail's icons, from every part (the rail shows one part's).
+  void services.get<LayoutService>('layoutService').whenRestored.then(() => feedRailBadges(context.forge, services, context.railEntries));
   if (role === 'editor') {
     // A side bar VS Code opens in the page opens on the rail; not one VS Code restores as it starts.
     void services.get<LayoutService>('layoutService').whenRestored.then(() => sideBarsToRail(context.forge, services, context.storage, context.railEntries));
+    // A page as narrow as beside the rail panel shows no minimap.
+    fitMinimap(services, () => innerWidth);
     const area = new EditorArea(context);
     await area.start();
     return { beforeFolderChange: () => area.closeAllTabs() };

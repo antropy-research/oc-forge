@@ -134,6 +134,22 @@ export interface QuickInputService {
   pick<T extends QuickPickItem>(items: readonly T[], options?: { title?: string; placeHolder?: string; activeItem?: T }): Promise<T | undefined>;
 }
 
+/** `IBadge`: what an activity shows (a count, an icon, progress); a count's number is its `NumberBadge`'s (README). */
+export interface Badge {
+  getDescription(): string;
+}
+
+/** `IActivity`. */
+export interface Activity {
+  readonly badge: Badge;
+}
+
+/** `IActivityService`: the badges VS Code's activity bar shows on its view containers. */
+export interface ActivityService {
+  readonly onDidChangeActivity: Event<unknown>;
+  getViewContainerActivities(viewContainerId: string): Activity[];
+}
+
 /** `INotificationService`. */
 export interface NotificationService {
   info(message: string): void;
@@ -161,7 +177,8 @@ export interface ConfigurationChangeEvent {
 
 /** `IConfigurationService`. */
 export interface ConfigurationService {
-  updateValue(key: string, value: unknown, target: number): Promise<void>;
+  /** In `target` (a `ConfigurationTarget`), or with overrides first (`{ resource }`: for that resource alone). */
+  updateValue(key: string, value: unknown, targetOrOverrides: number | { resource?: Uri }, target?: number): Promise<void>;
   inspect(key: string): ConfigurationValue;
   readonly onDidChangeConfiguration: Event<ConfigurationChangeEvent>;
 }

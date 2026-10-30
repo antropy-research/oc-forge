@@ -12,7 +12,7 @@ import { guardFocus } from '../src/focus.ts';
 import type { RailEntry } from '../src/rail.ts';
 import { isConnectionToken, parseServerUrl, readOpenRequest, readSettings, type OpenRequest, type VscodeSettings } from '../src/settings.ts';
 import { roleOf, roleSettings, type Role } from '../src/surfaces.ts';
-import { isExternalAllowed, NARROW_FRAME_CSS, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
+import { isExternalAllowed, NARROW_FRAME_CSS, PART_CSS, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
 import { persistentIndexedDB, IDBKeyRange, saveInBackground, saveThroughService, watchForChanges, type StateOp, type StateSnapshot } from './storage.ts';
 import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceController, type SurfaceRole } from './surfaces.ts';
@@ -67,10 +67,39 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLEl
   return node;
 };
 
-const status = (title: string, detail = '', progress?: number): void => {
-  const bar = progress === undefined ? null : el('div', { class: 'bar' }, el('div', { class: 'fill' }));
-  if (bar && progress !== undefined) (bar.firstElementChild as HTMLElement).style.width = `${Math.round(progress * 100)}%`;
+/** The boot screen: a step and its progress (a share done, or `busy` for a step with no measure). */
+const status = (title: string, detail = '', progress?: number | 'busy'): void => {
+  const bar = progress === undefined ? null : el('div', { class: progress === 'busy' ? 'bar busy' : 'bar' }, el('div', { class: 'fill' }));
+  if (bar && typeof progress === 'number') (bar.firstElementChild as HTMLElement).style.width = `${Math.round(progress * 100)}%`;
   root().replaceChildren(el('div', { class: 'status', role: 'status' }, el('strong', { textContent: title }), detail ? el('p', { class: 'hint', textContent: detail }) : null, bar));
+};
+
+/** What shows a part has started: its view's panes, the page's start (`EditorArea`), a terminal. */
+const SHOWN: Record<SurfaceRole, () => boolean> = {
+  view: () => Boolean(document.querySelector('.monaco-workbench .part.sidebar .pane-body, .monaco-workbench .part.sidebar .pane-header')),
+  editor: () => document.documentElement.dataset.ocVscodePageStarted === 'true',
+  terminal: () => Boolean(document.querySelector('.monaco-workbench .part.panel .xterm')),
+};
+/** The longest the boot screen stays over a part: one that never shows its part says so in its own way. */
+const STARTING_MAX_MS = 60_000;
+
+/**
+ * The boot screen over the part, busy, until it has started (`SHOWN`), or for STARTING_MAX_MS at most. Stopped (when
+ * VS Code didn't start), it stays to say why.
+ */
+const starting = (role: SurfaceRole, label: string): (() => void) => {
+  const boot = root();
+  boot.classList.add('starting');
+  boot.replaceChildren(el('div', { class: 'status', role: 'status' }, el('strong', { textContent: `Starting ${label}…` }), el('div', { class: 'bar busy' }, el('div', { class: 'fill' }))));
+  const since = performance.now();
+  const timer = setInterval(() => {
+    const shown = SHOWN[role]() || document.documentElement.dataset.ocVscodeSurfaceStarted === 'true';
+    if (!shown && performance.now() - since < STARTING_MAX_MS) return;
+    clearInterval(timer);
+    boot.remove();
+    document.documentElement.dataset.ocVscodeShownAt = String(Math.round(performance.now()));
+  }, 100);
+  return () => clearInterval(timer);
 };
 
 /** The settings form: where the VS Code Server answers (as this OpenChamber server reaches it) and its token. */
@@ -139,7 +168,7 @@ const boot = async (): Promise<void> => {
   if (!settings.serverUrl || forceSettings) settings = await showSettings(settings);
   let connected: Connected;
   for (;;) {
-    status('Connecting to VS Code…', settings.serverUrl ?? '');
+    status('Connecting to VS Code…', settings.serverUrl ?? '', 'busy');
     try {
       connected = await call<Connected>('/connect', { serverUrl: settings.serverUrl, token: settings.token });
       break;
@@ -161,7 +190,7 @@ const boot = async (): Promise<void> => {
     await new Promise((resolve) => setTimeout(resolve, assets.state === 'idle' ? 0 : 400));
     assets = (await call<{ assets: AssetState }>('/assets/prepare', server)).assets;
   }
-  status(`Starting ${label}…`);
+  status(`Starting ${label}…`, '', 'busy');
 
   // Which part of VS Code this frame is: the whole workbench on a stock OpenChamber.
   const forge = await forgeReady;
@@ -335,15 +364,20 @@ const boot = async (): Promise<void> => {
     stylesheet.addEventListener('error', () => resolve(), { once: true });
     document.head.append(stylesheet);
   });
-  // A part's frame can be narrower than VS Code's dialogs: they fit it.
+  // A part's frame can be narrower than VS Code's dialogs: they fit it. A part shows only its part's chrome.
   document.head.append(el('style', { id: 'oc-vscode-narrow', textContent: NARROW_FRAME_CSS }));
-  root().remove();
+  if (surfaceRole) document.head.append(el('style', { id: 'oc-vscode-part', textContent: PART_CSS[surfaceRole] }));
+  // A part keeps the boot screen over it, busy, until it shows what it is for: the rail its view, the page its editor
+  // (or nothing to open), the bottom its terminal. VS Code draws its parts one by one meanwhile (row 15).
+  const started = surfaceRole ? starting(surfaceRole, label) : () => {};
+  if (!surfaceRole) root().remove();
   document.body.setAttribute('aria-label', '');
   try {
     await import(/* @vite-ignore */ `${cache}out/nls.messages.js`);
     await import(/* @vite-ignore */ `${cache}out/vs/code/browser/workbench/workbench.js`);
   } catch (error) {
-    document.body.append(el('div', { id: 'oc-boot' }));
+    started();
+    if (!root()) document.body.append(el('div', { id: 'oc-boot' }));
     status(`${label} did not start`, messageOf(error));
     return;
   }

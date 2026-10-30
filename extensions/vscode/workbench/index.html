@@ -20,10 +20,16 @@
       #oc-boot .status { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; text-align: center; gap: 4px; }
       #oc-boot .bar { width: min(320px, 80%); height: 4px; border-radius: 2px; background: var(--oc-border); overflow: hidden; margin-top: 8px; }
       #oc-boot .fill { height: 100%; background: var(--oc-primary, #4c6ef5); transition: width 300ms ease-out; }
+      /* Over a part while VS Code starts in it, until the part shows what it is for (main.ts, `starting`). */
+      #oc-boot.starting { position: fixed; inset: 0; z-index: 100000; height: auto; }
+      #oc-boot .bar.busy .fill { width: 30%; animation: oc-busy 1.2s ease-in-out infinite; }
+      @keyframes oc-busy { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+      @media (prefers-reduced-motion: reduce) { #oc-boot .bar.busy .fill { animation: none; width: 100%; opacity: 0.5; } }
     </style>
   </head>
   <body>
-    <div id="oc-boot"></div>
+    <!-- Shown from the first paint, until main.js says where it is (connecting, preparing, starting). -->
+    <div id="oc-boot"><div class="status" role="status"><strong>Starting VS Code…</strong><div class="bar busy"><div class="fill"></div></div></div></div>
     <script src="main.js"></script>
   </body>
 </html>

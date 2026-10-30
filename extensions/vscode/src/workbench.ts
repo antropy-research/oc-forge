@@ -174,6 +174,36 @@ export const NARROW_FRAME_CSS = `
 `;
 
 /**
+ * What a part shows of VS Code's chrome, appended like NARROW_FRAME_CSS. VS Code has no setting for either, so these
+ * name its elements (README, "Which VS Code internals the frames use"):
+ *
+ * - The page's status bar is the editor's: what OpenChamber shows already goes (the remote indicator names the
+ *   OpenChamber it is in, the keyboard layout is the browser's), then, as the page narrows beside the rail panel, the
+ *   branch and its sync, then the bell, the language status and the problems count: the language, indentation,
+ *   encoding, line endings and the cursor's line and column stay in sight down to the page's 340 px at 1024
+ *   (pre-review row 11). Status bar items carry their entry's id, as VS Code's "Hide" on each keeps them.
+ * - The bottom's panel is OpenChamber's bottom zone, whose header has its own maximize and close: VS Code's "Maximize
+ *   Panel" and "Hide Panel" would act on a panel the part keeps shown and maximized (they did nothing; row 13). Hide
+ *   Panel is contributed with no `when`, and Maximize's depends on the panel's alignment, which the part keeps
+ *   centred to maximize it.
+ */
+export const PART_CSS: Record<'view' | 'editor' | 'terminal', string> = {
+  view: '',
+  editor: `
+.monaco-workbench .part.statusbar .statusbar-item:is([id="status.host"], [id="status.workbench.keyboardLayout"]) { display: none !important; }
+@media (max-width: 719px) {
+  .monaco-workbench .part.statusbar .statusbar-item[id^="status.scm."] { display: none !important; }
+}
+@media (max-width: 439px) {
+  .monaco-workbench .part.statusbar .statusbar-item:is([id="status.notifications"], [id="status.languageStatus"], [id="status.problems"]) { display: none !important; }
+}
+`,
+  terminal: `
+.monaco-workbench .part.panel > .title .global-actions .action-item:has(> .action-label:is(.codicon-panel-close, .codicon-panel-maximize, .codicon-panel-restore)) { display: none !important; }
+`,
+};
+
+/**
  * A 52-character base-32 name for a webview origin, the shape of VS Code's
  * SHA-256 one, for a page without crypto.subtle (plain HTTP). It names
  * webviews apart; it guards nothing.

@@ -86,8 +86,13 @@ layout. The settings (activity bar hidden; status bar, title bar and layout butt
 the tab and preview settings in the page; a maximized, centred panel in the terminal) are the workbench's defaults
 from the start, and are set again in VS Code's in-memory configuration once it runs, above the user's
 `settings.json`, which nothing writes to. The layout (which parts show) is set as the workbench starts and again
-once it has restored its parts, through VS Code's layout service; a view and the terminal keep theirs when VS Code
-brings a part back.
+once it has restored its parts, through VS Code's layout service, and every part keeps it when VS Code brings a part
+back: a view never shows an editor area or a panel, the page never a side bar or a panel, the terminal its panel
+maximized (`workbench/layoutGuard.ts`). It lays the part out again on a timer, never in the task VS Code changed it
+in: a terminal made in a rail view once made VS Code show the panel again from each change, and a re-layout queued as
+a microtask never let the frame paint or answer, freezing all of OpenChamber while its renderer grew by gigabytes.
+When VS Code changes a part back more than 8 times in a second, the part leaves it as VS Code has it for a while (1 s,
+doubling up to 30 s) and logs which parts it fought over.
 
 **Reaching VS Code's services.** The embedder API (`IWorkbench`) has no events for editors, parts or view containers.
 Five more patches (`src/patch.ts`, *surface patches*) hand the frame VS Code's instantiation service as the
@@ -104,12 +109,28 @@ message:
 - A file opened in a view or the terminal (Explorer, Search, Source Control, a terminal link) is handed to the page:
   the frame's `openEditor`/`openEditors` post the editor (marshalled as VS Code does, with its selection) to the
   service (`/editors/request`) and open its header tab with `activate`; OpenChamber shows the page on it, the page
-  gets `tab-activated`, takes the request (`/editors/take`) and opens it. An extension's details page goes as
-  `extension.open`. What can't be handed over (a webview of that frame's extension host, a terminal or output
-  editor) opens in that frame.
-- The page keeps its tabs in the service, per server and folder (`/tabs/save`); after OpenChamber reloads, the rail
-  view opens that folder's again (`/tabs/load`), which mounts the page behind them, and the page's VS Code restores
-  the same editors. After the page's last tab closes, OpenChamber keeps the page a few seconds more, hidden (the
+  gets `tab-activated`, takes the request (`/editors/take`) and opens it.
+- An editor with no file to name it goes by VS Code's own command (`workbench/handoff.ts`): Settings and Keyboard
+  Shortcuts with their query (no part opens editors as modals: `workbench.editor.useModal` is off), a search editor
+  with its configuration, read from the editor (the page searches again: the Search view's "Open in editor" and a
+  new search editor alike), a walkthrough at its step, an extension's details through `_extensions.manage` (installed
+  here, no gallery), then `extension.open` (the gallery). Its tab has the key the page gives the editor (an
+  extension's details by its extension, so choosing it again reuses the tab) and opens unselected: the page finds the
+  request (`/editors/pending`), opens the editor, and only then selects its tab, which shows the page; an editor that
+  doesn't open closes its tab and says why. A view's editor that can't be handed over at all (a webview of its
+  extension host) doesn't open there: Markdown's preview opens in the page by the command that just made it, anything
+  else says it can't open from the rail. The terminal still opens its own (a terminal moved into its editor area).
+- A side bar VS Code opens in the page (Ctrl+Shift+E/F/G/D/X, Ctrl+B, Reveal in Explorer, Run and Debug as a session
+  starts) opens on the rail instead (`workbench/sideBars.ts`): the page lights the container's entry with
+  `forge.rail.open`, and what the entry should show waits in host storage for this browser tab
+  (`view-request:<window id>`: a container behind Additional Views, the file to reveal), where the rail view takes it
+  as the entry opens, or within 500 ms when it shows already, and reveals the file (`revealInExplorer`).
+- The page keeps its tabs in the service, per server and folder, and per browser tab (`/tabs/save` with
+  `forge.window.id()`, which the tab keeps across its reloads); after OpenChamber reloads, the rail view opens that
+  tab's again (`/tabs/load`), or the folder's latest in a browser tab that kept none, which mounts the page behind
+  them, and the page's VS Code restores the same editors. Two browser tabs on a folder no longer take each other's
+  tabs on a reload; the lists of all but a folder's 64 latest browser tabs go. After the page's last tab closes,
+  OpenChamber keeps the page a few seconds more, hidden (the
   adapters' `OC_FORGE_PAGE_LINGER_MS`): on that `tab-closed` the page closes the editor and saves the folder's tabs
   empty and VS Code's state (as before a reload) at once, so neither brings the file back; an unsaved last tab it
   closes itself the same way, after the save prompt, so the file's backup is gone too and Don't Save's change doesn't
@@ -131,6 +152,34 @@ message:
   as before.
 - A page that starts for a file a rail view or the terminal handed over shows that file, not the page's last route,
   which OpenChamber keeps for the extension after the page went with its last tab.
+
+**One window's chrome.** What VS Code's one window shows about its parts, the parts show in OpenChamber's places:
+- The rail panel's header names the entry it shows ("Explorer", "Search"), not the extension, through OpenChamber's
+  own slot for a surface's header (`ContextPanelHeaderToolbar`; the adapters' `useOcForgePanelTitle`). VS Code's own
+  title row stays under it: it holds the container's actions and its "…" menu (a one-view container such as Search
+  or Source Control has its view's actions only there), as VS Code shows it under the activity bar's icon.
+- VS Code's activity badges (Source Control's changes, the Extensions view's updates, an extension's own count) are on
+  the rail icons, open or not (`workbench/badges.ts`): each part reads `IActivityService` for the containers the rail
+  lists and sends its counts when they change (`forge.rail.setBadges`); the rail shows each entry's count from the part
+  that saw it change last. Each part
+  keeps its own Source Control, which VS Code refreshes while that part has the focus: the part the user works in
+  counts first (one Source Control across the parts is round 14's bridge).
+- The bottom shows no VS Code "Maximize Panel" or "Hide Panel": OpenChamber's bottom zone has its own, and no host API
+  lets a frame act on the zone. VS Code contributes Hide Panel with no `when` and has no setting for either, so the
+  terminal part's CSS hides them (`PART_CSS`).
+- The page's status bar is the editor's: no remote indicator or keyboard layout (OpenChamber names both already),
+  then, as the page narrows beside the rail panel, no branch and sync (below 720 px), then no bell, language status
+  or problems count (below 440 px): the language, indentation, encoding, line endings and line and column stay in
+  sight down to the page's 340 px at 1024 (`PART_CSS`, by status entry id; VS Code has no setting). Below 600 px the
+  page shows no minimap, and as the user has it when it widens (`workbench/minimap.ts`): `editor.minimap.enabled` in
+  memory for each open editor's resource, as VS Code merges a folder's settings with the global memory layer into a
+  cache a memory change doesn't clear, so a global value set later never reached a file's editor.
+- Split, each of the page's groups shows one tab naming its editor (`workbench.editor.showTabs: single` while there
+  is more than one group, `none` again after); zen mode shows none (`zenMode.showTabs: none`).
+- A part keeps the boot screen over it, busy, until it shows what it is for (the rail its view, the page its editor
+  or nothing to open, the bottom its terminal), rather than a blank frame while VS Code starts. The rail view asks
+  OpenChamber to start the page with it (`forge.page.warm`), hidden, so the first file it opens shows at once rather
+  than after VS Code starts in the page (see **Cost**).
 
 **State.** One store per server for the user's data (settings, keybindings, snippets: VS Code's `vscode-web-db`),
 shared by every frame and by the whole workbench of a stock OpenChamber; one store per role for VS Code's state
@@ -224,8 +273,9 @@ a tab or is opened.
   streams, more than Chrome's six connections per host, and starves: on the scratch stack the second tab's VS Code
   didn't show its file within 2 minutes, and the first tab stopped answering too until the second went. Over HTTPS
   (HTTP/2, e.g. `tailscale serve`) requests share one connection and the per-host limit doesn't apply.
-- Each part has its own extension host: an extension's webview or terminal opened from a view stays in that view's
-  workbench; the Explorer doesn't show the page's unsaved dots; a task run in the page shows in the page's own panel.
+- Each part has its own extension host: an extension's webview opened from a view (but Markdown's preview) doesn't
+  open, and says so; the Explorer doesn't show the page's unsaved dots; a terminal or task started in the page or a
+  view runs in that part, its panel hidden (round 14's bridge, `planner-vsruntime`, takes them to the bottom).
 - Rail icons follow what is installed on the server (`extensions.json`), not VS Code's `when` clauses or a
   disabled state: an installed extension whose container VS Code hides still has its icon, and opening it says so.
 - The Remixicons for the built-ins are the closest OpenChamber's sprite has to VS Code's codicons.
@@ -237,7 +287,8 @@ a tab or is opened.
 Each VS Code service member a frame calls is a member of a VS Code service interface (`IEditorService`,
 `IEditorGroupsService`, `IWorkbenchLayoutService`, `IPaneCompositePartService`, `IViewsService`, `IQuickInputService`,
 `INotificationService`, `IConfigurationService`, `IRemoteAgentService`, `IFileService`, `ICommandService`,
-`IEnvironmentService`, `ITerminalService`, `IStorageService`, `IWebviewService`, `IKeybindingService`), or a public
+`IEnvironmentService`, `ITerminalService`, `IStorageService`, `IWebviewService`, `IKeybindingService`,
+`IActivityService`), or a public
 member of a class those interfaces hand out (`EditorInput`, `URI`, `DisposableStore`). `workbench/vscode.ts` declares
 each under its VS Code interface's name, and `tests/vscode-api.test.ts` holds every declaration to the pinned source
 (`vendors/vscode`): a protected, private or class-only member fails it. That is VS Code's internal API, not the
@@ -252,6 +303,11 @@ each under its VS Code interface's name, and `tests/vscode-api.test.ts` holds ev
 | `IStorageService.flush`, wrapped on the service (`saveThroughService`) | Interface member; wrapping it is the frame's | VS Code's own reloads (`flush(SHUTDOWN)`, then reload) wait until the service has the state; in the browser, `ILifecycleService`'s shutdown events can't hold a reload for that | A lifecycle join that holds an expected reload |
 | `IWebviewService.createWebviewElement` and each webview's `focus`, wrapped (`src/focus.ts`); the original method is read from the class, as the delayed service's proxy keeps the first function read through it | Interface members; the proxy's behavior is `InstantiationService`'s implementation | A webview takes the focus only for the user, as the rest of a frame does | A focus policy for webviews (or an event when one is created) |
 | `_workbench.open`, run by id through the embedder's `IWorkbench.commands`: only on a release the surface patches don't fit, where there are no services (else `IEditorService.openEditor`) | VS Code's internal command behind the extension API's `vscode.open`; the workbench's own `vscode.open` takes no line | "Open in VS Code" on a file at a line | `vscode.open` taking editor options in the workbench |
+| Editors' type ids (`workbench.extensions.input2`, `workbench.editorinputs.searchEditorInput`, `workbench.input.settings2`, `workbench.input.preferences`, `workbench.input.keybindings`, `workbench.editors.gettingStartedInput`), the Welcome page's resource (`walkThrough://vscode_getting_started_page`), and the options they open with (settings' `query` and `target`, a walkthrough's `selectedCategory` and `selectedStep`) | `EditorInput.typeId` is public; the ids are each input's own `ID`, the options the editors' (`ISettingsEditorOptions`, `GettingStartedEditorOptions`) | To hand an editor with no file to the page by the command that opens it (`workbench/handoff.ts`) | An editor API that moves an editor between windows |
+| A search editor's configuration: `resolveModels()`, then `configurationModel.config` | Public members of class `SearchEditorInput`, read off the editor `IEditorService.openEditor` is given | To run the same search in the page ("Open in editor", a new search editor) | `toUntyped()` describing an untitled search editor |
+| Commands and their arguments: `_extensions.manage` (an installed extension's details, no gallery), `extension.open`, `search.action.openNewEditor` (`OpenSearchEditorArgs`), `workbench.action.openSettings`, `openWorkspaceSettings` and `openRemoteSettings` (`{ query }`), `workbench.action.openGlobalKeybindings` (its query), `workbench.action.openWalkthrough` (`{ category, step }`), `markdown.showPreview`, `showPreviewToSide` and `showLockedPreviewToSide` (watched in a view, run again in the page), `revealInExplorer` (a URI); `workbench.files.action.showActiveFileInExplorer` watched in the page | Run through `ICommandService.executeCommand`, watched through `onWillExecuteCommand`; `_extensions.manage` is VS Code's internal command behind `extension.open`'s fallback | The page opens what a view chose; the rail reveals what the page asked for | Nothing for the documented ones; an `extension.open` that doesn't ask the gallery for an installed extension |
+| `NumberBadge.number` | Public field of the class every count badge is (`IActivity.badge` is an `IBadge`, which has only `getDescription`) | The count on a rail icon (`workbench/badges.ts`) | `IBadge` naming its count |
+| Status bar entries' element ids (`status.host`, `status.workbench.keyboardLayout`, `status.scm.*`, `status.notifications`, `status.languageStatus`, `status.problems`), the panel title's global actions' codicon classes (`panel-close`, `panel-maximize`, `panel-restore`), and a started part's look (`.part.sidebar .pane-body`, `.part.panel .xterm`) | VS Code's DOM, in a part's own CSS (`PART_CSS`) and its boot screen (`workbench/main.ts`) | Which status items a narrow page drops and which panel buttons the bottom doesn't show, which VS Code has no settings for; when the boot screen lifts | Settings for status items and the panel's title actions |
 | The webview host page's protocol (`webview/`: `webview-ready` with `mountId` and `keyEventToken`, `load-resource`, the key and focus messages) | Internal, between `WebviewElement` and its host page (`webview/browser/pre/index.html`) | VS Code's own host page needs a service worker, `crypto.subtle` and a same-origin content frame, none of which an opaque-origin extension frame has | VS Code hosting webviews without them, or frames on real origins |
 | The other patches to the compiled workbench: the embedder's `create()` options, the handshake signature, the webview origin, keyboard support, the editor area's hiding | Compiled code, each matched exactly (`src/patch.ts`); a release they don't fit runs the whole workbench | See "How it fits in an extension frame" and the surface patches above | Each its own: see `src/patch.ts` |
 
@@ -261,7 +317,7 @@ each under its VS Code interface's name, and `tests/vscode-api.test.ts` holds ev
 |---|---|
 | `src/` | Pure code: settings and open requests (`settings.ts`), which install files the browser loads (`clientFiles.ts`), the patches (`patch.ts`), the workbench configuration and request routing (`workbench.ts`), the rail entries (`rail.ts`), the roles and editors between frames (`surfaces.ts`), the frames' keyboard focus (`focus.ts`) |
 | `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`), the rail (`rail.ts`), editors handed to the page and its saved tabs (`editors.ts`) |
-| `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB; the roles in OpenChamber's own surfaces (`surfaces.ts`) and the VS Code services they use (`vscode.ts`) |
+| `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB; the roles in OpenChamber's own surfaces (`surfaces.ts`) and the VS Code services they use (`vscode.ts`); each part's layout kept (`layoutGuard.ts`), editors handed over by command (`handoff.ts`), the page's side bars on the rail (`sideBars.ts`), activity badges on the rail (`badges.ts`) |
 | `panel/` | The background frame: "Open in VS Code" on a chat |
 | `webview/` | The webview host page (`host.ts`, built to `host.js` with the agent inside) and the agent that runs in each webview's content (`agent.ts`); `content.ts` makes a webview's HTML self-contained |
 | `scripts/web-files.ts` | Lists the browser's files of a VS Code Server install for `service/web-files.json` |

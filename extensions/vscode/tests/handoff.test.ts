@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readOpenRequest, roleSettings, tabIcon } from '../src/surfaces.ts';
+import { countOf, countsOf } from '../workbench/badges.ts';
 import { commandHandoff, ELSEWHERE, extensionIdOf, showingCommands } from '../workbench/handoff.ts';
 import { entryOfView, readViewRequest, viewRequestKey } from '../workbench/sideBars.ts';
 import type { CommandEvent, EditorInput, Event } from '../workbench/vscode.ts';
@@ -85,6 +86,27 @@ describe('editors the rail hands to the page by command', () => {
   test("an extension's page and a search editor have their own tab icons", () => {
     expect(tabIcon('workbench.extensions.input2|extension:/vscode.git/extension')).toBe('puzzle');
     expect(tabIcon('workbench.editorinputs.searchEditorInput|search-editor:#0.5')).toBe('search');
+  });
+});
+
+describe("VS Code's activity badges on the rail", () => {
+  const badge = (value: unknown) => ({ badge: { getDescription: () => '', ...(value === undefined ? {} : { number: value }) } });
+
+  test("a container's count is its first activity's number; an icon or progress badge has none", () => {
+    expect(countOf([badge(undefined), badge(3), badge(7)])).toBe(3);
+    expect(countOf([badge(0), badge(-1), badge(1.5)])).toBe(0);
+    expect(countOf([])).toBe(0);
+  });
+
+  test("each entry with a container of its own gets its container's count; Additional Views and the bottom's entry none", () => {
+    const entries = [
+      { id: 'scm', title: 'Source Control', icon: 'git-branch', order: 2, view: 'workbench.view.scm' },
+      { id: 'search', title: 'Search', icon: 'search', order: 1, view: 'workbench.view.search' },
+      { id: 'more', title: 'Additional Views', icon: 'more', order: 9, more: [{ view: 'workbench.view.extension.foo', title: 'Foo' }] },
+      { id: 'terminal', title: 'Terminal', icon: 'terminal', order: 10, zone: 'bottom' as const, view: 'workbench.panel.terminal' },
+    ];
+    const activities: Record<string, ReturnType<typeof badge>[]> = { 'workbench.view.scm': [badge(3)], 'workbench.panel.terminal': [badge(2)], 'workbench.view.extension.foo': [badge(5)] };
+    expect(countsOf(entries, (view) => activities[view] ?? [])).toEqual({ scm: 3 });
   });
 });
 
