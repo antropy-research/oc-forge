@@ -5,6 +5,9 @@ import {
   connectOcForge,
   envelope,
   matchHostShortcut,
+  OC_FORGE_LEGACY_LIMITS,
+  OC_FORGE_LIMITS,
+  parseOcForgeRequest,
   readOcForgeManifest,
   readOcForgeRailEntries,
   readOcForgeRequest,
@@ -58,6 +61,29 @@ describe("frame requests", () => {
     expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", route: "x".repeat(2049) } }))).toBeNull()
     expect(readOcForgeRequest(envelope({ type: "tab-update", payload: { id: "a", route: null } }))?.request).toEqual({ type: "tab-update", payload: { id: "a", route: null } })
     expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: "yes" } }))).toBeNull()
+  })
+
+  test("one the host can't take says why, for the host to answer at once; anything not on the channel is nothing", () => {
+    expect(parseOcForgeRequest({ channel: "openchamber", v: 1, type: "hello" })).toBeNull()
+    expect(parseOcForgeRequest({ channel: "oc-forge", v: 1 })).toBeNull()
+    const refused = (type: string, payload: unknown) => parseOcForgeRequest(envelope({ type, payload }, "9")) as { id: string; error: string }
+    expect(refused("tab-open", { id: "a", title: "t".repeat(513) })).toEqual({ id: "9", error: "Refused tab-open: a title is 1–512 characters." })
+    expect(refused("tab-open", { id: "x".repeat(1025), title: "A" }).error).toBe("Refused tab-open: a tab's id is 1–1024 characters.")
+    expect(refused("tab-update", { id: "a", route: "x".repeat(2049) }).error).toBe("Refused tab-update: a route is at most 2048 characters.")
+    expect(refused("tab-open", { id: "a", title: "A", icon: "javascript:alert(1)" }).error).toMatch(/^Refused tab-open: an icon is/)
+    expect(refused("tab-open", { id: "a", title: "A", activate: "yes" }).error).toBe("Refused tab-open: activate is true or false.")
+    expect(refused("route", { route: "/x", push: 1 }).error).toBe("Refused route: push is true or false.")
+    expect(refused("key", { key: "1" }).error).toMatch(/^Refused key: a press has/)
+    expect(refused("tab-shuffle", {}).error).toBe("Refused tab-shuffle: not a request this host knows.")
+    // Without an id there is nothing to answer, but it is still refused.
+    expect(parseOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a" } }))).toEqual({ id: null, error: "Refused tab-open: a title is 1–512 characters." })
+    // The well-formed read as before.
+    expect(parseOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "t".repeat(512) } }, "3"))).toEqual({ id: "3", request: { type: "tab-open", payload: { id: "a", title: "t".repeat(512) } } })
+  })
+
+  test("the limits: room for a thousand tabs and a file's whole name; an older host's for a hello without them", () => {
+    expect(OC_FORGE_LIMITS).toMatchObject({ tabs: 1000, title: 512, tabId: 1024, route: 2048 })
+    expect(OC_FORGE_LEGACY_LIMITS).toEqual({ ...OC_FORGE_LIMITS, tabs: 64, title: 80 })
   })
 })
 
@@ -213,6 +239,8 @@ describe("the client module", () => {
     const forge = await connecting
     expect(forge?.hello.extension).toBe("ocforge-test")
     expect(forge?.has("tabs")).toBe(true)
+    // This hello names no limits, as an older host's: those hold.
+    expect(forge?.limits()).toEqual(OC_FORGE_LEGACY_LIMITS)
     expect(forge?.links.pageUrl("/task/1 a")).toBe("http://h/?extension=ocforge-test&route=%2Ftask%2F1%20a")
     expect(forge?.links.sessionUrl("ses_1")).toBe("http://h/?session=ses_1")
 
@@ -238,6 +266,15 @@ describe("the client module", () => {
     expect(seen).toEqual(["entry:beta", "tab:a", "closed:a", "route:/x"])
     expect(forge!.rail.entry()).toBe("beta")
     expect(forge!.links.route()).toBe("/x")
+    forge!.dispose()
+  })
+
+  test("a current host's hello says its limits", async () => {
+    const { frame, deliver } = fakeFrame()
+    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
+    deliver(envelope({ type: "hello", payload: { ...hello, limits: OC_FORGE_LIMITS } }))
+    const forge = await connecting
+    expect(forge?.limits()).toEqual(OC_FORGE_LIMITS)
     forge!.dispose()
   })
 

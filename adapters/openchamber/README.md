@@ -11,7 +11,7 @@ end-to-end check compares screenshots: 0.00% of pixels differ).
 | API | `AGENTS.md` | What an extension gets |
 |---|---|---|
 | **rail** | 2.ii.a | A list of rail entries polled from its service: each its own rail icon with its own highlight; the panel's frame is told which entry was clicked. Entries come and go within a poll (1 s in the check). |
-| **tabs** | 2.ii.b | Tabs in the header's strip, after the session tabs: choosing one shows the extension's page on that tab, kept mounted while it has tabs; OpenChamber's tab shortcuts cover them. The extension may decide how an unsaved tab closes (a save prompt). |
+| **tabs** | 2.ii.b | Tabs in the header's strip, after the session tabs: choosing one shows the extension's page on that tab, kept mounted while it has tabs; OpenChamber's tab shortcuts cover them. Room for 1000 per extension; the strip keeps the selected one in view and, while it overflows, lists every tab. The extension may decide how an unsaved tab closes (a save prompt). |
 | **zones** | 2.ii.c | A default zone (`bottom`) for its panel, or for one rail entry, which then gets a panel of its own; its page may keep the bottom zone shown under it (an editor over its terminal). |
 | **keys** | tab shortcuts | Forward a key press to OpenChamber, which runs it through its own shortcut handlers, for navigation actions only and only with a user activation; the frame is told the current bindings. |
 | **links** | Cmd+click | `?extension=<id>&route=<route>` deep links to its page; URL prefixes for real `<a href>` links to its page and to chats; its page can keep its route in the address bar. |
@@ -116,13 +116,23 @@ stock host and the stock SDK ignore them. Each carries `channel: "oc-forge"`,
 `v: 1`, `type`, and `payload`; a request carries `id` and is answered with
 `{ type: "result", id, ok, error?, payload? }`. The host identifies the frame
 by `event.source`, as for SDK messages; a frame of an extension that is paused
-or not approved gets `ok: false`.
+or not approved gets `ok: false`. A request the host can't take (a field
+missing or past its limit, a type it doesn't know) gets `ok: false` at once,
+with what it takes (`Refused tab-open: a title is 1–512 characters.`); before
+2026-10-30 it got no answer, and the client gave up after 10 s.
+
+**Limits** (`OC_FORGE_LIMITS`, also in each frame's `hello` as `limits`): 1000
+header tabs per extension, tab ids of 1–1024 characters, titles of 1–512 (a
+file's whole name, a diff of two), routes of at most 2048, inline SVG icons of
+at most 16,384, 100 rail entries with kebab-case ids of at most 48. A host
+before 2026-10-30 sends no `limits`; its tabs were 64 and its titles 80
+(`OC_FORGE_LEGACY_LIMITS`), and the client's `limits()` answers those for it.
 
 | Frame → host | Payload | Effect |
 |---|---|---|
 | `hello` | | The host answers with a `hello` event; only frames that said hello get events. |
 | `rail-active` | `{ entry }` | The extension's one panel shows this entry now (rail panels of `rail` extensions). |
-| `tab-open` | `{ id, title, icon?, dirty?, route?, activate? }` | Opens or updates a header tab; `activate` shows the page on it; `route` is the tab's place on the page (a Cmd/Ctrl+click on the tab opens the page there in a new browser tab). Needs `contributes.page`; at most 64 tabs. |
+| `tab-open` | `{ id, title, icon?, dirty?, route?, activate? }` | Opens or updates a header tab; `activate` shows the page on it; `route` is the tab's place on the page (a Cmd/Ctrl+click on the tab opens the page there in a new browser tab). Needs `contributes.page`; past an extension's 1000th tab the host refuses one more (`An extension has at most 1000 header tabs: close one to open another.`) and changes nothing. |
 | `tab-update` | `{ id, title?, icon? (null clears), dirty?, route? (null clears) }` | |
 | `tab-close` | `{ id }` | The extension closed its tab (no `tab-closed` event comes back). After a `tab-close-request` for it, the host goes on as for the user's close (back to the chat after the last tab). |
 | `tab-close-handler` | `{ on }` | This frame decides how the extension's unsaved tabs close (the client sends it with the first `tabs.onCloseRequest` listener, and `on: false` after the last). A frame's `hello` resets it. |
@@ -132,7 +142,7 @@ or not approved gets `ok: false`.
 
 | Host → frame | Payload |
 |---|---|
-| `hello` | `{ version: 1, features, extension, surface, rail: { entry, own } \| null, tabs: { list, active, shown, strip }, route, links: { page, session } \| null, shortcuts }` |
+| `hello` | `{ version: 1, features, extension, surface, rail: { entry, own } \| null, tabs: { list, active, shown, strip }, route, links: { page, session } \| null, shortcuts, limits }` |
 | `rail-entry` | `{ entry }`: the user picked this entry of the panel |
 | `tab-activated` | `{ id }`: the user chose this tab, or it became the shown one |
 | `tab-closed` | `{ id }`: the user closed it in the header (it is gone there already) |
@@ -187,6 +197,14 @@ Chromium has no app window: `on` under the window's localStorage key
   With 2.5.3's separate tabs per workspace on, the strip shows the current
   workspace's session tabs, then the extension tabs, which are the same in every
   workspace.
+  The strip scrolls as it does for session tabs (the wheel, the edge fades), and
+  keeps the selected extension tab in view as it keeps the selected session's:
+  in the release it scrolls only when the current session changes. While the
+  strip holds extension tabs and overflows, a button at its end (`All tabs (N)`,
+  `data-oc-forge-all-tabs`) lists every tab of the strip, the chats first, the
+  selected one marked and in sight; choosing one selects it, as VS Code's "Show
+  All Opened Editors" lists its editors. A tab's whole title is its tooltip and
+  its accessible name; the strip cuts it to the tab's width.
   Tabs are not persisted: after a reload the extension opens the ones it wants.
   A plain click selects a tab and a middle click closes it, as on OpenChamber's
   own tabs; a Cmd/Ctrl+click on a tab with a `route` opens the extension's page

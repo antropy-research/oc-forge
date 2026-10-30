@@ -3,6 +3,7 @@ import React from 'react';
 import { Icon } from '@/components/icon/Icon';
 import { GuestIcon } from '@/components/layout/GuestRailIcon';
 import { PluginPane } from '@/components/layout/PluginPane';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { isGuestActive } from '@/lib/guests/capabilities';
 import { FALLBACK_GUEST_ICON, guestPackageIconSrc, resolveGuestIconName } from '@/lib/guests/icon';
@@ -31,7 +32,8 @@ const tabIcon = (tab: OcForgeHeaderTab, guest: InstalledGuest | undefined): { ic
   };
 };
 
-const HeaderTab: React.FC<{ tab: OcForgeHeaderTab; guest: InstalledGuest | undefined; isActive: boolean }> = ({ tab, guest, isActive }) => {
+// Memoized: a strip of hundreds of tabs re-renders only the tab that changed.
+const HeaderTab = React.memo(function HeaderTab({ tab, guest, isActive }: { tab: OcForgeHeaderTab; guest: InstalledGuest | undefined; isActive: boolean }) {
   const { t } = useI18n();
   const select = () => activateOcForgeTab(tab.guestId, tab.id);
   const close = () => requestCloseOcForgeTab(tab.guestId, tab.id);
@@ -105,7 +107,7 @@ const HeaderTab: React.FC<{ tab: OcForgeHeaderTab; guest: InstalledGuest | undef
       </div>
     </div>
   );
-};
+});
 
 /** Extension tabs, after the session tabs in the header's strip. */
 export const OcForgeHeaderTabs: React.FC = () => {
@@ -130,6 +132,85 @@ export const OcForgeHeaderTabs: React.FC = () => {
         />
       ))}
     </>
+  );
+};
+
+/**
+ * Every tab of the strip in one list, as VS Code's "Show All Opened Editors" lists its editors: a button at the
+ * strip's end while it holds extension tabs and some of its tabs are scrolled out of view (`overflowing`). Choosing
+ * one selects it, and the strip scrolls it into view. The session tabs come first, as in the strip.
+ */
+export const OcForgeAllTabs: React.FC<{
+  overflowing: boolean;
+  sessions: ReadonlyArray<{ id: string; title: string; active: boolean }>;
+  onSelectSession: (id: string) => void;
+}> = ({ overflowing, sessions, onSelectSession }) => {
+  const tabs = useOcForgeStore((state) => state.tabs);
+  const activeTab = useOcForgeStore((state) => state.activeTab);
+  const guests = useGuestsStore((state) => state.guests);
+  const page = useUIStore((state) => state.openGuestPageId);
+  const tabActive = useOcForgeTabActive();
+  const shown = tabs.filter((tab) => {
+    const guest = guests.find((entry) => entry.id === tab.guestId);
+    return Boolean(guest?.pageEntry && isGuestActive(guest));
+  });
+  if (!overflowing || shown.length === 0) return null;
+  const count = sessions.length + shown.length;
+  // The marked one in sight when the list opens, as VS Code's list of its editors keeps the active one: once the
+  // popup has its place and size (it mounts before it is positioned, when there is nothing to scroll yet).
+  const reveal = (node: HTMLElement | null) => {
+    if (node) requestAnimationFrame(() => requestAnimationFrame(() => node.scrollIntoView({ block: 'nearest' })));
+  };
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          data-oc-forge-all-tabs
+          aria-label={`All tabs (${count})`}
+          title="All tabs"
+          className="app-region-no-drag ms-1 flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-interactive-hover hover:text-foreground"
+        >
+          <Icon name="arrow-down-s" className="size-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="max-h-[min(28rem,var(--available-height))] w-72 overflow-auto">
+        {sessions.map((session) => (
+          <DropdownMenuItem
+            key={session.id}
+            ref={session.active ? reveal : undefined}
+            data-oc-forge-all-tabs-session={session.id}
+            aria-current={session.active ? 'true' : undefined}
+            onClick={() => onSelectSession(session.id)}
+          >
+            <Icon name="chat-3" />
+            <span dir="auto" className="min-w-0 flex-1 truncate">{session.title}</span>
+            {session.active ? <Icon name="check" /> : null}
+          </DropdownMenuItem>
+        ))}
+        {sessions.length > 0 ? <DropdownMenuSeparator /> : null}
+        {shown.map((tab) => {
+          const guest = guests.find((entry) => entry.id === tab.guestId);
+          const { icon, iconSrc } = tabIcon(tab, guest);
+          const active = tabActive && page === tab.guestId && activeTab[tab.guestId] === tab.id;
+          return (
+            <DropdownMenuItem
+              key={`${tab.guestId}:${tab.id}`}
+              ref={active ? reveal : undefined}
+              data-oc-forge-all-tabs-item={`${tab.guestId}:${tab.id}`}
+              aria-current={active ? 'true' : undefined}
+              title={guest ? `${tab.title} — ${guest.name}` : tab.title}
+              onClick={() => activateOcForgeTab(tab.guestId, tab.id)}
+            >
+              <GuestIcon icon={icon} iconSrc={iconSrc} className="size-3.5 shrink-0" />
+              <span dir="auto" className="min-w-0 flex-1 truncate">{tab.title}</span>
+              {tab.dirty ? <span data-oc-forge-dirty aria-label="Unsaved" className="size-2 shrink-0 rounded-full bg-current" /> : null}
+              {active ? <Icon name="check" /> : null}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 };
 

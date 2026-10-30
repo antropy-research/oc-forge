@@ -12,7 +12,8 @@ import { ocForgeEntrySurfaceOf, setOcForgeCatalogReader } from './ids.ts';
 import { forwardOcForgeKey, ocForgeShortcuts } from './keys.ts';
 import {
   OC_FORGE_FEATURES,
-  readOcForgeRequest,
+  OC_FORGE_LIMITS,
+  parseOcForgeRequest,
   type OcForgeFeature,
   type OcForgeHello,
   type OcForgeRequest,
@@ -77,6 +78,7 @@ export const ocForgeHello = (frame: OcForgeFrame, guest: InstalledGuest): OcForg
     route: routeFor(frame, guest),
     links: ocForgeLinks(guest.id),
     shortcuts: ocForgeShortcuts(),
+    limits: OC_FORGE_LIMITS,
   };
 };
 
@@ -145,8 +147,13 @@ export const useOcForgeFrame = ({ iframeRef, mode, surface, enabled }: FrameOpti
     const onMessage = (event: MessageEvent) => {
       const source = iframeRef.current?.contentWindow;
       if (!source || event.source !== source) return;
-      const read = readOcForgeRequest(event.data);
+      const read = parseOcForgeRequest(event.data);
       if (!read) return;
+      // One the host can't take is answered at once, with why: the frame's promise would otherwise wait out its timeout.
+      if ('error' in read) {
+        if (read.id !== null) postToFrame(frame, { type: 'result', id: read.id, ok: false, error: read.error });
+        return;
+      }
       identify(frame);
       const guest = useGuestsStore.getState().guests.find((entry) => entry.id === frame.guestId) ?? null;
       const reply = guest && isGuestActive(guest)

@@ -37,15 +37,24 @@ export type OcForgeForwardableAction = (typeof OC_FORGE_FORWARDABLE_ACTIONS)[num
 /** Bound to a bare modifier prefix and completed by a digit: held mod + 1–9, held mod+alt + 0–9. */
 export const OC_FORGE_DIGIT_ACTIONS = ['switch_context_surface', 'switch_session_tab'] as const;
 
+/**
+ * What the host takes from a frame. `tabs` is per extension: VS Code holds as many editors as the user opens, so the
+ * header has room for far more than a session holds (64 before 2026-10-30). `title` covers a file name (255 bytes at
+ * most on the usual file systems) and a diff of two (80 before). A frame learns them from its `hello`; one from an
+ * older host has none there, and these older values hold.
+ */
 export const OC_FORGE_LIMITS = {
   railEntries: 100,
   entryId: 48,
-  title: 80,
+  title: 512,
   svg: 16_384,
-  tabs: 64,
+  tabs: 1000,
   tabId: 1024,
   route: 2048,
 } as const;
+export type OcForgeLimits = { readonly [K in keyof typeof OC_FORGE_LIMITS]: number };
+/** An older host's limits, for a hello without `limits`. */
+export const OC_FORGE_LEGACY_LIMITS: OcForgeLimits = { ...OC_FORGE_LIMITS, title: 80, tabs: 64 };
 
 /** Kebab-case; `--` is reserved: OpenChamber names an entry's own surface `plugin:<extension>--<entry>`. */
 export const OC_FORGE_ENTRY_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -148,6 +157,8 @@ export type OcForgeHello = {
   /** URL prefixes: `page + encodeURIComponent(route)` is this extension's page, `session + encodeURIComponent(id)` a chat. */
   links: { page: string; session: string } | null;
   shortcuts: OcForgeShortcuts;
+  /** What this host takes (`OC_FORGE_LIMITS`); an older host sends none, and `OC_FORGE_LEGACY_LIMITS` hold. */
+  limits?: OcForgeLimits;
 };
 
 export type OcForgeKey = {
@@ -205,79 +216,96 @@ export const isOcForgeIcon = (value: unknown): value is OcForgeIcon => (
   && (ICON_NAME.test(value) || (/^\s*<svg[\s>]/i.test(value) && value.length <= OC_FORGE_LIMITS.svg))
 );
 
-const readTab = (value: Json): OcForgeTab | null => {
+// What the host takes, said to the frame whose request it refuses (its developer reads it in the rejected promise).
+const TAB_ID = `a tab's id is 1–${OC_FORGE_LIMITS.tabId} characters`;
+const TITLE = `a title is 1–${OC_FORGE_LIMITS.title} characters`;
+const ICON = `an icon is a Remixicon name or an inline <svg> of at most ${OC_FORGE_LIMITS.svg} characters`;
+const ROUTE = `a route is at most ${OC_FORGE_LIMITS.route} characters`;
+const flag = (name: string) => `${name} is true or false`;
+
+const isRoute = (value: unknown): value is string => typeof value === 'string' && value.length <= OC_FORGE_LIMITS.route;
+
+/** A tab as a frame sent it, or what is wrong with it. */
+const readTab = (value: Json): OcForgeTab | string => {
   const id = typeof value.id === 'string' && value.id.length > 0 && value.id.length <= OC_FORGE_LIMITS.tabId ? value.id : null;
+  if (!id) return TAB_ID;
   const title = text(value.title, OC_FORGE_LIMITS.title);
-  if (!id || !title) return null;
+  if (!title) return TITLE;
   const tab: OcForgeTab = { id, title };
   if (value.icon !== undefined) {
-    if (!isOcForgeIcon(value.icon)) return null;
+    if (!isOcForgeIcon(value.icon)) return ICON;
     tab.icon = value.icon;
   }
   if (value.dirty !== undefined) {
-    if (typeof value.dirty !== 'boolean') return null;
+    if (typeof value.dirty !== 'boolean') return flag('dirty');
     tab.dirty = value.dirty;
   }
   if (value.route !== undefined) {
-    if (!isRoute(value.route)) return null;
+    if (!isRoute(value.route)) return ROUTE;
     tab.route = value.route;
   }
   return tab;
 };
 
-const isRoute = (value: unknown): value is string => typeof value === 'string' && value.length <= OC_FORGE_LIMITS.route;
+type Parsed = { id: string | null; request: OcForgeRequest } | { id: string | null; error: string };
 
-/** A request a frame posted, or null for anything that is not one. */
-export const readOcForgeRequest = (data: unknown): { id: string | null; request: OcForgeRequest } | null => {
-  if (!isObject(data) || data.channel !== OC_FORGE_CHANNEL || data.v !== OC_FORGE_VERSION) return null;
+/**
+ * A request a frame posted; or, for one the host can't take, why (`error`), which the host answers with when the
+ * request has an id, at once rather than leaving the frame to time out; or null for anything that is not one.
+ */
+export const parseOcForgeRequest = (data: unknown): Parsed | null => {
+  if (!isObject(data) || data.channel !== OC_FORGE_CHANNEL || data.v !== OC_FORGE_VERSION || typeof data.type !== 'string') return null;
   const id = typeof data.id === 'string' && data.id.length > 0 && data.id.length <= 128 ? data.id : null;
   const payload = isObject(data.payload) ? data.payload : {};
+  const refuse = (reason: string): Parsed => ({ id, error: `Refused ${String(data.type).slice(0, 32)}: ${reason}.` });
   switch (data.type) {
     case 'hello':
       return { id, request: { type: 'hello' } };
     case 'rail-active':
       return typeof payload.entry === 'string' && OC_FORGE_ENTRY_ID.test(payload.entry)
         ? { id, request: { type: 'rail-active', payload: { entry: payload.entry } } }
-        : null;
+        : refuse(`an entry's id is kebab-case, at most ${OC_FORGE_LIMITS.entryId} characters`);
     case 'tab-open': {
       const tab = readTab(payload);
-      if (!tab || (payload.activate !== undefined && typeof payload.activate !== 'boolean')) return null;
+      if (typeof tab === 'string') return refuse(tab);
+      if (payload.activate !== undefined && typeof payload.activate !== 'boolean') return refuse(flag('activate'));
       return { id, request: { type: 'tab-open', payload: payload.activate === undefined ? tab : { ...tab, activate: payload.activate } } };
     }
     case 'tab-update': {
-      if (typeof payload.id !== 'string' || !payload.id || payload.id.length > OC_FORGE_LIMITS.tabId) return null;
+      if (typeof payload.id !== 'string' || !payload.id || payload.id.length > OC_FORGE_LIMITS.tabId) return refuse(TAB_ID);
       const update: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean; route?: string | null } = { id: payload.id };
       if (payload.title !== undefined) {
         const title = text(payload.title, OC_FORGE_LIMITS.title);
-        if (!title) return null;
+        if (!title) return refuse(TITLE);
         update.title = title;
       }
       if (payload.icon !== undefined) {
-        if (payload.icon !== null && !isOcForgeIcon(payload.icon)) return null;
+        if (payload.icon !== null && !isOcForgeIcon(payload.icon)) return refuse(ICON);
         update.icon = payload.icon;
       }
       if (payload.dirty !== undefined) {
-        if (typeof payload.dirty !== 'boolean') return null;
+        if (typeof payload.dirty !== 'boolean') return refuse(flag('dirty'));
         update.dirty = payload.dirty;
       }
       if (payload.route !== undefined) {
-        if (payload.route !== null && !isRoute(payload.route)) return null;
+        if (payload.route !== null && !isRoute(payload.route)) return refuse(ROUTE);
         update.route = payload.route;
       }
       return { id, request: { type: 'tab-update', payload: update } };
     }
     case 'tab-close-handler':
-      return typeof payload.on === 'boolean' ? { id, request: { type: 'tab-close-handler', payload: { on: payload.on } } } : null;
+      return typeof payload.on === 'boolean' ? { id, request: { type: 'tab-close-handler', payload: { on: payload.on } } } : refuse(flag('on'));
     case 'tab-close':
     case 'tab-activate':
       return typeof payload.id === 'string' && payload.id.length > 0 && payload.id.length <= OC_FORGE_LIMITS.tabId
         ? { id, request: { type: data.type, payload: { id: payload.id } } }
-        : null;
+        : refuse(TAB_ID);
     case 'key': {
       const flags = ['ctrlKey', 'metaKey', 'altKey', 'shiftKey'] as const;
-      if (typeof payload.key !== 'string' || !payload.key || payload.key.length > 32) return null;
-      if (typeof payload.code !== 'string' || payload.code.length > 32) return null;
-      if (flags.some((flag) => typeof payload[flag] !== 'boolean')) return null;
+      const press = 'a press has its key and code (at most 32 characters each) and the four modifier flags';
+      if (typeof payload.key !== 'string' || !payload.key || payload.key.length > 32) return refuse(press);
+      if (typeof payload.code !== 'string' || payload.code.length > 32) return refuse(press);
+      if (flags.some((name) => typeof payload[name] !== 'boolean')) return refuse(press);
       return {
         id,
         request: {
@@ -295,11 +323,18 @@ export const readOcForgeRequest = (data: unknown): { id: string | null; request:
       };
     }
     case 'route':
-      if (!isRoute(payload.route) || (payload.push !== undefined && typeof payload.push !== 'boolean')) return null;
+      if (!isRoute(payload.route)) return refuse(ROUTE);
+      if (payload.push !== undefined && typeof payload.push !== 'boolean') return refuse(flag('push'));
       return { id, request: { type: 'route', payload: payload.push === undefined ? { route: payload.route } : { route: payload.route, push: payload.push } } };
     default:
-      return null;
+      return refuse('not a request this host knows');
   }
+};
+
+/** A request a frame posted, or null for anything that is not a well-formed one. */
+export const readOcForgeRequest = (data: unknown): { id: string | null; request: OcForgeRequest } | null => {
+  const read = parseOcForgeRequest(data);
+  return read && 'request' in read ? read : null;
 };
 
 /** An event the host posted, or null. The client module reads these. */

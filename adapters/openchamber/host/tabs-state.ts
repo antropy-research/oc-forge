@@ -46,6 +46,20 @@ export const useOcForgeTabActive = (): boolean => {
   return Boolean(page) && stripShown && hasTabs;
 };
 
+/**
+ * The extension tab the strip shows selected (`<extension>:<tab>`), or null. The strip keeps it in view, as it keeps
+ * the selected session's tab: it scrolls only when the current session changes otherwise.
+ */
+export const useOcForgeActiveTabKey = (): string | null => {
+  const active = useOcForgeTabActive();
+  const page = useUIStore((state) => state.openGuestPageId);
+  const tab = useOcForgeStore((state) => (page ? state.activeTab[page] ?? null : null));
+  return active && page && tab ? `${page}:${tab}` : null;
+};
+
+/** How many extension tabs there are: the strip measures its edge fades again as they come and go. */
+export const useOcForgeTabCount = (): number => useOcForgeStore((state) => state.tabs.length);
+
 /** For the header: this open page keeps the tab strip instead of "← title". */
 export const useOcForgeTabbedPage = (guestId: string | null): boolean => {
   const stripShown = useUIStore((state) => state.sessionTabsEnabled) && !isVSCodeRuntime();
@@ -87,7 +101,7 @@ export const openOcForgeTab = (guestId: string, tab: OcForgeTab, activate: boole
   const state = useOcForgeStore.getState();
   const index = state.tabs.findIndex((entry) => entry.guestId === guestId && entry.id === tab.id);
   if (index === -1 && state.tabs.filter((entry) => entry.guestId === guestId).length >= OC_FORGE_LIMITS.tabs) {
-    return { ok: false, error: `An extension has at most ${OC_FORGE_LIMITS.tabs} header tabs.` };
+    return { ok: false, error: `An extension has at most ${OC_FORGE_LIMITS.tabs} header tabs: close one to open another.` };
   }
   const next: OcForgeHeaderTab = { guestId, ...tab, dirty: tab.dirty ?? false };
   const tabs = index === -1 ? [...state.tabs, next] : state.tabs.map((entry, at) => (at === index ? { ...entry, ...next } : entry));

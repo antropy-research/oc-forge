@@ -11,12 +11,14 @@
 import {
   envelope,
   matchHostShortcut,
+  OC_FORGE_LEGACY_LIMITS,
   readOcForgeEvent,
   type OcForgeEvent,
   type OcForgeFeature,
   type OcForgeForwardableAction,
   type OcForgeHello,
   type OcForgeKey,
+  type OcForgeLimits,
   type OcForgeShortcuts,
   type OcForgeTab,
   type OcForgeTabsState,
@@ -28,6 +30,8 @@ export type OcForgeClient = {
   /** The host's announcement for this frame. */
   readonly hello: OcForgeHello;
   has(feature: OcForgeFeature): boolean;
+  /** What the host takes (titles, tab counts, ids, routes): its hello's, else an older host's (`OC_FORGE_LEGACY_LIMITS`). */
+  limits(): OcForgeLimits;
   rail: {
     /** The entry this rail panel shows (its own entry for an entry's own panel); null without entries. */
     entry(): string | null;
@@ -174,6 +178,7 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
         return state();
       },
       has: (feature) => state().features.includes(feature),
+      limits: () => state().limits ?? OC_FORGE_LEGACY_LIMITS,
       rail: {
         entry: () => state().rail?.entry ?? null,
         own: () => state().rail?.own ?? false,

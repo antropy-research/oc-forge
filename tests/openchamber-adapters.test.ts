@@ -99,6 +99,11 @@ describe("openchamber adapters", () => {
     const strip = adapted("packages/ui/src/components/layout/SessionTabsStrip.tsx")
     expect(strip).toContain("isActive={tab.id === currentSessionId && !ocForgeTabActive}")
     expect(strip).toContain(") : null}\n        <OcForgeHeaderTabs />")
+    // The strip keeps the selected extension tab in view and measures its fades as they come and go; at its end, after
+    // the scroller, the list of every tab.
+    expect(strip).toContain("  }, [currentSessionId, ocForgeActiveTabKey, updateEdges]);")
+    expect(strip).toContain("  }, [updateEdges, tabs.length, ocForgeTabCount]);")
+    expect(strip).toContain("        <OcForgeHeaderTabs />\n      </div>\n      <OcForgeAllTabs\n        overflowing={edges.left || edges.right}")
     expect(adapted("packages/ui/src/components/layout/Header.tsx")).toContain("(ocForgeTabbedPage ? undefined : state.guests.find(")
     expect(adapted("packages/ui/src/hooks/useKeyboardShortcuts.ts")).toContain(
       "      if (ocForgeCloseActiveTab()) return;\n      if (currentSessionId) {",
