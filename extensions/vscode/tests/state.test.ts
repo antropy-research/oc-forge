@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyOps, readOps, WorkbenchState, type Parts, type StateSnapshot } from '../service/state.ts';
-import { batchOps, decodeValue, encodeValue, persistentIndexedDB, saveThroughService, type StateOp } from '../workbench/storage.ts';
+import { batchOps, decodeValue, encodeValue, persistentIndexedDB, saveInBackground, saveThroughService, watchForChanges, type StateOp, type Timers } from '../workbench/storage.ts';
+import { STORAGE_SCOPES, VscodeServices, type Disposable } from '../workbench/vscode.ts';
 
 describe('the service keeps the workbench storage', () => {
   test('ops are checked; malformed ones are dropped', () => {
@@ -164,19 +165,226 @@ describe('the frame runs an IndexedDB that persists through the service', () => 
     expect(order).toEqual(['vscode 1', 'service', 'delivered']);
   });
 
-  test('VS Code saves every few seconds with the focus outside its frame too, unless a save is still on its way', () => {
-    // As VS Code for the web: only while the document has focus (a frame in OpenChamber often hasn't).
-    const storageService = {
-      pendingUpdate: false,
-      get hasPendingUpdate() {
-        return this.pendingUpdate;
+});
+
+/** Timers on a clock the test moves. */
+const manualClock = () => {
+  let now = 0;
+  let next = 0;
+  const pending = new Map<number, { at: number; run: () => void }>();
+  const timers: Timers = {
+    set: (run, ms) => {
+      pending.set(++next, { at: now + ms, run });
+      return next;
+    },
+    clear: (handle) => {
+      pending.delete(handle as number);
+    },
+  };
+  const settle = async () => {
+    for (let round = 0; round < 10; round++) await Promise.resolve();
+  };
+  return {
+    timers,
+    armed: () => pending.size,
+    /** Moves the clock by `ms`, running each timer that falls due, and what it sets in motion. */
+    advance: async (ms: number) => {
+      const end = now + ms;
+      for (;;) {
+        const due = [...pending.entries()].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        pending.delete(due[0]);
+        now = due[1].at;
+        due[1].run();
+        await settle();
+      }
+      now = end;
+      await settle();
+    },
+  };
+};
+
+describe("VS Code's state saved while the frame doesn't have the focus", () => {
+  /** A storage service whose saves the test ends; how many ran and how many at once at most. */
+  const storageService = () => {
+    const ends: (() => void)[] = [];
+    const counts = { started: 0, running: 0, most: 0 };
+    return {
+      counts,
+      ends,
+      flush: () => {
+        counts.started += 1;
+        counts.running += 1;
+        counts.most = Math.max(counts.most, counts.running);
+        return new Promise<void>((resolve) => ends.push(() => {
+          counts.running -= 1;
+          resolve();
+        }));
       },
-      shouldFlushWhenIdle: () => false,
-      flush: async () => {},
+      endAll: () => ends.splice(0).forEach((end) => end()),
     };
-    saveThroughService(storageService, async () => {});
-    expect(storageService.shouldFlushWhenIdle()).toBe(true);
-    storageService.pendingUpdate = true;
-    expect(storageService.shouldFlushWhenIdle()).toBe(false);
+  };
+
+  test('a few seconds after a change it saves, once; while nothing changed it never does', async () => {
+    const clock = manualClock();
+    const storage = storageService();
+    const saves = saveInBackground(storage, () => false, { interval: 5_000, timers: clock.timers });
+    await clock.advance(60_000);
+    expect(storage.counts.started).toBe(0);
+    saves.changed();
+    await clock.advance(4_999);
+    expect(storage.counts.started).toBe(0);
+    await clock.advance(1);
+    expect(storage.counts.started).toBe(1);
+    storage.endAll();
+    await clock.advance(60_000);
+    expect(storage.counts.started).toBe(1);
+  });
+
+  test('with the focus VS Code saves itself: the frame waits until the focus is gone', async () => {
+    const clock = manualClock();
+    const storage = storageService();
+    let focused = true;
+    const saves = saveInBackground(storage, () => focused, { interval: 5_000, timers: clock.timers });
+    saves.changed();
+    await clock.advance(30_000);
+    expect(storage.counts.started).toBe(0);
+    focused = false;
+    await clock.advance(5_000);
+    expect(storage.counts.started).toBe(1);
+  });
+
+  test('one save at a time: a slow one holds the next, which comes an interval after it ended', async () => {
+    const clock = manualClock();
+    const storage = storageService();
+    const saves = saveInBackground(storage, () => false, { interval: 5_000, timers: clock.timers });
+    saves.changed();
+    await clock.advance(5_000);
+    expect(storage.counts.started).toBe(1);
+    expect(saves.saving()).toBe(true);
+    saves.changed();
+    await clock.advance(60_000);
+    // Still the first: nothing is timed while it runs.
+    expect(storage.counts.started).toBe(1);
+    expect(clock.armed()).toBe(0);
+    storage.endAll();
+    await clock.advance(0);
+    expect(saves.saving()).toBe(false);
+    await clock.advance(4_999);
+    expect(storage.counts.started).toBe(1);
+    await clock.advance(1);
+    expect(storage.counts.started).toBe(2);
+    expect(storage.counts.most).toBe(1);
+  });
+
+  test("what VS Code stores while a save collects its state is that save's, not a change; what comes after is", async () => {
+    const clock = manualClock();
+    let saves: ReturnType<typeof saveInBackground> | null = null;
+    let started = 0;
+    let later = false;
+    const storage = {
+      flush: async () => {
+        started += 1;
+        // onWillSaveState: everyone stores their state at once, which VS Code reports as changed values.
+        saves?.changed();
+        if (later) queueMicrotask(() => saves?.changed());
+      },
+    };
+    saves = saveInBackground(storage, () => false, { interval: 5_000, timers: clock.timers });
+    saves.changed();
+    await clock.advance(30_000);
+    expect(started).toBe(1);
+    later = true;
+    saves.changed();
+    await clock.advance(5_000);
+    expect(started).toBe(2);
+    later = false;
+    await clock.advance(5_000);
+    expect(started).toBe(3);
+    await clock.advance(30_000);
+    expect(started).toBe(3);
+  });
+
+  test('a failed save stops nothing; disposed, it saves no more', async () => {
+    const clock = manualClock();
+    let started = 0;
+    const saves = saveInBackground({ flush: async () => {
+      started += 1;
+      throw new Error('the databases are gone');
+    } }, () => false, { interval: 5_000, timers: clock.timers });
+    saves.changed();
+    await clock.advance(5_000);
+    saves.changed();
+    await clock.advance(5_000);
+    expect(started).toBe(2);
+    saves.changed();
+    saves.dispose();
+    await clock.advance(30_000);
+    expect(started).toBe(2);
+    expect(clock.armed()).toBe(0);
+  });
+
+  test("a change is what VS Code's interfaces report (editors, view containers, stored values, a webview's state) and the user's input in the frame", () => {
+    /** An event of VS Code's: its listeners, and what removed them. */
+    const emitter = () => {
+      const listeners = new Set<() => void>();
+      const event = (listener: () => void): Disposable => {
+        listeners.add(listener);
+        return { dispose: () => listeners.delete(listener) };
+      };
+      return { event, fire: () => listeners.forEach((listener) => listener()), count: () => listeners.size };
+    };
+    const editors = emitter();
+    const panes = emitter();
+    const values = new Map<number, ReturnType<typeof emitter>>(STORAGE_SCOPES.map((scope) => [scope, emitter()]));
+    const kept: Disposable[] = [];
+    const webviewState = [emitter(), emitter()];
+    const webviews: { onDidUpdateState: ReturnType<typeof emitter>['event'] }[] = [{ onDidUpdateState: webviewState[0]!.event }];
+    const registry: Record<string, unknown> = {
+      storageService: {
+        flush: async () => {},
+        onDidChangeValue: (scope: number, key: string | undefined, store: { add<T extends Disposable>(disposable: T): T }) => {
+          expect(key).toBeUndefined();
+          kept.push(store.add({ dispose: () => {} }));
+          return values.get(scope)!.event;
+        },
+      },
+      editorService: { onDidEditorsChange: editors.event },
+      paneCompositePartService: { onDidPaneCompositeOpen: panes.event },
+      webviewService: { get webviews() {
+        return webviews;
+      } },
+    };
+    const services = new VscodeServices({ invokeFunction: (fn) => fn({ get: (id) => registry[id as string] }) }, new Map(Object.keys(registry).map((name) => [name, name])));
+    const handlers = new Map<string, () => void>();
+    const target = {
+      addEventListener: (type: string, listener: () => void) => void handlers.set(type, listener),
+      removeEventListener: (type: string) => void handlers.delete(type),
+    };
+    let changes = 0;
+    const watch = watchForChanges(services, target, () => {
+      changes += 1;
+    });
+    expect(kept.length).toBe(STORAGE_SCOPES.length);
+    const fired: string[] = [];
+    const counted = (what: string, fire: () => void) => {
+      const before = changes;
+      fire();
+      if (changes > before) fired.push(what);
+    };
+    for (const scope of STORAGE_SCOPES) counted(`value ${scope}`, () => values.get(scope)!.fire());
+    counted('editors', () => editors.fire());
+    counted('view container', () => panes.fire());
+    // Webviews are looked for again at each change: the first is watched now, a later one after the next change.
+    counted('webview state', () => webviewState[0]!.fire());
+    webviews.push({ onDidUpdateState: webviewState[1]!.event });
+    counted('webview not watched yet', () => webviewState[1]!.fire());
+    counted('editors again', () => editors.fire());
+    counted('second webview state', () => webviewState[1]!.fire());
+    for (const type of ['wheel', 'pointerdown', 'keydown', 'blur']) counted(type, () => handlers.get(type)!());
+    expect(fired).toEqual([...STORAGE_SCOPES.map((scope) => `value ${scope}`), 'editors', 'view container', 'webview state', 'editors again', 'second webview state', 'wheel', 'pointerdown', 'keydown', 'blur']);
+    watch.dispose();
+    expect(editors.count() + panes.count() + webviewState[0]!.count() + webviewState[1]!.count() + handlers.size).toBe(0);
+    for (const scope of STORAGE_SCOPES) expect(values.get(scope)!.count()).toBe(0);
   });
 });

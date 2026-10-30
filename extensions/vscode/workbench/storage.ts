@@ -3,7 +3,7 @@
 // This is fake-indexeddb (an in-memory IndexedDB) filled from the snapshot the
 // service keeps, and every change goes back to the service.
 import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb';
-import { SHUTDOWN, type StorageService } from './vscode.ts';
+import { SHUTDOWN, STORAGE_SCOPES, type Disposable, type EditorService, type PaneCompositePartService, type StorageService, type VscodeServices, type Webview, type WebviewService } from './vscode.ts';
 
 export type StoredValue = { s: string } | { b: string } | { j: unknown };
 export type StateOp =
@@ -195,21 +195,146 @@ export const persistentIndexedDB = (snapshot: StateSnapshot, send: (ops: StateOp
 
 /**
  * VS Code saves its state before it reloads the window (Reload Window, a
- * folder switch) and reloads once its databases have it. Here they are memory,
- * and what a frame sends as it unloads never reaches the service: that save
- * waits for the service too. Returns the same save, for this frame's own reloads.
+ * folder switch: `flush(SHUTDOWN)`) and reloads once its databases have it.
+ * Here they are memory, and what a frame sends as it unloads never reaches the
+ * service: that save waits for the service too. The wrapper takes and replaces
+ * `IStorageService.flush`, a member of the service interface, on the service
+ * itself, so VS Code's own reloads wait as well. Returns the same save, for
+ * this frame's own reloads.
  */
-export const saveThroughService = (storageService: StorageService, flush: () => Promise<void>): (() => Promise<void>) => {
+export const saveThroughService = (storageService: Pick<StorageService, 'flush'>, flush: () => Promise<void>): (() => Promise<void>) => {
   const save = storageService.flush.bind(storageService);
   storageService.flush = async (reason?: number) => {
     await save(reason);
     if (reason === SHUTDOWN) await flush();
   };
-  // VS Code for the web saves every few seconds only while its document has focus, as its state changes only then.
-  // In OpenChamber the focus is often outside the frame (the chat, the header, another frame) while its state changes
-  // (a webview's, the editors the header opens), and a frame that unloads can't save: it saves either way.
-  if (typeof storageService.shouldFlushWhenIdle === 'function') storageService.shouldFlushWhenIdle = () => !storageService.hasPendingUpdate;
   return () => storageService.flush(SHUTDOWN);
+};
+
+/** Timers as the background saves use them (a stand-in in the tests). */
+export interface Timers {
+  set(callback: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const windowTimers: Timers = { set: (callback, ms) => setTimeout(callback, ms), clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) };
+
+/** How often a frame without the focus saves VS Code's state, when it changed: VS Code for the web's own interval. */
+export const BACKGROUND_SAVE_MS = 5_000;
+
+export interface BackgroundSaves extends Disposable {
+  /** Something may have changed what VS Code's next save collects. */
+  changed(): void;
+  /** Whether a save runs now. */
+  saving(): boolean;
+}
+
+/**
+ * The frame's own saves of VS Code's state while it doesn't have the focus, through `IStorageService.flush()`, which
+ * asks everyone for their latest state (`onWillSaveState`) and writes it to the databases. VS Code for the web does
+ * that every few seconds, but only while its document has the focus, taking it that its state changes only then. In
+ * OpenChamber it changes without it too (the editors the header opens, a webview's state), and a frame that unloads
+ * without a save (a browser reload, OpenChamber closing its panel) loses what changed since the last one. So once
+ * something changed (`changed`), every `interval` the frame saves if it lacks the focus (with it, VS Code saves): one
+ * save at a time, the next an interval after the last ended, none while nothing changed. What VS Code stores while a
+ * save collects its state is that save's own doing, not a change.
+ */
+export const saveInBackground = (storage: Pick<StorageService, 'flush'>, hasFocus: () => boolean, { interval = BACKGROUND_SAVE_MS, timers = windowTimers }: { interval?: number; timers?: Timers } = {}): BackgroundSaves => {
+  let changed = false;
+  let collecting = false;
+  let running = false;
+  let disposed = false;
+  let timer: unknown = null;
+  const arm = (): void => {
+    if (!disposed && !running && timer === null) timer = timers.set(tick, interval);
+  };
+  const tick = (): void => {
+    timer = null;
+    if (!changed || hasFocus()) return arm();
+    changed = false;
+    running = true;
+    let save: Promise<void>;
+    collecting = true;
+    try {
+      save = storage.flush();
+    } catch (error) {
+      save = Promise.reject(error);
+    } finally {
+      collecting = false;
+    }
+    void save.catch(() => undefined).finally(() => {
+      running = false;
+      arm();
+    });
+  };
+  arm();
+  return {
+    changed: () => {
+      if (!collecting) changed = true;
+    },
+    saving: () => running,
+    dispose: () => {
+      disposed = true;
+      if (timer !== null) timers.clear(timer);
+      timer = null;
+    },
+  };
+};
+
+/** What the change watch listens to in the frame's own window (a stand-in in the tests). */
+export interface WatchedWindow {
+  addEventListener(type: string, listener: () => void, options?: { capture?: boolean; passive?: boolean }): void;
+  removeEventListener(type: string, listener: () => void, options?: { capture?: boolean }): void;
+}
+
+/** The frame's own input: what the user did in it, with or without the focus (a wheel scrolls without taking it). */
+const INPUT_EVENTS = ['wheel', 'pointerdown', 'keydown'] as const;
+
+/**
+ * What may change VS Code's state in a frame, from VS Code's service interfaces and the frame's own window: editors
+ * opened, closed or changed (`IEditorService.onDidEditorsChange`), a view container opened
+ * (`IPaneCompositePartService.onDidPaneCompositeOpen`), values stored (`IStorageService.onDidChangeValue`, each
+ * scope), a webview's own state (`IWebview.onDidUpdateState` of each webview `IWebviewService` lists, looked for again
+ * at each of these), the user's input in the frame, and its window losing the focus (what VS Code's own saves, every
+ * few seconds while it had it, may not have collected yet).
+ */
+export const watchForChanges = (services: VscodeServices, target: WatchedWindow, changed: () => void): Disposable => {
+  const disposables: Disposable[] = [];
+  const store = { add: <T extends Disposable>(disposable: T): T => (disposables.push(disposable), disposable) };
+  const webviews = (() => {
+    try {
+      return services.get<WebviewService>('webviewService');
+    } catch {
+      return null;
+    }
+  })();
+  const watched = new WeakSet<Webview>();
+  const note = (): void => {
+    changed();
+    if (!webviews) return;
+    for (const webview of webviews.webviews) {
+      if (watched.has(webview)) continue;
+      watched.add(webview);
+      disposables.push(webview.onDidUpdateState(changed));
+    }
+  };
+  const storage = services.get<StorageService>('storageService');
+  for (const scope of STORAGE_SCOPES) disposables.push(storage.onDidChangeValue(scope, undefined, store)(changed));
+  disposables.push(services.get<EditorService>('editorService').onDidEditorsChange(note));
+  try {
+    disposables.push(services.get<PaneCompositePartService>('paneCompositePartService').onDidPaneCompositeOpen(note));
+  } catch {
+    // A workbench without pane composites shows no view containers to watch.
+  }
+  for (const type of INPUT_EVENTS) target.addEventListener(type, note, { capture: true, passive: true });
+  target.addEventListener('blur', note);
+  disposables.push({
+    dispose: () => {
+      for (const type of INPUT_EVENTS) target.removeEventListener(type, note, { capture: true });
+      target.removeEventListener('blur', note);
+    },
+  });
+  return { dispose: () => disposables.splice(0).forEach((disposable) => disposable.dispose()) };
 };
 
 export { IDBKeyRange };

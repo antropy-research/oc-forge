@@ -138,9 +138,13 @@ databases (layout, open editors, view state, extensions' state: `vscode-web-stat
 overwrite each other's layout (`service/state.ts`, `<server>.<role>.json`). The page starts from the whole
 workbench's state (its open editors), the others from nothing. Two frames that both write the same user file (each
 saved `settings.json`) still keep the later one, as two windows of the whole workbench did. VS Code for the web
-saves its state every few seconds only while its document has focus; a frame here saves either way
-(`shouldFlushWhenIdle`), as the focus is often in OpenChamber while its state changes (a preview's, the editors the
-header opens) and a frame can't save as it unloads: a browser reload keeps what was saved a few seconds before.
+saves its state every few seconds only while its document has focus, but the focus is often in OpenChamber while a
+frame's state changes (a preview's, the editors the header opens), and a frame can't save as it unloads. So a frame
+without the focus saves too, through `IStorageService.flush()`, 5 s after something changed (`saveInBackground` in
+`workbench/storage.ts`): what VS Code's interfaces report (editors, view containers, stored values, a webview's own
+state) and the user's input in the frame, one save at a time, none while nothing changed. A browser reload keeps
+what was saved a few seconds before. VS Code's own save before it reloads (`flush(SHUTDOWN)`) waits for the
+service.
 
 **Keys.** VS Code takes the keys while it has focus, in every frame: with the keyboard patch it keeps Cmd/Ctrl+1–9
 and Cmd/Ctrl+Alt+←/→ too, as VS Code's own default keybindings (not user keybindings, so `keybindings.json` stays
@@ -426,6 +430,29 @@ js-debug's parent and child sessions.
 | Testing through the runtime (a test extension in the check) | 2 |
 | The spike's checks as journeys at both sizes, with negative controls on the old build | 2 |
 | Docs, review fixes | 1 |
+
+## Which VS Code internals the frames use
+
+Each VS Code service member a frame calls is a member of a VS Code service interface (`IEditorService`,
+`IEditorGroupsService`, `IWorkbenchLayoutService`, `IPaneCompositePartService`, `IViewsService`, `IQuickInputService`,
+`INotificationService`, `IConfigurationService`, `IRemoteAgentService`, `IFileService`, `ICommandService`,
+`IEnvironmentService`, `ITerminalService`, `IStorageService`, `IWebviewService`, `IKeybindingService`), or a public
+member of a class those interfaces hand out (`EditorInput`, `URI`, `DisposableStore`). `workbench/vscode.ts` declares
+each under its VS Code interface's name, and `tests/vscode-api.test.ts` holds every declaration to the pinned source
+(`vendors/vscode`): a protected, private or class-only member fails it. That is VS Code's internal API, not the
+`vscode` extension API: stable in practice, checked on each release. Beyond it, the frames use:
+
+| What | Interface or class | Why | What it would take to drop it |
+|---|---|---|---|
+| The instantiation service and the service identifiers by name (`__ocVSCode.services`, `serviceIds`) | Two of the surface patches to the compiled workbench (`src/patch.ts`) | The embedder API (`web.api.ts`) hands out no services, and a frame needs the editor, layout, view and storage services to be one part | An embedder API that hands out services, or the parts' events and control |
+| `EditorInput`'s `typeId`, `editorId`, `resource`, `getName`, `isDirty`, `toUntyped`, `matches` | Public members of the abstract class `IEditorService` hands out for each open editor | To name an editor (its header tab's key and title) and hand it to the page | Nothing: they are its public API, and VS Code has no interface for it |
+| `URI.revive` and `URI.parse` | Public static members of class `URI`, reached through the constructor of a URI `IEnvironmentService` holds (`VscodeServices.uriClass`) | The editor service takes VS Code's own URIs (an editor from another frame arrives as JSON) | The bundle the frame loads (`code/browser/workbench/workbench.js`) exporting `URI`, as VS Code's embedder module (`workbench.web.main`) does |
+| `IEditorService.openEditor` and `openEditors`, replaced on the service in a rail view and the terminal | Interface members; replacing them is the frame's | An editor opened there goes to the page as a header tab; VS Code has no hook before an editor opens that can send it elsewhere | An event before an editor opens that can redirect it |
+| `IStorageService.flush`, wrapped on the service (`saveThroughService`) | Interface member; wrapping it is the frame's | VS Code's own reloads (`flush(SHUTDOWN)`, then reload) wait until the service has the state; in the browser, `ILifecycleService`'s shutdown events can't hold a reload for that | A lifecycle join that holds an expected reload |
+| `IWebviewService.createWebviewElement` and each webview's `focus`, wrapped (`src/focus.ts`); the original method is read from the class, as the delayed service's proxy keeps the first function read through it | Interface members; the proxy's behavior is `InstantiationService`'s implementation | A webview takes the focus only for the user, as the rest of a frame does | A focus policy for webviews (or an event when one is created) |
+| `_workbench.open`, run by id through the embedder's `IWorkbench.commands`: only on a release the surface patches don't fit, where there are no services (else `IEditorService.openEditor`) | VS Code's internal command behind the extension API's `vscode.open`; the workbench's own `vscode.open` takes no line | "Open in VS Code" on a file at a line | `vscode.open` taking editor options in the workbench |
+| The webview host page's protocol (`webview/`: `webview-ready` with `mountId` and `keyEventToken`, `load-resource`, the key and focus messages) | Internal, between `WebviewElement` and its host page (`webview/browser/pre/index.html`) | VS Code's own host page needs a service worker, `crypto.subtle` and a same-origin content frame, none of which an opaque-origin extension frame has | VS Code hosting webviews without them, or frames on real origins |
+| The other patches to the compiled workbench: the embedder's `create()` options, the handshake signature, the webview origin, keyboard support, the editor area's hiding | Compiled code, each matched exactly (`src/patch.ts`); a release they don't fit runs the whole workbench | See "How it fits in an extension frame" and the surface patches above | Each its own: see `src/patch.ts` |
 
 ## Layout
 
