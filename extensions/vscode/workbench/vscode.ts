@@ -130,9 +130,14 @@ export interface QuickInputService {
   pick<T extends QuickPickItem>(items: readonly T[], options?: { title?: string; placeHolder?: string; activeItem?: T }): Promise<T | undefined>;
 }
 
+/** `Severity.Info`. */
+export const SEVERITY_INFO = 1;
+
 /** `INotificationService`. */
 export interface NotificationService {
   info(message: string): void;
+  /** A notification with buttons (`IPromptChoice`: its `label` and `run` are its base's, which VS Code doesn't export). */
+  prompt(severity: number, message: string, choices: { label: string; run(): void }[]): unknown;
 }
 
 /** `ConfigurationTarget.MEMORY`: above the user's settings, never written anywhere. */
@@ -172,6 +177,10 @@ export interface UserDataProfile {
 /** `IRemoteAgentEnvironment`. */
 export interface RemoteAgentEnvironment {
   readonly profiles: { all: readonly UserDataProfile[] };
+  /** The server's install (its `package.json` is always there). */
+  readonly appRoot: Uri;
+  /** Where extensions keep their global storage on the server. */
+  readonly globalStorageHome: Uri;
 }
 
 /** `IRemoteAgentService`. */
@@ -179,11 +188,25 @@ export interface RemoteAgentService {
   getEnvironment(): Promise<RemoteAgentEnvironment | null>;
 }
 
+/** Public members of VS Code's `VSBuffer` class, in which `IFileService.readFile` hands out a file's content. */
+export interface VsBuffer {
+  readonly buffer: Uint8Array;
+  readonly byteLength: number;
+}
+
+/** `IFileContent`. */
+export interface FileContent {
+  readonly value: VsBuffer;
+}
+
 /** `IFileService`. */
 export interface FileService {
   /** Resolves once the scheme's provider is there (`vscode-remote` comes with the remote environment). */
   activateProvider(scheme: string): Promise<void>;
   hasProvider(resource: Uri): boolean;
+  readFile(resource: Uri): Promise<FileContent>;
+  /** Writes the file, its folders first. */
+  writeFile(resource: Uri, buffer: VsBuffer): Promise<unknown>;
 }
 
 /** `ICommandService`. */
@@ -196,11 +219,102 @@ export interface EnvironmentService {
   readonly userRoamingDataHome: Uri;
 }
 
+/** `IShellLaunchConfig`: how a terminal started. */
+export interface ShellLaunchConfig {
+  readonly name?: string;
+  /** An extension's own pseudoterminal: its process is the extension's, not the server's pty host's. */
+  readonly customPtyImplementation?: unknown;
+  readonly hideFromUser?: boolean;
+  readonly isFeatureTerminal?: boolean;
+  readonly type?: string;
+  readonly icon?: unknown;
+  readonly color?: string;
+}
+
+/** `ITerminalInstance`. */
+export interface TerminalInstance {
+  readonly instanceId: number;
+  /** Its process on the server's pty host, which another window can attach to. */
+  readonly persistentProcessId: number | undefined;
+  processId: number | undefined;
+  readonly processReady: Promise<void>;
+  readonly title: string;
+  readonly titleSource: number;
+  readonly shellLaunchConfig: ShellLaunchConfig;
+  shellIntegrationNonce: string;
+  readonly hasChildProcesses: boolean;
+  getInitialCwd(): Promise<string>;
+}
+
 /** `ITerminalService`. */
 export interface TerminalService {
-  readonly instances: readonly unknown[];
+  readonly instances: readonly TerminalInstance[];
   /** Done once VS Code has reconnected the workspace's terminals an earlier window left (persistent sessions). */
   readonly whenConnected: Promise<void>;
+  readonly onDidCreateInstance: Event<TerminalInstance>;
+  /** `ICreateTerminalOptions`: `{ config: IShellLaunchConfig }` (`attachPersistentProcess` attaches to a process). */
+  createTerminal(options?: unknown): Promise<TerminalInstance>;
+}
+
+/** `ITerminalInstanceHost`, `ITerminalService`'s base. */
+export interface TerminalInstanceHost {
+  readonly activeInstance: TerminalInstance | undefined;
+  readonly onDidChangeActiveInstance: Event<TerminalInstance | undefined>;
+  setActiveInstance(instance: TerminalInstance): void;
+  /** Reveals the instance, and focuses it. */
+  focusInstance(instance: TerminalInstance): Promise<void>;
+}
+
+/** `ITerminalGroupService`. */
+export interface TerminalGroupService {
+  showPanel(focus?: boolean): Promise<void>;
+}
+
+/** Public members of `CommonTask`, the class of the tasks `ITaskService.run` takes. */
+export interface Task {
+  _label: string;
+  /** Its source (`IBaseTaskSource`, which VS Code doesn't export): its `label` names it ("Workspace", "npm"). */
+  _source: { readonly label: string };
+  getDefinition(useSource?: boolean): Record<string, unknown> | undefined;
+}
+
+/** `ITaskService`. */
+export interface TaskService {
+  run(task: Task | undefined, options?: unknown, runSource?: number): Promise<unknown>;
+}
+
+/** `ILaunch`. */
+export interface Launch {
+  getCompound(name: string): unknown;
+}
+
+/** `IAdapterManager`: the debuggers VS Code knows (their contributions). */
+export interface AdapterManager {
+  getDebugger(type: string): unknown;
+}
+
+/** `IDebugService`. */
+export interface DebugService {
+  getAdapterManager(): AdapterManager;
+  startDebugging(launch: Launch | undefined, configOrName?: unknown, options?: { noDebug?: boolean }, saveBeforeStart?: boolean): Promise<boolean>;
+}
+
+/** Public members of `ExtensionIdentifier`, the class that names an extension in `IExtensionDescription`. */
+export interface ExtensionIdentifier {
+  readonly value: string;
+}
+
+/** `IExtensionDescription` (its members are `IRelaxedExtensionDescription`'s). */
+export interface ExtensionDescription {
+  identifier: ExtensionIdentifier;
+}
+
+/** `IExtensionService`. */
+export interface ExtensionService {
+  /** The extensions this window runs (installed and enabled). */
+  readonly extensions: readonly ExtensionDescription[];
+  whenInstalledExtensionsRegistered(): Promise<boolean>;
+  readonly onDidChangeExtensions: Event<unknown>;
 }
 
 /** `WillSaveStateReason.SHUTDOWN`: the window is about to reload or close. */
@@ -284,6 +398,11 @@ export class VscodeServices {
   /** VS Code's URI class, for `URI.revive` and `URI.parse`: the class of a URI the environment service holds. */
   uriClass(): { revive(components: unknown): Uri; parse(text: string): Uri } {
     return this.get<EnvironmentService>('environmentService').userRoamingDataHome.constructor as unknown as { revive(components: unknown): Uri; parse(text: string): Uri };
+  }
+
+  /** VS Code's `VSBuffer` class, for `VSBuffer.wrap`: the class of a file's content the file service read (`sample`). */
+  static bufferClass(sample: VsBuffer): { wrap(data: Uint8Array): VsBuffer } {
+    return sample.constructor as unknown as { wrap(data: Uint8Array): VsBuffer };
   }
 }
 
