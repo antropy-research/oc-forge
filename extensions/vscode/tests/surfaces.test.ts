@@ -2,18 +2,23 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EditorRequests, readTabs, SavedTabs } from '../service/editors.ts';
+import { EditorRequests, readPart, readTabs, SavedTabs } from '../service/editors.ts';
 import {
   editorKeyOf,
   editorRoute,
   isPortable,
+  keyHash,
+  leastRecentlyUsed,
   marshal,
+  pageRoute,
   readEditorRoute,
   readOpenRequest,
   requestTitle,
   restoredTabOf,
   roleOf,
   roleSettings,
+  routeNames,
+  tabChunks,
   tabIcon,
   tabRoute,
   tabTitle,
@@ -101,6 +106,9 @@ describe('an editor between frames', () => {
     expect(restoredTabOf(tabs, preview('new'), 'Preview notes.md', new Set())).toBeNull();
     // Only a webview panel is revived under a new key: a file of the same title is another file.
     expect(restoredTabOf([{ id: 'vscode-remote://vscode:8000/q/README.md', title: 'README.md' }], 'vscode-remote://vscode:8000/p/README.md', 'README.md', new Set())).toBeNull();
+    // Saved under an older host, which took 80 characters: its title cut there is the same title.
+    const long = `Preview ${'chapter-'.repeat(15)}.md`;
+    expect(restoredTabOf([{ id: preview('old'), title: tabTitle(long, 80) }], preview('new'), tabTitle(long, 512), new Set())).toBe(preview('old'));
   });
 
   test('marshalled as VS Code does, and back with its URI.revive', () => {
@@ -126,10 +134,51 @@ describe('an editor between frames', () => {
     expect(requestTitle({ original: { resource: remote('/p/a.ts') }, modified: { resource: remote('/p/a.ts') } })).toBe('a.ts (changes)');
     expect(requestTitle({ label: 'Settings' })).toBe('Settings');
     expect(tabTitle('x'.repeat(100))).toHaveLength(80);
+    expect(requestTitle({ resource: remote(`/p/${'n'.repeat(300)}.ts`) }, 512)).toBe(`${'n'.repeat(300)}.ts`);
     expect(tabIcon('vscode-remote://h/p/README.md')).toBe('file-text');
     expect(tabIcon('vscode-remote://h/p/a.png')).toBe('file-image');
     expect(tabIcon('diff:a b')).toBe('git-commit');
     expect(tabIcon('vscode-remote://h/p/main.ts')).toBe('file-code');
+  });
+
+  test("a title as long as the host takes: a file's whole name (255 bytes at most) under a current host, cut by characters", () => {
+    // An older host takes 80 characters, a current one 512 (its hello says).
+    const name = `${'report-'.repeat(36)}final.pdf`;
+    expect(name.length).toBe(261);
+    expect(tabTitle(name, 512)).toBe(name);
+    expect(tabTitle(name)).toHaveLength(80);
+    expect(tabTitle(name).endsWith('…')).toBe(true);
+    expect(tabTitle('x'.repeat(600), 512)).toHaveLength(512);
+    // Never inside a character: an emoji is two UTF-16 units, and the host counts units.
+    const emoji = tabTitle('😀'.repeat(60), 80);
+    expect(emoji.length).toBeLessThanOrEqual(80);
+    expect(emoji).toMatch(/^(😀)+…$/);
+    // Nor a space before the ellipsis (the host trims, and the page would send it again and again).
+    expect(tabTitle(`${'word '.repeat(30)}`, 80)).toMatch(/\S…$/);
+    expect(tabTitle('   ')).toBe('Untitled');
+  });
+
+  test('every editor has a route the host takes, naming it: its link, or for a key too long for one, its hash', () => {
+    const file = 'vscode-remote://h/p/a.ts';
+    expect(pageRoute(file)).toBe(editorRoute(file));
+    // A key the host takes as a tab id (1024 characters) can make a route of 3,000 (each `/` is `%2F`).
+    // (A key of half slashes still fits: `d/` repeated makes a route of 2,027.)
+    expect(editorRoute(editorKeyOf({ resource: remote(`/${'d/'.repeat(1500)}x.ts`) })!).length).toBeLessThanOrEqual(2048);
+    for (const key of [`vscode-remote://h/${'/'.repeat(1000)}x`, editorKeyOf({ resource: remote(`/${'/'.repeat(1500)}x.ts`) })!]) {
+      expect(key.length).toBeLessThanOrEqual(1024);
+      expect(editorRoute(key).length).toBeGreaterThan(2048);
+      const route = pageRoute(key);
+      expect(route).toBe(`/editor?tab=${keyHash(key)}`);
+      expect(route.length).toBeLessThanOrEqual(2048);
+      const target = readEditorRoute(route)!;
+      expect(target).toEqual({ key: `#${keyHash(key)}`, line: null });
+      expect(routeNames(target.key, key)).toBe(true);
+      expect(routeNames(target.key, file)).toBe(false);
+    }
+    expect(routeNames(file, file)).toBe(true);
+    expect(keyHash('a')).not.toBe(keyHash('b'));
+    expect(keyHash('a')).toMatch(/^[0-9a-z]{1,12}$/);
+    expect(readEditorRoute('/editor?tab=../../x')).toBeNull();
   });
 
   test('requests and routes are read defensively', () => {
@@ -154,6 +203,92 @@ describe('an editor between frames', () => {
     // A key shortened by `bounded`, or whose route the host wouldn't take.
     expect(tabRoute(`vscode-remote://h/${'a'.repeat(1010)}`)).toBeUndefined();
     expect(tabRoute(`vscode-remote://h/${'/'.repeat(700)}x`)).toBeUndefined();
+  });
+});
+
+describe('the header full: what makes room', () => {
+  const editor = (key: string, flags: Partial<{ dirty: boolean; sticky: boolean; visible: boolean }> = {}) => ({ key, dirty: false, sticky: false, visible: false, ...flags });
+
+  test('the editors used least recently close first, as VS Code\'s workbench.editor.limit closes them', () => {
+    // Most recently used first: e is the one used least recently.
+    const editors = [editor('a', { visible: true }), editor('b'), editor('c', { dirty: true }), editor('d', { sticky: true }), editor('e')];
+    expect(leastRecentlyUsed(editors, new Set(), 1)).toEqual(['e']);
+    // Never one with unsaved changes, a pinned one, one on screen.
+    expect(leastRecentlyUsed(editors, new Set(), 5)).toEqual(['e', 'b']);
+    // Nor one the caller keeps (the editors waiting for a tab).
+    expect(leastRecentlyUsed(editors, new Set(['e']), 1)).toEqual(['b']);
+    expect(leastRecentlyUsed([editor('a', { dirty: true })], new Set(), 1)).toEqual([]);
+    expect(leastRecentlyUsed(editors, new Set(), 0)).toEqual([]);
+  });
+});
+
+describe('the saved tabs, in parts when one request is too small for them', () => {
+  // A request as the page makes it (the service's server fields, the list) and as OpenChamber's route takes it:
+  // a body of 64,000 characters at most, in a JSON request of 80 KB.
+  const fits = (tabs: unknown[]) => {
+    const body = JSON.stringify({ serverUrl: 'http://127.0.0.1:35392/base', token: 't'.repeat(48), folder: '/p'.repeat(60), tabs, part: { revision: 'mbabcdef12', index: 0, count: 99 } });
+    const request = JSON.stringify({ method: 'POST', path: '/tabs/save', body, viewerId: 'v'.repeat(36) });
+    return body.length <= 64_000 && new TextEncoder().encode(request).length <= 80 * 1024;
+  };
+  const many = (count: number, idLength: number, title = (index: number) => `file-${index}.ts`) => Array.from({ length: count }, (_, index) => ({
+    id: `vscode-remote://h/${String(index).padStart(6, '0')}/${'"%é/'.repeat(Math.max(0, Math.floor((idLength - 30) / 4)))}`.slice(0, idLength),
+    title: title(index),
+    icon: 'file-code',
+  }));
+
+  test('one part while they fit, as before; parts each a request takes otherwise, in order', () => {
+    expect(tabChunks([])).toEqual([[]]);
+    const few = many(20, 90);
+    expect(tabChunks(few)).toEqual([few]);
+    // A thousand tabs with ids of 1024 characters (quotes and non-ASCII escaped in the request) and long titles.
+    const heavy = many(1000, 1024, (index) => `${'題'.repeat(200)}-${index}`);
+    const parts = tabChunks(heavy);
+    expect(parts.length).toBeGreaterThan(20);
+    expect(parts.every((part) => part.length > 0 && fits(part))).toBe(true);
+    expect(parts.flat()).toEqual(heavy);
+  });
+
+  test('the service keeps a list sent in parts once they have all come, and as long as any host takes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vscode-tabs-parts-'));
+    const saved = new SavedTabs(dir, () => {});
+    const tabs = many(1000, 120).map((tab, index) => ({ ...tab, title: index === 0 ? 't'.repeat(512) : tab.title }));
+    expect(readTabs(tabs)).toHaveLength(1000);
+    expect(readTabs([{ id: 'x', title: 't'.repeat(513) }])).toEqual([]);
+    const parts = tabChunks(tabs, 20_000);
+    expect(parts.length).toBeGreaterThan(2);
+    await saved.save('k', readTabs(many(3, 40)));
+    // In any order; until the last has come the list is the one before.
+    const order = [...parts.keys()].reverse();
+    for (const [step, index] of order.entries()) {
+      await saved.savePart('k', { revision: 'r1', index, count: parts.length }, readTabs(parts[index]));
+      if (step < order.length - 1) expect(await saved.load('k')).toHaveLength(3);
+    }
+    expect(await saved.load('k')).toEqual(readTabs(tabs));
+    expect(await new SavedTabs(dir, () => {}).load('k')).toHaveLength(1000);
+  });
+
+  test('two windows saving at once: the revision that completes is kept and takes the older ones with it, not the newer', async () => {
+    const saved = new SavedTabs(mkdtempSync(join(tmpdir(), 'vscode-tabs-revisions-')), () => {});
+    const a = many(4, 40, (index) => `a${index}`);
+    const b = many(4, 40, (index) => `b${index}`);
+    const c = many(4, 40, (index) => `c${index}`);
+    await saved.savePart('k', { revision: 'a', index: 0, count: 2 }, a.slice(0, 2));
+    await saved.savePart('k', { revision: 'b', index: 0, count: 2 }, b.slice(0, 2));
+    await saved.savePart('k', { revision: 'c', index: 0, count: 2 }, c.slice(0, 2));
+    await saved.savePart('k', { revision: 'b', index: 1, count: 2 }, b.slice(2));
+    expect(await saved.load('k')).toEqual(b);
+    // a began before b and went with it; c began after, and completes.
+    await saved.savePart('k', { revision: 'a', index: 1, count: 2 }, a.slice(2));
+    expect(await saved.load('k')).toEqual(b);
+    await saved.savePart('k', { revision: 'c', index: 1, count: 2 }, c.slice(2));
+    expect(await saved.load('k')).toEqual(c);
+  });
+
+  test('a part is read defensively', () => {
+    expect(readPart({ revision: 'mbabc123', index: 1, count: 3 })).toEqual({ revision: 'mbabc123', index: 1, count: 3 });
+    for (const part of [null, {}, { revision: 'x', index: 3, count: 3 }, { revision: '../x', index: 0, count: 1 }, { revision: 'x', index: 0, count: 0 }, { revision: 'x', index: 0, count: 10_000 }, { revision: 'x', index: 0.5, count: 2 }]) {
+      expect(readPart(part)).toBeNull();
+    }
   });
 });
 

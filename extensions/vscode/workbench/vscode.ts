@@ -42,6 +42,8 @@ export type OpenEditors = (editors: unknown[], group?: unknown, options?: unknow
 
 export interface EditorService {
   readonly activeEditor: EditorInput | undefined;
+  /** The editors on screen: the active one of each group. */
+  readonly visibleEditors: readonly EditorInput[];
   /** 0: most recently active first, 1: in the order they appear. */
   getEditors(order: 0 | 1): readonly EditorIdentifier[];
   readonly onDidActiveEditorChange: Event<void>;
@@ -54,6 +56,7 @@ export interface EditorService {
 export interface EditorGroupsService {
   readonly whenRestored: Promise<void>;
   readonly activeGroup: { readonly id: number; readonly activeEditor: EditorInput | null };
+  getGroup(id: number): { isSticky(editor: EditorInput): boolean } | undefined;
 }
 
 export const PARTS = {

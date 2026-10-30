@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { isConnectionToken, parseServerUrl } from '../src/settings.ts';
 import { isExternalAllowed } from '../src/workbench.ts';
 import { WorkbenchAssets } from './assets.ts';
-import { EditorRequests, readTabs, SavedTabs } from './editors.ts';
+import { EditorRequests, readPart, readTabs, SavedTabs } from './editors.ts';
 import { Rail } from './rail.ts';
 import { RESOURCE_MAX, ServerError, VscodeServer } from './server.ts';
 import { isStateRole, readOps, WorkbenchState } from './state.ts';
@@ -107,10 +107,18 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
     if (typeof body.key !== 'string') throw new ServerError('key is required', 400);
     return { open: editorRequests.take(body.key) };
   },
-  // The page's header tabs for a folder, so a frame can bring them back after OpenChamber reloads.
+  // The page's header tabs for a folder, so a frame can bring them back after OpenChamber reloads. More than one
+  // request takes come in parts (`part`: the list's revision, this part's index, how many).
   '/tabs/save': async (body) => {
     const server = serverOf(body);
-    await savedTabs.save(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder), readTabs(body.tabs));
+    const key = SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder);
+    if (body.part === undefined) {
+      await savedTabs.save(key, readTabs(body.tabs));
+      return { ok: true };
+    }
+    const part = readPart(body.part);
+    if (!part) throw new ServerError('part is { revision, index, count }', 400);
+    await savedTabs.savePart(key, part, readTabs(body.tabs));
     return { ok: true };
   },
   '/tabs/load': async (body) => {

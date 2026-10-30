@@ -117,7 +117,8 @@ const uriText = (value: unknown): string | null => {
 
 const KEY_MAX = 1024;
 
-const bounded = (key: string): string => {
+/** A key the host takes (`OC_FORGE_LIMITS.tabId`): a longer one keeps its start and ends in a hash of the rest. */
+export const bounded = (key: string): string => {
   if (key.length <= KEY_MAX) return key;
   let hash = 0x811c9dc5;
   for (let index = 0; index < key.length; index++) hash = Math.imul(hash ^ key.charCodeAt(index), 0x01000193) >>> 0;
@@ -155,8 +156,11 @@ const WEBVIEW_PANEL = 'workbench.editors.webviewInput|';
 export const restoredTabOf = (tabs: readonly { id: string; title: string }[], key: string, title: string, taken: ReadonlySet<string>): string | null => {
   if (tabs.some((tab) => tab.id === key)) return key;
   if (!key.startsWith(WEBVIEW_PANEL)) return null;
-  return tabs.find((tab) => tab.id.startsWith(WEBVIEW_PANEL) && tab.title === title && !taken.has(tab.id))?.id ?? null;
+  return tabs.find((tab) => tab.id.startsWith(WEBVIEW_PANEL) && sameTitle(tab.title, title) && !taken.has(tab.id))?.id ?? null;
 };
+
+/** A saved title is this one, or this one cut where an older host's limit ended it (`tabTitle`). */
+const sameTitle = (saved: string, title: string): boolean => saved === title || (saved.endsWith('…') && title.startsWith(saved.slice(0, -1)));
 
 /** Schemes whose editors belong to the frame that made them (its own terminals, output, chat). */
 const LOCAL_SCHEMES = /^(vscode-terminal|output|vscode-chat|vscode-chat-.+|vscode-interactive-input|vscode-webview|walkThrough|walkThroughSnippet)$/;
@@ -171,22 +175,33 @@ export const isPortable = (untyped: unknown): boolean => {
   return uris.length > 0 && uris.every((scheme) => !LOCAL_SCHEMES.test(scheme));
 };
 
+/** An older host's longest title (`OC_FORGE_LEGACY_LIMITS.title`); a host's hello says its own (512 since 2026-10-30). */
 const TITLE_MAX = 80;
 
-export const tabTitle = (name: string): string => {
+/**
+ * A header tab's title: the editor's name, cut to `max` UTF-16 units (the host's limit) with an ellipsis, never
+ * inside a character. The host shows the whole title in the tab's tooltip, and the page names the editor in full.
+ */
+export const tabTitle = (name: string, max: number = TITLE_MAX): string => {
   const title = name.trim() || 'Untitled';
-  return title.length > TITLE_MAX ? `${title.slice(0, TITLE_MAX - 1)}…` : title;
+  if (title.length <= max) return title;
+  let cut = '';
+  for (const point of title) {
+    if (cut.length + point.length > max - 1) break;
+    cut += point;
+  }
+  return `${cut.trimEnd()}…`;
 };
 
 const basename = (path: string): string => decodeURIComponent(path.replace(/\/+$/, '').split('/').pop() ?? '') || path;
 
 /** A first title for a tab another frame opens; the page names it properly once the editor runs. */
-export const requestTitle = (untyped: unknown): string => {
+export const requestTitle = (untyped: unknown, max: number = TITLE_MAX): string => {
   const input = untyped as { label?: unknown; resource?: unknown; modified?: unknown; multiDiffSource?: unknown } | null;
-  if (typeof input?.label === 'string' && input.label.trim()) return tabTitle(input.label);
+  if (typeof input?.label === 'string' && input.label.trim()) return tabTitle(input.label, max);
   const modified = resourceOf(input?.modified);
   const path = (isUriLike(modified) ? modified.path : null) ?? (isUriLike(input?.resource) ? input!.resource.path : (input?.resource as { path?: string } | undefined)?.path);
-  if (typeof path === 'string') return tabTitle(modified ? `${basename(path)} (changes)` : basename(path));
+  if (typeof path === 'string') return tabTitle(modified ? `${basename(path)} (changes)` : basename(path), max);
   return 'Editor';
 };
 
@@ -242,12 +257,91 @@ export const tabRoute = (key: string): string | undefined => {
   return route.length <= ROUTE_MAX ? route : undefined;
 };
 
+/** A short, stable name for a key (53 bits, cyrb53), for a route the key itself would make too long. */
+export const keyHash = (key: string): string => {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let index = 0; index < key.length; index++) {
+    const code = key.charCodeAt(index);
+    h1 = Math.imul(h1 ^ code, 2654435761);
+    h2 = Math.imul(h2 ^ code, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+};
+
+/**
+ * The page's route while it shows this editor: its link (`editorRoute`), or for a key too long for one the host takes,
+ * a route naming it by its hash, which finds the editor while VS Code has it open (as after a reload). Every editor
+ * has one, so the address bar never keeps the editor shown before.
+ */
+export const pageRoute = (key: string): string => {
+  const route = editorRoute(key);
+  return route.length <= ROUTE_MAX ? route : `/editor?tab=${keyHash(key)}`;
+};
+
+/** What a route names: an editor's key, or `#<hash>` for one named by its hash (`pageRoute`), which no key starts with. */
 export const readEditorRoute = (route: string | null): { key: string; line: number | null } | null => {
   if (!route) return null;
   const match = /^\/editor\?(.*)$/.exec(route);
   if (!match) return null;
   const params = new URLSearchParams(match[1]);
-  const key = params.get('key');
+  const tab = params.get('tab');
+  const key = params.get('key') ?? (tab && /^[0-9a-z]{1,12}$/.test(tab) ? `#${tab}` : null);
   const line = Number(params.get('line'));
   return key ? { key, line: Number.isInteger(line) && line > 0 ? line : null } : null;
+};
+
+/** Whether a route's target (`readEditorRoute`) is this editor's key. */
+export const routeNames = (target: string, key: string): boolean => target === key || (target.startsWith('#') && target === `#${keyHash(key)}`);
+
+const utf8Length = (text: string): number => new TextEncoder().encode(text).length;
+
+/**
+ * The saved tabs in parts, each small enough for one service request: OpenChamber's guest service route takes a body
+ * of 64,000 characters in a request of 80 KB. `budget` is in bytes of the request (each tab as it is written there,
+ * escaped once more); one part, maybe empty, when they all fit.
+ */
+export const tabChunks = <T>(tabs: readonly T[], budget = 48_000): T[][] => {
+  const parts: T[][] = [];
+  let part: T[] = [];
+  let size = 0;
+  for (const tab of tabs) {
+    const cost = utf8Length(JSON.stringify(JSON.stringify(tab))) + 1;
+    if (part.length > 0 && size + cost > budget) {
+      parts.push(part);
+      part = [];
+      size = 0;
+    }
+    part.push(tab);
+    size += cost;
+  }
+  parts.push(part);
+  return parts;
+};
+
+/** An editor (all of a key's, in each group), for `leastRecentlyUsed`. */
+export interface ClosableEditor {
+  key: string;
+  dirty: boolean;
+  /** Pinned (VS Code's sticky editors). */
+  sticky: boolean;
+  /** On screen, in some editor group. */
+  visible: boolean;
+}
+
+/**
+ * The editors to close so that `count` more get a header tab, as VS Code's `workbench.editor.limit` closes them: the
+ * ones used least recently first (`editors` comes most recent first), never one with unsaved changes, a pinned one,
+ * one on screen, or one `keep` names. Fewer than `count` when there aren't as many.
+ */
+export const leastRecentlyUsed = (editors: readonly ClosableEditor[], keep: ReadonlySet<string>, count: number): string[] => {
+  const keys: string[] = [];
+  for (const editor of [...editors].reverse()) {
+    if (keys.length >= count) break;
+    if (editor.dirty || editor.sticky || editor.visible || keep.has(editor.key) || keys.includes(editor.key)) continue;
+    keys.push(editor.key);
+  }
+  return keys;
 };

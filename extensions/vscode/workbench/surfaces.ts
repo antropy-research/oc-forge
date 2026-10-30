@@ -7,22 +7,28 @@
 // Frames reach each other only through OpenChamber: an editor opened in a
 // view or the terminal becomes a header tab, which shows the page, which opens
 // the editor; what to open waits in the extension's service.
-import type { OcForgeClient, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
+import type { OcForgeClient, OcForgeLimits, OcForgeTab } from '../../../adapters/openchamber/client/index.ts';
 import { followView, type RailEntry } from '../src/rail.ts';
 import {
+  bounded,
   editorKeyOf,
   editorRoute,
   isPortable,
+  leastRecentlyUsed,
   marshal,
+  pageRoute,
   readEditorRoute,
   readOpenRequest,
   requestTitle,
   restoredTabOf,
   roleSettings,
+  routeNames,
+  tabChunks,
   tabIcon,
   tabRoute,
   tabTitle,
   unmarshal,
+  type ClosableEditor,
   type OpenRequest,
   type Role,
 } from '../src/surfaces.ts';
@@ -70,6 +76,16 @@ export interface SurfaceContext {
 
 const log = (message: string, error?: unknown): void => console.warn(`[OpenChamber VS Code] ${message}`, error ?? '');
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** What the user should know, in this frame's VS Code notifications (a toast, then the notification center). */
+const notify = (services: VscodeServices, message: string): void => {
+  log(message);
+  try {
+    services.get<{ info(message: string): void }>('notificationService').info(message);
+  } catch (error) {
+    log('could not show a notification', error);
+  }
+};
 
 /** How often a rail view reads the rail again while it shows (the host polls it every 2 s). */
 const RAIL_FOLLOW_MS = 3_000;
@@ -230,7 +246,7 @@ export const keyOfEditor = (editor: EditorInput): string => {
     if (key) return key;
   }
   if (editor.resource) return editorKeyOf({ resource: editor.resource }, FILE_INPUTS.has(editor.typeId) ? undefined : editor.typeId)!;
-  return `${editor.typeId}|${editor.getName()}`;
+  return bounded(`${editor.typeId}|${editor.getName()}`);
 };
 
 const isGroup = (value: unknown): boolean => typeof value === 'number' || (typeof value === 'object' && value !== null && typeof (value as { id?: unknown }).id === 'number');
@@ -239,15 +255,15 @@ const selectionLine = (options: unknown): number | undefined => {
   return typeof line === 'number' && line > 0 ? line : undefined;
 };
 
-/** What the page should open instead of this frame, or null to open it here. */
-const handoffOf = (editor: unknown, optionsOrGroup: unknown): Handoff | null => {
+/** What the page should open instead of this frame, or null to open it here; titles as long as the host takes (`titleMax`). */
+const handoffOf = (editor: unknown, optionsOrGroup: unknown, titleMax: number): Handoff | null => {
   const options = optionsOrGroup && !isGroup(optionsOrGroup) ? optionsOrGroup : undefined;
   let untyped: Record<string, unknown> | undefined;
   if (isEditorInput(editor)) {
     // Editors with no resource to name them: the page opens them the way VS Code's own commands do.
     const id = editor.extension?.identifier?.id;
     if (editor.typeId === 'workbench.extensions.input2' && id) {
-      return { key: `open|${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, title: tabTitle(editor.getName()), icon: 'puzzle', open: { kind: 'command', command: 'extension.open', args: [id] }, route: null };
+      return { key: `open|${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, title: tabTitle(editor.getName(), titleMax), icon: 'puzzle', open: { kind: 'command', command: 'extension.open', args: [id] }, route: null };
     }
     try {
       untyped = editor.toUntyped() as Record<string, unknown> | undefined;
@@ -263,7 +279,7 @@ const handoffOf = (editor: unknown, optionsOrGroup: unknown): Handoff | null => 
   const key = editorKeyOf(merged);
   if (!key) return null;
   const line = selectionLine(merged.options);
-  return { key, title: requestTitle(merged), icon: tabIcon(key), open: { kind: 'editor', editor: marshal(merged) }, route: editorRoute(key, line) };
+  return { key, title: requestTitle(merged, titleMax), icon: tabIcon(key), open: { kind: 'editor', editor: marshal(merged) }, route: editorRoute(key, line) };
 };
 
 /**
@@ -295,6 +311,7 @@ const handEditorsToPage = (context: SurfaceContext): void => {
   const openEditor = editorService.openEditor.bind(editorService);
   const openEditors = editorService.openEditors.bind(editorService);
   const modified = modifiedClicks();
+  const limits = context.forge.limits();
   const hand = async (handoff: Handoff): Promise<void> => {
     const url = handoff.route && modified() ? context.forge.links.pageUrl(handoff.route) : null;
     if (url) {
@@ -306,10 +323,16 @@ const handEditorsToPage = (context: SurfaceContext): void => {
       await context.forge.tabs.open(withRoute({ id: handoff.key, title: handoff.title, icon: handoff.icon }), { activate: true });
     } catch (error) {
       log('could not hand the editor to the page', error);
+      // Nothing opened (the page takes an editor with its tab): the user hears why. A full header refuses a tab
+      // opened from here; the page itself, where VS Code opened it already, makes room instead (EditorArea.makeRoom).
+      const full = context.forge.tabs.state().list.length >= limits.tabs;
+      notify(context.services, full
+        ? `${handoff.title} didn't open: OpenChamber's header has room for ${limits.tabs} tabs. Close one to open it.`
+        : `${handoff.title} didn't open in the page: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
   editorService.openEditor = (editor, optionsOrGroup, group) => {
-    const handoff = handoffOf(editor, optionsOrGroup);
+    const handoff = handoffOf(editor, optionsOrGroup, limits.title);
     if (!handoff) return openEditor(editor, optionsOrGroup, group);
     void hand(handoff);
     return Promise.resolve(undefined);
@@ -318,7 +341,7 @@ const handEditorsToPage = (context: SurfaceContext): void => {
     const here: unknown[] = [];
     for (const item of editors) {
       const typed = (item as { editor?: unknown }).editor;
-      const handoff = isEditorInput(typed) ? handoffOf(typed, (item as { options?: unknown }).options) : handoffOf(item, undefined);
+      const handoff = isEditorInput(typed) ? handoffOf(typed, (item as { options?: unknown }).options, limits.title) : handoffOf(item, undefined, limits.title);
       if (handoff) void hand(handoff);
       else here.push(item);
     }
@@ -333,7 +356,7 @@ const handEditorsToPage = (context: SurfaceContext): void => {
       queued = false;
       for (const identifier of editorService.getEditors(1)) {
         if (identifier.editor.isDirty()) continue;
-        const handoff = handoffOf(identifier.editor, undefined);
+        const handoff = handoffOf(identifier.editor, undefined, limits.title);
         if (!handoff) continue;
         void hand(handoff);
         void editorService.closeEditor(identifier, { preserveFocus: true }).catch(() => undefined);
@@ -466,7 +489,9 @@ const startView = async (context: SurfaceContext): Promise<SurfaceController> =>
   // After OpenChamber reloads, the page's tabs come back with the rail view, which starts the page behind them.
   if (forge.has('tabs') && forge.tabs.state().list.length === 0) {
     const saved = await context.call<{ tabs?: OcForgeTab[] }>('/tabs/load', { folder: context.folder }).catch(() => ({ tabs: [] }));
-    for (const tab of saved.tabs ?? []) await forge.tabs.open(withRoute(tab)).catch(() => undefined);
+    // Saved under a host that took more (a longer title, more tabs) than this one: as much as it takes.
+    const limits = forge.limits();
+    for (const tab of (saved.tabs ?? []).slice(0, limits.tabs)) await forge.tabs.open(withRoute({ ...tab, title: tabTitle(tab.title, limits.title) })).catch(() => undefined);
   }
   return {
     showEntry: async (next) => {
@@ -520,10 +545,15 @@ class EditorArea {
   private linked: string | null = null;
   /** A tab chosen since the page started: it, not the link the page started with, is what the page shows. */
   private chosen = false;
+  /** What the host takes: the header's room for tabs and the longest title (an older host's, if its hello names none). */
+  private readonly limits: OcForgeLimits;
+  /** Editors left without a tab, the header full and none of its editors to close: the user heard of each once. */
+  private readonly unplaced = new Set<string>();
 
   constructor(private readonly context: SurfaceContext) {
     this.editorService = context.services.get<EditorService>('editorService');
     this.openEditor = this.editorService.openEditor.bind(this.editorService);
+    this.limits = context.forge.limits();
     const state = context.forge.tabs.state();
     this.hostTabs = new Map(state.list.map((tab) => [tab.id, tab]));
     this.shown = state.shown;
@@ -601,7 +631,7 @@ class EditorArea {
     const current = new Map<string, { identifier: EditorIdentifier; title: string; dirty: boolean }>();
     for (const identifier of this.editorService.getEditors(1)) {
       const key = keyOfEditor(identifier.editor);
-      if (!current.has(key)) current.set(key, { identifier, title: tabTitle(identifier.editor.getName()), dirty: identifier.editor.isDirty() });
+      if (!current.has(key)) current.set(key, { identifier, title: tabTitle(identifier.editor.getName(), this.limits.title), dirty: identifier.editor.isDirty() });
     }
     return current;
   }
@@ -619,7 +649,11 @@ class EditorArea {
     }, 30);
   }
 
-  /** The header follows the editors: their tabs, titles, unsaved dots, the active one. */
+  /**
+   * The header follows the editors: their tabs, titles, unsaved dots, the active one, and the page's route. A tab
+   * OpenChamber has no room for waits for the tabs of closed editors to close, then for the room the page makes
+   * (`makeRoom`); it never keeps the rest from following, nor the route from naming the editor shown.
+   */
   private async sync(): Promise<void> {
     if (this.syncing) {
       this.again = true;
@@ -629,37 +663,33 @@ class EditorArea {
     const { forge } = this.context;
     try {
       const current = this.current();
-      for (const [key, item] of current) {
-        if (this.leaving) return;
-        this.adopted.add(key);
-        const tab = withRoute({ id: key, title: item.title, icon: tabIcon(key), dirty: item.dirty });
-        const host = this.hostTabs.get(key);
-        // Its route is sent once more at most: an adapted OpenChamber older than tab routes keeps none.
-        const routed = host?.route === tab.route || this.routed.has(key);
-        if (host && host.title === tab.title && Boolean(host.dirty) === tab.dirty && host.icon === tab.icon && routed) continue;
-        await forge.tabs.open(tab);
-        this.hostTabs.set(key, tab);
-        if (tab.route) this.routed.add(key);
-      }
+      let waiting = await this.putTabs(current, [...current.keys()]);
+      if (this.leaving) return;
       // Activate before closing: closing the shown tab would move the page to OpenChamber's choice of neighbour.
-      // Only for a change made in VS Code (Ctrl+Tab, Go to Definition): a click on a header tab is OpenChamber's and on its way here.
+      // Only for a change made in VS Code (Ctrl+Tab, Go to Definition): a click on a header tab is OpenChamber's and on
+      // its way here. Followed once its tab is selected: one waiting for room is selected when it has it.
       const active = this.activeKey();
-      const changed = active !== this.lastActive;
-      if (this.showing === 0) this.lastActive = active;
-      if (active && changed && this.showing === 0 && this.shown && forge.tabs.state().active !== active && current.has(active)) await forge.tabs.activate(active);
+      const follow = active !== null && active !== this.lastActive && this.showing === 0 && this.shown && current.has(active);
+      if (this.showing === 0 && !follow) this.lastActive = active;
+      if (follow && await this.select(active)) this.lastActive = active;
       // Sent before a tab closes (OpenChamber takes the frame's messages in order): the last one may take the page with it.
       void this.saveTabs(current);
       for (const key of [...this.hostTabs.keys()]) {
         if (current.has(key) || !this.adopted.has(key)) continue;
-        await forge.tabs.close(key);
+        await forge.tabs.close(key).catch((error) => log('could not close a header tab', error));
         this.hostTabs.delete(key);
         this.adopted.delete(key);
         this.routed.delete(key);
       }
-      const route = active ? editorRoute(active) : null;
+      if (waiting.length > 0) {
+        waiting = await this.putTabs(current, waiting);
+        if (follow && active !== this.lastActive && !waiting.includes(active) && await this.select(active)) this.lastActive = active;
+      }
+      if (waiting.length > 0) await this.makeRoom(current, waiting);
+      const route = active ? pageRoute(active) : null;
       if (route !== this.route && this.shown) {
         this.route = route;
-        if (route) await forge.links.setRoute(route).catch(() => undefined);
+        if (route) await forge.links.setRoute(route).catch((error) => log('could not name the editor in the address bar', error));
       }
     } finally {
       this.syncing = false;
@@ -670,12 +700,112 @@ class EditorArea {
     }
   }
 
+  /** Opens or updates these editors' header tabs; answers the ones OpenChamber had no room for. */
+  private async putTabs(current: ReadonlyMap<string, { title: string; dirty: boolean }>, keys: readonly string[]): Promise<string[]> {
+    const { forge } = this.context;
+    const waiting: string[] = [];
+    for (const key of keys) {
+      if (this.leaving) break;
+      const item = current.get(key);
+      if (!item) continue;
+      this.adopted.add(key);
+      const tab = withRoute({ id: key, title: item.title, icon: tabIcon(key), dirty: item.dirty });
+      const host = this.hostTabs.get(key);
+      // Its route is sent once more at most: an adapted OpenChamber older than tab routes keeps none.
+      const routed = host?.route === tab.route || this.routed.has(key);
+      if (host && host.title === tab.title && Boolean(host.dirty) === tab.dirty && host.icon === tab.icon && routed) continue;
+      try {
+        await forge.tabs.open(tab);
+      } catch (error) {
+        if (!host && forge.tabs.state().list.length >= this.limits.tabs) waiting.push(key);
+        else this.tell(key, `${item.title} has no header tab: OpenChamber refused it (${error instanceof Error ? error.message : String(error)}).`);
+        continue;
+      }
+      this.hostTabs.set(key, tab);
+      this.unplaced.delete(key);
+      if (tab.route) this.routed.add(key);
+    }
+    return waiting;
+  }
+
+  /** Selects this editor's tab in the header, if it has one; whether the header now shows it selected. */
+  private async select(key: string): Promise<boolean> {
+    const { forge } = this.context;
+    if (forge.tabs.state().active === key) return true;
+    if (!this.hostTabs.has(key)) return false;
+    try {
+      await forge.tabs.activate(key);
+      return true;
+    } catch (error) {
+      log('could not select the header tab', error);
+      return false;
+    }
+  }
+
+  /**
+   * The header is full (OpenChamber's room for an extension's tabs, `limits.tabs`) and these editors have no tab. As
+   * VS Code's workbench.editor.limit does, the editors used least recently close to make room: never one with unsaved
+   * changes, a pinned one, one on screen, or one waiting. The next sync closes their tabs and opens these. The user
+   * hears what closed; with nothing to close, that these have no tab (the route still names the editor shown).
+   */
+  private async makeRoom(current: ReadonlyMap<string, { title: string }>, waiting: readonly string[]): Promise<void> {
+    const groups = this.context.services.get<EditorGroupsService>('editorGroupsService');
+    const visible = new Set(this.editorService.visibleEditors);
+    const editors = new Map<string, ClosableEditor & { identifiers: EditorIdentifier[] }>();
+    for (const identifier of this.editorService.getEditors(0)) {
+      const key = keyOfEditor(identifier.editor);
+      const editor = editors.get(key) ?? { key, dirty: false, sticky: false, visible: false, identifiers: [] };
+      editor.dirty ||= identifier.editor.isDirty();
+      editor.sticky ||= groups.getGroup(identifier.groupId)?.isSticky(identifier.editor) ?? false;
+      editor.visible ||= visible.has(identifier.editor);
+      editor.identifiers.push(identifier);
+      editors.set(key, editor);
+    }
+    // Only an editor with a tab gives the header room.
+    const candidates = [...editors.values()].filter((editor) => this.hostTabs.has(editor.key));
+    const closing = leastRecentlyUsed(candidates, new Set(waiting), waiting.length);
+    for (const key of closing) {
+      for (const identifier of editors.get(key)!.identifiers) await this.editorService.closeEditor(identifier, { preserveFocus: true }).catch((error) => log('could not close an editor', error));
+    }
+    const named = (keys: readonly string[]) => {
+      const titles = keys.map((key) => current.get(key)?.title ?? key);
+      return titles.length > 3 ? `${titles.slice(0, 3).join(', ')} and ${titles.length - 3} more` : titles.join(', ');
+    };
+    if (closing.length > 0) {
+      notify(this.context.services, `OpenChamber's header has room for ${this.limits.tabs} tabs: VS Code closed ${named(closing)}, used least recently, to give ${named(waiting.slice(0, closing.length))} a tab.`);
+      this.again = true;
+    }
+    for (const key of waiting.slice(closing.length)) {
+      this.tell(key, `${current.get(key)?.title ?? key} has no header tab: OpenChamber's header has room for ${this.limits.tabs} tabs, and the others have unsaved changes, are pinned or are on screen. Save or close one to give it a tab.`);
+    }
+  }
+
+  /** Tells the user once why this editor has no header tab. */
+  private tell(key: string, message: string): void {
+    if (this.unplaced.has(key)) return;
+    this.unplaced.add(key);
+    notify(this.context.services, message);
+  }
+
   /** The folder's tabs, which a frame brings back after OpenChamber reloads: the editors here, when they changed. */
   private async saveTabs(current: ReadonlyMap<string, { title: string }>): Promise<void> {
-    const saved = JSON.stringify([...current].map(([id, item]) => ({ id, title: item.title, icon: tabIcon(id) })));
+    const tabs = [...current].map(([id, item]) => ({ id, title: item.title, icon: tabIcon(id) }));
+    const saved = JSON.stringify(tabs);
     if (saved === this.saved) return;
     this.saved = saved;
-    await this.context.call('/tabs/save', { folder: this.context.folder, tabs: JSON.parse(saved) }).catch(() => undefined);
+    // Many tabs are more than one service request takes: then in parts, which the service puts together.
+    const parts = tabChunks(tabs);
+    const revision = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      for (const [index, part] of parts.entries()) {
+        const body = parts.length === 1 ? { folder: this.context.folder, tabs: part } : { folder: this.context.folder, tabs: part, part: { revision, index, count: parts.length } };
+        await this.context.call('/tabs/save', body);
+      }
+    } catch (error) {
+      log('could not keep the header tabs', error);
+      // Sent again with the next change, not left out of what comes back after a reload.
+      if (this.saved === saved) this.saved = '';
+    }
   }
 
   /**
@@ -693,13 +823,13 @@ class EditorArea {
     const current = this.editorService.getEditors(1).map((identifier) => ({ identifier, key: keyOfEditor(identifier.editor) }));
     const taken = new Set(current.map((editor) => editor.key));
     for (const { identifier, key } of current.filter((editor) => restored.has(editor.identifier.editor))) {
-      const title = tabTitle(identifier.editor.getName());
+      const title = tabTitle(identifier.editor.getName(), this.limits.title);
       const tab = restoredTabOf(tabs, key, title, taken);
       if (tab === key) continue;
       if (tab) {
         taken.add(tab);
         await this.replaceTab(tab, withRoute({ id: key, title, icon: tabIcon(key), dirty: identifier.editor.isDirty() }));
-      } else if (key !== this.linked && !identifier.editor.isDirty()) {
+      } else if (!(this.linked && routeNames(this.linked, key)) && !identifier.editor.isDirty()) {
         // Not waited on for long: the page's start (and its header) must not hang on one.
         await Promise.race([this.editorService.closeEditor(identifier).catch(() => undefined), later(2_000)]);
       }
@@ -712,9 +842,15 @@ class EditorArea {
     const state = forge.tabs.state();
     if (!state.list.some((item) => item.id === old)) return;
     this.adopted.add(tab.id);
-    this.hostTabs.set(tab.id, tab);
     // Opened before the old one closes: the page's last tab takes the page with it.
-    await forge.tabs.open(tab, { activate: state.shown && state.active === old }).catch(() => undefined);
+    try {
+      await forge.tabs.open(tab, { activate: state.shown && state.active === old });
+      this.hostTabs.set(tab.id, tab);
+    } catch (error) {
+      // The next sync gives it a tab, or makes room for it.
+      log('could not give a restored editor its tab', error);
+      this.schedule();
+    }
     await forge.tabs.close(old).catch(() => undefined);
     this.hostTabs.delete(old);
   }
@@ -788,18 +924,26 @@ class EditorArea {
     const target = readEditorRoute(route);
     if (!target) return;
     await this.ready;
-    const found = this.current().get(target.key);
+    // By its key, or by the hash of one too long for a route (pageRoute): an editor VS Code has open.
+    const key = [...this.current().keys()].find((open) => routeNames(target.key, open)) ?? target.key;
+    const found = this.current().get(key);
     const selection = target.line ? { selection: { startLineNumber: target.line, startColumn: 1 } } : {};
     if (found) await this.openEditor(found.identifier.editor, { preserveFocus: false, ...selection }, found.identifier.groupId);
-    else await this.openKey(target.key, target.line).catch((error) => log('could not open the linked editor', error));
+    else await this.openKey(key, target.line).catch((error) => log('could not open the linked editor', error));
     // A link names what the page shows: its tab is the selected one, not the tab the header had selected meanwhile.
-    const opened = this.current().get(target.key);
-    if (!opened || this.context.forge.tabs.state().active === target.key) return;
-    const tab = withRoute({ id: target.key, title: opened.title, icon: tabIcon(target.key), dirty: opened.dirty });
-    this.adopted.add(target.key);
-    this.hostTabs.set(target.key, tab);
-    this.lastActive = target.key;
-    await this.context.forge.tabs.open(tab, { activate: true }).catch(() => undefined);
+    const opened = this.current().get(key);
+    if (!opened || this.context.forge.tabs.state().active === key) return;
+    const tab = withRoute({ id: key, title: opened.title, icon: tabIcon(key), dirty: opened.dirty });
+    this.adopted.add(key);
+    try {
+      await this.context.forge.tabs.open(tab, { activate: true });
+      this.hostTabs.set(key, tab);
+      this.lastActive = key;
+    } catch (error) {
+      // The next sync gives it a tab (or makes room for one) and selects it then.
+      log('could not open the linked editor\'s tab', error);
+      this.schedule();
+    }
   }
 
   /** Another folder is coming: its editors are not these, so neither are the header's tabs, nor the page's route. */

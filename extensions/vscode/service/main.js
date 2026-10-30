@@ -455,9 +455,31 @@ var transform = (path, body, codicon, missing = []) => {
 import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join2 } from "node:path";
+
+// ../../adapters/openchamber/host/protocol.ts
+var OC_FORGE_LIMITS = {
+  railEntries: 100,
+  entryId: 48,
+  title: 512,
+  svg: 16384,
+  tabs: 1000,
+  tabId: 1024,
+  route: 2048
+};
+var OC_FORGE_LEGACY_LIMITS = { ...OC_FORGE_LIMITS, title: 80, tabs: 64 };
+var TAB_ID = `a tab's id is 1–${OC_FORGE_LIMITS.tabId} characters`;
+var TITLE = `a title is 1–${OC_FORGE_LIMITS.title} characters`;
+var ICON = `an icon is a Remixicon name or an inline <svg> of at most ${OC_FORGE_LIMITS.svg} characters`;
+var ROUTE = `a route is at most ${OC_FORGE_LIMITS.route} characters`;
+var MODIFIERS = new Set(["mod", "shift", "alt", "ctrl", "super"]);
+
+// service/editors.ts
 var REQUEST_TTL_MS = 60000;
 var REQUESTS_MAX = 64;
-var TABS_MAX = 64;
+var TABS_MAX = OC_FORGE_LIMITS.tabs;
+var TITLE_MAX = OC_FORGE_LIMITS.title;
+var REVISIONS_MAX = 4;
+var PARTS_MAX = 256;
 
 class EditorRequests {
   now;
@@ -493,18 +515,30 @@ var readTabs = (raw) => {
     const tab = item;
     if (typeof tab?.id !== "string" || !tab.id || tab.id.length > 1024)
       continue;
-    if (typeof tab.title !== "string" || !tab.title.trim() || tab.title.length > 80)
+    if (typeof tab.title !== "string" || !tab.title.trim() || tab.title.length > TITLE_MAX)
       continue;
     const icon = typeof tab.icon === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tab.icon) ? tab.icon : undefined;
     tabs.push(icon ? { id: tab.id, title: tab.title, icon } : { id: tab.id, title: tab.title });
   }
   return tabs;
 };
+var readPart = (raw) => {
+  const part = raw;
+  if (!part || typeof part !== "object")
+    return null;
+  const { revision, index, count } = part;
+  if (typeof revision !== "string" || !/^[0-9a-z]{1,32}$/.test(revision))
+    return null;
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > PARTS_MAX)
+    return null;
+  return typeof index === "number" && Number.isInteger(index) && index >= 0 && index < count ? { revision, index, count } : null;
+};
 
 class SavedTabs {
   dir;
   log;
   tabs = new Map;
+  incoming = new Map;
   constructor(dir, log) {
     this.dir = dir;
     this.log = log;
@@ -523,6 +557,30 @@ class SavedTabs {
     const tabs = await readFile2(this.file(key), "utf8").then((text) => readTabs(JSON.parse(text)), () => []);
     this.tabs.set(key, tabs);
     return tabs;
+  }
+  async savePart(key, part, tabs) {
+    const revisions = this.incoming.get(key) ?? new Map;
+    this.incoming.set(key, revisions);
+    let incoming = revisions.get(part.revision);
+    if (!incoming) {
+      incoming = { count: part.count, parts: new Map };
+      revisions.set(part.revision, incoming);
+      while (revisions.size > REVISIONS_MAX)
+        revisions.delete(revisions.keys().next().value);
+    }
+    if (incoming.count !== part.count)
+      return;
+    incoming.parts.set(part.index, tabs);
+    if (incoming.parts.size < incoming.count)
+      return;
+    for (const revision of [...revisions.keys()]) {
+      revisions.delete(revision);
+      if (revision === part.revision)
+        break;
+    }
+    if (revisions.size === 0)
+      this.incoming.delete(key);
+    await this.save(key, readTabs(Array.from({ length: incoming.count }, (_, index) => incoming.parts.get(index) ?? []).flat()));
   }
   async save(key, tabs) {
     if (JSON.stringify(this.tabs.get(key)) === JSON.stringify(tabs))
@@ -553,7 +611,7 @@ var BUILT_IN_ENTRIES = [
 ];
 var TERMINAL_ENTRY = { id: "terminal", title: "Terminal", icon: "terminal-box", order: 1000, zone: "bottom" };
 var ENTRY_ID_MAX = 48;
-var TITLE_MAX = 80;
+var TITLE_MAX2 = 80;
 var SVG_MAX = 16384;
 var ENTRIES_MAX = 100;
 var MORE_ENTRY_ID = "additional-views";
@@ -676,7 +734,7 @@ var railEntries = (installed, max = ENTRIES_MAX) => {
       views.add(view);
       const id = entryIdOf(container.id, taken);
       taken.add(id);
-      const title = container.title.length > TITLE_MAX ? `${container.title.slice(0, TITLE_MAX - 1)}…` : container.title;
+      const title = container.title.length > TITLE_MAX2 ? `${container.title.slice(0, TITLE_MAX2 - 1)}…` : container.title;
       const icon = (container.svg ? railSvg(container.svg) : null) ?? codiconIcon(container.icon) ?? FALLBACK_ICON;
       extensions.push({ id, title, icon, order: 10 + extensions.length, view });
     }
@@ -1475,7 +1533,15 @@ var routes = {
   },
   "/tabs/save": async (body) => {
     const server = serverOf(body);
-    await savedTabs.save(SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder), readTabs(body.tabs));
+    const key = SavedTabs.keyOf(WorkbenchState.keyOf(server.url, null), body.folder);
+    if (body.part === undefined) {
+      await savedTabs.save(key, readTabs(body.tabs));
+      return { ok: true };
+    }
+    const part = readPart(body.part);
+    if (!part)
+      throw new ServerError("part is { revision, index, count }", 400);
+    await savedTabs.savePart(key, part, readTabs(body.tabs));
     return { ok: true };
   },
   "/tabs/load": async (body) => {
