@@ -1,4 +1,8 @@
 // What the embedded workbench is told, and which of its requests go where. Pure.
+import type { HostTheme } from '@openchamber/sdk';
+import { DEFAULT_THEMES, lookSettings, modeOfTheme, vscodeColors } from './theme.ts';
+
+export { DEFAULT_THEMES, type ThemeMode } from './theme.ts';
 
 /** The VS Code Server's own workbench configuration (its page's `data-settings`), as far as this extension reads it. */
 export interface ServerWorkbenchConfig {
@@ -23,11 +27,6 @@ export interface UriComponents {
 /** A folder on the VS Code Server's machine, as the remote workbench names it. */
 export const remoteUri = (authority: string, path: string): UriComponents => ({ scheme: 'vscode-remote', authority, path });
 
-export type ThemeMode = 'light' | 'dark';
-
-/** VS Code's default themes in the release this extension was built against (1.140). */
-export const DEFAULT_THEMES: Record<ThemeMode, string> = { light: 'Light 2026', dark: 'Dark 2026' };
-
 /**
  * The plain-data part of the workbench options: the server's configuration,
  * the folder to open, and OpenChamber's defaults. The frame adds the functions
@@ -35,10 +34,12 @@ export const DEFAULT_THEMES: Record<ThemeMode, string> = { light: 'Light 2026', 
  */
 export const workbenchConfiguration = (
   server: ServerWorkbenchConfig,
-  { folder, token, mode, followTheme, defaults = {} }: {
+  { folder, token, theme, followTheme, defaults = {} }: {
     folder: string | null;
     token: string | null;
-    mode: ThemeMode;
+    /** OpenChamber's theme as the frame starts. */
+    theme: HostTheme;
+    /** VS Code wears OpenChamber's look (`src/theme.ts`); off, VS Code's own themes as they are. */
     followTheme: boolean;
     /** The part of VS Code this frame is (`roleSettings` in surfaces.ts), as defaults from the start. */
     defaults?: Record<string, unknown>;
@@ -63,7 +64,16 @@ export const workbenchConfiguration = (
     'workbench.preferredLightColorTheme': DEFAULT_THEMES.light,
     'workbench.preferredDarkColorTheme': DEFAULT_THEMES.dark,
   };
-  if (followTheme) configurationDefaults['workbench.colorTheme'] = DEFAULT_THEMES[mode];
+  const mode = modeOfTheme(theme);
+  if (followTheme) {
+    Object.assign(configurationDefaults, {
+      // VS Code takes its preferred light or dark theme by the mode it is told the system prefers, which in the frame
+      // is OpenChamber's (`workbench/theme.ts`); a user who turns that detection off gets the one of the mode it starts in.
+      'window.autoDetectColorScheme': true,
+      'workbench.colorTheme': DEFAULT_THEMES[mode],
+      ...lookSettings(theme),
+    });
+  }
   Object.assign(configurationDefaults, defaults);
   return {
     ...server,
@@ -73,7 +83,8 @@ export const workbenchConfiguration = (
     // OpenChamber already decided to show this folder; VS Code's trust prompt would ask again.
     enableWorkspaceTrust: false,
     configurationDefaults,
-    initialColorTheme: { themeType: mode },
+    // What VS Code paints before its theme has loaded: OpenChamber's colors too.
+    initialColorTheme: followTheme ? { themeType: mode, colors: vscodeColors(theme.tokens) } : { themeType: mode },
   };
 };
 

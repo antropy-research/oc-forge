@@ -9,7 +9,10 @@ export interface VscodeSettings {
   serverUrl: string | null;
   /** Its connection token (`--connection-token`). */
   token: string | null;
-  /** Start VS Code in OpenChamber's light or dark look (VS Code's own default themes). */
+  /**
+   * VS Code follows OpenChamber's theme: its light or dark mode, its colors on VS Code's default themes, its code
+   * font (`src/theme.ts`). Off: VS Code's own themes as they are.
+   */
   followTheme: boolean;
 }
 
