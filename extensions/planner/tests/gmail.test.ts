@@ -109,7 +109,7 @@ describe('the import and completion automations', () => {
     asking.commit([created('t1', email('th1', 'Budget'))]);
     expect(asking.gmail.getView().prompt).toBeNull();
     asking.commit([{ type: 'task.completed', taskId: 't1', on: '2026-10-29' }]);
-    expect(asking.gmail.getView().prompt).toEqual({ when: 'complete', taskId: 't1', account: ME, thread: 'th1', subject: 'Budget', actions: [{ kind: 'archive' }] });
+    expect(asking.gmail.getView().prompt).toEqual({ when: 'complete', taskId: 't1', mails: [{ account: ME, thread: 'th1', subject: 'Budget' }], subject: 'Budget', actions: [{ kind: 'archive' }] });
     asking.gmail.answerPrompt([{ kind: 'trash' }]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(asking.calls.filter((call) => call.path === '/google/mail/act').map((call) => call.body.actions)).toEqual([[{ kind: 'trash' }]]);
@@ -126,6 +126,34 @@ describe('the import and completion automations', () => {
     fake.commit([{ type: 'task.updated', taskId: 'triage', patch: { subtasks: [{ id: 's1', title: 'Budget', done: true, source: email('th9', 'Budget') }] } }]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => [call.body.thread, call.body.actions])).toEqual([['th9', [{ kind: 'markRead' }]], ['th9', [{ kind: 'archive' }]]]);
+  });
+
+  test("completing a task completes its email and the emails merged into it, as checking each off would (not one checked off on its own: that ran then); asked, once for all; reopening does nothing in Gmail", async () => {
+    const merged = (lunchDone: boolean) => [{ id: 's1', title: 'Budget', done: false, source: email('th1', 'Budget') }, { id: 's2', title: 'Lunch', done: lunchDone, source: email('th2', 'Lunch') }];
+    const acts = (calls: { path: string; body: any }[]) => calls.filter((call) => call.path === '/google/mail/act').map((call) => [call.body.thread, call.body.actions]);
+    const doing = setup({ gmailOnComplete: [{ kind: 'archive' }] });
+    doing.commit([created('triage', email('th0', 'Inbox triage')), { type: 'task.updated', taskId: 'triage', patch: { subtasks: merged(false) } }]);
+    doing.commit([{ type: 'task.updated', taskId: 'triage', patch: { subtasks: merged(true) } }]);
+    doing.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-29' }]);
+    doing.commit([{ type: 'task.reopened', taskId: 'triage' }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acts(doing.calls)).toEqual([['th2', [{ kind: 'archive' }]], ['th0', [{ kind: 'archive' }]], ['th1', [{ kind: 'archive' }]]]);
+
+    const asking = setup({ gmailOnComplete: [{ kind: 'archive' }], gmailCompletePrompt: true });
+    asking.commit([created('triage', email('th0', 'Inbox triage')), { type: 'task.updated', taskId: 'triage', patch: { subtasks: merged(false) } }]);
+    asking.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-29' }]);
+    expect(asking.gmail.getView().prompt).toEqual({
+      when: 'complete',
+      taskId: 'triage',
+      mails: [{ account: ME, thread: 'th0', subject: 'Inbox triage' }, { account: ME, thread: 'th1', subject: 'Budget' }, { account: ME, thread: 'th2', subject: 'Lunch' }],
+      subject: 'Inbox triage and 2 more',
+      actions: [{ kind: 'archive' }],
+    });
+    asking.gmail.answerPrompt([{ kind: 'star' }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acts(asking.calls)).toEqual([['th0', [{ kind: 'star' }]], ['th1', [{ kind: 'star' }]], ['th2', [{ kind: 'star' }]]]);
+    asking.commit([{ type: 'task.reopened', taskId: 'triage' }]);
+    expect(asking.gmail.getView().prompt).toBeNull();
   });
 
   test('Convert to task gives back a merged email as a task: not an import, nothing done in Gmail again', async () => {

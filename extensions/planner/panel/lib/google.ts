@@ -1903,9 +1903,9 @@ export class GoogleStore {
         if (!task) continue;
         const own = task.source?.kind === 'gtask' && task.source.status?.name !== GONE_STATUS.name;
         // Google tasks merged into it (Sunsama's merge) go with it, as its own does: completed with it, and reopened with
-        // it unless checked off on their own.
+        // it, unless checked off on their own (that completed it, or asked, then; as Linear's and Gmail's merged items).
         const merged = task.subtasks.filter((subtask) => subtask.source?.kind === 'gtask' && subtask.source.status?.name !== GONE_STATUS.name);
-        if (command.type === 'task.completed') this.completeInGoogle(settings, task, own && !doneThere(task.source), merged.filter((subtask) => !doneThere(subtask.source)), 'task');
+        if (command.type === 'task.completed') this.completeInGoogle(settings, task, own && !doneThere(task.source), merged.filter((subtask) => !subtask.done && !doneThere(subtask.source)), 'task');
         else if (settings.googleTasksOnComplete === 'complete') {
           if (own && doneThere(task.source)) void this.writeTask(task, { completed: false });
           const reopen = merged.filter((subtask) => !subtask.done && doneThere(subtask.source));

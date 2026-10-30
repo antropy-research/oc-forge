@@ -207,7 +207,10 @@ export const LinearIssues = (_props: { page?: boolean }) => {
   );
 };
 
-/** The question Sunsama asks after completing or planning a linked task. */
+/**
+ * The question Sunsama asks after completing or planning a linked task. About several issues (a task completed with
+ * issues merged into it), it asks once, without a status picker: each goes to its team's first completed state.
+ */
 export const LinearPromptBar = () => {
   const { linear } = usePlanner();
   const lv = useLinear();
@@ -247,7 +250,7 @@ export const LinearPromptBar = () => {
   return (
     <div class="linear-prompt" role="alertdialog" aria-label={`Update ${prompt.key} in Linear`}>
       <span>
-        {prompt.kind === 'import' ? 'Imported' : prompt.kind === 'complete' ? 'Completed' : 'Planned'} <strong>{prompt.key}</strong>: update its status in Linear{now ? ` (now ${now})` : ''}?
+        {prompt.kind === 'import' ? 'Imported' : prompt.kind === 'complete' ? 'Completed' : 'Planned'} <strong>{prompt.key}</strong>: update {prompt.many ? 'their' : 'its'} status in Linear{now ? ` (now ${now})` : ''}?
       </span>
       {states.length > 0 && (
         <select aria-label="Status in Linear" value={chosen} onChange={(event) => setChosen(event.currentTarget.value)}>

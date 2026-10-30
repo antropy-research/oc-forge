@@ -358,6 +358,7 @@ const gmailPart = async (viewport) => {
     message(4, 'in progress', { labels: ['INBOX', 'Label_7'] }),
     message(5, 'spam offer', { labels: ['SPAM', 'Label_7'] }),
     message(6, 'merge me', { unread: true }),
+    message(7, 'merge two', { unread: true }),
   ];
   const fake = await startFakeGoogle(world);
   const file = JSON.parse(fake.accountsFile());
@@ -562,6 +563,30 @@ const gmailPart = async (viewport) => {
       return Boolean(converted);
     });
     check(`${size}: Convert to task gives it back as a task, still the email`, converted?.source?.kind === 'email' && (await card(`${run} merge me`).isVisible()), JSON.stringify(converted?.source ?? null));
+    // Completed through the task it is merged into, as checking it off would (Sunsama keeps merged items integrated):
+    // the task completed, its completion prompt asks about the merged email (Archive ticked as set), the actions picked
+    // happen in Gmail; reopened, nothing is asked or done in Gmail (its automations are for importing and completing).
+    await mailRow(`${run} merge two`).waitFor({ timeout: 20_000 });
+    await g.page.keyboard.down('Alt');
+    await mailRow(`${run} merge two`).dragTo(card(`${run} inbox triage`));
+    await g.page.keyboard.up('Alt');
+    const mergedTwo = await until(async () => Object.values((await latestState()).tasks).find((task) => task.title === `${run} inbox triage`)?.subtasks?.some((subtask) => subtask.source?.kind === 'email' && subtask.title === `${run} merge two`));
+    await card(`${run} inbox triage`).getByRole('button', { name: 'Mark complete' }).click();
+    const throughTask = f.getByRole('alertdialog', { name: `Gmail: ${run} merge two` });
+    const askedThrough = await throughTask.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+    const archiveTicked = askedThrough && (await throughTask.getByRole('checkbox', { name: 'Archive', exact: true }).isChecked());
+    if (askedThrough) await throughTask.getByRole('checkbox', { name: 'Star', exact: true }).check();
+    await shotHere('gm-09b-merged-through-task');
+    if (askedThrough) await throughTask.getByRole('button', { name: 'Do it' }).click();
+    const starredThrough = await until(() => labelsOf(`gm7-${run}`).includes('STARRED'));
+    check(`${size}: completing the task an email is merged into asks about that email once (Archive ticked as set); the actions picked happen in Gmail`,
+      mergedTwo && askedThrough && archiveTicked && starredThrough, JSON.stringify({ mergedTwo, askedThrough, archiveTicked, labels: labelsOf(`gm7-${run}`) }));
+    const labelsBefore = labelsOf(`gm7-${run}`).join();
+    await card(`${run} inbox triage`).getByRole('button', { name: 'Mark incomplete' }).click();
+    await g.page.waitForTimeout(1500);
+    check(`${size}: reopening that task asks nothing and changes nothing in Gmail`,
+      (await f.getByRole('alertdialog', { name: /^Gmail: / }).count()) === 0 && labelsOf(`gm7-${run}`).join() === labelsBefore && !(await latestState()).tasks[Object.values((await latestState()).tasks).find((task) => task.title === `${run} inbox triage`)?.id ?? '']?.completedAt,
+      labelsOf(`gm7-${run}`).join());
 
     // Access Google took back: the panel offers Re-add Gmail account (not clicked: nothing signs in here).
     fake.world.revoked = true;

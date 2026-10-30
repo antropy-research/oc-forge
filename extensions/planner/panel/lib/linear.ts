@@ -106,7 +106,7 @@ import {
 } from '../../src/domain/linearFilter.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
-import { DEFAULT_SETTINGS, type LinearDisplayPrefs, type Placement, type PlannerState, type Settings, type Task, type TaskSourceRef } from '../../src/domain/types.ts';
+import { DEFAULT_SETTINGS, type LinearDisplayPrefs, type Placement, type PlannerState, type Settings, type Subtask, type Task, type TaskSourceRef } from '../../src/domain/types.ts';
 import type { Origin, PlannerClient } from './client.ts';
 
 /** What an issue list shows: issues of mine, a saved view, a project's issues, or a search. */
@@ -129,9 +129,15 @@ export type LinearMode = 'issues' | 'projects' | 'planned';
 export interface LinearPrompt {
   kind: 'complete' | 'start' | 'import';
   taskId: string;
+  /** The issue it names; asked about several, the first one's key and how many more. */
   key: string;
   /** An issue merged into the task (a subtask with its link), not the task's own. */
   subtaskId?: string;
+  /**
+   * A task completed with issues merged into it: asked once about all of them (and the task's own, `own`), each then
+   * moved to its team's first completed state (one status picker can't serve several teams).
+   */
+  many?: { own: boolean; subtaskIds: string[] };
 }
 
 export interface LinearTeam {
@@ -764,8 +770,9 @@ export class LinearStore {
   }
 
   /** Move the issue behind `task` to its team's first completed or started state. */
-  /** The issue a prompt is about: the task's own, or one merged into it. */
+  /** The issue a prompt is about: the task's own, or one merged into it (none for a prompt about several). */
   promptSource(prompt: LinearPrompt, state: PlannerState = this.client.getView().state): TaskSourceRef | null {
+    if (prompt.many) return null;
     const task = state.tasks[prompt.taskId];
     const source = prompt.subtaskId ? task?.subtasks.find((subtask) => subtask.id === prompt.subtaskId)?.source : task?.source;
     return source?.kind === 'linear' ? source : null;
@@ -966,6 +973,15 @@ export class LinearStore {
     if (!prompt || answer === 'no') return;
     const task = this.client.getView().state.tasks[prompt.taskId];
     if (!task) return;
+    if (prompt.many) {
+      if (answer === 'always') void this.client.dispatch([{ type: 'settings.updated', patch: { linearOnComplete: 'complete' } }]);
+      if (prompt.many.own) void this.moveIssue(task, 'completed');
+      for (const subtaskId of prompt.many.subtaskIds) {
+        const source = task.subtasks.find((subtask) => subtask.id === subtaskId)?.source;
+        if (source?.kind === 'linear') void this.moveSource(source, 'completed');
+      }
+      return;
+    }
     if (prompt.subtaskId) {
       const source = this.promptSource(prompt);
       if (answer === 'always' && prompt.kind === 'complete') void this.client.dispatch([{ type: 'settings.updated', patch: { linearOnComplete: 'complete' } }]);
@@ -1094,6 +1110,23 @@ export class LinearStore {
     this.set({ linked: { ...this.view.linked, [issue.id]: issue }, lists });
   }
 
+  /**
+   * A task completed, or issues merged into it checked off: each moved to its team's Done, as the settings say
+   * (Sunsama's "Show prompt to update status in Linear"): at once, or asked, once for all of them. One issue keeps the
+   * status picker; several each go to their team's first completed state.
+   */
+  private completeIssues(task: Task, own: boolean, merged: readonly Subtask[], settings: PlannerState['settings'], ask: (prompt: LinearPrompt) => void): void {
+    const keys = [...(own ? [task.source!.key] : []), ...merged.map((subtask) => subtask.source!.key)];
+    if (!keys.length) return;
+    if (settings.linearOnComplete === 'complete') {
+      if (own) void this.moveIssue(task, 'completed');
+      for (const subtask of merged) void this.moveSource(subtask.source!, 'completed');
+    } else if (settings.linearOnComplete === 'ask') {
+      if (keys.length === 1) ask(own ? { kind: 'complete', taskId: task.id, key: keys[0]! } : { kind: 'complete', taskId: task.id, key: keys[0]!, subtaskId: merged[0]!.id });
+      else ask({ kind: 'complete', taskId: task.id, key: `${keys[0]} and ${keys.length - 1} more`, many: { own, subtaskIds: merged.map((subtask) => subtask.id) } });
+    }
+  }
+
   private afterCommit(commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin): void {
     // Only the user's own changes reach Linear.
     if (origin !== 'user' || !this.available()) return;
@@ -1107,12 +1140,9 @@ export class LinearStore {
       // Issues merged into a task stay integrated (Sunsama's merge): checking one off, or merging one straight in from
       // the panel, asks as the task's own would.
       if (command.type === 'task.updated' && command.patch.subtasks) {
-        for (const subtask of mergedDone(before.tasks[command.taskId], after.tasks[command.taskId])) {
-          const source = subtask.source!;
-          if (source.kind !== 'linear' || isClosedType(source.status?.type)) continue;
-          if (settings.linearOnComplete === 'complete') void this.moveSource(source, 'completed');
-          else if (settings.linearOnComplete === 'ask') ask({ kind: 'complete', taskId: command.taskId, key: source.key, subtaskId: subtask.id });
-        }
+        const ticked = mergedDone(before.tasks[command.taskId], after.tasks[command.taskId]).filter((subtask) => subtask.source?.kind === 'linear' && !isClosedType(subtask.source.status?.type));
+        const task = after.tasks[command.taskId];
+        if (task && ticked.length) this.completeIssues(task, false, ticked, settings, ask);
         if (settings.linearImportPrompt) {
           for (const subtask of mergedImports(before, after, command.taskId, made)) {
             if (subtask.source?.kind === 'linear') ask({ kind: 'import', taskId: command.taskId, key: subtask.source.key, subtaskId: subtask.id });
@@ -1120,11 +1150,15 @@ export class LinearStore {
         }
         continue;
       }
+      // Completing a task: its own issue, and the issues merged into it that were not checked off on their own (that
+      // ran their automation, or asked, then) nor closed in Linear, as checking each off would. Reopening it does
+      // nothing in Linear, as unchecking one does not (Sunsama's Linear automation is for completing).
       if (command.type === 'task.completed') {
         const task = after.tasks[command.taskId];
-        if (task?.source?.kind !== 'linear' || isClosedType(task.source.status?.type)) continue;
-        if (settings.linearOnComplete === 'complete') void this.moveIssue(task, 'completed');
-        else if (settings.linearOnComplete === 'ask') ask({ kind: 'complete', taskId: task.id, key: task.source.key });
+        if (!task) continue;
+        const own = task.source?.kind === 'linear' && !isClosedType(task.source.status?.type);
+        const merged = task.subtasks.filter((subtask) => !subtask.done && subtask.source?.kind === 'linear' && !isClosedType(subtask.source.status?.type));
+        this.completeIssues(task, own, merged, settings, ask);
         continue;
       }
       // Sunsama's import automation: right after an issue is imported, a prompt to update its status in Linear.

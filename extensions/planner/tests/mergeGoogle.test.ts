@@ -168,6 +168,17 @@ describe('a Google task merged into a task stays a synced Google task', () => {
     expect(await until(() => p.google.tasks.get('g-trip')!.completed && p.google.tasks.get('g-stamps')!.completed)).toBe(true);
   });
 
+  test('one checked off on its own (its question declined) is not asked about again when its task is completed, as with Linear and Gmail', async () => {
+    const p = await plannerWith([inbox, linked('trip', google('g-trip', 'Plan the trip')), linked('stamps', google('g-stamps', 'Buy stamps'))], [google('g-trip', 'Plan the trip'), google('g-stamps', 'Buy stamps')], { googleTasksOnComplete: 'ask' });
+    const trip = await merge(p, 'trip');
+    const stamps = await merge(p, 'stamps');
+    await tick(p, stamps.id, true);
+    expect(p.store.getView().prompt).toMatchObject({ title: 'Buy stamps', own: false, subtaskIds: [stamps.id], by: 'tick' });
+    p.store.answerPrompt('no');
+    await p.client.dispatch([{ type: 'task.completed', taskId: 'inbox', on: TODAY }]);
+    expect(p.store.getView().prompt).toMatchObject({ title: 'Plan the trip', own: false, subtaskIds: [trip.id], by: 'task' });
+  });
+
   test('refused by Google: checked off on its own, the tick goes back and it says so; with its task, the task stays completed and it says so', async () => {
     const p = await plannerWith([inbox, linked('trip', google('g-trip', 'Plan the trip'))], [google('g-trip', 'Plan the trip')]);
     const trip = await merge(p, 'trip');

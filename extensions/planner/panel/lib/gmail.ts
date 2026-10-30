@@ -4,17 +4,27 @@
 // and filters as one Gmail search.
 import type { Command } from '../../src/domain/events.ts';
 import { DEFAULT_MAIL_FILTER, gmailActionKey, mailQuery, threadIdOf, type GmailLabel, type MailFilter, type MailThread } from '../../src/domain/gmail.ts';
-import type { GmailAction, PlannerState, Task, TaskSourceRef } from '../../src/domain/types.ts';
+import type { GmailAction, PlannerState, Subtask, Task, TaskSourceRef } from '../../src/domain/types.ts';
 import { mergedDone, mergedImports, wasMerged } from '../../src/domain/merge.ts';
 import type { Origin, PlannerClient } from './client.ts';
 import type { GoogleStore } from './google.ts';
 
-/** The question after an email becomes a task, or its task is completed, when the settings ask ("Show prompt"). */
+/** An email the automations act on: its account, its thread, and what it is called. */
+export interface GmailMail {
+  account: string;
+  thread: string;
+  subject: string;
+}
+
+/**
+ * The question after an email becomes a task, or its task is completed, when the settings ask ("Show prompt"): about
+ * the task's own email and the emails merged into it, once for all of them (`subject` names the first, and how many
+ * more).
+ */
 export interface GmailPrompt {
   when: 'import' | 'complete';
   taskId: string;
-  account: string;
-  thread: string;
+  mails: GmailMail[];
   subject: string;
   /** What the automations would do, ticked to start with. */
   actions: GmailAction[];
@@ -42,14 +52,24 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 export const threadKey = (account: string, thread: string): string => `${account}|${thread}`;
 
 /** An email's account and thread, by its link (a task's, or a merged subtask's), when it has both. */
-export const mailOfSource = (source: TaskSourceRef | null | undefined): { account: string; thread: string; subject: string } | null => {
+export const mailOfSource = (source: TaskSourceRef | null | undefined): GmailMail | null => {
   if (source?.kind !== 'email' || !source.account) return null;
   const thread = threadIdOf(source);
   return thread ? { account: source.account, thread, subject: source.title ?? 'the email' } : null;
 };
 
 /** An email task's account and thread, when it has both. */
-export const mailOf = (task: Pick<Task, 'source'> | undefined): { account: string; thread: string; subject: string } | null => mailOfSource(task?.source);
+export const mailOf = (task: Pick<Task, 'source'> | undefined): GmailMail | null => mailOfSource(task?.source);
+
+/**
+ * The emails completing a task acts on: its own, and the emails merged into it that were not checked off on their own
+ * (checking one off ran its completion automations, or the question about them, then), as Sunsama keeps merged items
+ * integrated: completing the task is checking off the ones still open.
+ */
+export const mailsCompletedWith = (task: Pick<Task, 'source' | 'subtasks'> | undefined): GmailMail[] => [
+  ...(mailOf(task) ? [mailOf(task)!] : []),
+  ...(task?.subtasks ?? []).flatMap((subtask) => (subtask.done ? [] : (mailOfSource(subtask.source) ?? []))),
+];
 
 export class GmailStore {
   private view: GmailView = { labels: {}, threads: {}, busy: {}, prompt: null, filter: DEFAULT_MAIL_FILTER };
@@ -150,12 +170,15 @@ export class GmailStore {
     const prompt = this.view.prompt;
     this.set({ prompt: null });
     if (!prompt || !actions?.length) return;
-    void this.act(prompt.account, prompt.thread, actions, prompt.when === 'import' ? 'Importing' : 'Completing').then((done) => done && this.client.notify(`Gmail: done for "${prompt.subject}"`));
+    const verb = prompt.when === 'import' ? 'Importing' : 'Completing';
+    void Promise.all(prompt.mails.map((mail) => this.act(mail.account, mail.thread, actions, verb))).then((done) => done.every(Boolean) && this.client.notify(`Gmail: done for "${prompt.subject}"`));
   }
 
   /**
    * The automations, after the user's own changes in this window: an email that became a task, an email task
-   * completed; and, as Sunsama keeps merged items integrated, an email merged straight into a task, or checked off there.
+   * completed; and, as Sunsama keeps merged items integrated, an email merged straight into a task, checked off there,
+   * or completed with the task it is merged into (`mailsCompletedWith`). Reopening a task does nothing in Gmail, as
+   * unchecking an email does not (Sunsama's Gmail automations are for importing and completing).
    */
   private afterCommit(commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin): void {
     // Only the surfaces with room for the question act; the Work Status frame and the background never do.
@@ -163,8 +186,9 @@ export class GmailStore {
     const made = commands.flatMap((command) => (command.type === 'task.created' && command.task.source ? [command.task.source] : []));
     for (const command of commands) {
       if (command.type === 'task.updated' && command.patch.subtasks) {
-        for (const subtask of mergedImports(before, after, command.taskId, made)) this.automate('import', command.taskId, mailOfSource(subtask.source), after);
-        for (const subtask of mergedDone(before.tasks[command.taskId], after.tasks[command.taskId])) this.automate('complete', command.taskId, mailOfSource(subtask.source), after);
+        const mails = (subtasks: readonly Subtask[]) => subtasks.flatMap((subtask) => mailOfSource(subtask.source) ?? []);
+        this.automate('import', command.taskId, mails(mergedImports(before, after, command.taskId, made)), after);
+        this.automate('complete', command.taskId, mails(mergedDone(before.tasks[command.taskId], after.tasks[command.taskId])), after);
         continue;
       }
       const when = command.type === 'task.created' ? 'import' : command.type === 'task.completed' ? 'complete' : null;
@@ -174,26 +198,34 @@ export class GmailStore {
       // given back by Convert to task (its email was imported when it was merged).
       if (when === 'import' && before.tasks[taskId] && !before.tasks[taskId]!.deletedAt) continue;
       if (command.type === 'task.created' && command.task.source && wasMerged(before, command.task.source)) continue;
-      this.automate(when, taskId, mailOf(after.tasks[taskId]), after);
+      const task = after.tasks[taskId];
+      this.automate(when, taskId, when === 'complete' ? mailsCompletedWith(task) : mailOf(task) ? [mailOf(task)!] : [], after);
     }
   }
 
-  /** What the settings say to do to an email in Gmail when it is imported or its task completed: ask, or do it. */
-  private automate(when: 'import' | 'complete', taskId: string, mail: ReturnType<typeof mailOfSource>, after: PlannerState): void {
-    if (!mail) return;
+  /**
+   * What the settings say to do to emails in Gmail when they are imported or their task completed: ask (once, about
+   * all of them), or do it to each.
+   */
+  private automate(when: 'import' | 'complete', taskId: string, found: readonly GmailMail[], after: PlannerState): void {
+    const mails = [...new Map(found.map((mail) => [`${mail.account}\n${mail.thread}`, mail])).values()];
+    if (!mails.length) return;
     const settings = after.settings;
     const configured = when === 'import' ? settings.gmailOnImport : settings.gmailOnComplete;
     const ask = when === 'import' ? settings.gmailImportPrompt : settings.gmailCompletePrompt;
     if (ask) {
-      this.set({ prompt: { when, taskId, account: mail.account, thread: mail.thread, subject: mail.subject, actions: [...configured] } });
+      const subject = mails.length === 1 ? mails[0]!.subject : `${mails[0]!.subject} and ${mails.length - 1} more`;
+      this.set({ prompt: { when, taskId, mails, subject, actions: [...configured] } });
       return;
     }
     if (!configured.length) return;
-    if (!this.allowed(mail.account)) {
-      this.client.notify(`Gmail's ${when === 'import' ? 'import' : 'completion'} automations need Gmail actions for ${mail.account}: allow them in Settings → Google`);
-      return;
+    for (const account of new Set(mails.map((mail) => mail.account))) {
+      if (!this.allowed(account)) {
+        this.client.notify(`Gmail's ${when === 'import' ? 'import' : 'completion'} automations need Gmail actions for ${account}: allow them in Settings → Google`);
+        continue;
+      }
+      for (const mail of mails.filter((item) => item.account === account)) void this.act(mail.account, mail.thread, configured, when === 'import' ? 'Importing' : 'Completing');
     }
-    void this.act(mail.account, mail.thread, configured, when === 'import' ? 'Importing' : 'Completing');
   }
 }
 

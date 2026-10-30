@@ -391,6 +391,39 @@ describe("Sunsama's prompts to update the status in Linear (round 12)", () => {
     expect([moving.store.getView().prompt, moving.moves()]).toEqual([null, [{ id: 'i1', stateId: 's-done' }]]);
   });
 
+  test("completing a task completes its issue and the issues merged into it, as checking each off would (not one checked off on its own, nor one closed); asked, once for all; reopening asks nothing", async () => {
+    const triage: EventBody = { type: 'task.created', task: { id: 'triage', title: 'Triage', placement: { kind: 'backlog', bucket: 'later' } as never, position: 1024, source: source(1, STATES[1]!) } };
+    const merged = (aloneDone: boolean): EventBody => ({
+      type: 'task.updated',
+      taskId: 'triage',
+      patch: { subtasks: [{ id: 's2', title: 'issue 2', done: false, source: source(2, STATES[2]!) }, { id: 's100', title: 'issue 100', done: aloneDone, source: source(100, STATES[1]!) }, { id: 's3', title: 'issue 3', done: false, source: source(3, STATES[4]!) }] },
+    });
+    const moving = await ready({ linearOnComplete: 'complete' });
+    moving.commit([triage, merged(false)]);
+    // HAR-100 checked off on its own first: moved then.
+    moving.commit([merged(true)]);
+    await moving.flush();
+    expect(moving.moves()).toEqual([{ id: 'i100', stateId: 's-done' }]);
+    moving.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-26' }]);
+    moving.commit([{ type: 'task.reopened', taskId: 'triage' }]);
+    await moving.flush();
+    // The task's own and HAR-2; not HAR-100 again, nor HAR-3 (Done already); nothing on reopening.
+    expect(moving.moves().slice(1).map((move) => move.id).sort()).toEqual(['i1', 'i2']);
+    expect(moving.moves().every((move) => move.stateId === 's-done')).toBe(true);
+
+    const asking = await ready();
+    asking.commit([triage, merged(false)]);
+    asking.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-26' }]);
+    expect(asking.store.getView().prompt).toEqual({ kind: 'complete', taskId: 'triage', key: 'HAR-1 and 2 more', many: { own: true, subtaskIds: ['s2', 's100'] } });
+    // Several issues, several teams maybe: no status picker, each to its team's Done.
+    expect(asking.store.promptSource(asking.store.getView().prompt!)).toBeNull();
+    asking.store.answerPrompt('yes');
+    await asking.flush();
+    expect(asking.moves().map((move) => move.id).sort()).toEqual(['i1', 'i100', 'i2']);
+    asking.commit([{ type: 'task.reopened', taskId: 'triage' }]);
+    expect(asking.store.getView().prompt).toBeNull();
+  });
+
   test("a pasted issue's status picked in the add field: the issue moves there as it is added", async () => {
     const fake = await ready();
     const linear = Object.assign(Object.create(fake.store), { issue: async () => fake.fake.small[0]! }) as LinearStore;

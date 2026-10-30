@@ -381,6 +381,37 @@ const sunsamaLinear = async (size, { importKey, urlKey, mergeKey }) => {
   check(`${size}: merged straight from the panel, the issue is imported: the import prompt asks about it`, await mergedPrompt.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false));
   await h.shot(`24-sunsama-linear-merged-${size}`);
   await mergedPrompt.getByRole('button', { name: 'Not now' }).click();
+  // Completed through the task they are merged into, as checking each off would (Sunsama keeps merged items
+  // integrated): the pasted issue's task merged in too (Alt/Option + drop, card onto card); completing the triage task
+  // asks once about the merged issues still open (one: its status picker, Done picked; several: each to its team's
+  // first completed state), and Move to Done moves them in Linear; reopening the task asks and moves nothing.
+  await browserPage.keyboard.down('Alt');
+  await card(urlIssue.title).dragTo(card(`harness triage ${size}`));
+  await browserPage.keyboard.up('Alt');
+  const withPasted = await until(async () => Object.values((await state()).tasks).find((task) => task.title === `harness triage ${size}`)?.subtasks?.some((subtask) => subtask.source?.key === urlKey));
+  const stillOpen = Object.values((await state()).tasks).find((task) => task.title === `harness triage ${size}`).subtasks.filter((subtask) => subtask.source?.kind === 'linear' && !subtask.done && !['completed', 'canceled'].includes(subtask.source.status?.type)).map((subtask) => subtask.source.key);
+  const askedFor = stillOpen.length === 1 ? stillOpen[0] : `${stillOpen[0]} and ${stillOpen.length - 1} more`;
+  await card(`harness triage ${size}`).getByRole('button', { name: 'Mark complete' }).click();
+  const throughTask = frame.getByRole('alertdialog', { name: `Update ${askedFor} in Linear` });
+  const askedThrough = await throughTask.waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+  const pickers = await throughTask.getByRole('combobox', { name: 'Status in Linear' }).count();
+  if (askedThrough && stillOpen.length === 1) await throughTask.getByRole('combobox', { name: 'Status in Linear' }).waitFor({ timeout: 10_000 });
+  const pickedThrough = stillOpen.length === 1 ? await throughTask.getByRole('combobox', { name: 'Status in Linear' }).evaluate((select) => select.selectedOptions[0]?.textContent ?? '').catch(() => '') : 'Done';
+  await h.shot(`25-sunsama-linear-merged-through-task-${size}`);
+  if (askedThrough) await throughTask.getByRole('button', { name: 'Move to Done' }).click();
+  const completedIn = (key) => {
+    const item = world.issues.find((one) => one.identifier === key);
+    const done = statesOf(item.team.id).filter((one) => one.type === 'completed').map((one) => one.id);
+    return moves(item.id).some((id) => done.includes(id));
+  };
+  const movedAll = await until(() => stillOpen.every(completedIn));
+  check(`${size}: completing the task issues are merged into asks once about the ones still open (${askedFor}), ${stillOpen.length === 1 ? 'Done picked' : 'each to its Done'}; Move to Done moves them in Linear`,
+    Boolean(withPasted) && stillOpen.includes(urlKey) && askedThrough && pickedThrough === 'Done' && (stillOpen.length === 1 ? pickers <= 1 : pickers === 0) && Boolean(movedAll),
+    JSON.stringify({ withPasted: Boolean(withPasted), stillOpen, askedThrough, pickers, pickedThrough, moves: stillOpen.map((key) => [key, moves(world.issues.find((one) => one.identifier === key).id)]) }));
+  const movesBefore = calls('PlannerSetState').length;
+  await card(`harness triage ${size}`).getByRole('button', { name: 'Mark incomplete' }).click();
+  await browserPage.waitForTimeout(1500);
+  check(`${size}: reopening that task asks nothing and moves nothing in Linear`, (await frame.getByRole('alertdialog', { name: /in Linear$/ }).count()) === 0 && calls('PlannerSetState').length === movesBefore);
   await go('Settings');
   await frame.getByRole('checkbox', { name: /Import automations: Show prompt to update status in Linear/ }).uncheck();
   for (const [item, issueState, completedAt, updatedAt] of saved) Object.assign(item, { state: issueState, completedAt, updatedAt });
