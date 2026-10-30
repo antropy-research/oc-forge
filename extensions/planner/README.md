@@ -328,6 +328,7 @@ docker compose exec -w /extensions/planner openchamber bun run build   # panel/m
 node ../../extensions/planner/tests/e2e/run.mjs http://<bind>:35310     # on the host
 node ../../extensions/planner/tests/e2e/sunsama.mjs                       # on the host, this checkout's build
 node ../../extensions/planner/tests/e2e/linear.mjs /tmp/opencode/planner-linear  # the Linear page on this checkout's build (harness.mjs)
+node ../../extensions/planner/tests/e2e/undo.mjs /tmp/opencode/planner-undo-journey  # the Planner's own Undo in two windows, at 1440 and 1024 (harness.mjs)
 node ../../extensions/planner/tests/e2e/calendar.mjs /tmp/planner-calendar   # this build, a fake Google
 node ../../extensions/planner/tests/e2e/tasks-calendar.mjs /tmp/planner-tasks-calendar   # Pending tasks, notifications, advanced settings, Drive, colors, Do not disturb, declining, the inventory, printing (a fake Google; TC_PARTS=tasks|advanced|inventory|print|decline runs one part)
 node ../../extensions/planner/tests/e2e/agentpr.mjs http://<bind>:35310   # the installed extension, a real agent, a fake GitHub
