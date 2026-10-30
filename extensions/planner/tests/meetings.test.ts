@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { EventStore } from '../service/store.ts';
 import { Planner } from '../service/planner.ts';
 import { MeetingImport } from '../service/meetings.ts';
-import { addMeetingCommands, addMeetingsCommands, eventKey, excludedBy, importCalendars, meetingSuggestions, planMeetingCompletion, planMeetingSync, taskForEvent } from '../src/domain/meetings.ts';
+import { addMeetingCommands, addMeetingsCommands, eventKey, excludedBy, importCalendars, meetingSuggestions, planChannelFill, planMeetingCompletion, planMeetingSync, taskForEvent } from '../src/domain/meetings.ts';
 import { instantAt } from '../src/domain/dates.ts';
 import { actualMinutes } from '../src/domain/selectors.ts';
 import { applyEvents } from '../src/domain/reducer.ts';
@@ -191,6 +191,88 @@ describe('auto-sync', () => {
     state = run(state, [{ type: 'settings.updated', patch: { meetingCalendars: ['home'] } }]);
     state = synced(state, [], new Set(['home']));
     expect(state.tasks[task.id]!.deletedAt).not.toBeNull();
+  });
+});
+
+// Round 13: the first import starts as a calendar is ticked under Auto-sync, before its channel can be chosen. The
+// channel chosen then goes at once to that calendar's meetings without one, today's and later ones not done.
+describe('an import channel chosen with auto-sync on', () => {
+  const YESTERDAY = '2026-10-28';
+  const options = { from: TODAY, days: 7, zone: ZONE, newId };
+  const channels: EventBody[] = [
+    { type: 'channel.created', channel: { id: 'meet', name: 'meetings', color: '#e8590c', context: 'work' } },
+    { type: 'channel.created', channel: { id: 'mine', name: 'mine', color: '#1c7ed6', context: 'personal' } },
+  ];
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("its calendar's auto-imported meetings with no channel take it; one given a channel, a done one, a past one (rolled over or not), one added by hand and another calendar's stay", () => {
+    let state = run(base({ meetingImport: 'autoSync', meetingCalendars: ['work', 'home'] }), channels);
+    const homeOne = meeting('home1', 'Family call', at(TODAY, 18), at(TODAY, 19), { calendar: 'home' });
+    const past = meeting('past', 'Retro', at(YESTERDAY, 10), at(YESTERDAY, 11));
+    const pastStill = meeting('past2', 'Offsite debrief', at(YESTERDAY, 15), at(YESTERDAY, 16));
+    const byHand = meeting('hand', 'Interview', at(TOMORROW, 15), at(TOMORROW, 16));
+    state = run(state, planMeetingSync(state, [planning, standup, review, homeOne], options));
+    state = run(state, planMeetingSync(state, [past, pastStill], { ...options, from: YESTERDAY, days: 1 }));
+    state = run(state, addMeetingCommands(state, byHand, ZONE, newId));
+    const id = (event: CalendarEvent) => taskForEvent(state, eventKey(event)!)!.id;
+    state = run(state, [
+      { type: 'task.updated', taskId: id(review), patch: { channelId: 'mine' } },
+      { type: 'task.completed', taskId: id(standup), on: TODAY },
+      // Rolled over: yesterday's meeting, still open, on today.
+      { type: 'task.moved', taskId: id(past), placement: { kind: 'day', date: TODAY }, position: 2048 },
+      { type: 'settings.updated', patch: { meetingChannels: { work: 'meet' } } },
+    ]);
+    expect(planChannelFill(state, ['work'], TODAY, ZONE)).toEqual([{ type: 'task.updated', taskId: id(planning), patch: { channelId: 'meet' } }]);
+    // Filled, nothing is left to fill. Nothing with Show prompt, nor for a channel deleted since.
+    expect(planChannelFill(run(state, planChannelFill(state, ['work'], TODAY, ZONE)), ['work'], TODAY, ZONE)).toEqual([]);
+    expect(planChannelFill(run(state, [{ type: 'settings.updated', patch: { meetingImport: 'prompt' } }]), ['work'], TODAY, ZONE)).toEqual([]);
+    expect(planChannelFill(run(state, [{ type: 'channel.deleted', channelId: 'meet' }]), ['work'], TODAY, ZONE)).toEqual([]);
+  });
+
+  test('chosen while a run waits on Google, the service fills them at once by their ids, from its own plan: one another window gave a channel meanwhile keeps it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'planner-meetings-'));
+    dirs.push(dir);
+    const store = new EventStore({ dir, commitDelayMs: 5 });
+    await store.init();
+    const planner = new Planner(store, () => new Date(at(TODAY, 12)));
+    let n = 0;
+    const execute = (...bodies: EventBody[]) => {
+      const result = planner.execute(bodies.map((body) => ({ cmd: `seed${String(++n).padStart(4, '0')}x`, ...body })));
+      if (!result.ok) throw new Error(result.error);
+    };
+    execute(
+      { type: 'settings.updated', patch: { timezone: ZONE, meetingImport: 'autoSync', meetingCalendars: ['work'] } },
+      { type: 'calendar.added', calendar: { id: 'work', name: 'Work', url: 'https://calendar.google.com/calendar/r', color: '#039be5', google: { account: ME, calendarId: 'primary' } } },
+      ...channels,
+    );
+    let release = () => {};
+    const calendars = {
+      read: async () => {
+        await new Promise<void>((resolve) => (release = resolve));
+        return { events: [planning, review], errors: [], reads: new Map() };
+      },
+    };
+    const meetings = new MeetingImport(planner, calendars as never, () => {}, () => Date.parse(at(TODAY, 12)));
+    const first = meetings.run();
+    release();
+    await first;
+    const planningId = taskForEvent(planner.state, eventKey(planning)!)!.id;
+    const reviewId = taskForEvent(planner.state, eventKey(review)!)!.id;
+    expect([planner.state.tasks[planningId]!.channelId, planner.state.tasks[reviewId]!.channelId]).toEqual([null, null]);
+    // Another window gives the review a channel; then the calendar's channel is chosen, and the run it asks for waits on Google.
+    execute({ type: 'task.updated', taskId: reviewId, patch: { channelId: 'mine' } }, { type: 'settings.updated', patch: { meetingChannels: { work: 'meet' } } });
+    const second = meetings.run();
+    expect([planner.state.tasks[planningId]!.channelId, planner.state.tasks[reviewId]!.channelId]).toEqual(['meet', 'mine']);
+    // Asked again before Google answers: nothing changed since, nothing written.
+    const version = planner.state.version;
+    expect(meetings.run()).toBe(second);
+    expect(planner.state.version).toBe(version);
+    release();
+    await second;
+    expect([planner.state.tasks[planningId]!.channelId, planner.state.tasks[reviewId]!.channelId]).toEqual(['meet', 'mine']);
   });
 });
 

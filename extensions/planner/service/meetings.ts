@@ -5,7 +5,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Planner } from './planner.ts';
 import type { GoogleCalendars } from './googleTimeboxes.ts';
-import { MEETING_SYNC_DAYS, importCalendars, planMeetingCompletion, planMeetingSync } from '../src/domain/meetings.ts';
+import { MEETING_SYNC_DAYS, importCalendars, planChannelFill, planMeetingCompletion, planMeetingSync } from '../src/domain/meetings.ts';
 import { addDays, instantAt, todayIn } from '../src/domain/dates.ts';
 import { newId } from '../src/domain/ids.ts';
 import type { EventBody } from '../src/domain/events.ts';
@@ -23,6 +23,8 @@ const SYNC_MS = 5 * 60_000;
 
 export class MeetingImport {
   private running: Promise<MeetingRun> | null = null;
+  /** The import channels as the last run found them (null before the first run). */
+  private channels: Record<string, string> | null = null;
 
   constructor(
     private readonly planner: Pick<Planner, 'state' | 'execute'>,
@@ -48,8 +50,25 @@ export class MeetingImport {
     return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
   }
 
+  /**
+   * An import channel chosen (or changed) since the last run: its calendar's meetings with none take it now, by their
+   * ids (planChannelFill), without waiting for Google. Before, they took it only once a sync had read Google again.
+   */
+  fillChannels(): number {
+    const state = this.planner.state;
+    const seen = this.channels;
+    const channels = state.settings.meetingChannels;
+    this.channels = { ...channels };
+    const zone = state.settings.timezone;
+    if (!seen || !zone) return 0;
+    const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== seen[calendarId]);
+    return changed.length ? this.apply(planChannelFill(state, changed, todayIn(zone, new Date(this.now())), zone)) : 0;
+  }
+
   /** Complete ended meetings, then (with auto-sync on and a calendar chosen) add, follow and remove the week's. One run at a time. */
   run(): Promise<MeetingRun> {
+    // A channel just chosen reaches its meetings at once, whether or not a run is under way.
+    this.fillChannels();
     this.running ??= this.once().finally(() => {
       this.running = null;
     });

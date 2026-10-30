@@ -4292,10 +4292,31 @@ var meetingTask = (state, event, options) => {
     source
   };
 };
+var calendarChannel = (state, calendarId) => {
+  const channelId = state.settings.meetingChannels[calendarId];
+  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
+};
 var importChannel = (state, event) => {
   const subscription = subscriptionOf(state, event);
-  const channelId = subscription ? state.settings.meetingChannels[subscription.id] : undefined;
-  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
+  return subscription ? calendarChannel(state, subscription.id) : null;
+};
+var planChannelFill = (state, calendarIds, today, zone) => {
+  if (state.settings.meetingImport !== "autoSync")
+    return [];
+  return calendarIds.flatMap((calendarId) => {
+    const google = state.calendars[calendarId]?.google;
+    const channelId = calendarChannel(state, calendarId);
+    if (!google || !channelId || !state.settings.meetingCalendars.includes(calendarId))
+      return [];
+    return Object.values(state.tasks).flatMap((task) => {
+      const event = task.source?.kind === "event" ? task.source.event : undefined;
+      if (!event?.auto || task.channelId || task.completedAt || task.deletedAt || task.archivedAt)
+        return [];
+      if (task.source.account !== google.account || event.calendarId !== google.calendarId || eventDay(event, zone) < today)
+        return [];
+      return [{ type: "task.updated", taskId: task.id, patch: { channelId } }];
+    });
+  });
 };
 var hasTime = (state, taskId) => Object.values(state.entries).some((entry) => entry.taskId === taskId);
 var planMeetingSync = (state, events, options) => {
@@ -4380,6 +4401,7 @@ class MeetingImport {
   log;
   now;
   running = null;
+  channels = null;
   constructor(planner, calendars, log = () => {}, now = Date.now) {
     this.planner = planner;
     this.calendars = calendars;
@@ -4400,7 +4422,19 @@ class MeetingImport {
     const zone = this.planner.state.settings.timezone;
     return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
   }
+  fillChannels() {
+    const state = this.planner.state;
+    const seen = this.channels;
+    const channels = state.settings.meetingChannels;
+    this.channels = { ...channels };
+    const zone = state.settings.timezone;
+    if (!seen || !zone)
+      return 0;
+    const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== seen[calendarId]);
+    return changed.length ? this.apply(planChannelFill(state, changed, todayIn(zone, new Date(this.now())), zone)) : 0;
+  }
   run() {
+    this.fillChannels();
     this.running ??= this.once().finally(() => {
       this.running = null;
     });
