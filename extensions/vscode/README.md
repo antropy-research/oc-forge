@@ -234,14 +234,16 @@ behind it then and opens each, and the Explorer shows, lit, once the container s
 through VS Code's Quick Open in the page, past the 64 tabs the host had room for (each has its header tab, the last
 selected, in view and named by the address bar; the strip's list holds every one and opens the 30th; the last, switched
 to from its tab and closed unsaved from the header, asks to save: Cancel keeps it, Don't Save closes it, and the file
-shown next is the selected tab and the address bar's; `4ac4898`'s build failed all of these).
+shown next is the selected tab and the address bar's; `4ac4898`'s build failed all of these); "Open in VS Code" on a
+chat in a second project and back, the chat's menu opened once each time (no retry), and a menu opened while VS Code
+follows the folder staying open, with the focus still in OpenChamber once the rail view and the page have started on it
+(`ffd6c44`'s build lost the menu and the focus to a VS Code frame every time).
 At 1440×900 also: Markdown's preview in the stock instance's
 whole workbench (it renders, a key pressed in it reaches VS Code, Reload Window restores it), in the page and in a
 rail view; Ctrl+click on a link in a rail view (the probe extension's welcome view) and on a file link in the terminal
 opening a new browser tab on that file's editor while this tab stays as it was, a plain click opening it here;
 OpenChamber's rail digits (Ctrl+Alt+digit) reaching it from the rail view, the page and the terminal, Alt+W from a
-rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; "Open in VS Code" on a chat in a
-second project and back; the terminal under a file's editor (`keepBottomZone`: the page ends where the bottom zone
+rail view, Alt+W staying VS Code's in the editor and the shell's in the terminal; the terminal under a file's editor (`keepBottomZone`: the page ends where the bottom zone
 begins, both take input, both stay through a chat); closing the last unsaved file tab (Cancel keeps the tab, the
 editor and the change; Don't Save closes without writing, and the file opens again as on disk; Save writes; each back
 to the chat), and across a reload the tabs coming back once each (Markdown's preview too), tabs chosen while the page
@@ -252,7 +254,10 @@ while this one stays as it was, VS Code's rail view and page then working in bot
 service requests over a WebSocket of its own (the adapters' transport); and three browser windows in a row each
 opening the terminal and running a command in it, the terminal's part adding no terminal to the ones VS Code
 reconnects. It writes each size's start times and memory to `<size>-frames.json`. Run the stack's `prepare` outside a
-private network namespace (it downloads), then `up`, the check and `down` inside one.
+private network namespace (it downloads), then `up`, the check and `down` inside one. `SURFACES_ONLY=openInVscode`
+(phase functions, comma-separated) runs only those, after the seed. `SURFACES_TRACE=1` writes `toasts.log`: every VS Code
+notification and OpenChamber toast shown, where and for how long, among the checks. A full run shows two, both
+"OpenChamber is now in …" in phase 10's rail view, for under 2 s.
 
 `run.mjs` checks the dev container, whichever OpenChamber it runs; its catalog tells (an adapted server publishes the
 extension's `ocForge` block). On a stock OpenChamber it connects the panel to the VS Code Server and checks the
