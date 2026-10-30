@@ -18,6 +18,22 @@ h1, h2, h3 { margin: 0; }
 
 button.primary { background: var(--oc-primary); color: var(--oc-primary-fg); border: 0; border-radius: var(--pl-radius); padding: 6px 14px; }
 button.link { background: none; border: 0; padding: 0; color: var(--oc-primary-text, var(--oc-primary)); }
+/* What the browser would draw in its own colours takes OpenChamber's look (its --oc-* tokens), as the host's controls
+   and the SDK's kit do. Links in the accent text, visited too (a link with a colour of its own keeps it: these come
+   first), action links (a.link, as button.link) underlined on hover and focus, links in text underlined. Keyboard focus
+   is the hover fill, not a ring ("like the app"); a check, which shows no fill, has a ring in the focus colour; a field
+   darkens its edge. Checks in the accent; selected text in the selection pair. */
+:link, :visited { color: var(--oc-primary-text, var(--oc-primary)); text-underline-offset: 2px; }
+a.link { text-decoration: none; }
+a.link:hover, a.link:focus-visible, a:not([class]):hover, a:not([class]):focus-visible { text-decoration: underline; }
+/* A field, select or textarea with no look of its own: the Planner's surface and line (any class rule wins). */
+:where(select, textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"])) { background: var(--pl-surface); border: 1px solid var(--pl-line); border-radius: 6px; }
+:focus-visible { outline: none; }
+:where(button, a[href], summary, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [tabindex]:not([tabindex="-1"])):focus-visible { background-image: linear-gradient(var(--oc-hover), var(--oc-hover)); }
+:where(input[type="checkbox"], input[type="radio"]):focus-visible { outline: 2px solid var(--oc-focus, var(--oc-primary)); outline-offset: 1px; }
+:where(input:not([type="checkbox"]):not([type="radio"]), select, textarea):focus-visible { border-color: color-mix(in srgb, var(--oc-fg) 26%, transparent); }
+input[type="checkbox"], input[type="radio"], input[type="range"], progress { accent-color: var(--oc-primary); }
+::selection { background: var(--oc-selection, color-mix(in srgb, var(--oc-primary) 24%, transparent)); color: var(--oc-selection-fg, inherit); }
 .danger { color: var(--oc-error-text, #c92a2a); }
 .hint { color: var(--oc-muted); font-size: 12px; margin: 4px 0 8px; }
 

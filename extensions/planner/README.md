@@ -166,6 +166,26 @@ the same kind of loss.
 | A chat | OpenChamber's chats | Its title and notes, and the chat | — |
 | A repeating task's next instance | The service | The series' title, notes, planned time, priority, channel and subtasks | — |
 
+## OpenChamber's look
+
+Colours, fonts and radii come from the host theme (`--oc-*`, which OpenChamber keeps live), and nothing falls back to
+the browser's own look. `look.mjs` checks every view, a task's details and the Sources panel, in OpenChamber's light
+and dark themes, Nord and Flexoki, at both sizes, against the browser's defaults read in the same frame.
+
+| What | As | Before (review 13) |
+|---|---|---|
+| Links (Create a view in Linear, Open, links in notes) | The accent text (`--oc-primary-text`), visited too; action links (`a.link`) underlined on hover and focus, links in text underlined | The browser's blue: `rgb(0, 0, 238)`, `rgb(158, 158, 255)` in dark themes |
+| Keyboard focus | The hover fill, as OpenChamber's own controls draw it; a check, a ring in the focus colour; a field, a darker edge | The browser's ring |
+| Checks | The accent | The browser's blue |
+| Selected text | The host's selection pair | The browser's |
+| A field, select or textarea with no look of its own | The Planner's surface and line | The browser's (the Linear team choice in a task's details) |
+| Scrollbars | OpenChamber's own thin ones, which the host adds to every extension | — |
+
+A visited link can't be shown in the Planner's frame in a test: Chrome tells no script a `:visited` colour, keys a
+link's visited state to the page and frame it was followed from, and the Planner's links open through OpenChamber.
+`look.mjs` draws one on a page of its own with the Planner's stylesheet, in a browser with a profile (which keeps
+visited links), and reads its pixels; a link no stylesheet reaches shows the browser's visited purple there.
+
 ## Google's task help, operation by operation
 
 Every operation Google documents for tasks in Google Calendar
@@ -335,6 +355,7 @@ each phase compares the day the Planner shows with the one the journey computes 
 | `forge.mjs` | Today from its plan, for a run of a minute | Waits out a midnight less than 10 minutes away in the plan's zone |
 | `undo.mjs` | Today read once; its tasks are seeded there and looked for in the column marked today | Waits out a midnight less than 20 minutes away in the plan's zone, reloads the Planner, then reads today |
 | `subtasks.mjs` | Today read once; its task is seeded there and opened from the column marked today in both windows | The same as `undo.mjs` |
+| `look.mjs` | Today read once; its one task is opened from wherever the board shows it (rolled over, it is on the new today) | — |
 | `smoke.mjs` | No dates | — |
 | `agentpr.mjs` | Adds its task in the column marked today and finds it there seconds later; no stored date | — |
 | `tasks-calendar.mjs` | Already runs in a zone where it is between 10 AM and 10 PM | — |
@@ -594,6 +615,7 @@ node ../../extensions/planner/tests/e2e/sunsama.mjs                       # on t
 node ../../extensions/planner/tests/e2e/linear.mjs /tmp/opencode/planner-linear  # the Linear page on this checkout's build (harness.mjs)
 node ../../extensions/planner/tests/e2e/undo.mjs /tmp/opencode/planner-undo-journey  # the Planner's own Undo in two windows, at 1440 and 1024 (harness.mjs)
 node ../../extensions/planner/tests/e2e/subtasks.mjs /tmp/opencode/planner-subtasks-journey  # one task's subtasks changed in two windows at once, one window's command held on its way; details and Focus; subtasks turned into tasks by every control, and in both windows at once, at 1440 and 1024 (harness.mjs)
+node ../../extensions/planner/tests/e2e/look.mjs /tmp/opencode/planner-look-journey  # OpenChamber's look in four themes at 1440 and 1024: links, focus, checks, selection, fields (harness.mjs)
 node ../../extensions/planner/tests/e2e/calendar.mjs /tmp/planner-calendar   # this build, a fake Google
 node ../../extensions/planner/tests/e2e/tasks-calendar.mjs /tmp/planner-tasks-calendar   # Pending tasks, notifications, advanced settings, Drive, colors, Do not disturb, declining, the inventory, printing (a fake Google; TC_PARTS=tasks|advanced|inventory|print|decline runs one part)
 node ../../extensions/planner/tests/e2e/agentpr.mjs http://<bind>:35310   # the installed extension, a real agent, a fake GitHub
