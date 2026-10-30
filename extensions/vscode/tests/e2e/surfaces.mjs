@@ -73,6 +73,11 @@
 //      opens one from it; switching to the last from its header tab and closing
 //      it unsaved asks to save (Cancel keeps it, Don't Save closes it), then the
 //      page shows its neighbour, which the header and the address bar name;
+//  19. a frame without the focus saves what changed in it, at both sizes: the
+//      page's editor scrolled with the mouse wheel while the focus is in
+//      OpenChamber is where it was after a browser reload (VS Code for the web
+//      saves its state only while its document has the focus; the frame saves
+//      a few seconds after a change through IStorageService.flush);
 // and, with OpenChamber's session tabs off, the page keeps VS Code's own tab
 // bar. It also measures each workbench's start and memory (`<size>-frames.json`).
 //
@@ -1818,6 +1823,84 @@ const manyFiles = async (chat, viewport) => {
   }
 };
 
+// ── 19. A frame without the focus saves what changed in it. VS Code for the web saves its state every few seconds only
+// while its document has the focus; a frame in OpenChamber often hasn't it while its state changes, and a browser
+// reload can't save on the way out. Scrolled with the wheel while the focus is in OpenChamber (a wheel doesn't take
+// the focus), the page's editor is where it was after the reload: the frame saved it a few seconds after the scroll.
+const backgroundSave = async (chat, viewport) => {
+  const size = `${viewport.width}x${viewport.height}`;
+  const file = 'background-save.txt';
+  writeFileSync(join(project, file), Array.from({ length: 400 }, (_, index) => `line ${index + 1} of ${run}`).join('\n') + '\n');
+  const context = await browser.newContext({ viewport });
+  await context.request.post(`${base}/auth/session`, { data: { password } });
+  await context.addInitScript(seedTabs, [chat]);
+  const page = await context.newPage();
+  const editor = () => pageFrame(page).locator(`.part.editor .monaco-editor[data-uri$="/${file}"]`).first();
+  /** The first line the page's editor shows. */
+  const firstLine = () => editor().locator('.margin-view-overlays .line-numbers').evaluateAll((numbers) => Math.min(...numbers.map((number) => Number(number.textContent)).filter((value) => value > 0)));
+  /** Which VS Code frames have the focus (the window's document, or one inside it, as a webview's). */
+  const focused = () => Promise.all([pageFrame(page), viewFrame(page)].map((frame) => frame.locator('html').evaluate(() => document.hasFocus()).catch(() => false)));
+  try {
+    await page.goto(`${base}/?session=${chat}`);
+    await until(async () => (await rail(page)).some((entry) => entry.id === entrySurface('explorer')), 60_000);
+    await entryButton(page, 'explorer').click();
+    const view = viewFrame(page);
+    // Alone on a fresh stack, it is the first to connect.
+    const row = view.locator('.explorer-folders-view .monaco-list-row', { hasText: file }).first();
+    const address = view.getByRole('textbox', { name: 'VS Code Server address' });
+    await row.or(address).first().waitFor({ timeout: 120_000 });
+    if (await address.isVisible()) {
+      await address.fill(vscodeUrl);
+      await view.getByLabel('VS Code Server connection token').fill(token);
+      await view.getByRole('button', { name: 'Connect' }).click();
+    }
+    await row.waitFor({ timeout: 240_000 });
+    await row.click();
+    await until(async () => await pageShown(page) && await editor().locator('.view-line').first().isVisible(), 120_000);
+    await pageStarted(page);
+    // VS Code has saved the editor as opened (from here on, only the scroll is new).
+    await wait(6_000);
+    // The focus goes to OpenChamber, as when the user clicks outside VS Code.
+    await page.evaluate(() => document.activeElement?.blur());
+    const outside = await until(async () => (await focused()).every((has) => !has), 5_000);
+    const box = await editor().boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    // Down past line 40, a wheel turn at a time (VS Code scrolls each by its own measure).
+    let scrolled = null;
+    for (let step = 0; step < 40 && !scrolled; step++) {
+      await page.mouse.wheel(0, 400);
+      await wait(200);
+      const line = await firstLine().catch(() => 0);
+      if (line > 40) scrolled = line;
+    }
+    await wait(500);
+    if (scrolled) scrolled = await firstLine();
+    const stillOutside = (await focused()).every((has) => !has);
+    // The frame's save comes within its interval (5 s), then the service has it.
+    await wait(8_000);
+    await page.reload({ waitUntil: 'load' });
+    const tab = await until(async () => (await headerTabs(page)).find((item) => item.title.includes(file)), 120_000);
+    if (tab && !(await pageShown(page))) await headerTab(page, file).click();
+    await until(async () => await pageShown(page) && await editor().locator('.view-line').first().isVisible(), 120_000);
+    const restored = await until(async () => {
+      const line = await firstLine();
+      return Number.isFinite(line) && line > 1 ? line : null;
+    }, 20_000) ?? await firstLine().catch(() => null);
+    check(`[${size}] 19 a frame without the focus saves what changed in it: the editor scrolled with the focus in OpenChamber is where it was after a browser reload`,
+      Boolean(outside && stillOutside && scrolled) && Math.abs(restored - scrolled) <= 3,
+      `focus ${outside && stillOutside ? 'in OpenChamber throughout' : 'in a VS Code frame'}; scrolled to line ${scrolled ?? 'none'}; after the reload line ${restored ?? 'none'}`);
+    await shot(page, `${size}-19-after-reload`);
+    await closeHeaderTab(page, file).catch(() => undefined);
+    await until(async () => !(await headerTabs(page)).some((item) => item.title.includes(file)), 10_000);
+  } catch (error) {
+    check(`[${size}] 19 the background save ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+    await shot(page, `${size}-19-failure`).catch(() => undefined);
+  } finally {
+    await context.close();
+    rmSync(join(project, file), { force: true });
+  }
+};
+
 // SURFACES_ONLY: these phases only (their function names), after the seed.
 const only = process.env.SURFACES_ONLY ? new Set(process.env.SURFACES_ONLY.split(',')) : null;
 const runs = (phase) => !only || only.has(phase);
@@ -1839,6 +1922,8 @@ try {
   if (runs('overflowAtRuntime')) await overflowAtRuntime(seeded.chats[0], { width: 1024, height: 768 });
   if (runs('manyFiles')) await manyFiles(seeded.chats[0], { width: 1440, height: 900 });
   if (runs('manyFiles')) await manyFiles(seeded.chats[0], { width: 1024, height: 768 });
+  if (runs('backgroundSave')) await backgroundSave(seeded.chats[0], { width: 1440, height: 900 });
+  if (runs('backgroundSave')) await backgroundSave(seeded.chats[0], { width: 1024, height: 768 });
 } catch (error) {
   check('the check ran to the end', false, String(error.message ?? error).split('\n')[0]);
 } finally {
