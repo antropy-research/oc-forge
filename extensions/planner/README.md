@@ -311,7 +311,8 @@ each phase compares the day the Planner shows with the one the journey computes 
 | `linear.mjs` | `dayKey` read the clock at each use, in steps of 24 hours (on a 25-hour day such as November 1, "tomorrow" in its first hour was today) | Today read once at the start, after waiting out a midnight less than 10 minutes away; calendar days from it |
 | `run.mjs` | Today from the plan's first read, for the rest of the run | Waits out a midnight less than 30 minutes away in the plan's zone, then reads it again (not run here: it uses the installed Planner) |
 | `forge.mjs` | Today from its plan, for a run of a minute | Waits out a midnight less than 10 minutes away in the plan's zone |
-| `undo.mjs` | Today read once; its tasks are seeded there and looked for in the column marked today | The same assumption. The file belongs to the subtask work under way, so it is left to it: the same `waitOutMidnight` before reading today |
+| `undo.mjs` | Today read once; its tasks are seeded there and looked for in the column marked today | Waits out a midnight less than 20 minutes away in the plan's zone, reloads the Planner, then reads today |
+| `subtasks.mjs` | Today read once; its task is seeded there and opened from the column marked today in both windows | The same as `undo.mjs` |
 | `smoke.mjs` | No dates | — |
 | `agentpr.mjs` | Adds its task in the column marked today and finds it there seconds later; no stored date | — |
 | `tasks-calendar.mjs` | Already runs in a zone where it is between 10 AM and 10 PM | — |

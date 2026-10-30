@@ -6,6 +6,7 @@
 // another window since; not undone".
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/undo.mjs [outDir]
 import { startHarness } from './harness.mjs';
+import { minutesToMidnight, waitOutMidnight } from './days.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-undo-journey';
 const CHANGED = 'Changed in another window since; not undone';
@@ -35,7 +36,16 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   };
-  const today = (await state()).today;
+  // Today is the plan's (its zone is the window's), read once for the rest of the run: within 20 minutes of midnight
+  // there, the new day first, so the cards this run puts on today stay on the day both windows show.
+  let first = await state();
+  const zone = first.state?.settings?.timezone ?? 'UTC';
+  if (minutesToMidnight(zone) < 20) {
+    await waitOutMidnight(zone, 20, 'undo.mjs');
+    await h.openPlanner();
+    first = await state();
+  }
+  const today = first.today;
 
   // The second window, on the same Planner.
   other = await h.context.newPage();

@@ -8,6 +8,7 @@
 // subtasks with the same controls.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/subtasks.mjs [outDir]
 import { startHarness } from './harness.mjs';
+import { minutesToMidnight, waitOutMidnight } from './days.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-subtasks-journey';
 const results = [];
@@ -37,7 +38,16 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   };
-  const today = (await state()).today;
+  // Today is the plan's (its zone is the window's), read once for the rest of the run: within 20 minutes of midnight
+  // there, the new day first, so the cards this run puts on today stay on the day both windows show.
+  let first = await state();
+  const zone = first.state?.settings?.timezone ?? 'UTC';
+  if (minutesToMidnight(zone) < 20) {
+    await waitOutMidnight(zone, 20, 'subtasks.mjs');
+    await h.openPlanner();
+    first = await state();
+  }
+  const today = first.today;
 
   // Window A's subtask commands, held on their way while `hold` is on: sent once released, unchanged, in order. (A
   // build from before subtask commands sends the whole list, `task.updated` with `subtasks`: held too, the negative
