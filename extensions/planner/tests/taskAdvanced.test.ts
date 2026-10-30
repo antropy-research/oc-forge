@@ -437,7 +437,8 @@ describe('Do not disturb and declining meetings (work and school accounts)', () 
 
 describe('saved from the form', () => {
   const host = { storage: { get: async () => undefined, set: async () => {}, delete: async () => {}, keys: async () => [] } } as unknown as HostClient;
-  const fakeClient = (start: PlannerState, answer: (method: string, path: string, body: any) => unknown = () => ({ tasks: [] })) => {
+  // Google has the one task, `item()`.
+  const fakeClient = (start: PlannerState, answer: (method: string, path: string, body: any) => unknown = () => ({ tasks: [item()] })) => {
     let state = start;
     let n = 0;
     const calls: { method: string; path: string; body?: any }[] = [];
@@ -466,7 +467,7 @@ describe('saved from the form', () => {
   const fields = (patch: Partial<TaskFields['kept']> = {}): TaskFields => ({ title: 'Deep work', notes: '', due: TODAY, kept: { time: 600, duration: 60, deadline: null, rule: null, busy: true, visibility: 'default', ...patch } });
 
   test('color, attachments, Do not disturb and declining are kept, with no Google write; declining is asked for at once', async () => {
-    const fake = fakeClient(stateWith(keep('gt1', { time: 600, duration: 60, busy: true })), (method, path) => (path === '/google/tasks/decline' ? { declined: [], errors: [] } : method === 'PATCH' ? { task: item() } : { tasks: [] }));
+    const fake = fakeClient(stateWith(keep('gt1', { time: 600, duration: 60, busy: true })), (method, path) => (path === '/google/tasks/decline' ? { declined: [], errors: [] } : method === 'PATCH' ? { task: item() } : { tasks: [item()] }));
     const store = new GoogleStore(host, fake.client, 'page');
     await store.saveListTask(item(), fields({ color: '#0b8043', attachments: [doc('a1', 'Q4 plan')], doNotDisturb: true, decline: { mode: 'new', message: 'Heads down' } }));
     expect(kept(fake.state())).toMatchObject({ color: '#0b8043', attachments: [doc('a1', 'Q4 plan')], doNotDisturb: true, decline: { mode: 'new', message: 'Heads down' } });

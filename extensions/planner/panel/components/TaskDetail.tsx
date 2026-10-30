@@ -17,7 +17,7 @@ import { LinearTaskSection } from './LinearPanel.tsx';
 import { AgentSection } from './Agents.tsx';
 import { GitHubTaskSection } from './GitHubPanel.tsx';
 import { GoogleTaskSection } from './GooglePanel.tsx';
-import { ConflictBanner, quoted, useDraft } from './Conflicts.tsx';
+import { ConflictBanner, RetryBanner, notCheckedText, quoted, useDraft } from './Conflicts.tsx';
 
 const PRIORITIES: { id: Priority; label: string }[] = [
   { id: 'urgent', label: 'Urgent' },
@@ -81,12 +81,21 @@ const StartPicker = ({ task }: { task: Task }) => {
 /**
  * A task's subtasks changed as the plan has them now, read again first: the
  * list is written whole, so one added, ticked or renamed in another window
- * meanwhile stays. `also`: what goes with it in the same step.
+ * meanwhile stays. When the plan cannot be read, nothing is written (never on
+ * this window's copy of the list), and it says so, to try again. `also`:
+ * what goes with it in the same step.
  */
 const useSubtasks = (taskId: string) => {
   const { client } = usePlanner();
   return async (change: (subtasks: Subtask[]) => Subtask[], also: EventBody[] = [], undo?: string) => {
-    const now = (await client.refresh().catch(() => client.getView().state)).tasks[taskId];
+    let state;
+    try {
+      state = await client.refresh();
+    } catch (error) {
+      client.notify(`The subtasks were not changed: the task couldn't be read as it is now (${error instanceof Error ? error.message : String(error)}). Try again.`);
+      return;
+    }
+    const now = state.tasks[taskId];
     if (now) await client.dispatch([...also, { type: 'task.updated', taskId, patch: { subtasks: change(now.subtasks) } }], undo ? { undo } : undefined);
   };
 };
@@ -118,6 +127,7 @@ const SubtaskTitle = ({ task, subtask }: { task: Task; subtask: Subtask }) => {
       {title.conflict && (
         <ConflictBanner lines={[`This subtask was renamed ${quoted(title.conflict.theirs)} elsewhere (yours: ${quoted(title.conflict.mine)})`]} onTheirs={title.theirs} onMine={title.mine} />
       )}
+      {title.failed && <RetryBanner text={notCheckedText(title.failed)} onRetry={title.retry} />}
     </>
   );
 };
@@ -197,6 +207,7 @@ export const NotesField = ({ task, className }: { task: Task; className: string 
           onMine={notes.mine}
         />
       )}
+      {notes.failed && <RetryBanner text={notCheckedText(notes.failed)} onRetry={notes.retry} />}
     </>
   );
 };
@@ -419,6 +430,8 @@ export const TaskDetail = ({ taskId }: { taskId: string }) => {
         {planned.conflict && (
           <ConflictBanner lines={[`Planned time was changed to ${planned.conflict.theirs || 'none'} elsewhere (yours: ${planned.conflict.mine.trim() || 'none'})`]} onTheirs={planned.theirs} onMine={planned.mine} />
         )}
+        {title.failed && <RetryBanner text={notCheckedText(title.failed)} onRetry={title.retry} />}
+        {planned.failed && <RetryBanner text={notCheckedText(planned.failed)} onRetry={planned.retry} />}
 
         <NotesField task={task} className="detail-notes" key={`notes-${task.id}`} />
         <Subtasks task={task} />

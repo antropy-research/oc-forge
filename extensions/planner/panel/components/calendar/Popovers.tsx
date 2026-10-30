@@ -474,11 +474,13 @@ export const UpcomingPopover = ({ event, anchor }: { event: CalendarEvent; ancho
   const remove = async () => {
     const scope = await calendarUi.ask({ title: 'Delete repeating task', style: 'radio', choices: DELETE_CHOICES });
     if (scope === 'this') {
-      // The series passes over this date and goes on; Undo gives it back as it was.
-      const before = upcoming.change ?? null;
-      await google.setOccurrence(upcoming, { skip: true });
+      // The series passes over this date and goes on; Undo gives it back as it was then: what the service replaced, not
+      // what this window last saw (another window may have changed it since).
+      const before = await google.setOccurrence(upcoming, { skip: true });
       close();
-      calendarUi.snack('Task deleted', () => google.setOccurrence(upcoming, before).catch((error) => client.notify(`The Planner did not put "${values.title}" back: ${messageOf(error)}`)));
+      calendarUi.snack('Task deleted', async () => {
+        await google.setOccurrence(upcoming, before).catch((error) => client.notify(`The Planner did not put "${values.title}" back: ${messageOf(error)}`));
+      });
     } else if (scope === 'following' || scope === 'all') {
       // By the date the series puts this one on: the tasks before it stay (This and following), or none does (All tasks).
       await google.deleteSeries({ account: upcoming.account, seriesId: upcoming.seriesId, from: scope === 'following' ? upcoming.on : null });

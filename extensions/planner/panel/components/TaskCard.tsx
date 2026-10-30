@@ -19,7 +19,7 @@ import type { PlaylistEntry } from '../../src/domain/schedule.ts';
 import { formatClock, useNow } from '../lib/time.ts';
 import { TimerButton } from './TimerButton.tsx';
 import { useUi } from '../lib/ui.ts';
-import { ConflictBanner, useDraft } from './Conflicts.tsx';
+import { ConflictBanner, RetryBanner, notCheckedText, useDraft } from './Conflicts.tsx';
 
 const PRIORITY_LABEL = { urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' } as const;
 
@@ -167,7 +167,7 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
   return (
     <li
       data-task={task.id}
-      class={`task-card${done ? ' is-done' : ''}${menuOpen || assigning ? ' has-menu' : ''}${running ? ' is-running' : ''}${planned.conflict ? ' has-conflict' : ''}`}
+      class={`task-card${done ? ' is-done' : ''}${menuOpen || assigning ? ' has-menu' : ''}${running ? ' is-running' : ''}${planned.conflict || planned.failed ? ' has-conflict' : ''}`}
       draggable={!editingTime}
       onMouseEnter={() => setHoveredTask(task.id)}
       onMouseLeave={() => setHoveredTask(null)}
@@ -265,6 +265,7 @@ export const TaskCard = ({ task, playlist }: { task: Task; playlist?: PlaylistEn
       {planned.conflict && (
         <ConflictBanner lines={[`Planned time was changed to ${planned.conflict.theirs || 'none'} elsewhere (yours: ${planned.conflict.mine.trim() || 'none'})`]} onTheirs={planned.theirs} onMine={planned.mine} />
       )}
+      {planned.failed && <RetryBanner text={notCheckedText(planned.failed)} onRetry={planned.retry} />}
     </li>
   );
 };

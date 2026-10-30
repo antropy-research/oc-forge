@@ -5321,8 +5321,8 @@ var googleWriteRoute = async (req, url, ctx) => {
     if (!edit)
       return bad("skip, restore, or before and after (an occurrence each) are required");
     try {
-      await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
-      return ok({ changed: true, ...ctx.snapshot() });
+      const { before } = await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
+      return ok({ changed: true, before, ...ctx.snapshot() });
     } finally {
       ctx.changed("tasks");
     }
@@ -5676,8 +5676,10 @@ class GoogleSeries {
       if (!tasks.length)
         throw new GoogleError(404, SERIES_GONE);
       const real = tasks.find((entry) => entry.repeat.on === on);
-      if (real)
-        return this.occurrenceMade(real, edit);
+      if (real) {
+        await this.occurrenceMade(real, edit);
+        return { before: null };
+      }
       const heads = tasks.filter((entry) => !entry.repeat.next);
       if (!heads.length)
         throw new GoogleError(409, OCCURRENCE_GONE);
@@ -5701,6 +5703,7 @@ class GoogleSeries {
       if (repeats.some((repeat) => Object.keys(repeat.exceptions ?? {}).length > GTASK_EXCEPTIONS_MAX))
         throw new GoogleError(400, `A series keeps at most ${GTASK_EXCEPTIONS_MAX} of its tasks changed on their own`);
       this.write(heads.map((head, index) => ({ type: "gtask.kept", account, listId: head.listId, taskId: head.taskId, patch: { repeat: repeats[index] } })));
+      return { before: current ?? null };
     });
   }
   async occurrenceMade(real, edit) {
