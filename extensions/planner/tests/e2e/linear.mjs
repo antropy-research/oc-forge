@@ -904,6 +904,8 @@ try {
   const focusedLabel = () => frame.locator(':focus').evaluate((element) => element.querySelector('.lin-nav-label')?.textContent ?? element.getAttribute('aria-label') ?? element.textContent ?? '').catch(() => '');
   await browserPage.keyboard.press('[');
   await overlay.waitFor({ timeout: 5000 });
+  // The sidebar puts the focus on the open section once it is drawn; keys pressed before then go nowhere.
+  await until(async () => (await focusedLabel()) === 'Created', 5000);
   const firstFocus = await focusedLabel();
   await browserPage.keyboard.press('ArrowDown');
   const onSubscribed = await focusedLabel();
@@ -912,6 +914,7 @@ try {
   check('"[" opens the sidebar on the open section; ↓ and Enter open Subscribed', firstFocus === 'Created' && onSubscribed === 'Subscribed' && (await overlay.count()) === 0, `${firstFocus} → ${onSubscribed}`);
   await browserPage.keyboard.press('[');
   await overlay.waitFor({ timeout: 5000 });
+  await until(async () => (await focusedLabel()) === 'Subscribed', 5000);
   await browserPage.keyboard.press('ArrowDown');
   await browserPage.keyboard.press('ArrowDown');
   const onFavorite = await focusedLabel();
