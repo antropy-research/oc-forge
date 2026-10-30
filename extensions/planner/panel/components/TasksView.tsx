@@ -23,9 +23,9 @@ import { KEPT_HINT, TASKS_API_REFERENCE, VISIBILITY_LABELS, keptFor, keptTimeLab
 import { byTitle, completedItems, dateGroups, deadlineSections, dropTarget, dueChip, indentTarget, moveBottomTarget, moveDownTarget, moveTopTarget, moveUpTarget, openRows, outdentTarget, type MoveTarget, type TaskRow } from '../../src/domain/gtasks.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../lib/context.ts';
 import { calendarUi } from '../lib/gcal.ts';
-import { DELETE_CHOICES, completeWithUndo, undoAction, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, TaskConflict, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
+import { DELETE_CHOICES, completeWithUndo, undoAction, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, FreshnessError, TaskConflict, listKey, type DeleteScope, type RepeatScope, type TaskFields } from '../lib/google.ts';
 import { SERIES_FIELDS, settleConflicts, type FormField, type FormValues } from '../../src/domain/gtaskForm.ts';
-import { ConflictBanner, taskConflictLines } from './Conflicts.tsx';
+import { ConflictBanner, RetryBanner, taskConflictLines } from './Conflicts.tsx';
 import { useUi } from '../lib/ui.ts';
 import { plannedLabel } from './GitHubPanel.tsx';
 import { Icon } from './calendar/Icon.tsx';
@@ -189,6 +189,8 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
   // another window or the service gave it meanwhile (a time, a repeat cut short). Settling a conflict moves it on.
   const [shownAt, setShownAt] = useState<FormValues>(() => ({ title, notes, due, time, duration, deadline, rule, busy, visibility, color, attachments, doNotDisturb, decline, starred, listId }));
   const [conflict, setConflict] = useState<TaskConflict | null>(null);
+  // The task could not be read as it is now: nothing was saved, and the edit stays to try again.
+  const [unchecked, setUnchecked] = useState<FreshnessError | null>(null);
   const [again, setAgain] = useState(false);
   const account = item.account ?? accountProp ?? null;
   // Google Calendar gives only work and school accounts Do not disturb and declining meetings (null: not known yet).
@@ -279,6 +281,7 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
     setSaving(true);
     setProblem(null);
     setConflict(null);
+    setUnchecked(null);
     // Google Calendar's repeating tasks have no end time; availability, visibility, Do not disturb and declining come
     // with a time, declining with Busy; an account not known yet to be a work or school one keeps the last two as they are.
     const fields = {
@@ -317,12 +320,15 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
         titleRef.current?.focus();
       },
       (error: unknown) => {
-        const message = error instanceof TaskConflict ? `"${title.trim()}" was not saved: it ${error.message}` : `Google Tasks did not take it: ${messageOf(error)}`;
+        const message =
+          error instanceof TaskConflict || error instanceof FreshnessError ? `"${title.trim()}" was not saved: it ${error.message}` : `Google Tasks did not take it: ${messageOf(error)}`;
         // Closed meanwhile: said where it shows.
         if (!mounted.current) return client.notify(message);
         setSaving(false);
         // Changed elsewhere too since the form opened: the user says which stays.
         if (error instanceof TaskConflict) return setConflict(error);
+        // Not known whether it changed elsewhere: never saved on a guess; the edit stays, to try again.
+        if (error instanceof FreshnessError) return setUnchecked(error);
         setProblem(message);
       },
     );
@@ -504,6 +510,12 @@ export const TaskForm = ({ item, kept, depth, canRepeat, repeatNote = null, star
       <KeptHint />
       {problem && <p class="danger gt-form-problem" role="alert">{problem}</p>}
       {conflict && <ConflictBanner lines={taskConflictLines(conflict, { zone, today: view.today, lists: gv.lists })} onTheirs={() => settle('theirs')} onMine={() => settle('mine')} />}
+      {unchecked && (
+        <RetryBanner
+          text={`Couldn't check for changes made elsewhere: ${unchecked.what} couldn't be read${unchecked.reason ? ` (${unchecked.reason})` : ''}. Nothing was saved; your edit is still here.`}
+          onRetry={() => save()}
+        />
+      )}
       <div class="gt-form-row gt-form-actions">
         {(onSubtask || subtaskNote) && (
           <button class="link" aria-disabled={subtaskNote ? 'true' : undefined} title={subtaskNote ?? undefined} onClick={() => !subtaskNote && onSubtask?.()}>

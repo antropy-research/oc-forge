@@ -18,6 +18,7 @@ import { GoogleSeries } from './googleSeries.ts';
 import { MeetingDecliner } from './googleDecline.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
 import { deadlineGroups } from '../src/domain/gtaskKept.ts';
+import { CHANGED_SINCE, UNDO_GONE } from '../src/domain/undo.ts';
 import { pendingRange, pendingTasks } from '../src/domain/gtaskPending.ts';
 import { addDays, daysBetween, instantAt, isDateKey, todayIn } from '../src/domain/dates.ts';
 import { CommandFiles, OpenCodeInfo, agentRoute, opencodeConfigDir } from './agents.ts';
@@ -502,19 +503,38 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === '/commands' && req.method === 'POST') {
-      const body = (await readJson(req)) as { commands?: unknown };
+      const body = (await readJson(req)) as { commands?: unknown; undo?: unknown };
       if (!Array.isArray(body.commands)) {
         json(res, 400, { error: 'commands must be an array' });
         return;
       }
       // A sync may be merging events from another machine; let it finish first.
       await sync!.idle();
-      const result = planner.execute(body.commands);
+      // `undo`: the window offers Undo for this batch, so what takes it back is kept here (`/undo`).
+      const result = planner.execute(body.commands, { undo: body.undo === true });
       if (!result.ok) {
         json(res, 400, { error: result.error, index: result.index });
         return;
       }
       json(res, 200, { applied: result.applied, ...snapshot() });
+      syncAgentCommands();
+      return;
+    }
+    if (url.pathname === '/undo' && req.method === 'POST') {
+      // Undo a batch sent with `undo`, named by its first command: only what nobody has changed since (409 otherwise,
+      // with the plan as it is, theirs included); 410 once it can no longer be undone.
+      const body = (await readJson(req)) as { batch?: unknown };
+      if (typeof body.batch !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(body.batch)) {
+        json(res, 400, { error: 'batch must be the command id of a batch' });
+        return;
+      }
+      await sync!.idle();
+      const result = planner.undo(body.batch);
+      if (!result.ok) {
+        json(res, result.reason === 'gone' ? 410 : 409, { error: result.reason === 'gone' ? UNDO_GONE : CHANGED_SINCE, changed: result.reason === 'changed' ? result.changed : [], ...snapshot() });
+        return;
+      }
+      json(res, 200, { applied: result.applied, commands: result.commands, ...snapshot() });
       syncAgentCommands();
       return;
     }

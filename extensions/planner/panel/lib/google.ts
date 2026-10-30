@@ -120,6 +120,21 @@ export class TaskConflict extends Error {
 }
 
 /**
+ * A save, deletion or completion that could not read what it needs as it is
+ * now (the plan from the service, a task or its list from Google): nothing was
+ * written, and it can be tried again. Never taken for "nothing changed".
+ */
+export class FreshnessError extends Error {
+  constructor(
+    readonly what: string,
+    readonly reason: string | null = null,
+  ) {
+    super(`couldn't read ${what} as it is now${reason ? ` (${reason})` : ''}`);
+    this.name = 'FreshnessError';
+  }
+}
+
+/**
  * How a form's save is made: its star and list (left out: as they were), and
  * what it shows (`series`: Edit → All tasks, its template on the open task's
  * date; else the task as it is).
@@ -809,8 +824,20 @@ export class GoogleStore {
     let plan = planGoogleTaskSync(state, byId, options);
     if (plan.conflicts.length) {
       const times = new Map<string, Partial<Record<SyncedField, string>>>();
-      for (const { taskId } of plan.conflicts) times.set(taskId, plannerEditTimes(await this.client.activity(taskId).catch(() => [])));
+      const unread = new Set<string>();
+      for (const { taskId } of plan.conflicts) {
+        try {
+          times.set(taskId, plannerEditTimes(await this.client.activity(taskId)));
+        } catch {
+          // Which side changed last is not known: neither side is picked on a guess; the next sync decides.
+          unread.add(taskId);
+        }
+      }
       plan = planGoogleTaskSync(state, byId, { ...options, editedAt: (taskId, field) => times.get(taskId)?.[field] ?? null });
+      if (unread.size) {
+        const taskOf = (body: EventBody) => ('taskId' in body ? (body as { taskId: string }).taskId : null);
+        plan = { ...plan, bodies: plan.bodies.filter((body) => !unread.has(taskOf(body) ?? '')), writes: plan.writes.filter((write) => !unread.has(write.taskId)) };
+      }
     }
     if (plan.bodies.length) await this.client.dispatch(plan.bodies, { origin: 'google' });
     for (const write of plan.writes) {
@@ -835,39 +862,45 @@ export class GoogleStore {
     return answer.tasks.find((item) => item.id === id) ?? null;
   }
 
-  /** A list's tasks, completed ones too: the Tasks view's copy of it, else read from Google. */
-  private async listItems(account: string, listId: string): Promise<GoogleTaskItem[]> {
-    const known = this.view.board[listKey(account, listId)]?.items;
-    return known ?? (await this.client.call<{ tasks?: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}`)).tasks ?? [];
+  /**
+   * A list's tasks as Google has them now, completed ones too: read from
+   * Google, never a window's copy (another window may have added a subtask
+   * since it was read). One that cannot be read, or is read only in part,
+   * throws (`FreshnessError`): never taken for a list without them.
+   */
+  private async readList(account: string, listId: string, what: string): Promise<GoogleTaskItem[]> {
+    let answer: { tasks?: GoogleTaskItem[]; complete?: boolean } | null;
+    try {
+      answer = await this.client.call<{ tasks?: GoogleTaskItem[]; complete?: boolean }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}`);
+    } catch (error) {
+      throw new FreshnessError(what, messageOf(error));
+    }
+    if (!Array.isArray(answer?.tasks)) throw new FreshnessError(what);
+    if (answer.complete === false) throw new FreshnessError(what, 'its list has more tasks than the Planner reads');
+    return answer.tasks;
   }
 
-  /** Whether a task has subtasks (open or done) in Google. */
+  /** Whether a task has subtasks (open or done) in Google now. */
   private async hasSubtasks(item: GoogleTaskItem): Promise<boolean> {
-    return (await this.listItems(item.account, item.listId)).some((other) => other.parent === item.id);
+    return (await this.readList(item.account, item.listId, "the task's subtasks")).some((other) => other.parent === item.id);
   }
 
   /**
    * What changes with a task completed or reopened, as in Google Tasks: its
    * open subtasks when it is completed, the completed task it is under when it
-   * is reopened. Its list as the Tasks view has it, else read from Google, so
-   * the result is the same however little the panel has loaded. A task whose
+   * is reopened. Its list as Google has it now, so the result is the same
+   * however little (or however long ago) the panel read it. A task whose
    * parent is known needs no read when it can have none: a subtask has no
    * subtasks, a task at the top is under none.
    */
   private async relatives(task: { account: string; listId: string; id: string; parent?: string | null }, completed: boolean): Promise<GoogleTaskItem[]> {
     if (task.parent !== undefined && (completed ? task.parent !== null : task.parent === null)) return [];
-    let items = await this.listItems(task.account, task.listId);
+    let items = await this.readList(task.account, task.listId, "the task's list");
     if (!items.some((other) => other.id === task.id)) {
       // Moved to another list in Google's own apps since the Planner last read it (the write finds it there too):
-      // its relatives are in the list it is in now.
-      const lists = this.view.lists.length ? this.view.lists : ((await this.client.call<{ lists?: GoogleTaskList[] }>('GET', '/google/tasklists').catch(() => null))?.lists ?? []);
-      for (const list of lists.filter((other) => other.account === task.account && other.id !== task.listId)) {
-        const there = await this.listItems(task.account, list.id);
-        if (there.some((other) => other.id === task.id)) {
-          items = there;
-          break;
-        }
-      }
+      // its relatives are in the list it is in now, wherever Google says it is.
+      const found = await this.freshTask(task);
+      if (found.listId !== task.listId) items = await this.readList(task.account, found.listId, "the task's list");
     }
     if (completed) return items.filter((other) => other.parent === task.id && !other.completed);
     const parent = task.parent ?? items.find((other) => other.id === task.id)?.parent ?? null;
@@ -883,8 +916,13 @@ export class GoogleStore {
     const candidates: GoogleTaskItem[] = [];
     for (const account of new Set(missing.map((item) => item.account))) {
       for (const list of this.view.lists.filter((item) => item.account === account)) {
-        const answer = await this.client.call<{ tasks: GoogleTaskItem[] }>('GET', `/google/tasks/all?account=${encodeURIComponent(account)}&list=${encodeURIComponent(list.id)}`).catch(() => ({ tasks: [] }));
-        candidates.push(...answer.tasks);
+        try {
+          candidates.push(...(await this.readList(account, list.id, 'a task list')));
+        } catch (error) {
+          // A list not read may hold the task under its new id: none is called deleted on a guess; the next sync looks again.
+          console.warn(`[planner] Google Tasks: linked tasks not checked this time: ${messageOf(error)}`);
+          return;
+        }
       }
     }
     const state = this.client.getView().state;
@@ -972,7 +1010,15 @@ export class GoogleStore {
     }
   }
 
+  /**
+   * A list deleted in Google, with its tasks (Google can't give a list back,
+   * so there is no Undo). What the Planner kept for its tasks goes too, read
+   * from the plan as the service has it first, not this window's copy (a
+   * repeating task kept there since would go on showing upcoming tasks of a
+   * list that is gone); when the plan can't be read, nothing is deleted.
+   */
   async deleteList(list: GoogleTaskList): Promise<void> {
+    await this.freshPlan();
     await this.client.call('DELETE', `/google/tasklists?account=${encodeURIComponent(list.account)}&list=${encodeURIComponent(list.id)}`);
     // Its tasks went with it in Google: what the Planner kept for them (their repeats' upcoming occurrences on the
     // calendar too) goes now, not on the next read, and Planner tasks linked to them say they are gone.
@@ -1041,18 +1087,39 @@ export class GoogleStore {
 
   /**
    * The plan as the service has it now: this window's view moves on to it
-   * (another window's change since it last looked included).
+   * (another window's change since it last looked included). One that cannot
+   * be read throws (`FreshnessError`): never taken for this window's view.
    */
   private async freshPlan(): Promise<PlannerState> {
-    const answer = await this.client.call<Snapshot>('GET', '/state').catch(() => null);
-    if (answer?.state) await this.client.adopt(answer);
+    let answer: Snapshot | null;
+    try {
+      answer = await this.client.call<Snapshot>('GET', '/state');
+    } catch (error) {
+      throw new FreshnessError("the Planner's plan", messageOf(error));
+    }
+    if (!answer?.state) throw new FreshnessError("the Planner's plan");
+    await this.client.adopt(answer);
     return this.client.getView().state;
   }
 
-  /** A Google task as Google has it now, read again (wherever it is in its account); null when it cannot be read. */
-  private async freshTask(task: { account: string; listId: string; id: string }): Promise<GoogleTaskItem | null> {
-    const answer = await this.client.call<{ tasks?: GoogleTaskItem[] }>('POST', '/google/tasks/linked', { groups: [{ account: task.account, listId: task.listId, ids: [task.id] }] }).catch(() => null);
-    return answer?.tasks?.find((one) => one.id === task.id) ?? null;
+  /**
+   * A Google task as Google has it now, read again (wherever it is in its
+   * account). One Google no longer has throws `TASK_GONE`; one that cannot be
+   * read (the read failed, Google answered with an error for its account, or
+   * the answer does not say) throws `FreshnessError`: never taken for the task
+   * as this window has it.
+   */
+  private async freshTask(task: { account: string; listId: string; id: string }): Promise<GoogleTaskItem> {
+    let answer: { tasks?: GoogleTaskItem[]; missing?: { id: string }[]; errors?: { account: string; message: string }[] } | null;
+    try {
+      answer = await this.client.call('POST', '/google/tasks/linked', { groups: [{ account: task.account, listId: task.listId, ids: [task.id] }] });
+    } catch (error) {
+      throw new FreshnessError('the task in Google Tasks', messageOf(error));
+    }
+    const found = answer?.tasks?.find((one) => one.id === task.id);
+    if (found) return found;
+    if (answer?.missing?.some((one) => one.id === task.id)) throw new Error(TASK_GONE);
+    throw new FreshnessError('the task in Google Tasks', answer?.errors?.find((one) => one.account === task.account)?.message);
   }
 
   /**
@@ -1060,12 +1127,14 @@ export class GoogleStore {
    * service and the task from Google, as the form would show it now (`shows`).
    * What the form changed from what it showed (`fields.base`), and which of
    * those changed meanwhile too. Without a baseline, the task as this window
-   * had it is taken for what the form showed, and nothing conflicts.
+   * had it is taken for what the form showed, and nothing conflicts. Either
+   * read failing throws (`FreshnessError`), so a save never writes over a
+   * task it could not see as it is.
    */
   async formCheck(item: GoogleTaskItem, fields: TaskFields, extra: SaveExtra = {}): Promise<FormCheck> {
     const had = keptFor(this.client.getView().state, item);
     const state = await this.freshPlan();
-    const task = (await this.freshTask(item)) ?? item;
+    const task = await this.freshTask(item);
     const kept = keptFor(state, task);
     const shown = (at: GoogleTaskItem, entry: GoogleTaskKept | null) => (extra.shows === 'series' && entry ? seriesShown(at, entry) : null) ?? { item: at, kept: entry };
     const now = formValuesOf(shown(task, kept).item, shown(task, kept).kept);
@@ -1197,13 +1266,16 @@ export class GoogleStore {
    * first, so Google never has an open subtask under a completed task, even
    * when a write fails half way. A repeating task's next occurrence appears.
    * A completion can be undone, as Google Tasks and Google Calendar offer it
-   * ("Task completed · Undo", and Ctrl/⌘+Z): `undoLast`.
+   * ("Task completed · Undo", and Ctrl/⌘+Z): `undoLast`. What it needs is
+   * read as it is now (the plan, the task's list), not from what this window
+   * loaded; one that cannot be read changes nothing (`FreshnessError`).
    */
   async completeListTask(item: GoogleTaskItem, completed: boolean): Promise<void> {
+    const state = await this.freshPlan();
     const related = await this.relatives(item, completed);
     // What Undo takes back: the tasks this completes, and what was kept for it before (a series that ends with it).
     const opened = [...related, item].filter((one) => !one.completed);
-    const before = keptFor(this.client.getView().state, item);
+    const before = keptFor(state, item);
     // A task opened again by hand is what an earlier Undo would have done: that Undo goes.
     this.lastUndo = null;
     const answers = await this.writeListTask([...related, item], () => ({ completed }), true);
@@ -1248,36 +1320,45 @@ export class GoogleStore {
    * only then is this one deleted; when the next one can't be made, nothing is
    * deleted and the series stays as it was, to delete again. The series'
    * template, schedule and exceptions go on with the next one; deleting this
-   * one never drops them while the series goes on.
+   * one never drops them while the series goes on. What Undo gives back is
+   * read first from where it is kept, never from what this window happened
+   * to load: the plan as the service has it, the task as Google has it, and
+   * (a task at the top) its subtasks as its list in Google has them now,
+   * which Google deletes with it. When one of those cannot be read, nothing
+   * is deleted (`FreshnessError`), to try again.
    */
   async deleteListTask(item: GoogleTaskItem, scope: DeleteScope = 'this'): Promise<void> {
     const key = listKey(item.account, item.listId);
     const before = this.view.board[key]?.items ?? [];
-    const kept = keptFor(this.client.getView().state, item);
+    const state = await this.freshPlan();
+    const task = await this.freshTask(item);
+    const kept = keptFor(state, task);
     if (kept?.repeat && scope !== 'this') {
-      const from = scope === 'following' ? scheduledOn(kept, item) : null;
-      return this.deleteSeries({ account: item.account, seriesId: kept.repeat.seriesId, from, task: item.id });
+      const from = scope === 'following' ? scheduledOn(kept, task) : null;
+      return this.deleteSeries({ account: task.account, seriesId: kept.repeat.seriesId, from, task: task.id });
     }
-    // What Undo gives back: the task and its subtasks as Google had them, and what the Planner kept for them.
-    const subtree = [item, ...before.filter((other) => other.parent === item.id)];
-    const keptBefore = subtree.flatMap((one) => keptFor(this.client.getView().state, one) ?? []);
+    // What Undo gives back: the task and its subtasks as Google has them now (a subtask, or a repeating task, has
+    // none), in their order, and what the Planner kept for each.
+    const children = task.parent || kept?.repeat ? [] : (await this.readList(task.account, task.listId, "the task's subtasks")).filter((other) => other.parent === task.id).sort((a, b) => a.position.localeCompare(b.position));
+    const subtree = [task, ...children];
+    const keptBefore = subtree.flatMap((one) => keptFor(state, one) ?? []);
     this.lastUndo = null;
-    const next = kept?.repeat && !kept.repeat.next ? nextOccurrence(item, kept) : null;
+    const next = kept?.repeat && !kept.repeat.next ? nextOccurrence(task, kept) : null;
     this.patchBoard(key, before.filter((other) => other.id !== item.id && other.parent !== item.id));
     let made: GoogleTaskItem | null = null;
     let madeNow: MadeTask | null = null;
     try {
       if (next?.date && next.template) {
         try {
-          ({ task: made, made: madeNow } = await this.makeSuccessor(item));
+          ({ task: made, made: madeNow } = await this.makeSuccessor(task));
         } catch (error) {
-          throw new Error(`the next "${item.title}" couldn't be made, so this one stays (${messageOf(error)})`);
+          throw new Error(`the next "${task.title}" couldn't be made, so this one stays (${messageOf(error)})`);
         }
       }
       // A task of a series as kept now, linked to its next one: what the series' Undo gives back.
-      const inSeries = keptFor(this.client.getView().state, item);
+      const inSeries = keptFor(this.client.getView().state, task);
       try {
-        await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(item.account)}&list=${encodeURIComponent(item.listId)}&id=${encodeURIComponent(item.id)}`);
+        await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(task.account)}&list=${encodeURIComponent(task.listId)}&id=${encodeURIComponent(task.id)}`);
       } catch (error) {
         // The next one stays, linked: a DELETE that fails may still have reached Google (the service gives up after
         // 12 s), so deleting the next one too could leave the series with no task at all. Kept, the series goes on
@@ -1285,7 +1366,9 @@ export class GoogleStore {
         if (made) throw new Error(`${messageOf(error)}; its next task, ${longDay(made.due ?? next!.date!)}, is made, so deleting this one again finishes`);
         throw error;
       }
-      if (keptFor(this.client.getView().state, item)) await this.client.dispatch([{ type: 'gtask.dropped', account: item.account, taskId: item.id }], { origin: 'google' });
+      // Google deleted its subtasks with it: what the Planner kept for them goes too (Undo gives it back).
+      const dropped = subtree.filter((one) => keptFor(this.client.getView().state, one));
+      if (dropped.length) await this.client.dispatch(dropped.map((one) => ({ type: 'gtask.dropped' as const, account: one.account, taskId: one.id })), { origin: 'google' });
       this.afterTaskWrite(item.account, item.listId, true);
       // Read once this one is gone (a read before it could bring it back): Google may renumber the places around them.
       if (made && this.view.board[key]) void this.loadBoard(item.account, item.listId);
@@ -1293,13 +1376,14 @@ export class GoogleStore {
       // comes back. A task of a series is the service's, one change of the series at a time (`GoogleSeries.undo`): the
       // next one this deletion made goes again while it is still as it was made.
       this.lastUndo = inSeries?.repeat
-        ? this.seriesUndo({ account: item.account, seriesId: inSeries.repeat.seriesId, kind: 'one', task: inSeries, made: madeNow }, [item.listId, ...(made ? [made.listId] : [])])
+        ? this.seriesUndo({ account: task.account, seriesId: inSeries.repeat.seriesId, kind: 'one', task: inSeries, made: madeNow }, [task.listId, ...(made ? [made.listId] : [])])
         : async () => {
-            await this.undelete(subtree);
-            await this.restoreKept(keptBefore);
-            this.afterTaskWrite(item.account, item.listId, true);
-            if (this.view.board[key]) void this.loadBoard(item.account, item.listId);
-            return { done: 'Deletion undone', note: null };
+            const refused = await this.undelete(subtree);
+            await this.restoreKept(keptBefore.filter((entry) => !refused.includes(entry.taskId)));
+            this.afterTaskWrite(task.account, task.listId, true);
+            for (const listId of new Set([item.listId, task.listId])) if (this.view.board[listKey(task.account, listId)]) void this.loadBoard(task.account, listId);
+            const note = refused.length ? `Google Tasks did not give back ${refused.length} of its ${children.length} subtask${children.length === 1 ? '' : 's'}` : null;
+            return { done: 'Deletion undone', note };
           };
     } catch (error) {
       this.patchBoard(key, before);
@@ -1392,9 +1476,22 @@ export class GoogleStore {
     return last ? last() : null;
   }
 
-  /** Tasks Google deleted, undeleted (the task first, then its subtasks). */
-  private async undelete(items: readonly { account: string; listId: string; id: string }[]): Promise<void> {
-    for (const one of items) await this.client.call('PATCH', '/google/tasks', { account: one.account, listId: one.listId, id: one.id, deleted: false });
+  /**
+   * Tasks Google deleted, undeleted: the task first (refused, it throws and
+   * nothing comes back), then its subtasks, each under it as it was; the ids
+   * of the subtasks Google refused.
+   */
+  private async undelete(items: readonly { account: string; listId: string; id: string }[]): Promise<string[]> {
+    const refused: string[] = [];
+    for (const [index, one] of items.entries()) {
+      try {
+        await this.client.call('PATCH', '/google/tasks', { account: one.account, listId: one.listId, id: one.id, deleted: false });
+      } catch (error) {
+        if (index === 0) throw error;
+        refused.push(one.id);
+      }
+    }
+    return refused;
   }
 
   /** What the Planner kept for tasks, as it was (Undo). */
@@ -1445,7 +1542,7 @@ export class GoogleStore {
    * series has made meanwhile is deleted as "This task" deletes one. The
    * series and its other occurrences stay as they are.
    */
-  setOccurrence(upcoming: Pick<UpcomingTask, 'account' | 'listId' | 'seriesId' | 'on'>, change: GoogleTaskException | null): Promise<void> {
+  setOccurrence(upcoming: Pick<UpcomingTask, 'account' | 'listId' | 'seriesId' | 'on'>, change: GoogleTaskException | null): Promise<GoogleTaskException | null> {
     return this.changeOccurrence(upcoming, change?.skip ? { skip: true } : { restore: change });
   }
 
@@ -1474,7 +1571,7 @@ export class GoogleStore {
         if (conflicts.length) throw new TaskConflict(conflicts, values, mine, base);
       }
     }
-    return this.changeOccurrence(upcoming, { before: base ? occurrenceOf(base, upcoming.on) : upcomingValues(upcoming), after });
+    await this.changeOccurrence(upcoming, { before: base ? occurrenceOf(base, upcoming.on) : upcomingValues(upcoming), after });
   }
 
   /** One upcoming occurrence as it is now: as its series has it, or as the task the series made for it meanwhile; null when it is gone. */
@@ -1483,24 +1580,33 @@ export class GoogleStore {
     if (!found) return null;
     if ('values' in found) return found.values;
     const made = found.task;
+    // The task the series made for it meanwhile, as Google has it now (gone from Google, or unreadable: said, not guessed).
     const task = await this.freshTask({ account: made.account, listId: made.listId, id: made.taskId });
-    return task ? { title: task.title, notes: task.notes, due: task.due ?? upcoming.on, time: made.time, duration: made.duration, deadline: made.deadline, attachments: made.attachments ?? [] } : null;
+    return { title: task.title, notes: task.notes, due: task.due ?? upcoming.on, time: made.time, duration: made.duration, deadline: made.deadline, attachments: made.attachments ?? [] };
   }
 
-  private async changeOccurrence(upcoming: Pick<UpcomingTask, 'account' | 'listId' | 'seriesId' | 'on'>, edit: Record<string, unknown>): Promise<void> {
-    await this.client.adopt(await this.client.call<Snapshot>('POST', '/google/tasks/occurrence', { account: upcoming.account, seriesId: upcoming.seriesId, on: upcoming.on, ...edit }));
+  /** What the service replaced for that occurrence (its own change before this one, null: none), for Undo. */
+  private async changeOccurrence(upcoming: Pick<UpcomingTask, 'account' | 'listId' | 'seriesId' | 'on'>, edit: Record<string, unknown>): Promise<GoogleTaskException | null> {
+    const answer = await this.client.call<Snapshot & { before?: GoogleTaskException | null }>('POST', '/google/tasks/occurrence', { account: upcoming.account, seriesId: upcoming.seriesId, on: upcoming.on, ...edit });
+    await this.client.adopt(answer);
     // A task the series had made for it meanwhile changed in Google: its list as Google has it now.
     if (this.view.board[listKey(upcoming.account, upcoming.listId)]) void this.loadBoard(upcoming.account, upcoming.listId);
     calendarUi.refresh();
+    return answer.before ?? null;
   }
 
-  /** Google Tasks' "Delete all completed tasks": each completed task of a list, gone at once. */
+  /**
+   * Google Tasks' "Delete all completed tasks": each task of a list completed
+   * in Google now, gone at once. Which ones is read from Google first, not
+   * taken from this window's copy (a task reopened in another window since
+   * stays); when the list can't be read, nothing is deleted.
+   */
   async clearCompleted(account: string, listId: string): Promise<number> {
     const key = listKey(account, listId);
-    const before = this.view.board[key]?.items ?? [];
+    const now = await this.readList(account, listId, 'the list');
     // Subtasks first: deleting a task deletes its subtasks, which would then not be found.
-    const done = before.filter((item) => item.completed).sort((a, b) => Number(Boolean(b.parent)) - Number(Boolean(a.parent)));
-    this.patchBoard(key, before.filter((item) => !item.completed));
+    const done = now.filter((item) => item.completed).sort((a, b) => Number(Boolean(b.parent)) - Number(Boolean(a.parent)));
+    this.patchBoard(key, now.filter((item) => !item.completed));
     try {
       for (const item of done) await this.client.call('DELETE', `/google/tasks?account=${encodeURIComponent(account)}&list=${encodeURIComponent(listId)}&id=${encodeURIComponent(item.id)}`);
       this.afterTaskWrite(account, listId, true);

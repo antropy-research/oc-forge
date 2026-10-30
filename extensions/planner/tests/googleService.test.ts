@@ -13,7 +13,7 @@ import type { EventBody } from '../src/domain/events.ts';
 import type { GoogleTaskItem } from '../src/domain/google.ts';
 import { formValuesOf, settleConflicts, type FormValues } from '../src/domain/gtaskForm.ts';
 import { keptFor, upcomingTasks } from '../src/domain/gtaskKept.ts';
-import { GoogleStore, TaskConflict, type TaskFields } from '../panel/lib/google.ts';
+import { FreshnessError, GoogleStore, TaskConflict, type TaskFields } from '../panel/lib/google.ts';
 import type { PlannerClient, Snapshot } from '../panel/lib/client.ts';
 import { defaultFakeWorld, startFakeGoogle, type FakeGoogle } from './e2e/fakeGoogle.mjs';
 
@@ -609,5 +609,112 @@ describe('a task form open while the series changes, through the service (review
     expect((titled as TaskConflict).fields).toEqual(['title']);
     expect((titled as TaskConflict).now.title).toBe('Renamed in Google Tasks');
     expect((await googleTask(id)).title).toBe('Renamed in Google Tasks');
+  });
+});
+
+describe('a deletion and a save read what they need from the source first, through the service (review 11)', () => {
+  const host = { storage: { get: async () => undefined, set: async () => {}, delete: async () => {}, keys: async () => [] } } as unknown as HostClient;
+  /**
+   * A Planner window on the service: the panel's own GoogleStore over HTTP. A route in `failing` answers as a service
+   * request that fails (503) does, before it reaches the service, as the reviewer failed it.
+   */
+  const window = async () => {
+    let view = (await call('GET', '/state')).body as Snapshot;
+    const failing = new Set<string>();
+    const client = {
+      getView: () => ({ state: view.state, today }),
+      call: async (method: string, path: string, body?: unknown) => {
+        if (failing.has(path.split('?')[0]!)) throw new Error('Planner service answered 503');
+        const answer = await call(method, path, body);
+        if (answer.status >= 400) throw new Error(answer.body.error ?? `the service answered ${answer.status}`);
+        return answer.body;
+      },
+      adopt: async (snapshot: Snapshot) => {
+        if (snapshot?.state && snapshot.state.version >= view.state.version) view = snapshot;
+      },
+      dispatch: async (bodies: EventBody[]) => {
+        const answer = await commands(...(bodies as unknown as Record<string, unknown>[]));
+        if (answer.status !== 200) throw new Error(answer.body.error);
+        view = answer.body as Snapshot;
+      },
+      activity: async () => [],
+      notify: () => {},
+      onCommitted: () => () => {},
+    } as unknown as PlannerClient;
+    return { store: new GoogleStore(host, client, 'page'), view: () => view.state, failing };
+  };
+  const make = async (title: string, extra: Record<string, unknown> = {}) => (await call('POST', '/google/tasks', { account: ME, listId: 'L1', title, ...extra })).body.task as GoogleTaskItem;
+  const inGoogle = (id: string) => fake.tasks.get('L1')!.find((task) => task.id === id);
+  const patchesOf = (id: string) => fake.requests.filter((request) => request.method === 'PATCH' && request.path === `/tasks/v1/lists/L1/tasks/${id}`).length;
+
+  test('deleted from a window that never read the list (the calendar right after a reload): Undo gives back the task, each subtask under it and what the Planner kept for them, as from a window that read it', async () => {
+    for (const warm of [false, true]) {
+      const tag = warm ? 'warm' : 'cold';
+      const parent = await make(`Harness parent ${tag}`, { due: today });
+      const undated = await make(`Harness undated child ${tag}`, { parent: parent.id });
+      const dated = await make(`Harness dated child ${tag}`, { parent: parent.id, previous: undated.id, due: addDays(today, 1) });
+      await commands(
+        { type: 'gtask.kept', account: ME, listId: 'L1', taskId: parent.id, patch: { color: '#d50000', deadline: addDays(today, 3) } },
+        { type: 'gtask.kept', account: ME, listId: 'L1', taskId: dated.id, patch: { time: 600, starred: true } },
+      );
+      const a = await window();
+      if (warm) await a.store.loadBoard(ME, 'L1');
+      const reads = fake.requests.filter((request) => request.method === 'GET' && request.path === '/tasks/v1/lists/L1/tasks').length;
+      await a.store.deleteListTask(parent);
+      expect([inGoogle(parent.id), inGoogle(undated.id), inGoogle(dated.id)]).toEqual([undefined, undefined, undefined]);
+      const gone = await kept();
+      expect(await a.store.undoLast()).toEqual({ done: 'Deletion undone', note: null });
+      expect(inGoogle(parent.id)?.parent).toBeUndefined();
+      expect(inGoogle(undated.id)?.parent).toBe(parent.id);
+      expect(inGoogle(dated.id)).toMatchObject({ parent: parent.id, due: `${addDays(today, 1)}T00:00:00.000Z` });
+      const back = await kept();
+      expect(back[`${ME}\n${parent.id}`]).toMatchObject({ color: '#d50000', deadline: addDays(today, 3) });
+      expect(back[`${ME}\n${dated.id}`]).toMatchObject({ time: 600 });
+      expect(back[`${ME}\n${dated.id}`].starredAt).toBeTruthy();
+      // As a window reads the list after a reload: the task, then its subtasks under it, in their order.
+      const listed = ((await call('GET', `/google/tasks/all?${q({ account: ME, list: 'L1' })}`)).body.tasks as GoogleTaskItem[]).filter((task) => [parent.id, undated.id, dated.id].includes(task.id));
+      expect(listed.map((task) => [task.id, task.parent])).toEqual([[parent.id, null], [undated.id, parent.id], [dated.id, parent.id]]);
+      // Deleted, what was kept for each was dropped with it; and its subtasks were read from Google before the deletion,
+      // however little this window had loaded.
+      expect([gone[`${ME}\n${parent.id}`], gone[`${ME}\n${dated.id}`]]).toEqual([undefined, undefined]);
+      expect(fake.requests.filter((request) => request.method === 'GET' && request.path === '/tasks/v1/lists/L1/tasks').length).toBeGreaterThan(reads);
+    }
+  });
+
+  test("a save that can't read the task as it is now writes nothing and keeps the edit; once it can, the conflict is asked, and Keep theirs or Save mine each work", async () => {
+    const made = await make('Harness fresh', { due: today });
+    const a = await window();
+    const item = (await call('POST', '/google/tasks/linked', { groups: [{ account: ME, listId: 'L1', ids: [made.id] }] })).body.tasks[0] as GoogleTaskItem;
+    const shown = formValuesOf(item, keptFor(a.view(), item));
+    const sent = (title: string, base = shown): TaskFields => ({ title, notes: base.notes, due: base.due, kept: { time: base.time, duration: base.duration, deadline: base.deadline, rule: base.rule }, base });
+    // B saves another title, which Google takes.
+    const b = await window();
+    await b.store.saveListTask(item, sent('Harness fresh, B'));
+    expect(inGoogle(made.id)?.title).toBe('Harness fresh, B');
+    const writes = patchesOf(made.id);
+    // A's read of the task fails (its route answers 503), then its read of the plan, then Google for the account: nothing written each time.
+    for (const fault of ['/google/tasks/linked', '/state', 'google'] as const) {
+      if (fault === 'google') fake.failNext('GET', '/tasks/v1/lists/L1/tasks', 503, 'Backend Error');
+      else a.failing.add(fault);
+      const refused = await a.store.saveListTask(item, sent('Harness fresh, A')).catch((error: unknown) => error);
+      a.failing.clear();
+      expect(refused).toBeInstanceOf(FreshnessError);
+      expect(inGoogle(made.id)?.title).toBe('Harness fresh, B');
+      expect(patchesOf(made.id)).toBe(writes);
+    }
+    // Reading works again: the conflict is asked, nothing written yet.
+    const conflict = (await a.store.saveListTask(item, sent('Harness fresh, A')).catch((error: unknown) => error)) as TaskConflict;
+    expect(conflict).toBeInstanceOf(TaskConflict);
+    expect(conflict.fields).toEqual(['title']);
+    expect(conflict.now.title).toBe('Harness fresh, B');
+    expect(patchesOf(made.id)).toBe(writes);
+    // Keep theirs: nothing to save. Save mine: written over theirs.
+    const theirs = settleConflicts(shown, conflict.mine, conflict.now, ['title'], 'theirs');
+    await a.store.saveListTask(item, sent(theirs.mine.title, theirs.base));
+    expect(inGoogle(made.id)?.title).toBe('Harness fresh, B');
+    expect(patchesOf(made.id)).toBe(writes);
+    const mine = settleConflicts(shown, conflict.mine, conflict.now, ['title'], 'mine');
+    await a.store.saveListTask(item, sent(mine.mine.title, mine.base));
+    expect(inGoogle(made.id)?.title).toBe('Harness fresh, A');
   });
 });

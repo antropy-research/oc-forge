@@ -192,8 +192,8 @@ export const googleWriteRoute = async (req: http.IncomingMessage, url: URL, ctx:
     const edit = occurrenceEditOf(input);
     if (!edit) return bad('skip, restore, or before and after (an occurrence each) are required');
     try {
-      await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
-      return ok({ changed: true, ...ctx.snapshot() });
+      const { before } = await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
+      return ok({ changed: true, before, ...ctx.snapshot() });
     } finally {
       ctx.changed('tasks');
     }

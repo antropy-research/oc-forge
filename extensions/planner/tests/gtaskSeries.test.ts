@@ -6,7 +6,7 @@
 // they were.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, TaskConflict, listKey, type TaskFields } from '../panel/lib/google.ts';
+import { FreshnessError, GoogleStore, TaskConflict, listKey, type TaskFields } from '../panel/lib/google.ts';
 import { formValuesOf, seriesShown, withOccurrence, type FormValues } from '../src/domain/gtaskForm.ts';
 import type { PlannerClient, Snapshot } from '../panel/lib/client.ts';
 import { GoogleError } from '../service/google.ts';
@@ -119,18 +119,18 @@ const service = () => {
     let view = state;
     const notes: string[] = [];
     const calls: { method: string; path: string; body?: any }[] = [];
+    // Routes that fail (503) for this window, before they reach the service.
+    const failing = new Set<string>();
     const client = {
       getView: () => ({ state: view, today: '2026-10-29' }),
       call: async (method: string, path: string, body?: any) => {
         calls.push({ method, path, ...(body === undefined ? {} : { body }) });
+        if (failing.has(path.split('?')[0]!)) throw new Error('Planner service answered 503');
         // The plan as the service has it now (a form's save reads it again).
         if (method === 'GET' && path === '/state') return snapshot();
         if (path === '/google/tasks/next') return { ...(await series.next(body.account, body.listId, body.id, { completed: body.completed, due: body.due })), ...snapshot() };
         if (path.startsWith('/google/tasks/series?')) return { ...(await series.remove(query(path).get('account')!, query(path).get('series')!, query(path).get('from'), query(path).get('task'))), ...snapshot() };
-        if (path === '/google/tasks/occurrence') {
-          await series.occurrence(body.account, body.seriesId, body.on, body.skip ? { skip: true } : 'restore' in body ? { restore: body.restore } : { before: body.before, after: body.after });
-          return snapshot();
-        }
+        if (path === '/google/tasks/occurrence') return { ...(await series.occurrence(body.account, body.seriesId, body.on, body.skip ? { skip: true } : 'restore' in body ? { restore: body.restore } : { before: body.before, after: body.after })), ...snapshot() };
         if (path === '/google/tasks/series/edit') {
           await series.edit(body.account, body.listId, body.taskId, body.seriesId, body.own, body.before, body.after);
           return snapshot();
@@ -146,6 +146,11 @@ const service = () => {
         if (method === 'PATCH' && path === '/google/tasks') {
           const { account: _account, listId: _list, id: _id, ...patch } = body;
           return { task: await data.updateTask(body.account, body.listId, body.id, patch) };
+        }
+        if (method === 'DELETE' && path.startsWith('/google/tasklists?')) {
+          // The list goes with its tasks (all of this rig's are in it).
+          for (const id of [...google.keys()]) google.delete(id);
+          return { deleted: true };
         }
         if (method === 'DELETE' && path.startsWith('/google/tasks?')) {
           await data.deleteTask(ME, query(path).get('list')!, query(path).get('id')!);
@@ -170,6 +175,7 @@ const service = () => {
       store: new GoogleStore(host, client, 'page'),
       notes,
       calls,
+      failing,
       view: () => view,
       dispatch: (bodies: EventBody[]) => client.dispatch(bodies),
       /** The window looks again, as the panel does every 5 s: its view has the plan as it is (an open form does not). */
@@ -827,6 +833,65 @@ describe('a task form open while its task or series changes (review 10)', () => 
     const late = await a.store.editOccurrence(formA2.upcoming, sentFrom({ ...formA2.base, title: 'One day, late' }, formA2.base)).catch((error: unknown) => error);
     expect((late as TaskConflict).fields).toEqual(['title']);
     expect((late as TaskConflict).now.title).toBe('One day with Ann');
+  });
+});
+
+describe('what Undo gives back, and a save that cannot read (review 11)', () => {
+  test("one upcoming task deleted alone from a window that has not looked since another window changed it: Undo gives back that change, as the service had it, not this window's old copy", async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Stale day');
+    const shownA = upcomingOn(a.view(), '2026-10-30');
+    const b = world.window();
+    const formB = occurrenceForm(b.view(), world.google, '2026-10-30');
+    await b.store.editOccurrence(formB.upcoming, sentFrom({ ...formB.base, title: 'Stale day with Ann' }, formB.base));
+    // A deletes it from its calendar, never having seen B's change.
+    expect(shownA.change).toBeUndefined();
+    const before = await a.store.setOccurrence(shownA, { skip: true });
+    expect(before).toEqual({ title: 'Stale day with Ann' });
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-30']).toEqual({ skip: true });
+    // Its Undo: what the service replaced.
+    await a.store.setOccurrence(shownA, before);
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-30']).toEqual({ title: 'Stale day with Ann' });
+  });
+
+  test("one upcoming task's edit whose read of the plan fails writes nothing, and says so; the edit saves once it can read", async () => {
+    const world = service();
+    const a = world.window();
+    const { first } = await daily(world, a, 'Unread day');
+    const form = occurrenceForm(a.view(), world.google, '2026-10-30');
+    a.failing.add('/state');
+    const refused = await a.store.editOccurrence(form.upcoming, sentFrom({ ...form.base, title: 'Unread day, renamed' }, form.base)).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(FreshnessError);
+    expect((refused as FreshnessError).what).toBe("the Planner's plan");
+    expect(keptFor(world.state(), first)!.repeat!.exceptions).toBeUndefined();
+    a.failing.clear();
+    await a.store.editOccurrence(form.upcoming, sentFrom({ ...form.base, title: 'Unread day, renamed' }, form.base));
+    expect(keptFor(world.state(), first)!.repeat!.exceptions!['2026-10-30']).toEqual({ title: 'Unread day, renamed' });
+  });
+
+  test("a list deleted from a window that has not looked since another window added a repeating task to it: that task's series goes too, read from the plan as it is", async () => {
+    const world = service();
+    const a = world.window();
+    const b = world.window();
+    const { first, seriesId } = await daily(world, b, 'Added elsewhere');
+    expect(keptFor(a.view(), first)).toBeNull();
+    await a.store.deleteList({ account: ME, id: 'L1', title: 'My Tasks' });
+    expect(world.heads(seriesId)).toEqual([]);
+    expect(upcomingTasks(world.state().googleTasks, [], '2026-10-30', '2026-11-02', '2026-10-29')).toEqual([]);
+  });
+
+  test('a task deleted or completed while its plan or its list cannot be read: nothing changes, in Google or in the plan', async () => {
+    const world = service();
+    const a = world.window();
+    const { first, seriesId } = await daily(world, a, 'Unread task');
+    a.failing.add('/state');
+    await expect(a.store.deleteListTask(world.google.get(first.id)!, 'this')).rejects.toBeInstanceOf(FreshnessError);
+    await expect(a.store.completeListTask(world.google.get(first.id)!, true)).rejects.toBeInstanceOf(FreshnessError);
+    a.failing.clear();
+    expect(world.google.get(first.id)).toMatchObject({ completed: false });
+    expect(world.heads(seriesId).map((kept) => kept.taskId)).toEqual([first.id]);
+    expect(world.creates()).toHaveLength(1);
   });
 });
 

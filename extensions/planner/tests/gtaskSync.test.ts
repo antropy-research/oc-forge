@@ -13,7 +13,7 @@
 // in the projections and when the series makes it.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, listKey, OCCURRENCE_KEEPS_DATE, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
+import { FreshnessError, GoogleStore, listKey, OCCURRENCE_KEEPS_DATE, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT } from '../panel/lib/google.ts';
 import { dropTarget } from '../src/domain/gtasks.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { GoogleData, toTaskItem } from '../service/googleData.ts';
@@ -113,6 +113,8 @@ describe('a planned Google task moved to another list', () => {
     const fake = fakeClient(start, (method, path, body) => {
       if (path === '/google/tasks/move') return { task: item({ listId: 'L2' }) };
       if (method === 'PATCH' && path === '/google/tasks') return { task: item({ listId: body.listId, completed: true }) };
+      // Google has it in L2 now.
+      if (path.startsWith('/google/tasks/all')) return { tasks: path.includes('list=L2') ? [item({ listId: 'L2' })] : [], complete: true };
       return { tasks: [] };
     });
     const store = new GoogleStore(host, fake.client, 'page');
@@ -144,6 +146,61 @@ describe('a planned Google task moved to another list', () => {
     expect(findMovedTask(source, [moved, item({ id: 'gt8', listId: 'L2', title: 'Other' })], state)?.id).toBe('gt9');
     expect(findMovedTask(source, [moved, item({ id: 'gt7', listId: 'L3' })], state)).toBeNull();
     expect(findMovedTask(source, [{ ...moved, completed: true }], state)).toBeNull();
+  });
+});
+
+describe('a read that fails is never taken for "nothing there" (review 11)', () => {
+  test("a linked task Google has no more, while a list can't be read to look for it under a new id, is not called deleted; the next sync, reading, does", async () => {
+    let failing = true;
+    const fake = fakeClient(applyEvents(planned(), [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt1', patch: { time: 600 } })]), (_method, path) => {
+      if (path === '/google/tasklists') return { lists: [{ account: ME, id: 'L1', title: 'My Tasks' }], errors: [] };
+      if (path === '/google/tasks/linked') return { tasks: [], missing: [{ account: ME, listId: 'L1', id: 'gt1' }], errors: [] };
+      if (path.startsWith('/google/tasks/all')) {
+        if (failing) throw new Error('Backend Error');
+        return { tasks: [], complete: true };
+      }
+      return {};
+    });
+    const store = new GoogleStore(host, fake.client, 'page');
+    await store.loadLists();
+    await store.sync();
+    expect(fake.state().tasks.t1!.source?.status).not.toEqual(GONE_STATUS);
+    expect(keptFor(fake.state(), { account: ME, id: 'gt1' })?.time).toBe(600);
+    failing = false;
+    await store.sync();
+    expect(fake.state().tasks.t1!.source?.status).toEqual(GONE_STATUS);
+  });
+
+  test("a title changed on both sides while the task's activity can't be read: neither side is picked on a guess; the next sync decides", async () => {
+    const state = applyEvents(planned(), [ev({ type: 'task.updated', taskId: 't1', patch: { title: 'Send the report today' } })]);
+    // Google's change is older than the Planner task's last change of anything: a guess from that would write the Planner's title.
+    const google = item({ title: 'Send the full report', updated: new Date(Date.parse(state.tasks.t1!.updatedAt) - 60_000).toISOString() });
+    const fake = fakeClient(state, (method, _path, body) => (method === 'PATCH' ? { task: { ...google, ...body } } : {}));
+    let readable = false;
+    (fake.client as unknown as { activity: (taskId: string) => Promise<unknown[]> }).activity = async () => {
+      if (!readable) throw new Error('Planner service answered 503');
+      return [];
+    };
+    const store = new GoogleStore(host, fake.client, 'page');
+    await store.syncItems([google]);
+    expect(fake.calls.filter((call) => call.method === 'PATCH')).toEqual([]);
+    expect(fake.state().tasks.t1!.title).toBe('Send the report today');
+    readable = true;
+    await store.syncItems([google]);
+    expect(fake.calls.filter((call) => call.method === 'PATCH').length + Number(fake.state().tasks.t1!.title === 'Send the full report')).toBe(1);
+  });
+
+  test("completing a task Google's own apps moved, while it can't be found: nothing is completed (never without its subtasks), and it says so", async () => {
+    const parent = item({ id: 'p', title: 'Trip' });
+    const fake = fakeClient(emptyState(), (method, path) => {
+      // Its list no longer has it; where it is can't be read.
+      if (path.startsWith('/google/tasks/all')) return { tasks: [], complete: true };
+      if (path === '/google/tasks/linked') throw new Error('Planner service answered 503');
+      return method === 'PATCH' ? { task: { ...parent, completed: true } } : {};
+    });
+    const store = new GoogleStore(host, fake.client, 'page');
+    await expect(store.completeListTask(parent, true)).rejects.toBeInstanceOf(FreshnessError);
+    expect(fake.calls.filter((call) => call.method === 'PATCH')).toEqual([]);
   });
 });
 
@@ -185,7 +242,13 @@ describe('writes go to the list the task is in now', () => {
   });
 
   test('the link follows the write to the list Google answered from', async () => {
-    const fake = fakeClient(planned(), (method, _path, body) => (method === 'PATCH' ? { task: item({ listId: 'L2', completed: body.completed }) } : { tasks: [] }));
+    const fake = fakeClient(planned(), (method, path, body) => {
+      if (method === 'PATCH') return { task: item({ listId: 'L2', completed: body.completed }) };
+      // Google's own apps moved it to L2: its lists, and where it is.
+      if (path === '/google/tasklists') return { lists: [{ account: ME, id: 'L1', title: 'My Tasks' }, { account: ME, id: 'L2', title: 'Errands' }] };
+      if (path.startsWith('/google/tasks/all')) return { tasks: path.includes('list=L2') ? [item({ listId: 'L2' })] : [], complete: true };
+      return { tasks: [] };
+    });
     const store = new GoogleStore(host, fake.client, 'page');
     await store.writeTask(fake.state().tasks.t1!, { completed: true }, true);
     expect(fake.state().tasks.t1!.source).toMatchObject({ listId: 'L2', status: { type: 'completed' } });
@@ -200,8 +263,9 @@ describe('writes go to the list the task is in now', () => {
     expect(refused.state().tasks.t1!.completedAt).toBeNull();
     expect(refused.notes.at(-1)).toContain('stays open here too');
 
-    const gone = fakeClient(planned(), () => {
-      throw new Error(TASK_GONE);
+    const gone = fakeClient(planned(), (method) => {
+      if (method === 'PATCH') throw new Error(TASK_GONE);
+      return { tasks: [], complete: true };
     });
     await new GoogleStore(host, gone.client, 'page').writeTask(gone.state().tasks.t1!, { completed: true });
     expect(gone.state().tasks.t1!.source?.status).toEqual(GONE_STATUS);
@@ -412,7 +476,7 @@ describe('repeating tasks', () => {
 
   test('editing All tasks changes the rule of the series; This task leaves the others alone', async () => {
     const start = applyEvents(series(), [ev({ type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'gt3', patch: { repeat: { rule: 'RRULE:FREQ=WEEKLY;BYDAY=MO', seriesId: 's1', index: 2, next: null } } })]);
-    const fake = fakeClient(start);
+    const fake = fakeClient(start, (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item(), item({ id: 'gt3' })], complete: true } : {}));
     const store = new GoogleStore(host, fake.client, 'page');
     const fields = (rule: string, time = 9 * 60) => ({ title: 'Send the report', notes: 'To Ann', due: '2026-10-26', kept: { time, duration: null, deadline: '2026-10-28', rule } });
     await store.saveListTask(item(), fields('RRULE:FREQ=WEEKLY;BYDAY=MO', 10 * 60), 'this');
@@ -521,7 +585,7 @@ describe("a repeating task's series", () => {
 
   test('a series kept before templates, edited with This task before it was seen, keeps the occurrence as it was', async () => {
     const before = item({ title: 'Water the plants', notes: 'Balcony', due: '2026-10-26' });
-    const fake = fakeClient(legacy(), (method, path, body) => (method === 'PATCH' && path === '/google/tasks' ? { task: { ...before, ...body } } : {}));
+    const fake = fakeClient(legacy(), (method, path, body) => (method === 'PATCH' && path === '/google/tasks' ? { task: { ...before, ...body } } : path.startsWith('/google/tasks/all') ? { tasks: [before], complete: true } : {}));
     await new GoogleStore(host, fake.client, 'page').saveListTask(before, fields('Water the roses', 'Balcony', '2026-10-26', 8 * 60, '2026-10-27'), 'this');
     expect(keptFor(fake.state(), before)).toMatchObject({ time: 480, repeat: { index: 3, on: '2026-10-26', template: { title: 'Water the plants', time: 600, deadline: 1 } } });
   });
@@ -827,8 +891,9 @@ describe('completing a task completes its subtasks, and reopening a subtask reop
     await store.loadBoard(ME, 'L1');
     await store.completeListTask(world.tasks.get('p')!, true);
     expect(done(world)).toEqual([true, true, true, true, false]);
-    // The list as the Tasks view read it served, and shows the result.
-    expect(reads(warm)).toBe(2);
+    // The list read again for the completion (another window may have added a subtask since the Tasks view read it),
+    // and the Tasks view shows the result.
+    expect(reads(warm)).toBe(3);
     expect(store.getView().board[listKey(ME, 'L1')]!.items.filter((task) => task.completed).map((task) => task.id).sort()).toEqual(['c1', 'c2', 'c3', 'p']);
     const quiet = fakeClient(emptyState(), world.answer);
     const other = new GoogleStore(host, quiet.client, 'page');
@@ -881,7 +946,7 @@ describe('a repeating task and subtasks never go together, as in Google Tasks', 
   });
 
   test('a subtask under a repeating task, a repeating task under another, or a repeat on a task with subtasks: refused before anything changes', async () => {
-    const fake = fakeClient(repeating(), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ id: 'gt2' }), item({ id: 'gt3', parent: 'gt2' })], complete: true } : {}));
+    const fake = fakeClient(repeating(), (_method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [item({ id: 'gt1' }), item({ id: 'gt2' }), item({ id: 'gt3', parent: 'gt2' })], complete: true } : {}));
     const store = new GoogleStore(host, fake.client, 'page');
     const refused = (work: Promise<unknown>) => work.then(() => null, (error: Error) => error.message);
     expect(await refused(store.addListTask(ME, 'L1', { title: 'Child', parent: 'gt1' }))).toBe(REPEATING_NO_SUBTASKS);
@@ -925,8 +990,8 @@ describe('deleting "This task" of a repeating task is all or nothing (review 7)'
   test('the next one is made first, from the series on its next date, with its kept record and the link; only then is this one deleted', async () => {
     const { world, fake, store, id, google } = await daily();
     await store.deleteListTask(google()!, 'this');
-    // The task added, its next one, then the delete.
-    expect(fake.calls.filter((call) => call.method !== 'GET').map((call) => call.method)).toEqual(['POST', 'POST', 'DELETE']);
+    // The task added, its next one, then the delete (and reads: the task and the plan as they are, first).
+    expect(fake.calls.filter((call) => !reads(call)).map((call) => call.method)).toEqual(['POST', 'POST', 'DELETE']);
     expect(google()).toBeNull();
     expect(open(world)).toHaveLength(1);
     const next = open(world)[0]!;

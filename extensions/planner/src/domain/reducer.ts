@@ -212,6 +212,11 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       }
       return;
     }
+    case 'objective.restored': {
+      const objective = state.objectives[event.objectiveId];
+      if (objective) state.objectives[event.objectiveId] = { ...objective, deletedAt: null };
+      return;
+    }
     case 'ritual.saved': {
       const key = ritualKey(event.ritual, event.date);
       state.rituals[key] = { ...state.rituals[key], ...event.fields };

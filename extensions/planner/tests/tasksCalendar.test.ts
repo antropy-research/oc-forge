@@ -252,7 +252,7 @@ describe("a timed task's availability and visibility", () => {
 
   test('saved from the form: kept once Google has the rest; for a repeating task, for all of its series', async () => {
     const start = stateWith(keep('gt1', { time: 600 }));
-    const fake = fakeClient(start, (method, _path, body) => (method === 'PATCH' ? { task: item({ ...body, id: 'gt1' }) } : { tasks: [] }));
+    const fake = fakeClient(start, (method, _path, body) => (method === 'PATCH' ? { task: item({ ...body, id: 'gt1' }) } : { tasks: [item()] }));
     const store = new GoogleStore(host, fake.client, 'page');
     const fields = (patch: Partial<TaskFields['kept']> = {}): TaskFields => ({ title: 'Send the report', notes: '', due: TODAY, kept: { time: 600, duration: null, deadline: null, rule: null, busy: true, visibility: 'private', ...patch } });
     await store.saveListTask(item(), fields());
@@ -266,7 +266,7 @@ describe("a timed task's availability and visibility", () => {
     expect(kept(fake.state())).toBeNull();
 
     const template = templateOf({ title: 'Standup', notes: '' }, { time: 570, duration: null, deadline: null }, TODAY);
-    const series = fakeClient(stateWith(keep('gt1', { time: 570, repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 'series', index: 1, next: null, on: TODAY, template } })));
+    const series = fakeClient(stateWith(keep('gt1', { time: 570, repeat: { rule: 'RRULE:FREQ=DAILY', seriesId: 'series', index: 1, next: null, on: TODAY, template } })), () => ({ tasks: [item({ title: 'Standup' })] }));
     const repeating = new GoogleStore(host, series.client, 'page');
     await repeating.saveListTask(item({ title: 'Standup' }), { title: 'Standup', notes: '', due: TODAY, kept: { time: 570, duration: null, deadline: null, rule: 'RRULE:FREQ=DAILY', busy: true, visibility: 'default' } }, 'this');
     expect(kept(series.state())).toMatchObject({ busy: true });

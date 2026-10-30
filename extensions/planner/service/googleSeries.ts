@@ -226,14 +226,20 @@ export class GoogleSeries {
    * date) is changed as that task: its title, details and date in Google, its
    * time and deadline here; deleted, its next one is made first, as "This
    * task" deletes one. Refused when the series puts nothing on that date any
-   * more (cut, ended, a new rule), or that task was completed meanwhile.
+   * more (cut, ended, a new rule), or that task was completed meanwhile. What
+   * it replaced (`before`: that date's own change as it was, null for none or
+   * for a task the series had made), so Undo puts back what was there then,
+   * not what a window last saw.
    */
-  occurrence(account: string, seriesId: string, on: DateKey, edit: OccurrenceEdit): Promise<void> {
+  occurrence(account: string, seriesId: string, on: DateKey, edit: OccurrenceEdit): Promise<{ before: GoogleTaskException | null }> {
     return this.one(account, seriesId, async () => {
       const tasks = Object.values(this.planner.state.googleTasks).filter((entry) => entry.account === account && entry.repeat?.seriesId === seriesId);
       if (!tasks.length) throw new GoogleError(404, SERIES_GONE);
       const real = tasks.find((entry) => entry.repeat!.on === on);
-      if (real) return this.occurrenceMade(real, edit);
+      if (real) {
+        await this.occurrenceMade(real, edit);
+        return { before: null };
+      }
       const heads = tasks.filter((entry) => !entry.repeat!.next);
       // Its tasks done or cut, nothing upcoming: the occurrence went with them.
       if (!heads.length) throw new GoogleError(409, OCCURRENCE_GONE);
@@ -251,6 +257,7 @@ export class GoogleSeries {
       const repeats = heads.map((head) => withExceptions(head.repeat!, withException(head.repeat!.exceptions, on, change)));
       if (repeats.some((repeat) => Object.keys(repeat.exceptions ?? {}).length > GTASK_EXCEPTIONS_MAX)) throw new GoogleError(400, `A series keeps at most ${GTASK_EXCEPTIONS_MAX} of its tasks changed on their own`);
       this.write(heads.map((head, index) => ({ type: 'gtask.kept', account, listId: head.listId, taskId: head.taskId, patch: { repeat: repeats[index]! } })));
+      return { before: current ?? null };
     });
   }
 

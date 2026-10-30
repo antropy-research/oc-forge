@@ -387,6 +387,12 @@ var applyInto = (state, event) => {
       }
       return;
     }
+    case "objective.restored": {
+      const objective = state.objectives[event.objectiveId];
+      if (objective)
+        state.objectives[event.objectiveId] = { ...objective, deletedAt: null };
+      return;
+    }
     case "ritual.saved": {
       const key = ritualKey(event.ritual, event.date);
       state.rituals[key] = { ...state.rituals[key], ...event.fields };
@@ -1600,6 +1606,7 @@ var validateCommand = (command, context) => {
       return null;
     }
     case "objective.deleted":
+    case "objective.restored":
       return isId(command.objectiveId) && context.objectives[command.objectiveId] ? null : "unknown objective";
     case "series.created": {
       const series = command.series;
@@ -1829,6 +1836,146 @@ var touchesTask = (event, taskId) => {
   return "taskId" in event && event.taskId === taskId;
 };
 
+// src/domain/undo.ts
+var CHANGED_SINCE = "Changed in another window since; not undone";
+var UNDO_GONE = "This can no longer be undone";
+var restoreTask = (state, taskId) => {
+  const task = state.tasks[taskId];
+  if (!task)
+    return [];
+  return [
+    { type: "task.moved", taskId, placement: task.placement, position: task.position },
+    { type: "task.updated", taskId, patch: { plannedMinutes: task.plannedMinutes } }
+  ];
+};
+var sessionsOnItsDay = (state, task) => {
+  if (task.placement.kind !== "day")
+    return [];
+  const day = task.placement.date;
+  const zone = state.settings.timezone ?? "UTC";
+  return Object.values(state.blocks).filter((block) => block.taskId === task.id && zonedDateMinutes(block.start, zone).date === day);
+};
+var inverseOne = (state, body) => {
+  if (body.type === "task.created")
+    return [{ type: "task.deleted", taskId: body.task.id }];
+  if (body.type === "block.created")
+    return [{ type: "block.deleted", blockId: body.block.id }, ...restoreTask(state, body.block.taskId)];
+  if (body.type === "block.updated") {
+    const block = state.blocks[body.blockId];
+    return block ? [{ type: "block.updated", blockId: block.id, start: block.start, end: block.end }, ...restoreTask(state, block.taskId)] : null;
+  }
+  if (body.type === "block.deleted") {
+    const block = state.blocks[body.blockId];
+    return block ? [{ type: "block.created", block: { ...block } }, ...restoreTask(state, block.taskId)] : null;
+  }
+  if (body.type === "objective.deleted") {
+    const objective = state.objectives[body.objectiveId];
+    if (!objective || objective.deletedAt)
+      return null;
+    const aligned = Object.values(state.tasks).filter((task) => task.objectiveId === objective.id);
+    return [{ type: "objective.restored", objectiveId: objective.id }, ...aligned.map((task) => ({ type: "task.updated", taskId: task.id, patch: { objectiveId: objective.id } }))];
+  }
+  if (!("taskId" in body))
+    return null;
+  const task = state.tasks[body.taskId];
+  if (!task)
+    return null;
+  switch (body.type) {
+    case "task.deleted":
+      return task.archivedAt ? [{ type: "task.restored", taskId: task.id }, { type: "task.archived", taskId: task.id }] : [{ type: "task.restored", taskId: task.id }];
+    case "task.archived":
+      return [{ type: "task.restored", taskId: task.id }];
+    case "task.restored":
+      if (task.deletedAt)
+        return [{ type: "task.deleted", taskId: task.id }];
+      if (task.archivedAt)
+        return [{ type: "task.archived", taskId: task.id }];
+      return null;
+    case "task.completed":
+      return [{ type: "task.reopened", taskId: task.id }];
+    case "task.reopened":
+      return task.completedOn ? [{ type: "task.completed", taskId: task.id, on: task.completedOn }] : null;
+    case "task.moved": {
+      const back = [{ type: "task.moved", taskId: task.id, placement: task.placement, position: task.position }];
+      const dropped = samePlacement(task.placement, body.placement) ? [] : sessionsOnItsDay(state, task);
+      if (dropped.length)
+        back.push(...dropped.map((block) => ({ type: "block.created", block: { ...block } })), { type: "task.updated", taskId: task.id, patch: { plannedMinutes: task.plannedMinutes } });
+      if (task.folderId && body.placement.kind === "day")
+        back.push({ type: "task.updated", taskId: task.id, patch: { folderId: task.folderId } });
+      if (task.archivedAt)
+        back.push({ type: "task.archived", taskId: task.id });
+      return back;
+    }
+    case "task.updated": {
+      const patch = {};
+      for (const key of Object.keys(body.patch))
+        patch[key] = task[key];
+      return [{ type: "task.updated", taskId: task.id, patch }];
+    }
+    default:
+      return null;
+  }
+};
+var inverseOfBatch = (state, bodies) => {
+  const inverses = [];
+  let working = state;
+  for (const [index, body] of bodies.entries()) {
+    const inverse = inverseOne(working, body);
+    if (!inverse)
+      return null;
+    inverses.push(inverse);
+    working = applyEvents(working, [{ v: 1, id: `undo-${index}`, at: new Date(0).toISOString(), ...body }]);
+  }
+  return inverses.reverse().flat();
+};
+var COLLECTIONS = ["tasks", "blocks", "entries", "objectives", "channels", "folders", "calendars", "rituals", "series", "runs", "googleTasks"];
+var IGNORED = {
+  tasks: new Set(["updatedAt", "rolloverCount"]),
+  blocks: new Set(["google"])
+};
+var ignored = (collection, field) => field === "updatedAt" || Boolean(IGNORED[collection]?.has(field));
+var comparable = (collection, field, value) => {
+  if (collection === "tasks" && field === "source") {
+    const source = value;
+    return source ? `${source.kind}:${source.id}` : "null";
+  }
+  return canonical(value);
+};
+var canonical = (value) => JSON.stringify(value, (_key, inner) => inner && typeof inner === "object" && !Array.isArray(inner) ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => a.localeCompare(b))) : inner) ?? "undefined";
+var changedSince = (after, now, undone) => {
+  const changed = [];
+  for (const collection of COLLECTIONS) {
+    const was = after[collection];
+    const is = now[collection];
+    const will = undone[collection];
+    for (const id of new Set([...Object.keys(is), ...Object.keys(will)])) {
+      const [a, n, u] = [was[id], is[id], will[id]];
+      if (u === n)
+        continue;
+      const removed = !u || collection === "tasks" && !n?.deletedAt && Boolean(u.deletedAt);
+      const linked = collection === "tasks" && Boolean(n?.source ?? a?.source);
+      for (const field of new Set([...Object.keys(a ?? {}), ...Object.keys(n ?? {}), ...Object.keys(u ?? {})])) {
+        if (ignored(collection, field))
+          continue;
+        const since = comparable(collection, field, n?.[field]) !== comparable(collection, field, a?.[field]);
+        if (removed) {
+          if (since && !(linked && field === "dueDate"))
+            changed.push(`${collection}/${id}/${field}`);
+        } else if (since && comparable(collection, field, u?.[field]) !== comparable(collection, field, n?.[field]))
+          changed.push(`${collection}/${id}/${field}`);
+      }
+    }
+  }
+  if (canonical(undone.timer) !== canonical(now.timer) && canonical(now.timer) !== canonical(after.timer))
+    changed.push("timer");
+  for (const key of new Set([...Object.keys(now.settings), ...Object.keys(undone.settings)])) {
+    const [a, n, u] = [after.settings[key], now.settings[key], undone.settings[key]];
+    if (canonical(u) !== canonical(n) && canonical(n) !== canonical(a))
+      changed.push(`settings/${key}`);
+  }
+  return changed;
+};
+
 // src/domain/ids.ts
 var ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 var newId = (now = Date.now()) => {
@@ -1841,6 +1988,8 @@ var newId = (now = Date.now()) => {
 };
 
 // service/planner.ts
+var UNDO_KEEP_MS = 60000;
+var UNDO_KEEP_MAX = 50;
 var summarize = (events, titleOf) => {
   if (events.length > 1)
     return `${events.length} changes`;
@@ -1896,6 +2045,8 @@ var summarize = (events, titleOf) => {
       return "Edit objective";
     case "objective.deleted":
       return "Delete objective";
+    case "objective.restored":
+      return "Restore objective";
     case "ritual.saved":
       return `Save ${event.ritual} for ${event.date}`;
     case "calendar.added":
@@ -1946,6 +2097,7 @@ class Planner {
   now;
   state;
   applied = new Set;
+  undos = new Map;
   log;
   lastAt = 0;
   persistListeners = new Set;
@@ -1999,7 +2151,8 @@ class Planner {
       }
     };
   }
-  execute(commands) {
+  execute(commands, options = {}) {
+    const before = this.state;
     let working = this.state;
     const events = [];
     for (let index = 0;index < commands.length; index++) {
@@ -2015,7 +2168,45 @@ class Planner {
     }
     if (events.length)
       this.persist(events, working);
+    if (options.undo && events.length)
+      this.keepUndo(commands[0].cmd, before, events, working);
     return { ok: true, applied: events.length };
+  }
+  undo(batch) {
+    const record = this.undos.get(batch);
+    this.undos.delete(batch);
+    if (!record || this.now().getTime() - record.at > UNDO_KEEP_MS)
+      return { ok: false, reason: "gone" };
+    let working = this.state;
+    const events = [];
+    for (const body of record.inverse) {
+      const command = { ...body, cmd: newId() };
+      const error = validateCommand(command, working);
+      if (error)
+        return { ok: false, reason: "changed", changed: [error] };
+      const event = this.toEvent(body, command.cmd);
+      events.push(event);
+      working = applyEvents(working, [event]);
+    }
+    const changed = changedSince(record.after, this.state, working);
+    if (changed.length)
+      return { ok: false, reason: "changed", changed };
+    if (events.length)
+      this.persist(events, working);
+    return {
+      ok: true,
+      applied: events.length,
+      commands: events.map(({ v: _v, id: _id, at: _at, ...command }) => command)
+    };
+  }
+  keepUndo(batch, before, events, after) {
+    const now = this.now().getTime();
+    for (const [key, record] of this.undos)
+      if (now - record.at > UNDO_KEEP_MS || this.undos.size >= UNDO_KEEP_MAX)
+        this.undos.delete(key);
+    const inverse = inverseOfBatch(before, events);
+    if (inverse)
+      this.undos.set(batch, { inverse, after, at: now });
   }
   reload() {
     const events = this.store.load();
@@ -5321,8 +5512,8 @@ var googleWriteRoute = async (req, url, ctx) => {
     if (!edit)
       return bad("skip, restore, or before and after (an occurrence each) are required");
     try {
-      await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
-      return ok({ changed: true, ...ctx.snapshot() });
+      const { before } = await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
+      return ok({ changed: true, before, ...ctx.snapshot() });
     } finally {
       ctx.changed("tasks");
     }
@@ -5676,8 +5867,10 @@ class GoogleSeries {
       if (!tasks.length)
         throw new GoogleError(404, SERIES_GONE);
       const real = tasks.find((entry) => entry.repeat.on === on);
-      if (real)
-        return this.occurrenceMade(real, edit);
+      if (real) {
+        await this.occurrenceMade(real, edit);
+        return { before: null };
+      }
       const heads = tasks.filter((entry) => !entry.repeat.next);
       if (!heads.length)
         throw new GoogleError(409, OCCURRENCE_GONE);
@@ -5701,6 +5894,7 @@ class GoogleSeries {
       if (repeats.some((repeat) => Object.keys(repeat.exceptions ?? {}).length > GTASK_EXCEPTIONS_MAX))
         throw new GoogleError(400, `A series keeps at most ${GTASK_EXCEPTIONS_MAX} of its tasks changed on their own`);
       this.write(heads.map((head, index) => ({ type: "gtask.kept", account, listId: head.listId, taskId: head.taskId, patch: { repeat: repeats[index] } })));
+      return { before: current ?? null };
     });
   }
   async occurrenceMade(real, edit) {
@@ -7127,12 +7321,28 @@ ${event.location}`.toLocaleLowerCase().includes(needle));
         return;
       }
       await sync.idle();
-      const result = planner.execute(body.commands);
+      const result = planner.execute(body.commands, { undo: body.undo === true });
       if (!result.ok) {
         json(res, 400, { error: result.error, index: result.index });
         return;
       }
       json(res, 200, { applied: result.applied, ...snapshot() });
+      syncAgentCommands();
+      return;
+    }
+    if (url.pathname === "/undo" && req.method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.batch !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.batch)) {
+        json(res, 400, { error: "batch must be the command id of a batch" });
+        return;
+      }
+      await sync.idle();
+      const result = planner.undo(body.batch);
+      if (!result.ok) {
+        json(res, result.reason === "gone" ? 410 : 409, { error: result.reason === "gone" ? UNDO_GONE : CHANGED_SINCE, changed: result.reason === "changed" ? result.changed : [], ...snapshot() });
+        return;
+      }
+      json(res, 200, { applied: result.applied, commands: result.commands, ...snapshot() });
       syncAgentCommands();
       return;
     }

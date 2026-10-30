@@ -6,13 +6,14 @@
 // Tasks", and its keyboard shortcuts kept from OpenChamber in the Tasks view.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { GoogleStore, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, type TaskFields } from '../panel/lib/google.ts';
+import { FreshnessError, GoogleStore, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, type TaskFields } from '../panel/lib/google.ts';
 import type { PlannerClient } from '../panel/lib/client.ts';
 import { plannerKeeps } from '../panel/lib/forge.ts';
 import { TASK_SHORTCUTS, repeatBlock } from '../panel/components/TasksView.tsx';
 import { toTaskItem } from '../service/googleData.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { applyEvents } from '../src/domain/reducer.ts';
+import { seriesRoutes } from './seriesRoutes.ts';
 import type { GoogleTaskItem, MailItem } from '../src/domain/google.ts';
 import { byTitle, deadlineSections, moveBottomTarget, moveTopTarget, openRows } from '../src/domain/gtasks.ts';
 import { keptFor, templateOf } from '../src/domain/gtaskKept.ts';
@@ -37,12 +38,15 @@ const fakeClient = (start: PlannerState, answer: (method: string, path: string, 
   let state = start;
   let n = 0;
   const calls: { method: string; path: string; body?: any }[] = [];
+  const google = async (method: string, path: string, body?: unknown) => {
+    calls.push({ method, path, ...(body === undefined ? {} : { body }) });
+    return answer(method, path, body);
+  };
+  // The plan and tasks read again as the service answers them, and a series' routes as the service runs them.
+  const { handle } = seriesRoutes({ state: () => state, apply: (bodies) => (state = applyEvents(state, bodies.map(ev))) }, google);
   const client = {
     getView: () => ({ state, today: TODAY }),
-    call: async (method: string, path: string, body?: unknown) => {
-      calls.push({ method, path, ...(body === undefined ? {} : { body }) });
-      return answer(method, path, body);
-    },
+    call: async (method: string, path: string, body?: unknown) => (await handle(path, body)) ?? google(method, path, body),
     dispatch: async (bodies: EventBody[]) => {
       for (const body of bodies) expect(validateCommand({ cmd: `c${n}`, ...body }, state)).toBeNull();
       n += bodies.length;
@@ -138,6 +142,58 @@ describe('Undo after Delete', () => {
     expect(keptFor(fake.state(), parent)!.starredAt).toBeTruthy();
     // Once.
     expect(await store.undoLast()).toBeNull();
+  });
+
+  test('deleted from a window that never read its list (the calendar, cold): Undo still gives back each subtask and what was kept for it, read from Google before the deletion', async () => {
+    const parent = item({ id: 'p', title: 'Trip', due: TODAY });
+    const kid = item({ id: 'k', title: 'Hotel', parent: 'p' });
+    const dated = item({ id: 'd', title: 'Flight', parent: 'p', due: TODAY });
+    const start = stateWith(keep('p', { color: '#d50000' }), keep('d', { time: 540, starred: true }));
+    const fake = fakeClient(start, (method, path) => (path.startsWith('/google/tasks/all') ? { tasks: [parent, kid, dated], complete: true } : method === 'PATCH' ? { task: parent } : { deleted: true }));
+    const store = new GoogleStore(host, fake.client, 'page');
+    // No list loaded: deleted from the calendar of a fresh panel.
+    await store.deleteListTask(parent);
+    expect([keptFor(fake.state(), parent), keptFor(fake.state(), dated)]).toEqual([null, null]);
+    expect(await store.undoLast()).toEqual({ done: 'Deletion undone', note: null });
+    expect(fake.calls.filter((call) => call.method === 'PATCH').map((call) => call.body.id)).toEqual(['p', 'k', 'd']);
+    expect(keptFor(fake.state(), parent)).toMatchObject({ color: '#d50000' });
+    expect(keptFor(fake.state(), dated)).toMatchObject({ time: 540 });
+    expect(keptFor(fake.state(), dated)!.starredAt).toBeTruthy();
+  });
+
+  test("a subtask Google refuses to give back is said, the task and the others come back; a list that can't be read deletes nothing", async () => {
+    const parent = item({ id: 'p', title: 'Trip' });
+    const kids = [item({ id: 'k1', title: 'Hotel', parent: 'p' }), item({ id: 'k2', title: 'Train', parent: 'p' })];
+    let reading = false;
+    const fake = fakeClient(stateWith(), (method, path, body) => {
+      if (path.startsWith('/google/tasks/all')) {
+        if (reading) throw new Error('Backend Error');
+        return { tasks: [parent, ...kids], complete: true };
+      }
+      if (method === 'PATCH' && body.id === 'k1') throw new Error('Backend Error');
+      return method === 'PATCH' ? { task: parent } : { deleted: true };
+    });
+    const store = new GoogleStore(host, fake.client, 'page');
+    await store.deleteListTask(parent);
+    expect(await store.undoLast()).toEqual({ done: 'Deletion undone', note: 'Google Tasks did not give back 1 of its 2 subtasks' });
+    // Its list can't be read now: nothing is deleted, to try again.
+    reading = true;
+    const deletes = fake.calls.filter((call) => call.method === 'DELETE').length;
+    await expect(store.deleteListTask(parent)).rejects.toBeInstanceOf(FreshnessError);
+    expect(fake.calls.filter((call) => call.method === 'DELETE').length).toBe(deletes);
+    expect(store.canUndo()).toBe(false);
+  });
+
+  test("Delete all completed tasks deletes the ones Google has completed now: one reopened in another window since this window read the list stays", async () => {
+    const done = item({ id: 'a', title: 'Done', completed: true });
+    const reopened = item({ id: 'b', title: 'Reopened elsewhere', completed: true });
+    let list = [done, reopened];
+    const fake = fakeClient(stateWith(), (method, path) => (path.startsWith('/google/tasks/all') ? { tasks: list, complete: true } : method === 'DELETE' ? { deleted: true } : {}));
+    const store = new GoogleStore(host, fake.client, 'page');
+    await store.loadBoard(ME, 'L1');
+    list = [done, { ...reopened, completed: false }];
+    expect(await store.clearCompleted(ME, 'L1')).toBe(1);
+    expect(fake.calls.filter((call) => call.method === 'DELETE').map((call) => new URLSearchParams(call.path.split('?')[1]).get('id'))).toEqual(['a']);
   });
 
   test('a plain task completed with its subtasks: Undo opens them again, the task before its subtasks', async () => {
