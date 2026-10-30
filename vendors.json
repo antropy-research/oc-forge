@@ -18,5 +18,9 @@
     "repository": "https://github.com/microsoft/vscode.git",
     "release": "1.144.0",
     "commit": "2c33b50b16c472efe58357d1d2a8a5414bc23fbf"
+  },
+  "dawn-mac-antropy": {
+    "repository": "https://github.com/neethanwu/dawn-mac-antropy.git",
+    "branch": "main"
   }
 }
