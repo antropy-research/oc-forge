@@ -104,6 +104,10 @@ export const MEMORY_TARGET = 8;
 
 export interface ConfigurationService {
   updateValue(key: string, value: unknown, target: number): Promise<void>;
+  /** A setting's value in each layer (`IConfigurationValue`). */
+  inspect(key: string): { defaultValue?: unknown; applicationValue?: unknown; userValue?: unknown; workspaceValue?: unknown; workspaceFolderValue?: unknown; memoryValue?: unknown };
+  /** `source`: the `ConfigurationTarget` that changed. */
+  readonly onDidChangeConfiguration: Event<{ readonly source: number; affectsConfiguration(key: string): boolean }>;
 }
 
 export interface RemoteAgentService {

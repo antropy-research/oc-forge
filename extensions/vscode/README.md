@@ -10,7 +10,25 @@ the server's files.
 
 - **Open in VS Code** in a chat's menu shows that chat's folder (or worktree) in the VS Code panel (with oc-forge's
   adapters: in VS Code's Explorer, in the rail panel).
-- VS Code follows OpenChamber's light or dark look when it starts, and switches when OpenChamber's does.
+- VS Code wears OpenChamber's theme: its light or dark mode, its colors and its code font, and follows when
+  OpenChamber's changes (light and dark, another theme, the system's mode), without a reload and without touching an
+  unsaved edit. All through VS Code's own documented settings, as defaults (`src/theme.ts`):
+  - OpenChamber's tokens (`HostReadyContext.theme`) become `workbench.colorCustomizations` (334 workbench colors:
+    each frame's surface is the color OpenChamber paints around it, floating surfaces and inputs its `elevated`,
+    selections and hovers its own, accents its `primary`) and `editor.tokenColorCustomizations` (code as in
+    OpenChamber's Files view, each color made readable on the editor, WCAG AA), both scoped to VS Code's default theme
+    of that mode (`[Light 2026]`, `[Dark 2026]`; the same in 1.140–1.144). Its monospace font is `editor.fontFamily`
+    (and so the terminal's), its interface font `markdown.preview.fontFamily`.
+  - VS Code picks its light or dark default theme the way it follows a system (`window.autoDetectColorScheme`): in
+    the frame, `prefers-color-scheme` answers OpenChamber's mode (`workbench/theme.ts`).
+  - The look is VS Code's defaults as it starts; once it runs, the frame keeps it in VS Code's memory configuration
+    (`IConfigurationService`, `ConfigurationTarget.MEMORY`): never written to the user's settings, and resolved so
+    that a color, rule or font the user set (for that theme or for every theme, in any settings layer) still wins,
+    key by key. A theme the user picks in VS Code shows as its author made it (VS Code's picker sets its preferred
+    theme for that mode).
+  - "Follow OpenChamber's theme" in the connection form turns all of it off: VS Code's own themes, as they are. On a
+    VS Code release the surface patches don't fit (the whole workbench, `services` never called), the light or dark
+    switch is live and the colors of a changed theme come with the next start.
 - When OpenChamber moves to another folder, VS Code offers to open it; *OpenChamber: Open OpenChamber's Folder* and
   *OpenChamber: VS Code Server Connection…* are in VS Code's command palette.
 - VS Code keeps its settings, keybindings, open editors and layout across reloads.

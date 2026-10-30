@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { vscodeColors } from '../src/theme.ts';
 import { commitOfBase, isExternalAllowed, readServerPage, remoteUri, serverPathOf, webviewOriginName, workbenchConfiguration } from '../src/workbench.ts';
+import { openChamberTheme } from './fixtures/themes.ts';
 
 const server = {
   remoteAuthority: 'vscode:8000',
@@ -11,11 +13,13 @@ const server = {
 
 describe('the workbench configuration', () => {
   test("opens OpenChamber's folder on the server, with the token, without trust prompts or telemetry", () => {
-    const config = workbenchConfiguration(server, { folder: '/home/node/projects/a', token: 'tok', mode: 'dark', followTheme: true });
+    const theme = openChamberTheme('openchamber-dark');
+    const config = workbenchConfiguration(server, { folder: '/home/node/projects/a', token: 'tok', theme, followTheme: true });
     expect(config.folderUri).toEqual({ scheme: 'vscode-remote', authority: 'vscode:8000', path: '/home/node/projects/a' });
     expect(config.connectionToken).toBe('tok');
     expect(config.enableWorkspaceTrust).toBe(false);
-    expect(config.initialColorTheme).toEqual({ themeType: 'dark' });
+    // VS Code's first paint, before its theme has loaded, is OpenChamber's too.
+    expect(config.initialColorTheme).toEqual({ themeType: 'dark', colors: vscodeColors(theme.tokens) });
     const product = config.productConfiguration as Record<string, unknown>;
     expect(product.tasConfig).toBeUndefined();
     expect(product.aiConfig).toBeUndefined();
@@ -23,15 +27,19 @@ describe('the workbench configuration', () => {
     expect(product.extensionsGallery).toEqual(server.productConfiguration.extensionsGallery);
     const defaults = config.configurationDefaults as Record<string, unknown>;
     expect(defaults['workbench.colorTheme']).toBe('Dark 2026');
+    expect(defaults['window.autoDetectColorScheme']).toBe(true);
+    expect(defaults['workbench.colorCustomizations']).toEqual({ '[Dark 2026]': vscodeColors(theme.tokens) });
     expect(defaults['chat.disableAIFeatures']).toBe(true);
     expect(defaults['workbench.secondarySideBar.defaultVisibility']).toBe('hidden');
   });
 
   test('without a folder VS Code opens empty; without following the look the theme is the user\'s', () => {
-    const config = workbenchConfiguration(server, { folder: null, token: null, mode: 'light', followTheme: false });
+    const config = workbenchConfiguration(server, { folder: null, token: null, theme: openChamberTheme('openchamber-light'), followTheme: false });
     expect(config.folderUri).toBeUndefined();
     expect(config.connectionToken).toBeUndefined();
-    expect((config.configurationDefaults as Record<string, unknown>)['workbench.colorTheme']).toBeUndefined();
+    const defaults = config.configurationDefaults as Record<string, unknown>;
+    for (const key of ['workbench.colorTheme', 'window.autoDetectColorScheme', 'workbench.colorCustomizations', 'editor.tokenColorCustomizations', 'editor.fontFamily', 'markdown.preview.fontFamily']) expect(defaults[key]).toBeUndefined();
+    expect(config.initialColorTheme).toEqual({ themeType: 'light' });
     expect(remoteUri('h:1', '/x')).toEqual({ scheme: 'vscode-remote', authority: 'h:1', path: '/x' });
   });
 });

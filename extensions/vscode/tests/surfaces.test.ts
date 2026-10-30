@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EditorRequests, readPart, readTabs, SavedTabs } from '../service/editors.ts';
+import { openChamberTheme } from './fixtures/themes.ts';
 import {
   editorKeyOf,
   editorRoute,
@@ -75,7 +76,7 @@ describe('which part of VS Code a frame is', () => {
     for (const role of ['view', 'editor'] as const) expect(roleSettings(role)['terminal.integrated.enablePersistentSessions']).toBe(false);
     expect(roleSettings('editor', false)['terminal.integrated.enablePersistentSessions']).toBe(false);
     expect(roleSettings('terminal')['terminal.integrated.enablePersistentSessions']).toBeUndefined();
-    const configuration = workbenchConfiguration({ remoteAuthority: 'vscode:8000' }, { folder: '/p', token: null, mode: 'dark', followTheme: true, defaults: roleSettings('view') });
+    const configuration = workbenchConfiguration({ remoteAuthority: 'vscode:8000' }, { folder: '/p', token: null, theme: openChamberTheme('openchamber-dark'), followTheme: true, defaults: roleSettings('view') });
     expect(configuration.configurationDefaults).toMatchObject({ 'chat.disableAIFeatures': true, 'workbench.activityBar.location': 'hidden' });
   });
 });

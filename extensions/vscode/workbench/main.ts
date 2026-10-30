@@ -15,6 +15,7 @@ import { isExternalAllowed, NARROW_FRAME_CSS, remoteUri, webviewOriginName, work
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
 import { persistentIndexedDB, IDBKeyRange, saveThroughService, type StateOp, type StateSnapshot } from './storage.ts';
 import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceController, type SurfaceRole } from './surfaces.ts';
+import { keepLook, preferOpenChamberScheme } from './theme.ts';
 import { TunnelSocket, type TunnelService } from './tunnel.ts';
 import { VscodeServices, type InstantiationService, type StorageService } from './vscode.ts';
 
@@ -84,7 +85,7 @@ const showSettings = (settings: VscodeSettings, problem = ''): Promise<VscodeSet
     el('p', { class: 'hint', textContent: "VS Code runs here, inside OpenChamber: the workbench of your own VS Code Server for the web (code serve-web, or the server the oc-forge dev container runs). Its files, terminal and extensions are the server's." }),
     el('label', {}, 'Address, as the machine running OpenChamber reaches it', url),
     el('label', {}, 'Connection token', token),
-    el('label', { class: 'inline' }, follow, "Start in OpenChamber's light or dark look"),
+    el('label', { class: 'inline' }, follow, "Follow OpenChamber's theme: its light or dark mode, colors and code font"),
     error,
     el('div', { class: 'row' }, connect),
     el('p', { class: 'hint', textContent: 'In the oc-forge dev container: http://vscode:8000, with VSCODE_CONNECTION_TOKEN from its secrets file.' }),
@@ -200,7 +201,10 @@ const boot = async (): Promise<void> => {
   const storedFolder = await host.storage.get('folder').catch(() => undefined);
   const folder = fresh?.folder ?? (typeof storedFolder === 'string' && storedFolder.startsWith('/') ? storedFolder : null) ?? context.directory;
   if (surfaceRole && fresh && fresh.folder !== storedFolder) await host.storage.set('folder', fresh.folder).catch(() => {});
-  const configuration = workbenchConfiguration(connected.config, { folder, token: settings.token, mode: modeOf(context), followTheme: settings.followTheme, defaults: roleSettings(role, strip) });
+  const configuration = workbenchConfiguration(connected.config, { folder, token: settings.token, theme: context.theme, followTheme: settings.followTheme, defaults: roleSettings(role, strip) });
+  // OpenChamber's look (src/theme.ts): VS Code follows its mode as a system's, and keeps its colors once it runs.
+  const scheme = settings.followTheme ? preferOpenChamberScheme(window, modeOf(context)) : null;
+  let look: ReturnType<typeof keepLook> | null = null;
 
   // This frame's sockets share one poll (tunnel.ts, FramePoll). Not crypto.randomUUID: plain HTTP is no secure context.
   const poller = [...crypto.getRandomValues(new Uint8Array(12))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -246,6 +250,13 @@ const boot = async (): Promise<void> => {
         console.warn('[OpenChamber VS Code] VS Code saves its state before a reload without waiting for the service', error);
       }
       markServices(services);
+      if (settings.followTheme) {
+        try {
+          look = keepLook(services, context.theme);
+        } catch (error) {
+          console.warn("[OpenChamber VS Code] VS Code takes OpenChamber's theme as it starts, not as it changes", error);
+        }
+      }
     },
     workbench: (handle: typeof workbench) => {
       workbench = handle;
@@ -355,11 +366,11 @@ const boot = async (): Promise<void> => {
   let shownFolder = folder;
   let asked: string | null = null;
   host.onReady((next) => {
-    const before = modeOf(context);
     context = next;
     applyHostReady(next, document.documentElement);
-    const dark = document.querySelector('.monaco-workbench')?.classList.contains('vs-dark') ?? false;
-    if (settings.followTheme && modeOf(next) !== before && (modeOf(next) === 'dark') !== dark) void workbench?.commands.executeCommand('workbench.action.toggleLightDarkThemes');
+    // The colors first, then the mode: VS Code loads its other default theme with them in place.
+    look?.update(next.theme);
+    scheme?.set(modeOf(next));
     const directory = next.directory;
     if (answersOpen && directory && directory !== shownFolder && directory !== asked && workbench) {
       asked = directory;

@@ -19,7 +19,6 @@ var parseServerUrl = (raw) => {
   }
 };
 var isConnectionToken = (value) => typeof value === "string" && /^[A-Za-z0-9._~-]{1,256}$/.test(value);
-
 // src/workbench.ts
 var EXTERNAL_HOST_SUFFIXES = [
   "marketplace.visualstudio.com",
