@@ -36,6 +36,8 @@ describe('what a pasted URL is', () => {
   test("Gmail: the legacy view's thread id, a printed message's thread-f / msg-f ids (as hex), the account it names; Gmail's own links are opaque", () => {
     expect(parseGmailUrl('https://mail.google.com/mail/u/0/#inbox/18b2f3c4d5e6f708')).toEqual({ kind: 'gmail', thread: '18b2f3c4d5e6f708', message: null, account: null, url: 'https://mail.google.com/mail/u/0/#inbox/18b2f3c4d5e6f708' });
     expect(parseGmailUrl('https://mail.google.com/mail/?authuser=Me@Example.com#all/18B2F3C4D5E6F708')).toMatchObject({ thread: '18b2f3c4d5e6f708', account: 'me@example.com' });
+    // The Planner's own link to a thread (gmailUrl) names its account in the path.
+    expect(parseGmailUrl('https://mail.google.com/mail/u/me%40example.com/#all/18b2f3c4d5e6f708')).toMatchObject({ thread: '18b2f3c4d5e6f708', account: 'me@example.com' });
     // 1782345678901234567 = 0x18bc1f4b6c7c4807
     expect(parseGmailUrl('https://mail.google.com/mail/u/0/?ik=abc&view=pt&search=all&permthid=thread-f%3A1782345678901234567&simpl=msg-f%3A1782345678901234567')).toMatchObject({ thread: (1782345678901234567n).toString(16), message: (1782345678901234567n).toString(16) });
     expect(parseGmailUrl('https://mail.google.com/mail/u/0/#inbox/FMfcgzQgLjNPlfJCVRfnNkPGkLhWClCW')).toMatchObject({ thread: null, message: null });

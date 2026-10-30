@@ -223,11 +223,19 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       const found = (world.mail ?? []).filter((message) => words.every((word) => `${message.subject} ${message.from} ${message.snippet}`.toLowerCase().includes(word)));
       return [200, { messages: found.map((message) => ({ id: message.id, threadId: message.threadId })), resultSizeEstimate: found.length }];
     }
+    const rawMessage = (message) => ({ id: message.id, threadId: message.threadId, snippet: message.snippet, internalDate: String(Date.parse(message.date)), labelIds: message.unread ? ['UNREAD', 'INBOX'] : ['INBOX'], payload: { headers: [{ name: 'Subject', value: message.subject }, { name: 'From', value: message.from }, { name: 'Date', value: message.date }] } });
     const mailMatch = /^\/gmail\/v1\/users\/me\/messages\/([^/]+)$/.exec(path);
     if (mailMatch && method === 'GET') {
       const message = (world.mail ?? []).find((one) => one.id === decodeURIComponent(mailMatch[1]));
       if (!message) return [404, { error: { message: 'Not Found' } }];
-      return [200, { id: message.id, threadId: message.threadId, snippet: message.snippet, internalDate: String(Date.parse(message.date)), labelIds: message.unread ? ['UNREAD', 'INBOX'] : ['INBOX'], payload: { headers: [{ name: 'Subject', value: message.subject }, { name: 'From', value: message.from }, { name: 'Date', value: message.date }] } }];
+      return [200, rawMessage(message)];
+    }
+    // A thread: its messages, oldest first, as Gmail gives them (what a pasted thread address opens).
+    const threadMatch = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)$/.exec(path);
+    if (threadMatch && method === 'GET') {
+      const messages = (world.mail ?? []).filter((one) => one.threadId === decodeURIComponent(threadMatch[1])).sort((a, b) => a.date.localeCompare(b.date));
+      if (!messages.length) return [404, { error: { message: 'Not Found' } }];
+      return [200, { id: decodeURIComponent(threadMatch[1]), messages: messages.map(rawMessage) }];
     }
     // Google Drive: file names, types and addresses, by a part of the name (Drive's `name contains '…'`), newest first.
     if (path === '/drive/v3/files' && method === 'GET') {

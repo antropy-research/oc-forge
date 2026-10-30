@@ -32,8 +32,15 @@ export const parseGmailUrl = (text: string): Extract<PastedUrl, { kind: 'gmail' 
     return null;
   }
   if (url.protocol !== 'https:' || url.hostname !== 'mail.google.com') return null;
-  const authuser = url.searchParams.get('authuser');
-  const account = authuser && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(authuser) ? authuser.toLowerCase() : null;
+  // The account, when the address names it: `?authuser=` or `/mail/u/<address>/` (as the Planner's own links to Gmail do).
+  const named = url.searchParams.get('authuser') ?? (() => {
+    try {
+      return /^\/mail\/u\/([^/]+)\//.exec(decodeURIComponent(url.pathname))?.[1] ?? null;
+    } catch {
+      return null;
+    }
+  })();
+  const account = named && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(named) ? named.toLowerCase() : null;
   const decoded = decodeURIComponent(text);
   const thread = /thread-f:(\d{10,20})/.exec(decoded)?.[1];
   const message = /msg-f:(\d{10,20})/.exec(decoded)?.[1];
