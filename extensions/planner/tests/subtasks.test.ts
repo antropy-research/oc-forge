@@ -15,7 +15,8 @@ import { todayIn } from '../src/domain/dates.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
 import { describe as describeEvent } from '../src/domain/activity.ts';
-import { emptyState, type PlannerState, type Subtask } from '../src/domain/types.ts';
+import { convertSubtaskCommands } from '../src/domain/merge.ts';
+import { emptyState, type PlannerState, type Subtask, type TaskSourceRef } from '../src/domain/types.ts';
 import { PlannerClient } from '../panel/lib/client.ts';
 
 const ZONE = 'America/Los_Angeles';
@@ -89,6 +90,65 @@ describe('the reducer: an old log replays as it was; subtask commands change one
   });
 });
 
+// Review 13: one way to turn a subtask into a task, keeping all it holds; one that is no longer there is not turned
+// into a task again (converted or deleted in another window: a 409), and old logs' conversions replay as they did.
+const SOURCES: TaskSourceRef[] = [
+  { kind: 'linear', id: 'iss-h-1', key: 'HAR-1', url: 'https://linear.app/harness/issue/HAR-1/x', title: 'harness first', teamId: 'team-h', status: { name: 'Todo', type: 'unstarted', color: '#e2e2e2' }, workspaceId: 'org-h' },
+  { kind: 'github', id: 'I_harness_1', key: 'harness/app#1', url: 'https://github.com/harness/app/issues/1', title: 'harness issue', status: { name: 'Open', type: 'open', color: '#2da44e' } },
+  { kind: 'gtask', id: 'g-harness-1', key: 'Google Tasks', url: 'https://tasks.google.com/task/g-harness-1', title: 'harness google task', account: 'harness@example.com', listId: 'list-1' },
+  { kind: 'email', id: 'm-harness-1', key: 'Gmail', url: 'https://mail.google.com/mail/u/0/#all/t-harness-1', title: 'harness email', account: 'harness@example.com' },
+  { kind: 'link', id: 'https://example.com/harness', key: 'example.com', url: 'https://example.com/harness', title: 'harness page' },
+];
+
+describe('turning a subtask into a task keeps all it holds, by every control (review 13)', () => {
+  test('notes, planned time, link (each kind) and done (completed today), in its task\'s channel, folder and objective, right after it', () => {
+    let ids = 0;
+    const newId = () => `made${++ids}`;
+    const merged = SOURCES.map((source, index): Subtask => ({ id: `m${index}`, title: `merged ${source.kind}`, done: index % 2 === 1, notes: `notes of ${source.kind}`, plannedMinutes: 15 * (index + 1), source }));
+    let state = run(emptyState(), [
+      { type: 'channel.created', channel: { id: 'deep', name: 'deep', color: '#2f9e44', context: 'work' } },
+      { type: 'folder.created', folder: { id: 'f1', name: 'Harness folder' } },
+      { type: 'objective.created', objective: { id: 'o1', weekStart: today, title: 'Ship it', carriedFrom: null } },
+      { type: 'task.created', task: { id: 'p', title: 'Harness parent', placement: { kind: 'backlog', bucket: 'next-weeks' }, position: 1024, channelId: 'deep', folderId: 'f1', objectiveId: 'o1', subtasks: [...merged, sub('plain', 'plain one', true)] } },
+    ]);
+    for (const subtask of [...merged, sub('plain', 'plain one', true)]) {
+      const bodies = convertSubtaskCommands(state, 'p', subtask.id, newId, today);
+      state = run(state, bodies);
+      const made = Object.values(state.tasks).find((task) => task.title === subtask.title)!;
+      expect({ notes: made.notes, plannedMinutes: made.plannedMinutes, source: made.source, completedOn: made.completedOn, done: Boolean(made.completedAt) }).toEqual({
+        notes: subtask.notes ?? '',
+        plannedMinutes: subtask.plannedMinutes ?? null,
+        source: subtask.source ?? null,
+        completedOn: subtask.done ? today : null,
+        done: subtask.done,
+      });
+      expect([made.channelId, made.folderId, made.objectiveId, made.placement]).toEqual(['deep', 'f1', 'o1', { kind: 'backlog', bucket: 'next-weeks' }]);
+      expect(made.position).toBeGreaterThan(state.tasks.p!.position);
+      expect(state.tasks.p!.subtasks.some((item) => item.id === subtask.id)).toBe(false);
+    }
+  });
+
+  test("old logs' conversions replay as they did: a whole list, and a delete without the task it became", () => {
+    const old = foldEvents([
+      ev(created([sub('a', 'Alpha', true), sub('b', 'Beta')]) as EventBody),
+      ev({ type: 'task.created', task: { id: 'ta', title: 'Alpha', placement: { kind: 'day', date: today }, position: 2048 } } as EventBody),
+      ev({ type: 'task.updated', taskId: 't', patch: { subtasks: [sub('b', 'Beta')] } } as unknown as EventBody),
+      ev({ type: 'subtask.deleted', taskId: 't', subtaskId: 'b', seen: { title: 'Beta' } } as unknown as EventBody),
+      ev({ type: 'task.created', task: { id: 'tb', title: 'Beta', placement: { kind: 'day', date: today }, position: 3072 } } as EventBody),
+      ev({ type: 'subtask.deleted', taskId: 't', subtaskId: 'b', seen: { title: 'Beta' } } as unknown as EventBody),
+    ]);
+    expect(old.tasks.t!.subtasks).toEqual([]);
+    expect([old.tasks.ta, old.tasks.tb].map((task) => [task!.title, task!.completedAt, task!.notes])).toEqual([['Alpha', null, ''], ['Beta', null, '']]);
+  });
+
+  test('a task made completed takes a date', () => {
+    const state = run(emptyState(), [created()]);
+    const made = (completedOn: unknown) => ({ cmd: 'k1', type: 'task.created', task: { id: 'k', title: 'Made', placement: { kind: 'day', date: today }, position: 1, completedOn } });
+    expect(validateCommand(made('soon'), state)).toBe('completedOn must be a date or null');
+    expect(run(state, [made(today)]).tasks.k).toMatchObject({ completedOn: today });
+  });
+});
+
 // ── The real service, two windows ─────────────────────────────────────────────
 
 const token = 'subtasks-test-token';
@@ -150,6 +210,8 @@ const twoWindows = async (...names: string[]) => {
   return { taskId, subtasks, a: await openWindow(), b: await openWindow() };
 };
 const subtasksOf = (state: PlannerState, taskId: string) => state.tasks[taskId]!.subtasks;
+/** The task a conversion's batch makes (whatever the order of its commands). */
+const madeIn = (bodies: readonly EventBody[]): string => (bodies.find((body) => body.type === 'task.created') as { task: { id: string } }).task.id;
 
 /**
  * A's command held on its way while B's is accepted, then A's sent as it was: what each window was told of a conflict,
@@ -290,6 +352,51 @@ describe('two windows change the same task\'s subtasks at once (the real service
     const stale = await call('POST', '/commands', { commands: [{ cmd: next('c'), type: 'task.updated', taskId: w.taskId, patch: { subtasks: seenByA.map((subtask, index) => (index === 0 ? { ...subtask, done: true } : subtask)) } }] });
     expect(subtasksOf(await plan(), w.taskId).map((subtask) => subtask.title)).toContain('review12-newly-accepted-subtask');
     expect([stale.status, stale.body.error]).toEqual([400, 'Subtasks are changed one at a time now: reload the Planner and try again']);
+  });
+
+  test('both turn the same subtask into a task: one task; the other window is told which one it became, and nothing of it is written', async () => {
+    const w = await twoWindows('child A', 'child B');
+    const [, childB] = w.subtasks;
+    const convert = (window: typeof w.a) => convertSubtaskCommands(window.client.getView().state, w.taskId, childB!.id, () => next('t'), today);
+    const mine = convert(w.a);
+    const theirs = convert(w.b);
+    const result = await race(w, mine, theirs);
+    const made = [mine, theirs].map(madeIn);
+    const live = (state: PlannerState) => made.filter((id) => state.tasks[id] && !state.tasks[id]!.deletedAt);
+    expect(live(result.service)).toEqual([made[1]!]);
+    expect(result.told).toEqual({ a: [{ taskId: w.taskId, subtaskId: childB!.id, now: null, became: madeIn(theirs) }], b: [] });
+    expect([live(result.a.state), live(result.b.state)]).toEqual([live(result.service), live(result.service)]);
+  });
+
+  test('one turned into a task after another window deleted it: refused, no task made from it; a window from before the task it became is named refused too', async () => {
+    const w = await twoWindows('child A', 'child B');
+    const [childA, childB] = w.subtasks;
+    const conversion = convertSubtaskCommands(w.a.client.getView().state, w.taskId, childA!.id, () => next('t'), today);
+    const deleted = await race(w, conversion, [{ type: 'subtask.deleted', taskId: w.taskId, subtaskId: childA!.id, seen: { title: 'child A' } } as unknown as EventBody]);
+    expect(deleted.service.tasks[madeIn(conversion)]).toBeUndefined();
+    expect(deleted.told.a).toEqual([{ taskId: w.taskId, subtaskId: childA!.id, now: null }]);
+    // A window from before (its batch: the task, then the delete, which does not name it) after another window's conversion.
+    const theirs = convertSubtaskCommands(w.b.client.getView().state, w.taskId, childB!.id, () => next('t'), today);
+    const stale = [{ type: 'task.created', task: { id: next('t'), title: 'child B', placement: { kind: 'day', date: today }, position: 4096 } }, { type: 'subtask.deleted', taskId: w.taskId, subtaskId: childB!.id, seen: { title: 'child B' } }] as unknown as EventBody[];
+    const older = await race(w, stale, theirs);
+    expect(older.service.tasks[madeIn(stale)]).toBeUndefined();
+    expect(older.service.tasks[madeIn(theirs)]?.deletedAt).toBeNull();
+    expect((older.told.a[0] as { now: unknown }).now).toBeNull();
+  });
+
+  test('a conversion undone puts the subtask back as it was, all it holds; the task it became goes', async () => {
+    const taskId = next('t');
+    const merged = { id: next('s'), title: 'merged email', done: true, notes: 'From Ann', plannedMinutes: 20, source: SOURCES[3]! };
+    expect((await call('POST', '/commands', { commands: [{ cmd: next('c'), type: 'task.created', task: { id: taskId, title: 'Harness undo conversion', placement: { kind: 'day', date: today }, position: 9000, subtasks: [sub(next('s'), 'first'), merged] } }] })).status).toBe(200);
+    const a = await openWindow();
+    const bodies = convertSubtaskCommands(a.client.getView().state, taskId, merged.id, () => next('t'), today);
+    await a.client.dispatch(bodies, { undo: 'Converted to a task' });
+    const made = madeIn(bodies);
+    expect((await plan()).tasks[made]).toMatchObject({ notes: 'From Ann', plannedMinutes: 20, completedOn: today, source: SOURCES[3] });
+    await a.client.undo();
+    const after = await plan();
+    expect(after.tasks[taskId]!.subtasks.at(-1)).toEqual(merged);
+    expect(after.tasks[made]!.deletedAt).toBeTruthy();
   });
 
   test('a conflict answers 409 with what the subtask is now and the plan as it is; the batch it was in is written not at all', async () => {

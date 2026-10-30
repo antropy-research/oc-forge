@@ -41,7 +41,7 @@ const summarize = (events: readonly PlannerEvent[], titleOf: (id: string) => str
     case 'task.updated': return `Edit task: ${titleOf(event.taskId)}`;
     case 'subtask.added': return `Add subtask: ${event.subtask.title} (${titleOf(event.taskId)})`;
     case 'subtask.updated': return `Edit subtask: ${titleOf(event.taskId)}`;
-    case 'subtask.deleted': return `Delete subtask: ${titleOf(event.taskId)}`;
+    case 'subtask.deleted': return event.into ? `Turn a subtask into a task: ${titleOf(event.into)}` : `Delete subtask: ${titleOf(event.taskId)}`;
     case 'subtask.moved': return `Move subtask: ${titleOf(event.taskId)}`;
     case 'task.moved': return `Move task: ${titleOf(event.taskId)} → ${event.placement.kind === 'day' ? event.placement.date : event.placement.bucket}`;
     case 'task.completed': return `Complete task: ${titleOf(event.taskId)}`;
@@ -166,19 +166,22 @@ export class Planner {
    * A command id seen before is skipped, which makes client retries safe.
    * With `undo`, what takes it back is kept, by its first command (`undo`).
    * A subtask command meeting a change made elsewhere since refuses the
-   * batch with that conflict (`subtaskConflict`).
+   * batch with that conflict (`subtaskConflict`); a subtask another window
+   * turned into a task says which (`became`).
    */
   execute(commands: readonly unknown[], options: { undo?: boolean } = {}): ExecuteResult {
     const before = this.state;
     let working = this.state;
     const events: PlannerEvent[] = [];
+    // A batch that makes a task and deletes a subtask turns the subtask into it: the subtask must still be there.
+    const converts = commands.some((command) => (command as Command | null)?.type === 'task.created');
     for (let index = 0; index < commands.length; index++) {
       const command = commands[index] as Command;
       if (command && typeof command === 'object' && typeof command.cmd === 'string' && this.applied.has(command.cmd)) continue;
       const error = validateCommand(command, working);
       if (error) return { ok: false, error, index };
-      const conflict = subtaskConflict(command, working);
-      if (conflict) return { ok: false, error: SUBTASK_CHANGED, index, conflict };
+      const conflict = subtaskConflict(command, working, { converts });
+      if (conflict) return { ok: false, error: SUBTASK_CHANGED, index, conflict: conflict.now ? conflict : { ...conflict, ...this.converted(conflict.taskId, conflict.subtaskId) } };
       const event = this.toEvent(commandBody(command), command.cmd);
       events.push(event);
       working = applyEvents(working, [event]);
@@ -221,6 +224,17 @@ export class Planner {
       applied: events.length,
       commands: events.map(({ v: _v, id: _id, at: _at, ...command }) => command as Command),
     };
+  }
+
+  /** The task a subtask was last turned into, while that task is still there (`subtask.deleted`'s `into`). */
+  private converted(taskId: string, subtaskId: string): { became?: string } {
+    for (let index = this.log.length - 1; index >= 0; index--) {
+      const event = this.log[index]!;
+      if (event.type !== 'subtask.deleted' || event.taskId !== taskId || event.subtaskId !== subtaskId) continue;
+      const task = event.into ? this.state.tasks[event.into] : undefined;
+      return task && !task.deletedAt ? { became: task.id } : {};
+    }
+    return {};
   }
 
   private keepUndo(batch: string, before: PlannerState, events: readonly PlannerEvent[], after: PlannerState): void {

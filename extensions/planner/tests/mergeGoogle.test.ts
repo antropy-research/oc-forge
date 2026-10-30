@@ -229,6 +229,17 @@ describe('a Google task merged into a task stays a synced Google task', () => {
   });
 });
 
+describe('a Google task planned as a task (review 13: what turns into a task keeps what it has)', () => {
+  test('its time on the calendar, kept by the Planner, is its planned time; one without is planned without', async () => {
+    const kept: EventBody = { type: 'gtask.kept', account: ME, listId: 'L1', taskId: 'g-timed', patch: { time: 600, duration: 45 } };
+    const p = await plannerWith([kept], [google('g-timed', 'Timed call'), google('g-plain', 'Plain errand')]);
+    await p.store.planTask(google('g-timed', 'Timed call'), day);
+    await p.store.planTask(google('g-plain', 'Plain errand'), day);
+    const planned = (id: string) => Object.values(p.state().tasks).find((task) => task.source?.id === id)!;
+    expect([planned('g-timed').plannedMinutes, planned('g-plain').plannedMinutes]).toEqual([45, null]);
+  });
+});
+
 describe('a calendar event task has no subtasks at all, as in Sunsama', () => {
   const event: TaskSourceRef = { kind: 'event', id: `${ME}|primary|e1`, key: 'Google Calendar', url: 'https://calendar.google.com/calendar/r/eventedit/e1' };
   const state = () => applyEvents(emptyState(), [ev({ type: 'task.created', task: { id: 'meeting', title: 'Harness 1:1', placement: day, position: 1024, source: event } }), ev({ type: 'task.created', task: { id: 'plain', title: 'Write notes', placement: day, position: 2048 } })]);

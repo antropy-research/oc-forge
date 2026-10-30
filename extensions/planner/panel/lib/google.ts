@@ -580,7 +580,7 @@ export class GoogleStore {
     const existing = taskForGoogleTask(state, item);
     if (existing && !existing.completedAt) return { bodies: [{ type: 'task.moved', taskId: existing.id, placement, position: at }], taskId: existing.id };
     const id = newId();
-    return { bodies: [{ type: 'task.created', task: taskFromGoogleTask(item, id, placement, at) }], taskId: id };
+    return { bodies: [{ type: 'task.created', task: taskFromGoogleTask(item, id, placement, at, keptFor(state, item)?.duration) }], taskId: id };
   }
 
   planTask(item: GoogleTaskItem, placement: Placement): Promise<void> {

@@ -6,6 +6,11 @@
 // the service and in both windows reloaded; A deletes one B renamed meanwhile, or renames one B deleted: nothing of A's
 // is written, and A's Subtasks asks (Keep theirs / Save mine), never an error. The same in Focus, which shows the task's
 // subtasks with the same controls.
+// Review 13: a subtask turned into a task, by every control (↗ in the task's details and in Focus, Convert to task in
+// Merged in), comes back whole: merged items of every kind, and a Linear-linked task merged with Alt/Option + drop, keep
+// their notes, planned time, link and done (completed), in their task's channel and objective, once each, after a
+// reload. And one turned into a task in both windows at once, or after the other window deleted it, makes one task at
+// most: A's held conversion is refused, and A's section says what happened (Show it; Keep theirs / Save mine).
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/subtasks.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { minutesToMidnight, waitOutMidnight } from './days.mjs';
@@ -162,6 +167,160 @@ try {
     await nav.click();
   };
 
+  const turn = (section, name) => section.getByRole('button', { name: `Turn ${name} into a task`, exact: true }).click();
+  const convertIn = (section, name) => section.getByRole('button', { name: `Convert ${name} to a task`, exact: true }).click();
+  const mergedIn = (window) => window.frame.getByRole('dialog', { name: 'Task details' }).locator('section[aria-label="Merged in"]');
+  const live = (state, title) => Object.values(state.tasks).filter((task) => task.title === title && !task.deletedAt);
+  const closeDetails = async (window) => {
+    await front(window);
+    await window.frame.getByRole('dialog', { name: 'Task details' }).getByRole('button', { name: 'Close' }).click().catch(() => {});
+  };
+
+  /** Review 13 at one size (see the header). */
+  const conversions = async (size) => {
+    // P0. A task in the "work" channel, aligned to an objective, with an item of every kind merged in (every other one
+    // checked off), and a Linear-linked task with notes and 45 minutes beside it, to merge with Alt/Option + drop.
+    const parentId = `harness-convert-${size}`;
+    const parent = `Harness convert ${size}`;
+    const objective = `harness-convert-objective-${size}`;
+    const [first, second] = h.linearWorld.issues;
+    const linear = (issue) => ({ kind: 'linear', id: issue.id, key: issue.identifier, url: issue.url, title: issue.title, status: { name: 'Todo', type: 'unstarted', color: '#e2e2e2' } });
+    const kinds = [
+      ['linear', linear(second)],
+      ['github', { kind: 'github', id: `I_harness_convert_${size}`, key: `harness/app#${size}`, url: `https://github.com/harness/app/issues/${size}`, title: 'harness github item', status: { name: 'Open', type: 'open', color: '#2da44e' } }],
+      ['gtask', { kind: 'gtask', id: `g-harness-convert-${size}`, key: 'Google Tasks', url: `https://tasks.google.com/task/g-harness-convert-${size}`, title: 'harness google task', account: 'harness@example.com', listId: 'list-1' }],
+      ['email', { kind: 'email', id: `m-harness-convert-${size}`, key: 'Gmail', url: `https://mail.google.com/mail/u/0/#all/t-harness-convert-${size}`, title: 'harness email', account: 'harness@example.com' }],
+      ['link', { kind: 'link', id: `https://example.com/harness-convert-${size}`, key: 'example.com', url: `https://example.com/harness-convert-${size}`, title: 'harness page' }],
+    ];
+    const merged = kinds.map(([kind, source], index) => ({ id: `harness-convert-${size}-${kind}`, title: `merged ${kind} ${size}`, done: index % 2 === 1, notes: `notes of the ${kind} item`, plannedMinutes: 15 * (index + 1), source }));
+    const linked = { id: `harness-convert-linked-${size}`, title: `review13 linked issue ${size}`, notes: 'review13 notes that must survive conversion', plannedMinutes: 45, source: linear(first) };
+    await commands(
+      { type: 'objective.created', objective: { id: objective, weekStart: today, title: `Harness objective ${size}`, carriedFrom: null } },
+      { type: 'task.created', task: { id: parentId, title: parent, placement: { kind: 'day', date: today }, position: 1, channelId: 'work', objectiveId: objective, subtasks: merged } },
+      { type: 'task.created', task: { id: linked.id, title: linked.title, placement: { kind: 'day', date: today }, position: 2, notes: linked.notes, plannedMinutes: linked.plannedMinutes, source: linked.source } },
+    );
+    await front(A);
+    await h.openPlanner();
+    await cardIn(A.frame, linked.title).waitFor({ timeout: 15_000 });
+    await page.keyboard.down('Alt');
+    await cardIn(A.frame, linked.title).dragTo(cardIn(A.frame, parent));
+    await page.keyboard.up('Alt');
+    const mergedLinked = await until(async () => (await plan()).tasks[parentId]?.subtasks.find((subtask) => subtask.title === linked.title));
+    // Every control: ↗ in the details (the linked one, linear, link), Convert to task in Merged in (github, email), ↗ in Focus (gtask).
+    let section = await details(A, parent);
+    const gone = (title) => until(async () => !(await plan()).tasks[parentId]?.subtasks.some((subtask) => subtask.title === title));
+    for (const title of [linked.title, merged[0].title, merged[4].title]) {
+      await turn(section, title);
+      await gone(title);
+    }
+    for (const title of [merged[1].title, merged[3].title]) {
+      await convertIn(mergedIn(A), title);
+      await gone(title);
+    }
+    await closeDetails(A);
+    await go(A.frame, 'Focus');
+    await A.frame.locator('aside[aria-label="Up next"]').getByRole('button', { name: parent, exact: true }).click();
+    const focus = A.frame.locator('article.focus-card section[aria-label="Subtasks"]');
+    await turn(focus, merged[2].title);
+    await gone(merged[2].title);
+    await h.openPlanner();
+    const after = await plan();
+    const expected = [{ ...linked, done: false }, ...merged];
+    const kept = expected.map((item) => {
+      const made = live(after, item.title);
+      const task = made[0];
+      return {
+        title: item.title,
+        count: made.length,
+        whole: Boolean(task) && task.notes === item.notes && task.plannedMinutes === item.plannedMinutes && task.source?.kind === item.source.kind && task.source?.id === item.source.id &&
+          task.completedOn === (item.done ? today : null) && task.channelId === 'work' && task.objectiveId === objective,
+      };
+    });
+    // After the reload, each open one's card links to its item (its integration).
+    const cards = {};
+    for (const item of expected.filter((item) => !item.done)) cards[item.title] = await cardIn(A.frame, item.title).first().locator('a.source-open').getAttribute('aria-label').catch(() => null);
+    const integrated = expected.filter((item) => !item.done).every((item) => cards[item.title]?.startsWith(`Open ${item.source.key} in`));
+    await cardIn(A.frame, linked.title).first().getByRole('button', { name: `Open ${linked.title}` }).click();
+    await h.shot(`sub-06-converted-linked-${size}`);
+    await closeDetails(A);
+    check(
+      `${size} px: merged items of every kind (Linear, GitHub, Google Tasks, Gmail, a link) and a Linear-linked task merged with Alt/Option + drop, turned into tasks by ↗ in the details, ↗ in Focus and Convert to task in Merged in: each once, keeping its notes, planned time, link and done (completed), in its task's channel and objective, after a reload; the open ones' cards link to their item`,
+      Boolean(mergedLinked?.source) && kept.every((item) => item.count === 1 && item.whole) && integrated,
+      JSON.stringify({ mergedLinked: Boolean(mergedLinked?.source), kept: kept.filter((item) => item.count !== 1 || !item.whole), cards }),
+    );
+
+    // P1. Plain subtasks and a merged link; A's conversion held while B converts the same subtask, or deletes it.
+    const racesId = `harness-convert-races-${size}`;
+    const races = `Harness convert races ${size}`;
+    const names = ['race one', 'race two', 'race three', 'race merged'].map((name) => `${name} ${size}`);
+    await commands({ type: 'task.created', task: { id: racesId, title: races, placement: { kind: 'day', date: today }, position: 3, subtasks: names.map((title, index) => ({ id: `harness-race-${size}-${index}`, title, done: false, notes: `notes of ${title}`, ...(index === 3 ? { source: { kind: 'link', id: `https://example.com/race-${size}`, key: 'example.com', url: `https://example.com/race-${size}`, title: 'race page' } } : {}) })) } });
+    const absent = (title) => (task) => task && !task.subtasks.some((subtask) => subtask.title === title);
+    const agreed = async (title) => {
+      const sections = await reloadBoth(races);
+      return { sections, cards: [await cardIn(A.frame, title).count(), await cardIn(B.frame, title).count()] };
+    };
+    // 1. Both by ↗ in Subtasks: A told it was turned into a task already, with Show it, which opens that task.
+    let sections = await reloadBoth(races);
+    const one = await race(racesId, races, sections, (s) => turn(s, names[0]), (s) => turn(s, names[0]), absent(names[0]));
+    const oneText = await bannerIn(sections.a).innerText({ timeout: 10_000 }).catch(() => '');
+    await h.shot(`sub-07-converted-twice-${size}`);
+    await bannerIn(sections.a).getByRole('button', { name: 'Show it' }).click().catch(() => {});
+    const shown = await A.frame.getByRole('dialog', { name: 'Task details' }).getByRole('textbox', { name: 'Title' }).inputValue().catch(() => '');
+    const oneLive = live(await plan(), names[0]).length;
+    ({ sections } = await agreed(names[0]));
+    const oneCards = [await cardIn(A.frame, names[0]).count(), await cardIn(B.frame, names[0]).count()];
+    check(
+      `${size} px: both windows turn one subtask into a task with ↗ (A's held): one task; A's Subtasks says it was already turned into a task in another window, Show it opens it; both windows reloaded show one card`,
+      one.heldOne && oneText.includes(`“${names[0]}” was already turned into a task in another window`) && /Show it/.test(oneText) && shown === names[0] && oneLive === 1 && oneCards.join() === '1,1',
+      JSON.stringify({ held: one.held, oneText, shown, oneLive, oneCards }),
+    );
+    // 2. Both by Convert to task in Merged in: A told so there, Keep theirs.
+    const two = await race(racesId, races, { a: mergedIn(A), b: mergedIn(B) }, (s) => convertIn(s, names[3]), (s) => convertIn(s, names[3]), absent(names[3]));
+    const twoText = await bannerIn(mergedIn(A)).innerText({ timeout: 10_000 }).catch(() => '');
+    await bannerIn(mergedIn(A)).getByRole('button', { name: 'Keep theirs' }).click().catch(() => {});
+    const twoLive = live(await plan(), names[3]);
+    ({ sections } = await agreed(names[3]));
+    const twoCards = [await cardIn(A.frame, names[3]).count(), await cardIn(B.frame, names[3]).count()];
+    check(
+      `${size} px: both windows convert one merged item with Convert to task in Merged in (A's held): one task, still linked; A's Merged in says it was already turned into a task; both windows reloaded show one card`,
+      two.heldOne && twoText.includes(`“${names[3]}” was already turned into a task in another window`) && twoLive.length === 1 && twoLive[0].source?.kind === 'link' && twoCards.join() === '1,1',
+      JSON.stringify({ held: two.held, twoText, twoLive: twoLive.length, twoCards }),
+    );
+    // 3. A turns one into a task after B deleted it: refused; Keep theirs leaves it deleted, no task.
+    const three = await race(racesId, races, sections, (s) => turn(s, names[1]), (s) => remove(s, names[1]), absent(names[1]));
+    const threeText = await bannerIn(sections.a).innerText({ timeout: 10_000 }).catch(() => '');
+    await h.shot(`sub-08-converted-after-delete-${size}`);
+    await bannerIn(sections.a).getByRole('button', { name: 'Keep theirs' }).click().catch(() => {});
+    await page.waitForTimeout(800);
+    const threeLive = live(await plan(), names[1]).length;
+    ({ sections } = await agreed(names[1]));
+    const threeRows = [await rowsOf(sections.a), await rowsOf(sections.b)].map((rows) => rows.includes(names[1]));
+    const threeCards = [await cardIn(A.frame, names[1]).count(), await cardIn(B.frame, names[1]).count()];
+    check(
+      `${size} px: A turns a subtask into a task (held) after B deleted it: refused, no task made; A's Subtasks says it was deleted in another window; Keep theirs leaves it deleted, in both windows reloaded`,
+      three.heldOne && threeText.includes(`“${names[1]}” was deleted in another window`) && /Save mine/.test(threeText) && threeLive === 0 && threeRows.join() === 'false,false' && threeCards.join() === '0,0',
+      JSON.stringify({ held: three.held, threeText, threeLive, threeRows, threeCards }),
+    );
+    // 4. The same, Save mine: the task made from what A saw, once.
+    const four = await race(racesId, races, sections, (s) => turn(s, names[2]), (s) => remove(s, names[2]), absent(names[2]));
+    const fourText = await bannerIn(sections.a).innerText({ timeout: 10_000 }).catch(() => '');
+    await bannerIn(sections.a).getByRole('button', { name: 'Save mine' }).click().catch(() => {});
+    const fourMade = await until(async () => live(await plan(), names[2])[0]);
+    ({ sections } = await agreed(names[2]));
+    const fourCards = [await cardIn(A.frame, names[2]).count(), await cardIn(B.frame, names[2]).count()];
+    check(
+      `${size} px: the same, Save mine: the task made from what A saw (its notes), once, the subtask gone; both windows reloaded agree`,
+      four.heldOne && fourText.includes(`“${names[2]}” was deleted in another window`) && fourMade?.notes === `notes of ${names[2]}` && live(await plan(), names[2]).length === 1 && fourCards.join() === '1,1',
+      JSON.stringify({ held: four.held, fourText, made: fourMade ? { notes: fourMade.notes } : null, fourCards }),
+    );
+    await closeDetails(A);
+    await closeDetails(B);
+    await commands(
+      ...[parentId, racesId].map((taskId) => ({ type: 'task.deleted', taskId })),
+      ...Object.values((await plan()).tasks).filter((task) => !task.deletedAt && (expected.some((item) => item.title === task.title) || names.includes(task.title))).map((task) => ({ type: 'task.deleted', taskId: task.id })),
+    );
+  };
+
   for (const size of [1440, 1024]) {
     const viewport = size === 1440 ? { width: 1440, height: 900 } : { width: 1024, height: 768 };
     await page.setViewportSize(viewport);
@@ -285,6 +444,7 @@ try {
     await front(B);
     await B.frame.getByRole('dialog', { name: 'Task details' }).getByRole('button', { name: 'Close' }).click().catch(() => {});
     await commands({ type: 'task.deleted', taskId });
+    await conversions(size);
   }
   check('no page errors in either window', h.problems.filter((problem) => problem.includes('pageerror')).length === 0, h.problems.filter((problem) => problem.includes('pageerror')).join(' | '));
 } catch (error) {

@@ -22,6 +22,8 @@ export interface NewTask {
   subtasks?: Subtask[];
   recurrence?: { seriesId: string; date: DateKey } | null;
   sessionRef?: Task['sessionRef'];
+  /** Made completed (on this day): a ticked subtask turned into a task, as it was merged (`taskFromSubtask`). */
+  completedOn?: DateKey | null;
 }
 
 export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title' | 'wantsPr' | 'assignee'>;
@@ -66,7 +68,11 @@ export type EventBody =
    */
   | { type: 'subtask.added'; taskId: string; subtask: Subtask; after?: string | null }
   | { type: 'subtask.updated'; taskId: string; subtaskId: string; patch: SubtaskPatch; seen?: SubtaskSeen }
-  | { type: 'subtask.deleted'; taskId: string; subtaskId: string; seen?: Pick<SubtaskSeen, 'title'> }
+  /**
+   * `into`: turned into this task, made in the same batch (↗ Turn into a task, Convert to task); such a delete needs
+   * its subtask still there as seen (`subtaskConflict`).
+   */
+  | { type: 'subtask.deleted'; taskId: string; subtaskId: string; seen?: Pick<SubtaskSeen, 'title'>; into?: string }
   | { type: 'subtask.moved'; taskId: string; subtaskId: string; after: string | null }
   | { type: 'task.moved'; taskId: string; placement: Placement; position: number }
   | { type: 'task.completed'; taskId: string; on: DateKey }
@@ -537,6 +543,7 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       // Recurrence comes from series.created and the service's instances, never from a client's task.
       if (task.recurrence !== undefined && task.recurrence !== null) return 'recurrence is set through a series';
       if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef)) return 'sessionRef is invalid';
+      if (task.completedOn !== undefined && !(task.completedOn === null || isDateKey(task.completedOn))) return 'completedOn must be a date or null';
       return null;
     }
     case 'task.updated':
@@ -556,7 +563,12 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
     case 'subtask.updated':
       return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? subtaskPatchProblem(command.patch) ?? (isSeen(command.seen, ['title', 'done']) ? null : 'seen is invalid');
     case 'subtask.deleted':
-      return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? (isSeen(command.seen, ['title']) ? null : 'seen is invalid');
+      return (
+        needTask() ??
+        (isId(command.subtaskId) ? null : 'subtask needs an id') ??
+        (isSeen(command.seen, ['title']) ? null : 'seen is invalid') ??
+        (command.into === undefined || (isId(command.into) && tasks[command.into as string]) ? null : 'into must be the task it became, made before it')
+      );
     case 'subtask.moved':
       return needTask() ?? (isId(command.subtaskId) ? null : 'subtask needs an id') ?? (command.after === null || isId(command.after) ? null : 'after must be a subtask id or null');
     case 'task.moved':
@@ -746,24 +758,28 @@ export const commandBody = (command: Command): EventBody => {
 
 /**
  * A subtask command that can't apply as it was meant to the plan as it is: the subtask was deleted elsewhere since
- * (`now` null), or a field it sets was changed since to a value other than the one it sets (`now`: the subtask as it
- * is). The service writes nothing of its batch and answers 409 with this and the plan.
+ * (`now` null; `became`: the task another window turned it into, when it did), or a field it sets was changed since
+ * to a value other than the one it sets (`now`: the subtask as it is). The service writes nothing of its batch and
+ * answers 409 with this and the plan.
  */
 export interface SubtaskConflict {
   taskId: string;
   subtaskId: string;
   now: Subtask | null;
+  became?: string;
 }
 
 /**
  * The conflict a subtask command meets in the plan as it is, if any. A rename, or a delete, of a subtask renamed since
  * it was seen is one; a tick never is (it sets done, so done changed since is done as it sets it: two windows ticking
- * the same subtask agree). Changing or moving a subtask deleted since is one; deleting it again is not (it is gone).
+ * the same subtask agree). Changing or moving a subtask deleted since is one; deleting it again is not (it is gone),
+ * unless it is turned into a task (`into`, or, from a window from before `into`, a batch that also makes a task:
+ * `converts`): that task would be made from a subtask no longer there, converted or deleted in another window.
  */
-export const subtaskConflict = (body: EventBody, context: Pick<CommandContext, 'tasks'>): SubtaskConflict | null => {
+export const subtaskConflict = (body: EventBody, context: Pick<CommandContext, 'tasks'>, batch: { converts?: boolean } = {}): SubtaskConflict | null => {
   if (body.type !== 'subtask.updated' && body.type !== 'subtask.deleted' && body.type !== 'subtask.moved') return null;
   const now = context.tasks[body.taskId]?.subtasks.find((subtask) => subtask.id === body.subtaskId) ?? null;
-  if (!now) return body.type === 'subtask.deleted' ? null : { taskId: body.taskId, subtaskId: body.subtaskId, now };
+  if (!now) return body.type === 'subtask.deleted' && !body.into && !batch.converts ? null : { taskId: body.taskId, subtaskId: body.subtaskId, now };
   const seen: SubtaskSeen = body.type === 'subtask.moved' ? {} : (body.seen ?? {});
   const sets: SubtaskPatch = body.type === 'subtask.updated' ? body.patch : {};
   const changed = (['title', 'done'] as const).some((field) => seen[field] !== undefined && now[field] !== seen[field] && now[field] !== sets[field]);
