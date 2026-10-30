@@ -378,13 +378,18 @@ export const followMergedGoogleTask = (subtask: Subtask, item: GoogleTaskItem, i
   return same ? subtask : { ...subtask, title, done, source: { ...source, ...next } };
 };
 
-export const taskFromGoogleTask = (item: GoogleTaskItem, id: string, placement: Placement, position: number): NewTask => ({
+/**
+ * A task for a Google task: its title, details and date, linked to it; `minutes`, the time the Planner keeps for it
+ * (its duration on the calendar), is its planned time, as a meeting's length is an imported meeting's.
+ */
+export const taskFromGoogleTask = (item: GoogleTaskItem, id: string, placement: Placement, position: number, minutes?: number | null): NewTask => ({
   id,
   title: item.title,
   placement,
   position,
   ...(item.notes.trim() ? { notes: item.notes.slice(0, 40_000) } : {}),
   ...(item.due ? { dueDate: item.due } : {}),
+  ...(minutes ? { plannedMinutes: minutes } : {}),
   source: gtaskSource(item),
 });
 

@@ -4,7 +4,7 @@
 // merges straight in; merged items stay linked and synced (a Linear issue's or a GitHub item's state and title follow);
 // an event task neither merges nor takes one ("Cannot merge events"), so it has no subtasks at all; Convert to task gives
 // one back as a task. Each changes the subtasks one at a time, by identity (`subtask.*`).
-import { SUBTASK_PATCH_FIELDS, type EventBody, type SubtaskPatch, type SubtaskSeen } from './events.ts';
+import { SUBTASK_PATCH_FIELDS, type EventBody, type NewTask, type SubtaskPatch, type SubtaskSeen } from './events.ts';
 import { positionAt, tasksIn } from './selectors.ts';
 import type { DateKey, PlannerState, Subtask, Task, TaskSourceRef } from './types.ts';
 
@@ -76,31 +76,41 @@ export const mergeItemCommands = (state: PlannerState, targetId: string, item: {
 };
 
 /**
- * Convert to task: the subtask becomes a task again, right after its task, with what it kept (notes, planned time,
- * link); renamed elsewhere since it was seen, the service refuses it (`subtaskConflict`), so the task never takes the
- * old title.
+ * The task a subtask becomes, as Sunsama's convert to task reverts a merge: everything the subtask holds (its title,
+ * notes, planned time and link, and, ticked, it is made completed today), right after its task, in that task's
+ * channel, folder and objective. One for every control that turns a subtask into a task (↗ in Subtasks, in the
+ * task's details and Focus; Convert to task in Merged in), so none loses what another keeps.
  */
-export const convertSubtaskCommands = (state: PlannerState, taskId: string, subtaskId: string, newId: () => string): EventBody[] => {
+export const taskFromSubtask = (state: PlannerState, parent: Task, subtask: Subtask, id: string, today: DateKey): NewTask => {
+  const index = tasksIn(state, parent.placement).findIndex((item) => item.id === parent.id);
+  return {
+    id,
+    title: subtask.title,
+    placement: parent.placement,
+    position: positionAt(state, parent.placement, index + 1),
+    ...(subtask.notes ? { notes: subtask.notes } : {}),
+    ...(subtask.plannedMinutes ? { plannedMinutes: subtask.plannedMinutes } : {}),
+    ...(parent.channelId ? { channelId: parent.channelId } : {}),
+    ...(parent.folderId ? { folderId: parent.folderId } : {}),
+    ...(parent.objectiveId ? { objectiveId: parent.objectiveId } : {}),
+    ...(subtask.source ? { source: subtask.source } : {}),
+    ...(subtask.done ? { completedOn: today } : {}),
+  };
+};
+
+/**
+ * Turn a subtask into a task (`taskFromSubtask`), in one step Undo takes back. The delete names the task (`into`), so
+ * the service makes it only from the subtask as this window saw it: renamed elsewhere since, converted, or deleted,
+ * it writes nothing and says which (`subtaskConflict`), so the task never takes an old title nor comes twice.
+ */
+export const convertSubtaskCommands = (state: PlannerState, taskId: string, subtaskId: string, newId: () => string, today: DateKey): EventBody[] => {
   const task = state.tasks[taskId];
   const subtask = task?.subtasks.find((item) => item.id === subtaskId);
   if (!task || !subtask) return [];
-  const list = tasksIn(state, task.placement);
-  const index = list.findIndex((item) => item.id === task.id);
+  const id = newId();
   return [
-    { type: 'subtask.deleted', taskId, subtaskId, seen: { title: subtask.title } },
-    {
-      type: 'task.created',
-      task: {
-        id: newId(),
-        title: subtask.title,
-        placement: task.placement,
-        position: positionAt(state, task.placement, index + 1),
-        ...(subtask.notes ? { notes: subtask.notes } : {}),
-        ...(subtask.plannedMinutes ? { plannedMinutes: subtask.plannedMinutes } : {}),
-        ...(task.channelId ? { channelId: task.channelId } : {}),
-        ...(subtask.source ? { source: subtask.source } : {}),
-      },
-    },
+    { type: 'task.created', task: taskFromSubtask(state, task, subtask, id, today) },
+    { type: 'subtask.deleted', taskId, subtaskId, seen: { title: subtask.title }, into: id },
   ];
 };
 

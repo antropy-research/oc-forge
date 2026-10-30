@@ -1180,7 +1180,8 @@ export class LinearStore {
       const task = after.tasks[plannedId];
       const previous = before.tasks[plannedId];
       // Only the first time an issue lands on a day, and only while it has not started.
-      if (task?.source?.kind !== 'linear' || task.placement.kind !== 'day' || previous?.placement.kind === 'day') continue;
+      // (Not a task made completed: a ticked merged issue turned back into a task.)
+      if (task?.source?.kind !== 'linear' || task.placement.kind !== 'day' || previous?.placement.kind === 'day' || task.completedAt) continue;
       if (!['backlog', 'unstarted', 'triage'].includes(task.source.status?.type ?? '')) continue;
       if (settings.linearOnPlan === 'start') void this.moveIssue(task, 'started');
       else if (settings.linearOnPlan === 'ask') ask({ kind: 'start', taskId: task.id, key: task.source.key });

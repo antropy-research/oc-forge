@@ -54,7 +54,7 @@ describe('merging tasks (Alt/Option + drop)', () => {
     expect(after.tasks.issue!.deletedAt).not.toBeNull();
     expect(after.tasks.triage!.subtasks).toEqual([{ id: 'n1', title: 'NEX-1 Fix the crash', done: false, notes: 'Repro: open twice\n\n- [x] Write a test', plannedMinutes: 45, source: linear('L1', 'NEX-1', 'NEX-1 Fix the crash') }]);
     // Convert to task: a task again, right after its task, with what it kept.
-    const back = run(after, convertSubtaskCommands(after, 'triage', 'n1', newId));
+    const back = run(after, convertSubtaskCommands(after, 'triage', 'n1', newId, TODAY));
     expect(back.tasks.triage!.subtasks).toEqual([]);
     const made = back.tasks.n2!;
     expect([made.title, made.notes, made.plannedMinutes, made.source?.key, made.placement]).toEqual(['NEX-1 Fix the crash', 'Repro: open twice\n\n- [x] Write a test', 45, 'NEX-1', day()]);

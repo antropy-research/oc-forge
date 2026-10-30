@@ -1,18 +1,16 @@
 // The task detail's merged items (Sunsama's Merge tasks): subtasks merged in from a task or an integration panel keep
-// their link, which opens them where they live; Convert to task gives one back as a task, with its notes, planned time
-// and link (renamed elsewhere since, it asks, as the subtasks do). Their item's state and title follow it, as a linked
-// task's do (src/domain/merge.ts).
+// their link, which opens them where they live; Convert to task gives one back as a task, as the Subtasks' ↗ does (one
+// path: `useSubtaskCommands`), and asks here when another window changed it first. Their item's state and title follow
+// it, as a linked task's do (src/domain/merge.ts).
 import { SOURCE_NAMES, type Task } from '../../src/domain/types.ts';
 import { formatMinutes } from '../../src/domain/dates.ts';
 import { sourceUrl } from '../../src/domain/gmail.ts';
-import { convertSubtaskCommands } from '../../src/domain/merge.ts';
-import { newId } from '../../src/domain/ids.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { hoveredSource, setHoveredSource } from '../lib/hover.ts';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect } from 'preact/hooks';
 import { ExternalLink } from './ExternalLink.tsx';
 import { SourceIcon } from './SourceIcons.tsx';
-import { ConflictBanner, quoted } from './Conflicts.tsx';
+import { SubtaskProblems, useSubtaskCommands } from './SubtaskCommands.tsx';
 
 const typing = (target: EventTarget | null) => target instanceof HTMLElement && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable);
 
@@ -21,13 +19,7 @@ export const MergedSection = ({ task }: { task: Task }) => {
   const view = useView();
   const merged = task.subtasks.filter((subtask) => subtask.source);
   const settings = view.state.settings;
-  const [problem, setProblem] = useState<{ line: string; subtaskId: string } | null>(null);
-  /** Convert to task, as the plan has the subtask now; renamed elsewhere since, asked (Save mine: converted as it is now). */
-  const convert = (subtaskId: string, title: string) =>
-    void client.dispatch(convertSubtaskCommands(client.getView().state, task.id, subtaskId, newId), {
-      undo: 'Converted to a task',
-      onConflict: (conflict) => conflict.now && setProblem({ line: `${quoted(title)} was renamed ${quoted(conflict.now.title)} elsewhere (yours: converted to a task)`, subtaskId }),
-    });
+  const commands = useSubtaskCommands(task);
   // G over a merged item opens it in its tool (Sunsama's subtask shortcut); the board's keys rest while a task is open.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -42,7 +34,7 @@ export const MergedSection = ({ task }: { task: Task }) => {
       setHoveredSource(null);
     };
   }, [settings.emailClient]);
-  if (!merged.length && !problem) return null;
+  if (!merged.length && !commands.problems.length) return null;
   return (
     <section class="detail-section merged-section" aria-label="Merged in">
       <h3>Merged in</h3>
@@ -58,24 +50,14 @@ export const MergedSection = ({ task }: { task: Task }) => {
                 <span class="muted"> · {source.key}{source.status ? ` · ${source.status.name}` : ''}{subtask.plannedMinutes ? ` · ${formatMinutes(subtask.plannedMinutes)}` : ''}</span>
               </span>
               <ExternalLink className="link" href={sourceUrl(source, view.state.settings)} label={`Open ${source.key} in ${tool}`}>Open</ExternalLink>
-              <button class="link" aria-label={`Convert ${subtask.title} to a task`} onClick={() => convert(subtask.id, subtask.title)}>
+              <button class="link" aria-label={`Convert ${subtask.title} to a task`} onClick={() => void commands.toTask(subtask)}>
                 Convert to task
               </button>
             </li>
           );
         })}
       </ul>
-      {problem && (
-        <ConflictBanner
-          lines={[problem.line]}
-          onTheirs={() => setProblem(null)}
-          onMine={() => {
-            setProblem(null);
-            const now = client.getView().state.tasks[task.id]?.subtasks.find((subtask) => subtask.id === problem.subtaskId);
-            if (now) convert(now.id, now.title);
-          }}
-        />
-      )}
+      <SubtaskProblems commands={commands} />
     </section>
   );
 };

@@ -49,7 +49,7 @@ export const describe = (event: PlannerEvent, taskId: string, state: PlannerStat
       return `updated subtasks: updated ${name}`;
     }
     case 'subtask.deleted':
-      return `updated subtasks: deleted ${subtaskName(state, event.taskId, event.subtaskId, event.seen?.title)}`;
+      return `updated subtasks: ${event.into ? 'turned' : 'deleted'} ${subtaskName(state, event.taskId, event.subtaskId, event.seen?.title)}${event.into ? ' into a task' : ''}`;
     case 'subtask.moved':
       return `updated subtasks: moved ${subtaskName(state, event.taskId, event.subtaskId)}`;
     case 'task.moved':

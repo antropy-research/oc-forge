@@ -266,8 +266,8 @@ var createTask = (state, input, at) => {
     dueDate: input.dueDate ?? null,
     placement: input.placement,
     position: input.position,
-    completedAt: null,
-    completedOn: null,
+    completedAt: input.completedOn ? at : null,
+    completedOn: input.completedOn ?? null,
     rolloverCount: 0,
     archivedAt: null,
     deletedAt: null,
@@ -1560,6 +1560,8 @@ var validateCommand = (command, context) => {
         return "recurrence is set through a series";
       if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef))
         return "sessionRef is invalid";
+      if (task.completedOn !== undefined && !(task.completedOn === null || isDateKey(task.completedOn)))
+        return "completedOn must be a date or null";
       return null;
     }
     case "task.updated":
@@ -1582,7 +1584,7 @@ var validateCommand = (command, context) => {
     case "subtask.updated":
       return needTask() ?? (isId(command.subtaskId) ? null : "subtask needs an id") ?? subtaskPatchProblem(command.patch) ?? (isSeen(command.seen, ["title", "done"]) ? null : "seen is invalid");
     case "subtask.deleted":
-      return needTask() ?? (isId(command.subtaskId) ? null : "subtask needs an id") ?? (isSeen(command.seen, ["title"]) ? null : "seen is invalid");
+      return needTask() ?? (isId(command.subtaskId) ? null : "subtask needs an id") ?? (isSeen(command.seen, ["title"]) ? null : "seen is invalid") ?? (command.into === undefined || isId(command.into) && tasks[command.into] ? null : "into must be the task it became, made before it");
     case "subtask.moved":
       return needTask() ?? (isId(command.subtaskId) ? null : "subtask needs an id") ?? (command.after === null || isId(command.after) ? null : "after must be a subtask id or null");
     case "task.moved":
@@ -1830,12 +1832,12 @@ var commandBody = (command) => {
   const { cmd: _cmd, ...body } = command;
   return body;
 };
-var subtaskConflict = (body, context) => {
+var subtaskConflict = (body, context, batch = {}) => {
   if (body.type !== "subtask.updated" && body.type !== "subtask.deleted" && body.type !== "subtask.moved")
     return null;
   const now = context.tasks[body.taskId]?.subtasks.find((subtask) => subtask.id === body.subtaskId) ?? null;
   if (!now)
-    return body.type === "subtask.deleted" ? null : { taskId: body.taskId, subtaskId: body.subtaskId, now };
+    return body.type === "subtask.deleted" && !body.into && !batch.converts ? null : { taskId: body.taskId, subtaskId: body.subtaskId, now };
   const seen = body.type === "subtask.moved" ? {} : body.seen ?? {};
   const sets = body.type === "subtask.updated" ? body.patch : {};
   const changed = ["title", "done"].some((field) => seen[field] !== undefined && now[field] !== seen[field] && now[field] !== sets[field]);
@@ -2165,7 +2167,7 @@ var summarize = (events, titleOf) => {
     case "subtask.updated":
       return `Edit subtask: ${titleOf(event.taskId)}`;
     case "subtask.deleted":
-      return `Delete subtask: ${titleOf(event.taskId)}`;
+      return event.into ? `Turn a subtask into a task: ${titleOf(event.into)}` : `Delete subtask: ${titleOf(event.taskId)}`;
     case "subtask.moved":
       return `Move subtask: ${titleOf(event.taskId)}`;
     case "task.moved":
@@ -2324,6 +2326,7 @@ class Planner {
     const before = this.state;
     let working = this.state;
     const events = [];
+    const converts = commands.some((command) => command?.type === "task.created");
     for (let index = 0;index < commands.length; index++) {
       const command = commands[index];
       if (command && typeof command === "object" && typeof command.cmd === "string" && this.applied.has(command.cmd))
@@ -2331,9 +2334,9 @@ class Planner {
       const error = validateCommand(command, working);
       if (error)
         return { ok: false, error, index };
-      const conflict = subtaskConflict(command, working);
+      const conflict = subtaskConflict(command, working, { converts });
       if (conflict)
-        return { ok: false, error: SUBTASK_CHANGED, index, conflict };
+        return { ok: false, error: SUBTASK_CHANGED, index, conflict: conflict.now ? conflict : { ...conflict, ...this.converted(conflict.taskId, conflict.subtaskId) } };
       const event = this.toEvent(commandBody(command), command.cmd);
       events.push(event);
       working = applyEvents(working, [event]);
@@ -2373,6 +2376,16 @@ class Planner {
       applied: events.length,
       commands: events.map(({ v: _v, id: _id, at: _at, ...command }) => command)
     };
+  }
+  converted(taskId, subtaskId) {
+    for (let index = this.log.length - 1;index >= 0; index--) {
+      const event = this.log[index];
+      if (event.type !== "subtask.deleted" || event.taskId !== taskId || event.subtaskId !== subtaskId)
+        continue;
+      const task = event.into ? this.state.tasks[event.into] : undefined;
+      return task && !task.deletedAt ? { became: task.id } : {};
+    }
+    return {};
   }
   keepUndo(batch, before, events, after) {
     const now = this.now().getTime();

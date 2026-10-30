@@ -5,7 +5,7 @@ import { addDays, formatMinutes, isDateKey, monthDay } from '../../src/domain/da
 import { parseDuration } from '../../src/domain/quickAdd.ts';
 import { suggestFor } from '../../src/domain/suggest.ts';
 import { describe, timeAgo } from '../../src/domain/activity.ts';
-import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels, positionAt, tasksIn } from '../../src/domain/selectors.ts';
+import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { EVENT_SUBTASKS_HINT, isEventTask } from '../../src/domain/merge.ts';
 import { usePlanner, useView } from '../lib/context.ts';
@@ -21,6 +21,7 @@ import { GitHubTaskSection } from './GitHubPanel.tsx';
 import { GoogleTaskSection } from './GooglePanel.tsx';
 import { LinkTaskSection } from './LinkSection.tsx';
 import { ConflictBanner, RetryBanner, notCheckedText, quoted, useDraft } from './Conflicts.tsx';
+import { SubtaskProblems, useSubtaskCommands } from './SubtaskCommands.tsx';
 
 const PRIORITIES: { id: Priority; label: string }[] = [
   { id: 'urgent', label: 'Urgent' },
@@ -79,77 +80,6 @@ const StartPicker = ({ task }: { task: Task }) => {
       )}
     </span>
   );
-};
-
-/** A subtask change the service found changed elsewhere since, as the section asks it: what, and Save mine. */
-interface SubtaskProblem {
-  /** The subtask it is about: a newer question about it replaces this one. */
-  id: string;
-  line: string;
-  mine: () => void;
-}
-
-/**
- * A task's subtasks changed one at a time, by identity (`subtask.*`): the
- * service applies each to the plan as it has it then, so a subtask added,
- * ticked or renamed in another window meanwhile stays. A tick or a rename
- * says what it saw, a delete the title it saw: a subtask renamed or deleted
- * elsewhere since is asked as an edit's conflict is (`problems`: Keep theirs,
- * or Save mine), nothing of it written. Each resolves to that conflict, or
- * null.
- */
-const useSubtaskCommands = (task: Task) => {
-  const { client } = usePlanner();
-  const view = useView();
-  const [problems, setProblems] = useState<SubtaskProblem[]>([]);
-  const ask = (id: string, line: string, mine: () => void) => setProblems((list) => [...list.filter((item) => item.id !== id), { id, line, mine }]);
-  const settle = (id: string) => setProblems((list) => list.filter((item) => item.id !== id));
-  const send = (bodies: EventBody[], undo?: string) =>
-    new Promise<SubtaskConflict | null>((resolve) => {
-      let found: SubtaskConflict | null = null;
-      void client.dispatch(bodies, { ...(undo ? { undo } : {}), onConflict: (conflict) => (found = conflict) }).then(() => resolve(found));
-    });
-  /** Where a subtask is in this window's list: after the one before it (null: first). */
-  const placeOf = (subtask: Subtask) => {
-    const index = task.subtasks.findIndex((item) => item.id === subtask.id);
-    return index > 0 ? task.subtasks[index - 1]!.id : index === 0 ? null : undefined;
-  };
-  /** Deleted elsewhere since: Save mine puts it back where it was, with this change. */
-  const deleted = (subtask: Subtask, yours: string, mine: Subtask, after: string | null | undefined) =>
-    ask(subtask.id, `${quoted(subtask.title)} was deleted elsewhere (yours: ${yours})`, () => void send([{ type: 'subtask.added', taskId: task.id, subtask: mine, after }]));
-  const tick = async (subtask: Subtask) => {
-    const done = !subtask.done;
-    const after = placeOf(subtask);
-    const conflict = await send([{ type: 'subtask.updated', taskId: task.id, subtaskId: subtask.id, patch: { done }, seen: { done: subtask.done } }]);
-    if (conflict && !conflict.now) deleted(subtask, done ? 'checked off' : 'unchecked', { ...subtask, done }, after);
-  };
-  const rename = async (subtask: Subtask, title: string, seen: string) => {
-    const after = placeOf(subtask);
-    const conflict = await send([{ type: 'subtask.updated', taskId: task.id, subtaskId: subtask.id, patch: { title }, seen: { title: seen } }]);
-    if (conflict && !conflict.now) deleted({ ...subtask, title: seen }, `renamed ${quoted(title)}`, { ...subtask, title }, after);
-    return conflict;
-  };
-  const remove = async (subtask: Subtask, seen = subtask.title) => {
-    const conflict = await send([{ type: 'subtask.deleted', taskId: task.id, subtaskId: subtask.id, seen: { title: seen } }]);
-    const now = conflict?.now;
-    if (now) ask(subtask.id, `${quoted(seen)} was renamed ${quoted(now.title)} elsewhere (yours: deleted)`, () => void remove(subtask, now.title));
-  };
-  /** ↗ Turn into a task: a task right after this one, the subtask gone, in one step Undo takes back. */
-  const toTask = async (subtask: Subtask) => {
-    const list = tasksIn(view.state, task.placement);
-    const position = positionAt(view.state, task.placement, list.findIndex((item) => item.id === task.id) + 1);
-    const conflict = await send(
-      [
-        { type: 'task.created', task: { id: newId(), title: subtask.title, placement: task.placement, position, channelId: task.channelId, folderId: task.folderId, objectiveId: task.objectiveId } },
-        { type: 'subtask.deleted', taskId: task.id, subtaskId: subtask.id, seen: { title: subtask.title } },
-      ],
-      'Subtask became a task',
-    );
-    const now = conflict?.now;
-    if (now) ask(subtask.id, `${quoted(subtask.title)} was renamed ${quoted(now.title)} elsewhere (yours: turned into a task)`, () => void toTask(now));
-  };
-  const add = (title: string) => send([{ type: 'subtask.added', taskId: task.id, subtask: { id: newId(), title, done: false } }]);
-  return { problems, settle, add, tick, rename, remove, toTask };
 };
 
 /**
@@ -217,17 +147,7 @@ export const Subtasks = ({ task }: { task: Task }) => {
           </li>
         ))}
       </ul>
-      {commands.problems.map((problem) => (
-        <ConflictBanner
-          key={problem.id}
-          lines={[problem.line]}
-          onTheirs={() => commands.settle(problem.id)}
-          onMine={() => {
-            commands.settle(problem.id);
-            problem.mine();
-          }}
-        />
-      ))}
+      <SubtaskProblems commands={commands} />
       {event ? (
         <p class="hint subtasks-event">{EVENT_SUBTASKS_HINT}</p>
       ) : (

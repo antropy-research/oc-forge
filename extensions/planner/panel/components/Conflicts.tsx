@@ -18,15 +18,15 @@ import type { GoogleTaskList } from '../../src/domain/google.ts';
 import type { DateKey } from '../../src/domain/types.ts';
 import type { TaskConflict } from '../lib/google.ts';
 
-/** Changed elsewhere while it was edited here: each change, and the two ways on. */
-export const ConflictBanner = ({ lines, onTheirs, onMine }: { lines: readonly string[]; onTheirs: () => void; onMine: () => void }) => (
+/** Changed elsewhere while it was edited here: each change, and the two ways on (`mineLabel`: one with nothing of mine to save, Show it). */
+export const ConflictBanner = ({ lines, onTheirs, onMine, mineLabel = 'Save mine' }: { lines: readonly string[]; onTheirs: () => void; onMine: () => void; mineLabel?: string }) => (
   <div class="banner is-warning edit-conflict" role="alert">
     <ul>
       {lines.map((line) => <li key={line}>{line}</li>)}
     </ul>
     <span class="edit-conflict-actions">
       <button class="link" onClick={onTheirs}>Keep theirs</button>
-      <button class="link" onClick={onMine}>Save mine</button>
+      <button class="link" onClick={onMine}>{mineLabel}</button>
     </span>
   </div>
 );
