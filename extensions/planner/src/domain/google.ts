@@ -1,7 +1,7 @@
 // Google as a source: Calendar events beside the plan, Google Tasks and Gmail
 // messages that become tasks, and the rules that keep a linked task in step.
 import type { CalendarEvent } from './ics.ts';
-import { googleTaskKey, type DateKey, type Placement, type PlannerState, type Task, type TaskSourceRef } from './types.ts';
+import { googleTaskKey, type DateKey, type Placement, type PlannerState, type Subtask, type Task, type TaskSourceRef } from './types.ts';
 import { GOOGLE_NOTES_MAX, type EventBody, type NewTask, type PlannerEvent } from './events.ts';
 import { addDays, instantAt, isDateKey } from './dates.ts';
 
@@ -360,6 +360,24 @@ export const gtaskSource = (item: GoogleTaskItem): TaskSourceRef => ({
   due: item.due,
 });
 
+/**
+ * A Google task merged into a task (Sunsama's merge keeps it a synced task), as Google has it now: its link follows
+ * (its state there, title, details, date and list), its title follows while it is still the one Google gave it, and,
+ * as completion is imported for linked tasks (`googleTasksImportCompletion`), it is checked off once completed there
+ * since its link last said (a completion new in Google: one the Planner wrote, or one a read saw before it was opened
+ * again here, is not taken for a new one). The same subtask when nothing changed.
+ */
+export const followMergedGoogleTask = (subtask: Subtask, item: GoogleTaskItem, importCompletion: boolean): Subtask => {
+  const source = subtask.source;
+  if (source?.kind !== 'gtask') return subtask;
+  const next = gtaskSource(item);
+  const title = subtask.title === (source.title ?? subtask.title) ? next.title! : subtask.title;
+  const done = subtask.done || (importCompletion && item.completed && source.status?.type !== 'completed');
+  const same =
+    title === subtask.title && done === subtask.done && next.id === source.id && next.listId === source.listId && next.title === source.title && next.status?.type === source.status?.type && next.notes === source.notes && next.due === source.due;
+  return same ? subtask : { ...subtask, title, done, source: { ...source, ...next } };
+};
+
 export const taskFromGoogleTask = (item: GoogleTaskItem, id: string, placement: Placement, position: number): NewTask => ({
   id,
   title: item.title,
@@ -419,9 +437,14 @@ export const linkedGoogleTasks = (state: PlannerState): { account: string; listI
     groups.set(key, group);
   };
   for (const task of Object.values(state.tasks)) {
+    if (!live(task) || task.completedAt) continue;
     const source = task.source;
-    if (source?.kind !== 'gtask' || !source.account || !source.listId || !live(task) || task.completedAt || source.status?.name === GONE_STATUS.name) continue;
-    add(source.account, source.listId, source.id);
+    if (source?.kind === 'gtask' && source.account && source.listId && source.status?.name !== GONE_STATUS.name) add(source.account, source.listId, source.id);
+    // Google tasks merged into it (Sunsama's merge) are still synced tasks: read with the linked ones, while not checked off.
+    for (const subtask of task.subtasks) {
+      const merged = subtask.source;
+      if (merged?.kind === 'gtask' && merged.account && merged.listId && !subtask.done && merged.status?.name !== GONE_STATUS.name) add(merged.account, merged.listId, merged.id);
+    }
   }
   for (const kept of Object.values(state.googleTasks ?? {})) if (kept.repeat && !kept.repeat.next) add(kept.account, kept.listId, kept.taskId);
   return [...groups.values()];

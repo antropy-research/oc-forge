@@ -2,14 +2,24 @@
 // emails ("merge an email directly into your daily recurring task"): Alt/Option + drag a task onto another merges it
 // in as a subtask that keeps its notes, planned time and integrated information; an item from an integration panel
 // merges straight in; merged items stay linked and synced (a Linear issue's or a GitHub item's state and title follow);
-// an event task neither merges nor takes one ("Cannot merge events"); Convert to task gives one back as a task.
+// an event task neither merges nor takes one ("Cannot merge events"), so it has no subtasks at all; Convert to task gives
+// one back as a task.
 import type { EventBody } from './events.ts';
 import { positionAt, tasksIn } from './selectors.ts';
 import type { DateKey, PlannerState, Subtask, Task, TaskSourceRef } from './types.ts';
 
 export const CANNOT_MERGE_EVENTS = 'Cannot merge events';
 
-const isEventTask = (task: Pick<Task, 'source'> | undefined): boolean => task?.source?.kind === 'event';
+/**
+ * Sunsama's FAQ: "Because merging is how subtasks get created, this also means calendar event tasks can't have
+ * subtasks at all." What the service says to a subtask added to one, and what its details say instead of Add subtask
+ * (Sunsama's advice: a breakdown in its notes, or a separate task for what needs real subtasks).
+ */
+export const EVENT_NO_SUBTASKS = "Calendar event tasks can't have subtasks";
+export const EVENT_SUBTASKS_HINT = "Calendar event tasks can't have subtasks: break this one down in its notes, or make a separate task for what needs real subtasks.";
+
+/** A task made from a calendar event (an imported meeting, Add to tasks). */
+export const isEventTask = (task: Pick<Task, 'source'> | undefined): boolean => task?.source?.kind === 'event';
 
 /** A task's subtasks as notes lines, for one merged into another (its own subtasks can't nest). */
 const checklist = (subtasks: readonly Subtask[]): string => subtasks.map((subtask) => `- [${subtask.done ? 'x' : ' '}] ${subtask.title}`).join('\n');
@@ -101,6 +111,13 @@ export const mergedDone = (before: Task | undefined, after: Task | undefined): S
   (after?.subtasks ?? []).filter((subtask) => {
     const was = before?.subtasks.find((item) => item.id === subtask.id);
     return Boolean(subtask.source && subtask.done && was && !was.done);
+  });
+
+/** Merged items a change opened again (a subtask with a link, done before and not now): opened again where they live. */
+export const mergedReopened = (before: Task | undefined, after: Task | undefined): Subtask[] =>
+  (after?.subtasks ?? []).filter((subtask) => {
+    const was = before?.subtasks.find((item) => item.id === subtask.id);
+    return Boolean(subtask.source && !subtask.done && was?.done);
   });
 
 /**

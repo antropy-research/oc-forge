@@ -1075,6 +1075,10 @@ var commandFile = (assignee, kind) => [
 ].join(`
 `);
 
+// src/domain/merge.ts
+var EVENT_NO_SUBTASKS = "Calendar event tasks can't have subtasks";
+var isEventTask = (task) => task?.source?.kind === "event";
+
 // src/domain/events.ts
 var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "folderId", "objectiveId", "subtasks", "source"];
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver", "tasks.recurred"]);
@@ -1514,8 +1518,14 @@ var validateCommand = (command, context) => {
         return "sessionRef is invalid";
       return null;
     }
-    case "task.updated":
-      return needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+    case "task.updated": {
+      const error = needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+      if (error)
+        return error;
+      const task = tasks[command.taskId];
+      const subtasks = command.patch.subtasks;
+      return isEventTask(task) && subtasks?.some((subtask) => !task.subtasks.some((item) => item.id === subtask.id)) ? EVENT_NO_SUBTASKS : null;
+    }
     case "task.moved":
       if (!isPlacement(command.placement))
         return "placement is invalid";

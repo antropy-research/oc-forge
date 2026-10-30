@@ -6,6 +6,7 @@ import type { HostClient } from '@openchamber/sdk';
 import { GOOGLE_NOTES_MAX, GTASK_EXCEPTIONS_MAX, type Command, type DeclineInput, type EventBody, type GoogleTaskKeptPatch } from '../../src/domain/events.ts';
 import {
   findMovedTask,
+  followMergedGoogleTask,
   GONE_STATUS,
   gtaskSource,
   isGoogleTaskItem,
@@ -42,11 +43,12 @@ import {
 } from '../../src/domain/gtaskKept.ts';
 import { SERIES_FIELDS, formChanges, formConflicts, formValuesOf, occurrenceNow, occurrenceOf, seriesShown, withOccurrence, type FormField, type FormValues } from '../../src/domain/gtaskForm.ts';
 import { edgePosition } from '../../src/domain/selectors.ts';
+import { mergedDone, mergedReopened } from '../../src/domain/merge.ts';
 import { newId } from '../../src/domain/ids.ts';
 import { addDays } from '../../src/domain/dates.ts';
 import { longDay } from '../../src/domain/gcalendar.ts';
 import { applyMove, positionBetween, type MoveTarget } from '../../src/domain/gtasks.ts';
-import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Task, TaskAttachment, TaskVisibility } from '../../src/domain/types.ts';
+import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Subtask, Task, TaskAttachment, TaskSourceRef, TaskVisibility } from '../../src/domain/types.ts';
 import { declineCarriesOn, type DeclinedMeeting, type DriveFile } from '../../src/domain/gtaskAdvanced.ts';
 import type { Origin, PlannerClient, Snapshot } from './client.ts';
 import { calendarUi } from './gcal.ts';
@@ -235,8 +237,11 @@ export interface GoogleView {
   mailError: string | null;
   /** Where Gmail's next page of this search starts; null when there is none. */
   mailNext: string | null;
-  /** Asking whether to complete the Google task too. */
-  prompt: { taskId: string; title: string } | null;
+  /**
+   * Asking whether to complete the Google task too: the task's own (`own`), and Google tasks merged into it
+   * (`subtaskIds`), checked off on their own (`by: 'tick'`) or with their task. `title` says which.
+   */
+  prompt: { taskId: string; title: string; own: boolean; subtaskIds: string[]; by: 'tick' | 'task' } | null;
   /** The Tasks view: each list's tasks, completed ones too, by `listKey`. */
   board: Record<string, TaskBoardList>;
 }
@@ -258,6 +263,9 @@ const REFRESH_MS = 5 * 60_000;
 /** Linked tasks are asked for in parts of at most this many lists and tasks, which the service answers in time. */
 const SYNC_GROUPS = 10;
 const SYNC_IDS = 50;
+
+/** A linked or merged Google task's link says it is completed in Google (as last read or written). */
+const doneThere = (source: TaskSourceRef | null | undefined): boolean => source?.status?.type === 'completed';
 const SIGN_IN_POLL_MS = 1500;
 const SIGN_IN_MAX_MS = 10 * 60_000;
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -317,6 +325,8 @@ export class GoogleStore {
   private readonly making = new Set<string>();
   /** Open tasks of series a read no longer found, being looked for (`missingHeads`). */
   private readonly looking = new Set<string>();
+  /** Each task's merged Google tasks being written, in turn (`writeMerged`). */
+  private readonly mergedWrites = new Map<string, Promise<void>>();
 
   constructor(private readonly host: HostClient, private readonly client: PlannerClient, private readonly surface: string) {}
 
@@ -647,14 +657,7 @@ export class GoogleStore {
     const source = task.source;
     if (source?.kind !== 'gtask' || !source.account || !source.listId) return false;
     try {
-      const completed = patch.completed;
-      if (completed !== undefined) {
-        const related = await this.relatives({ account: source.account, listId: source.listId, id: source.id }, completed);
-        // Planner tasks planning those take the change too.
-        if (related.length) await this.syncItems(await this.writeListTask(related, () => ({ completed }), true));
-      }
-      const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { account: source.account, listId: source.listId, id: source.id, ...patch });
-      const item = answer.task;
+      const item = await this.writeGoogleTask({ account: source.account, listId: source.listId, id: source.id }, patch);
       if (item) {
         const current = this.client.getView().state.tasks[task.id] ?? task;
         // What was written is what both sides now agree on; a date set from the plan becomes the task's date here too.
@@ -683,6 +686,104 @@ export class GoogleStore {
       } else this.client.notify(`Couldn't update "${task.title}" in Google Tasks: ${message}`);
       return false;
     }
+  }
+
+  /**
+   * The Google side of `writeTask` and `writeMerged`: completed or reopened,
+   * its subtasks in Google, or the completed task it is under, first (as the
+   * Tasks view does, however little of its list is loaded; Planner tasks
+   * planning those take the change too); then it. Google's answer; a refusal
+   * throws.
+   */
+  private async writeGoogleTask(ref: { account: string; listId: string; id: string }, patch: GoogleTaskWrite['patch'] & { completed?: boolean }): Promise<GoogleTaskItem | null> {
+    const completed = patch.completed;
+    if (completed !== undefined) {
+      const related = await this.relatives(ref, completed);
+      if (related.length) await this.syncItems(await this.writeListTask(related, () => ({ completed }), true));
+    }
+    const answer = await this.client.call<{ task: GoogleTaskItem | null }>('PATCH', '/google/tasks', { ...ref, ...patch });
+    return answer.task;
+  }
+
+  /**
+   * Complete or reopen Google tasks merged into a task: Sunsama's merge keeps
+   * them "fully integrated, synced tasks", so they are written as a linked
+   * one is (`writeTask`): each with its own subtasks in Google first, one at
+   * a time, then the links the subtasks keep follow what Google answered (its
+   * state there, its list). One Google refused is said; checked off or opened
+   * again on its own (`by: 'tick'`), its tick goes back, as a refused
+   * completion of a linked task does; with its task (`by: 'task'`), the task
+   * stays as it is. One Google no longer has shows as deleted there.
+   */
+  writeMerged(taskId: string, subtaskIds: readonly string[], completed: boolean, by: 'tick' | 'task', quiet = false): Promise<void> {
+    const write = async () => {
+      const results = new Map<string, { source: TaskSourceRef } | { refused: true }>();
+      for (const subtaskId of subtaskIds) {
+        const subtask = this.client.getView().state.tasks[taskId]?.subtasks.find((item) => item.id === subtaskId);
+        const source = subtask?.source;
+        if (!subtask || source?.kind !== 'gtask' || !source.account || !source.listId || source.status?.name === GONE_STATUS.name) continue;
+        try {
+          const item = await this.writeGoogleTask({ account: source.account, listId: source.listId, id: source.id }, { completed });
+          if (item) {
+            results.set(subtaskId, { source: { ...source, ...gtaskSource(item) } });
+            if (item.listId !== source.listId) await this.followMove({ account: source.account, listId: source.listId, id: source.id }, item);
+            this.remember(item);
+            if (completed) await this.makeNextOccurrences([item]);
+          }
+          if (!quiet) this.client.notify(completed ? `Completed "${subtask.title}" in Google Tasks` : `Reopened "${subtask.title}" in Google Tasks`);
+        } catch (error) {
+          const message = messageOf(error);
+          if (message === TASK_GONE) {
+            this.client.notify(`"${subtask.title}" is no longer in Google Tasks`);
+            results.set(subtaskId, { source: { ...source, status: GONE_STATUS } });
+          } else {
+            const stays = by === 'tick' ? `, so it stays ${completed ? 'open' : 'completed'} here too` : '';
+            this.client.notify(`Google Tasks did not ${completed ? 'complete' : 'reopen'} "${subtask.title}" (${message})${stays}`);
+            if (by === 'tick') results.set(subtaskId, { refused: true });
+          }
+        }
+      }
+      if (!results.size) return;
+      await this.changeMerged((task, subtask) => {
+        const result = task.id === taskId ? results.get(subtask.id) : undefined;
+        if (!result) return subtask;
+        if ('refused' in result) return subtask.done === completed ? { ...subtask, done: !completed } : subtask;
+        return { ...subtask, source: result.source };
+      });
+      if (this.view.list) void this.refreshTasks();
+      calendarUi.refresh();
+    };
+    // One task's merged items are written in turn (checked off and opened again at once: the second waits).
+    const next = (this.mergedWrites.get(taskId) ?? Promise.resolve()).then(write, write);
+    this.mergedWrites.set(taskId, next);
+    void next.then(() => {
+      if (this.mergedWrites.get(taskId) === next) this.mergedWrites.delete(taskId);
+    });
+    return next;
+  }
+
+  /**
+   * Merged items changed in their tasks' subtasks as the plan has them now,
+   * read again first: the list is written whole, so a subtask another window
+   * ticked or added meanwhile stays. `change` gives a subtask its new self,
+   * or itself. Nothing is written when the plan can't be read (the next sync
+   * or write looks again), nor for a task none of whose subtasks changed.
+   */
+  private async changeMerged(change: (task: Task, subtask: Subtask) => Subtask): Promise<void> {
+    let state: PlannerState;
+    try {
+      state = await this.freshPlan();
+    } catch (error) {
+      console.warn(`[planner] Google Tasks: merged tasks not updated this time: ${messageOf(error)}`);
+      return;
+    }
+    const bodies: EventBody[] = [];
+    for (const task of Object.values(state.tasks)) {
+      if (task.deletedAt || !task.subtasks.some((subtask) => subtask.source?.kind === 'gtask')) continue;
+      const subtasks = task.subtasks.map((subtask) => change(task, subtask));
+      if (subtasks.some((subtask, index) => subtask !== task.subtasks[index])) bodies.push({ type: 'task.updated', taskId: task.id, patch: { subtasks } });
+    }
+    if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
   }
 
   /**
@@ -783,7 +884,8 @@ export class GoogleStore {
     if (!prompt || answer === 'no') return;
     if (answer === 'always') void this.client.dispatch([{ type: 'settings.updated', patch: { googleTasksOnComplete: 'complete' } }]);
     const task = this.client.getView().state.tasks[prompt.taskId];
-    if (task) void this.writeTask(task, { completed: true });
+    if (task && prompt.own) void this.writeTask(task, { completed: true });
+    if (task && prompt.subtaskIds.length) void this.writeMerged(task.id, prompt.subtaskIds, true, prompt.by);
   }
 
   /**
@@ -844,8 +946,23 @@ export class GoogleStore {
       const task = this.client.getView().state.tasks[write.taskId];
       if (task) await this.writeTask(task, write.patch, true);
     }
+    await this.followMerged(byId);
     await this.keepSeries(items);
     await this.makeNextOccurrences(items);
+  }
+
+  /**
+   * Google tasks merged into tasks follow these Google tasks as linked ones
+   * do (`followMergedGoogleTask`): their state there, title, details, date
+   * and list, and, when completion is imported, checked off once completed
+   * in Google. Only open tasks' merged items not checked off are read.
+   */
+  private async followMerged(items: ReadonlyMap<string, GoogleTaskItem>): Promise<void> {
+    const { state } = this.client.getView();
+    const read = (task: Task, subtask: Subtask) => !task.deletedAt && !task.archivedAt && !task.completedAt && !subtask.done && subtask.source?.kind === 'gtask' && items.get(subtask.source.id)?.account === subtask.source.account;
+    const differs = Object.values(state.tasks).some((task) => task.subtasks.some((subtask) => read(task, subtask) && followMergedGoogleTask(subtask, items.get(subtask.source!.id)!, state.settings.googleTasksImportCompletion) !== subtask));
+    if (!differs) return;
+    await this.changeMerged((task, subtask) => (read(task, subtask) ? followMergedGoogleTask(subtask, items.get(subtask.source!.id)!, this.client.getView().state.settings.googleTasksImportCompletion) : subtask));
   }
 
   /** A series kept before templates gets its template from its open occurrence the first time it is seen (`firstSightOfSeries`). */
@@ -910,7 +1027,9 @@ export class GoogleStore {
   /**
    * Linked tasks whose Google task is in none of the account's lists under its
    * id: one Google's own apps moved under a new id is found by what it last
-   * said (`findMovedTask`); the rest show as deleted in Google.
+   * said (`findMovedTask`); the rest show as deleted in Google. Google tasks
+   * merged into tasks too: their links follow the move, or say deleted (and
+   * are read no more).
    */
   private async relink(missing: readonly { account: string; listId: string; id: string }[]): Promise<void> {
     const candidates: GoogleTaskItem[] = [];
@@ -941,6 +1060,14 @@ export class GoogleStore {
       if (keptFor(state, gone)) bodies.push({ type: 'gtask.dropped', account: gone.account, taskId: gone.id });
     }
     if (bodies.length) await this.client.dispatch(bodies, { origin: 'google' });
+    const isGone = (source: TaskSourceRef | undefined) => source?.kind === 'gtask' && source.status?.name !== GONE_STATUS.name && missing.some((gone) => gone.id === source.id && gone.account === source.account);
+    if (Object.values(state.tasks).some((task) => task.subtasks.some((subtask) => isGone(subtask.source)))) {
+      await this.changeMerged((_task, subtask) => {
+        if (!isGone(subtask.source)) return subtask;
+        const moved = findMovedTask(subtask.source!, candidates, state);
+        return { ...subtask, source: moved ? { ...subtask.source!, ...gtaskSource(moved) } : { ...subtask.source!, status: GONE_STATUS } };
+      });
+    }
   }
 
   // ── The Tasks view, as the Google Tasks app ──────────────────────────────
@@ -1749,6 +1876,23 @@ export class GoogleStore {
     if (bodies.length) await this.client.dispatch(bodies);
   }
 
+  /**
+   * A task completed, or Google tasks merged into it checked off: completed
+   * in Google too, as the settings say (Sunsama's "Complete in Google Tasks"):
+   * at once, or asked first, where there is room to ask.
+   */
+  private completeInGoogle(settings: PlannerState['settings'], task: Task, own: boolean, merged: readonly Subtask[], by: 'tick' | 'task'): void {
+    if (!own && !merged.length) return;
+    if (settings.googleTasksOnComplete === 'complete') {
+      if (own) void this.writeTask(task, { completed: true });
+      if (merged.length) void this.writeMerged(task.id, merged.map((subtask) => subtask.id), true, by);
+    } else if (settings.googleTasksOnComplete === 'ask' && this.surface !== 'status') {
+      const titles = [...(own ? [task.title] : []), ...merged.map((subtask) => subtask.title)];
+      const title = titles.length === 1 ? titles[0]! : `${titles[0]} and ${titles.length - 1} more`;
+      this.set({ prompt: { taskId: task.id, title, own, subtaskIds: merged.map((subtask) => subtask.id), by } });
+    }
+  }
+
   private afterCommit(commands: readonly Command[], before: PlannerState, after: PlannerState, origin: Origin): void {
     // Only the user's own changes reach Google, from the surface they were made in.
     if (origin !== 'user' || !this.accountsWith('tasks').length) return;
@@ -1756,14 +1900,30 @@ export class GoogleStore {
     for (const command of commands) {
       if (command.type === 'task.completed' || command.type === 'task.reopened') {
         const task = after.tasks[command.taskId];
-        if (task?.source?.kind !== 'gtask') continue;
-        const doneThere = task.source.status?.type === 'completed';
-        if (command.type === 'task.completed' && !doneThere) {
-          if (settings.googleTasksOnComplete === 'complete') void this.writeTask(task, { completed: true });
-          // Only surfaces with room for the question ask it.
-          else if (settings.googleTasksOnComplete === 'ask' && this.surface !== 'status') this.set({ prompt: { taskId: task.id, title: task.title } });
-        } else if (command.type === 'task.reopened' && doneThere && settings.googleTasksOnComplete === 'complete') void this.writeTask(task, { completed: false });
+        if (!task) continue;
+        const own = task.source?.kind === 'gtask' && task.source.status?.name !== GONE_STATUS.name;
+        // Google tasks merged into it (Sunsama's merge) go with it, as its own does: completed with it, and reopened with
+        // it unless checked off on their own.
+        const merged = task.subtasks.filter((subtask) => subtask.source?.kind === 'gtask' && subtask.source.status?.name !== GONE_STATUS.name);
+        if (command.type === 'task.completed') this.completeInGoogle(settings, task, own && !doneThere(task.source), merged.filter((subtask) => !doneThere(subtask.source)), 'task');
+        else if (settings.googleTasksOnComplete === 'complete') {
+          if (own && doneThere(task.source)) void this.writeTask(task, { completed: false });
+          const reopen = merged.filter((subtask) => !subtask.done && doneThere(subtask.source));
+          if (reopen.length) void this.writeMerged(task.id, reopen.map((subtask) => subtask.id), false, 'task');
+        }
         continue;
+      }
+      // A Google task merged into a task checked off, or opened again, on its own: completed or reopened in Google as
+      // a linked one is (opened again only while its task is open: a completed task's merged items are done with it).
+      if (command.type === 'task.updated' && command.patch.subtasks) {
+        const task = after.tasks[command.taskId];
+        const google = (subtask: Subtask) => subtask.source?.kind === 'gtask' && subtask.source.status?.name !== GONE_STATUS.name;
+        if (task && !task.deletedAt) {
+          const ticked = mergedDone(before.tasks[command.taskId], task).filter((subtask) => google(subtask) && !doneThere(subtask.source));
+          if (ticked.length) this.completeInGoogle(settings, task, false, ticked, 'tick');
+          const opened = mergedReopened(before.tasks[command.taskId], task).filter((subtask) => google(subtask) && doneThere(subtask.source));
+          if (opened.length && !task.completedAt && settings.googleTasksOnComplete === 'complete') void this.writeMerged(task.id, opened.map((subtask) => subtask.id), false, 'tick');
+        }
       }
       // Its title, details or date changed here: Google gets them too (a link just made is in step already).
       if (command.type === 'task.updated' && command.patch.source === undefined) {

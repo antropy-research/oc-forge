@@ -4,6 +4,7 @@ import { isDateKey, isValidTimeZone } from './dates.ts';
 import { parseRRule } from './rrule.ts';
 import { linearDisplayProblem } from './linearDisplay.ts';
 import { isAgentPreset, isRunAssignee } from './assignees.ts';
+import { EVENT_NO_SUBTASKS, isEventTask } from './merge.ts';
 
 export interface NewTask {
   id: string;
@@ -498,8 +499,15 @@ export const validateCommand = (command: unknown, context: CommandContext): stri
       if (task.sessionRef !== undefined && !isSessionRef(task.sessionRef)) return 'sessionRef is invalid';
       return null;
     }
-    case 'task.updated':
-      return needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+    case 'task.updated': {
+      const error = needTask() ?? validatePatch(command.patch, channels, context.objectives, context.folders);
+      if (error) return error;
+      // A calendar event task has no subtasks at all (Sunsama): none is added to one; the ones it had before stay, to
+      // tick, rename, convert or remove.
+      const task = tasks[command.taskId as string]!;
+      const subtasks = (command.patch as TaskPatch).subtasks;
+      return isEventTask(task) && subtasks?.some((subtask) => !task.subtasks.some((item) => item.id === subtask.id)) ? EVENT_NO_SUBTASKS : null;
+    }
     case 'task.moved':
       if (!isPlacement(command.placement)) return 'placement is invalid';
       if (typeof command.position !== 'number' || !Number.isFinite(command.position)) return 'position must be a number';

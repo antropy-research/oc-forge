@@ -7,6 +7,7 @@ import { suggestFor } from '../../src/domain/suggest.ts';
 import { describe, timeAgo } from '../../src/domain/activity.ts';
 import { actualIsFromPlan, actualMinutes, edgePosition, entriesFor, liveChannels, positionAt, tasksIn } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
+import { EVENT_SUBTASKS_HINT, isEventTask } from '../../src/domain/merge.ts';
 import { usePlanner, useView } from '../lib/context.ts';
 import { objectivesForWeek, weekStartOf } from '../../src/domain/rituals.ts';
 import { useUi } from '../lib/ui.ts';
@@ -138,6 +139,9 @@ export const Subtasks = ({ task }: { task: Task }) => {
   const view = useView();
   const [draft, setDraft] = useState('');
   const change = useSubtasks(task.id);
+  // A calendar event task has no subtasks at all, as in Sunsama (merging is how they are made, and events don't merge):
+  // no Add subtask, Sunsama's advice instead. Any it had before stay, to tick, rename, convert or delete.
+  const event = isEventTask(task);
   const add = () => {
     const title = draft.trim();
     if (!title) return;
@@ -178,7 +182,11 @@ export const Subtasks = ({ task }: { task: Task }) => {
           </li>
         ))}
       </ul>
-      <input class="subtask-add" value={draft} placeholder="Add subtask" aria-label="Add subtask" onInput={(event) => setDraft(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && add()} />
+      {event ? (
+        <p class="hint subtasks-event">{EVENT_SUBTASKS_HINT}</p>
+      ) : (
+        <input class="subtask-add" value={draft} placeholder="Add subtask" aria-label="Add subtask" onInput={(event) => setDraft(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && add()} />
+      )}
     </section>
   );
 };

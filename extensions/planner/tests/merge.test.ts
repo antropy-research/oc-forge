@@ -4,11 +4,12 @@
 // (state and title) and run their automations when checked off; `>` in Add task merges a new task into an open one.
 import { describe, expect, test } from 'bun:test';
 import type { HostClient } from '@openchamber/sdk';
-import { CANNOT_MERGE_EVENTS, convertSubtaskCommands, mergeItemCommands, mergeTarget, mergeTaskCommands, mergedDone, mergedImports, planSubtaskSourceSync, subtaskSourceIds, subtaskSources } from '../src/domain/merge.ts';
+import { CANNOT_MERGE_EVENTS, EVENT_NO_SUBTASKS, EVENT_SUBTASKS_HINT, convertSubtaskCommands, isEventTask, mergeItemCommands, mergeTarget, mergeTaskCommands, mergedDone, mergedImports, mergedReopened, planSubtaskSourceSync, subtaskSourceIds, subtaskSources } from '../src/domain/merge.ts';
+import { followMergedGoogleTask, gtaskSource, type GoogleTaskItem } from '../src/domain/google.ts';
 import { parseQuickAdd } from '../src/domain/quickAdd.ts';
 import { applyEvents } from '../src/domain/reducer.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
-import { emptyState, type PlannerState, type TaskSourceRef } from '../src/domain/types.ts';
+import { emptyState, type PlannerState, type Task, type TaskSourceRef } from '../src/domain/types.ts';
 import { addParsedTask, type AddSources } from '../panel/lib/addTask.ts';
 import { GitHubStore } from '../panel/lib/github.ts';
 import { GoogleStore } from '../panel/lib/google.ts';
@@ -165,5 +166,40 @@ describe("`>` in Add task (Sunsama's merge during task creation)", () => {
     await fake.add('Call the bank >groceries');
     expect(fake.notes).toEqual(['No open task matches "groceries": added it as its own task']);
     expect(Object.values(fake.state().tasks).some((task) => task.title === 'Call the bank' && !task.deletedAt)).toBe(true);
+  });
+});
+
+describe('merged Google tasks, and event tasks without subtasks', () => {
+  const item = (patch: Partial<GoogleTaskItem> = {}): GoogleTaskItem => ({
+    account: 'me@example.com', listId: 'L1', id: 'g1', title: 'Plan the trip', notes: '', due: null, completed: false, parent: null, position: '1', url: 'https://tasks.google.com/task/g1', updated: '2026-10-29T14:00:00.000Z', ...patch,
+  });
+  const merged = { id: 's1', title: 'Plan the trip', done: false, source: gtaskSource(item()) };
+
+  test("a merged Google task follows Google: its link, its title while it is Google's, checked off on a completion new there (and imported)", () => {
+    expect(followMergedGoogleTask(merged, item(), true)).toBe(merged);
+    const renamed = followMergedGoogleTask(merged, item({ title: 'Plan the trip to Lisbon', listId: 'L2' }), true);
+    expect(renamed).toMatchObject({ title: 'Plan the trip to Lisbon', done: false, source: { title: 'Plan the trip to Lisbon', listId: 'L2' } });
+    // Renamed here, it keeps its own title.
+    expect(followMergedGoogleTask({ ...merged, title: 'Trip' }, item({ title: 'Plan the trip to Lisbon' }), true).title).toBe('Trip');
+    expect(followMergedGoogleTask(merged, item({ completed: true }), true)).toMatchObject({ done: true, source: { status: { type: 'completed' } } });
+    expect(followMergedGoogleTask(merged, item({ completed: true }), false)).toMatchObject({ done: false, source: { status: { type: 'completed' } } });
+    // Its link said completed already (the Planner wrote it, or a read saw it before it was opened again here): not new.
+    const written = { ...merged, source: gtaskSource(item({ completed: true })) };
+    expect(followMergedGoogleTask(written, item({ completed: true }), true)).toBe(written);
+  });
+
+  test('opened again: merged items unticked by a change (a subtask without a link is not one)', () => {
+    const before = { subtasks: [{ ...merged, done: true }, { id: 's2', title: 'Pack', done: true }] } as unknown as Task;
+    const after = { subtasks: [merged, { id: 's2', title: 'Pack', done: false }] } as unknown as Task;
+    expect(mergedReopened(before, after).map((subtask) => subtask.id)).toEqual(['s1']);
+    expect(mergedReopened(after, before)).toEqual([]);
+  });
+
+  test("an event task has no subtasks: Sunsama's words, and its advice instead of Add subtask", () => {
+    expect(isEventTask({ source: { kind: 'event', id: 'e', key: 'Google Calendar', url: 'https://calendar.google.com/' } })).toBe(true);
+    expect(isEventTask({ source: null })).toBe(false);
+    expect(EVENT_NO_SUBTASKS).toBe("Calendar event tasks can't have subtasks");
+    expect(EVENT_SUBTASKS_HINT).toContain('notes');
+    expect(CANNOT_MERGE_EVENTS).toBe('Cannot merge events');
   });
 });
