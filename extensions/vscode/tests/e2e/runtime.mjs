@@ -1174,7 +1174,18 @@ const beforeBottom = async () => {
 // ── The server's extension hosts, and the bridge's sockets ──
 const extHostPids = () => execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' }).split('\n')
   .filter((line) => line.includes(`${work}/vscode-server/node`) && line.includes('--type=extensionHost')).map((line) => Number(line.trim().split(/\s+/)[0]));
-const socketFiles = () => busDir().flatMap((dir) => readdirSync(dir).filter((name) => name.endsWith('.sock')));
+// The bridge's sockets this stack's extension hosts listen on. Every stack run as one user in one network namespace
+// shares the directory (`$TMPDIR/ocvsb-<uid>`), so a socket of another stack's window isn't this one's to count.
+const socketFiles = () => {
+  const ours = new Set(extHostPids());
+  const dirs = busDir();
+  const listening = execFileSync('ss', ['-xlpn'], { encoding: 'utf8' }).split('\n').flatMap((line) => {
+    const path = line.split(/\s+/).find((field) => dirs.some((dir) => field.startsWith(`${dir}/`)) && field.endsWith('.sock'));
+    const pids = [...line.matchAll(/pid=(\d+)/g)].map((match) => Number(match[1]));
+    return path && pids.some((pid) => ours.has(pid)) ? [path] : [];
+  });
+  return [...new Set(listening)];
+};
 const clockTicks = Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim()) || 100;
 const cpuTicksOf = (pid) => {
   try {
