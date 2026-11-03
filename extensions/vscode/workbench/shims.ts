@@ -256,31 +256,16 @@ export const installResourceBridge = (options: ShimOptions): void => {
     }
   }).observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['src', 'style'] });
 
-  // A URL set on an element's style through the CSSOM (an icon label's `style.backgroundImage = asCSSUrl(icon)`, an
-  // extension's icon in a tab or a tree) is in place before the observer runs, and a layout read right after it in the
-  // same task makes the browser load it: such a value is rewritten as it is set, the blob put in once it is there.
+  // A URL set through the CSSOM's setProperty is in place before the observer runs, and a layout read right after it
+  // in the same task makes the browser load it: such a value is rewritten as it is set, the blob put in once it is
+  // there. (Chromium has no hook for the camel-case properties, `style.backgroundImage = …`: no accessor on the
+  // prototype; those wait for the observer, README "Limits".)
   const swapLater = (read: () => string, write: (value: string) => void, original: string): void => {
     const shown = read();
     void rewriteCss(original).then((next) => {
       if (read() === shown && next !== original) write(next);
     });
   };
-  let styleProto: object | null = Object.getPrototypeOf(document.documentElement.style);
-  while (styleProto && !Object.getOwnPropertyDescriptor(styleProto, 'backgroundImage')) styleProto = Object.getPrototypeOf(styleProto);
-  for (const property of ['background', 'backgroundImage', 'mask', 'maskImage', 'webkitMask', 'webkitMaskImage', 'listStyleImage', 'borderImage', 'borderImageSource', 'content', 'cursor']) {
-    const descriptor = styleProto ? Object.getOwnPropertyDescriptor(styleProto, property) : undefined;
-    if (!styleProto || !descriptor?.get || !descriptor.set || !descriptor.configurable) continue;
-    const { get, set } = descriptor;
-    Object.defineProperty(styleProto, property, {
-      ...descriptor,
-      set(this: CSSStyleDeclaration, value: unknown) {
-        if (typeof value !== 'string' || !cssUrls(value).length) return set.call(this, value);
-        const now = cssNow(value);
-        set.call(this, now);
-        if (now.includes(PENDING)) swapLater(() => String(get.call(this)), (next) => set.call(this, next), value);
-      },
-    });
-  }
   const setProperty = CSSStyleDeclaration.prototype.setProperty;
   CSSStyleDeclaration.prototype.setProperty = function (this: CSSStyleDeclaration, name: string, value: string | null, priority?: string): void {
     if (typeof value !== 'string' || !cssUrls(value).length) return setProperty.call(this, name, value, priority);

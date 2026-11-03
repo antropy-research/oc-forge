@@ -279,6 +279,12 @@ a tab or is opened.
   part, its panel hidden.
 - Rail icons follow what is installed on the server (`extensions.json`), not VS Code's `when` clauses or a
   disabled state: an installed extension whose container VS Code hides still has its icon, and opening it says so.
+- A frame reaches its VS Code Server's files only through the service, so its Content Security Policy refuses the
+  server's URLs and the frame's resource bridge (`workbench/shims.ts`) puts each one's content in as a blob: at once
+  where VS Code adds an image, a style or a rule (a transparent stand-in until the blob comes), so the browser never
+  asks the server. An icon VS Code sets through an element's style (`style.backgroundImage = …`, as its icon label does
+  for a webview's tab: Markdown's preview in a split group's tab) has no such hook in Chromium; when VS Code lays it
+  out in the same task, the policy refuses it once (a console message) and the bridge's blob shows a moment later.
 - The Remixicons for the built-ins are the closest OpenChamber's sprite has to VS Code's codicons.
 - On an adapted OpenChamber this extension's rail entries replace its one `plugin:oc-forge-vscode` icon; a check
   that compares the rail with a stock build's turns the extension off first.

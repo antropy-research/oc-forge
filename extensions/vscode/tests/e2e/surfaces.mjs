@@ -576,8 +576,13 @@ const journey = async (viewport, seeded, first) => {
   const deepLinks = [];
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
+  // Not counted: the frame's Content Security Policy refusing one of its VS Code Server's own resources, which the
+  // frame's resource bridge then serves. VS Code sets such an icon through an element's style (an icon label's
+  // `style.backgroundImage`, Chromium has no hook for it) and a layout in the same task loads it; the message names
+  // the innermost script, ours when VS Code's focus() goes through the frame's focus guard (README, Limits).
+  const bridgedRefusal = /^Loading the (image|font|media) '[^']*\/vscode-remote-resource\?[^']*' violates the following Content Security Policy directive/;
   page.on('console', (message) => {
-    if (message.type() === 'error' && /\/workbench\/main\.js/.test(message.location().url ?? '')) errors.push(`console: ${message.text()}`);
+    if (message.type() === 'error' && /\/workbench\/main\.js/.test(message.location().url ?? '') && !bridgedRefusal.test(message.text())) errors.push(`console: ${message.text()}`);
   });
   let probe = null;
   try {
