@@ -339,6 +339,18 @@ export interface TaskService {
 /** `ILaunch`. */
 export interface Launch {
   getCompound(name: string): unknown;
+  /** A launch configuration by its name (`IConfig`), as VS Code starts one named. */
+  getConfiguration(name: string): unknown;
+}
+
+/** `IDebugSessionOptions`: who started a session, and which of the window's debug UI it shows. */
+export interface DebugSessionOptions {
+  noDebug?: boolean;
+  /** VS Code's own Start Debugging (F5, the Run and Debug view, its pickers): the user's launch, not an extension's. */
+  startedByUser?: boolean;
+  suppressDebugToolbar?: boolean;
+  suppressDebugStatusbar?: boolean;
+  suppressDebugView?: boolean;
 }
 
 /** `IAdapterManager`: the debuggers VS Code knows (their contributions). */
@@ -442,7 +454,7 @@ export interface DebugService {
   /** Focuses a frame (the Debug Console evaluates in it), and opens its source. */
   focusStackFrame(frame: StackFrame | undefined, thread?: DebugThread, session?: DebugSession, options?: { explicit?: boolean; preserveFocus?: boolean }): Promise<void>;
   getConfigurationManager(): ConfigurationManager;
-  startDebugging(launch: Launch | undefined, configOrName?: unknown, options?: { noDebug?: boolean }, saveBeforeStart?: boolean): Promise<boolean>;
+  startDebugging(launch: Launch | undefined, configOrName?: unknown, options?: DebugSessionOptions, saveBeforeStart?: boolean): Promise<boolean>;
 }
 
 /** Public members of `ExtensionIdentifier`, the class that names an extension in `IExtensionDescription`. */

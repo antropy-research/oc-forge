@@ -69,7 +69,7 @@ __export(exports_extension, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(exports_extension);
-var crypto2 = __toESM(require("node:crypto"));
+var crypto3 = __toESM(require("node:crypto"));
 var os = __toESM(require("node:os"));
 var path5 = __toESM(require("node:path"));
 var vscode10 = __toESM(require("vscode"));
@@ -663,6 +663,7 @@ class Bus {
 }
 
 // bridge/src/front.ts
+var crypto2 = __toESM(require("node:crypto"));
 var vscode2 = __toESM(require("vscode"));
 
 // bridge/src/mirror.ts
@@ -839,6 +840,13 @@ var BRIDGE = {
   showTerminal: "openchamber.bridge.showTerminal",
   undo: "openchamber.bridge.undo"
 };
+var MIRROR_TYPE = "openchamber-mirror";
+var EXTENSION_LAUNCH = "__openchamberExtensionLaunch";
+var mirrorUi = (part) => ({
+  suppressDebugView: part === "editor",
+  suppressDebugToolbar: part !== "editor",
+  suppressDebugStatusbar: part !== "editor"
+});
 
 // bridge/src/variables.ts
 var NAME = /\$\{([A-Za-z][\w]*(?::[^}]+)?)\}/g;
@@ -942,10 +950,11 @@ var askVariables = async (names, inputs, asker, config, commandAliases = {}) => 
 };
 
 // bridge/src/front.ts
-var MIRROR = "openchamber-mirror";
+var MIRROR = MIRROR_TYPE;
 var startFront = (bus, context, folder, part, log) => {
   const mirrors = new Map;
   const live = new Set;
+  const forExtensions = new Set;
   const entryOf = (realId) => {
     let entry = mirrors.get(realId);
     if (!entry) {
@@ -999,6 +1008,8 @@ var startFront = (bus, context, folder, part, log) => {
   bus.on("session.started", async (message) => {
     const realId = String(message.realId);
     live.add(realId);
+    if (typeof message.launchId === "string" && forExtensions.has(message.launchId))
+      return;
     const entry = entryOf(realId);
     if (entry.starting || entry.session)
       return;
@@ -1029,9 +1040,7 @@ var startFront = (bus, context, folder, part, log) => {
       compact: Boolean(parent),
       consoleMode: parent ? vscode2.DebugConsoleMode.MergeWithParent : vscode2.DebugConsoleMode.Separate,
       noDebug: Boolean(message.noDebug),
-      suppressDebugView: part === "editor",
-      suppressDebugToolbar: part !== "editor",
-      suppressDebugStatusbar: part !== "editor",
+      ...mirrorUi(part),
       suppressSaveBeforeStart: true
     });
     if (!ok)
@@ -1105,23 +1114,59 @@ var startFront = (bus, context, folder, part, log) => {
     }
     return resolved;
   };
+  const sessionFor = async (started, config) => {
+    if (!started || !started.ok || !started.realId)
+      return;
+    const realId = started.realId;
+    live.add(realId);
+    const entry = entryOf(realId);
+    entry.starting = true;
+    entry.owner = started.member ?? bus.memberOf("terminal") ?? null;
+    const states = await bus.request(entry.owner ?? undefined, "dap.bpstates", { realId }, 5000).catch(() => ({}));
+    for (const [file, list] of Object.entries(states))
+      if (!entry.states.has(file))
+        entry.states.set(file, list);
+    log(`${String(config.name)} for an extension: the runtime's session, mirrored here`);
+    return {
+      type: MIRROR,
+      request: config.request === "attach" ? "attach" : "launch",
+      name: String(config.name ?? "Debug"),
+      noDebug: Boolean(config.noDebug),
+      internalConsoleOptions: "neverOpen",
+      __openchamber: { realId, owner: entry.owner }
+    };
+  };
+  const launchFor = () => {
+    const launchId = crypto2.randomUUID();
+    forExtensions.add(launchId);
+    setTimeout(() => forExtensions.delete(launchId), 10 * 60000);
+    return launchId;
+  };
   context.subscriptions.push(vscode2.debug.registerDebugConfigurationProvider("*", {
     resolveDebugConfiguration: async (_folder, config) => {
       if (config.type === MIRROR)
         return live.has(config.__openchamber?.realId ?? "") ? config : undefined;
       if (!config.type && !config.request && !config.name)
         return config;
+      const forExtension = config[EXTENSION_LAUNCH] === true;
+      delete config[EXTENSION_LAUNCH];
       if (part === "view" && needsFront(variablesIn(config)).editor && bus.has("editor")) {
-        await bus.request("editor", "debug.resolve", { config, noDebug: Boolean(config.noDebug) }, 120000);
-        return;
+        if (!forExtension) {
+          await bus.request("editor", "debug.resolve", { config, noDebug: Boolean(config.noDebug) }, 120000);
+          return;
+        }
+        return sessionFor(await bus.request("editor", "debug.resolve", { config, noDebug: Boolean(config.noDebug), launchId: launchFor() }, 120000), config);
       }
       if (!await ensureRuntime("Debugging"))
         return config;
       const resolved = await resolveHere(config);
       if (!resolved)
         return;
-      await bus.request("terminal", "debug.start", { config: resolved, noDebug: Boolean(config.noDebug) }, 120000);
-      return;
+      if (!forExtension) {
+        await bus.request("terminal", "debug.start", { config: resolved, noDebug: Boolean(config.noDebug) }, 120000);
+        return;
+      }
+      return sessionFor(await bus.request("terminal", "debug.startSession", { config: resolved, noDebug: Boolean(config.noDebug), launchId: launchFor() }, 120000), resolved);
     }
   }));
   if (part === "editor") {
@@ -1129,6 +1174,8 @@ var startFront = (bus, context, folder, part, log) => {
       const resolved = await resolveHere(message.config);
       if (!resolved || !await ensureRuntime("Debugging"))
         return false;
+      if (typeof message.launchId === "string")
+        return bus.request("terminal", "debug.startSession", { config: resolved, noDebug: Boolean(message.noDebug), launchId: message.launchId }, 120000);
       return bus.request("terminal", "debug.start", { config: resolved, noDebug: Boolean(message.noDebug) }, 120000);
     });
   }
@@ -1584,6 +1631,7 @@ var stateOf = (place, bp) => {
 };
 
 // bridge/src/runtime.ts
+var LAUNCH_ID = "__openchamberLaunch";
 var RUNTIME_SESSION_OPTIONS = {
   suppressDebugView: true,
   suppressDebugToolbar: true,
@@ -1606,7 +1654,8 @@ var startRuntime = (bus, context, folder, authority, log) => {
     parentId: session.parentSession?.id,
     name: session.name,
     request: session.configuration.request === "attach" ? "attach" : "launch",
-    noDebug: Boolean(session.configuration.noDebug)
+    noDebug: Boolean(session.configuration.noDebug),
+    launchId: typeof session.configuration[LAUNCH_ID] === "string" ? session.configuration[LAUNCH_ID] : undefined
   });
   const sendStates = (data) => {
     data.flush = null;
@@ -1677,6 +1726,31 @@ var startRuntime = (bus, context, folder, authority, log) => {
     const ok = await vscode5.debug.startDebugging(folder, target, { ...RUNTIME_SESSION_OPTIONS, noDebug: Boolean(message.noDebug) });
     log(`debug.start ${typeof target === "string" ? target : target.name}: ${ok} in ${Date.now() - started} ms`);
     return ok;
+  });
+  bus.on("debug.startSession", async (message) => {
+    const started = Date.now();
+    const launchId = String(message.launchId);
+    const config = { ...message.config, [LAUNCH_ID]: launchId };
+    let found = () => {
+      return;
+    };
+    const seen = new Promise((resolve) => {
+      found = resolve;
+    });
+    const watch = vscode5.debug.onDidStartDebugSession((session) => {
+      if (session.configuration[LAUNCH_ID] === launchId)
+        found(session);
+    });
+    try {
+      const ok = await vscode5.debug.startDebugging(folder, config, { ...RUNTIME_SESSION_OPTIONS, noDebug: Boolean(message.noDebug) });
+      const session = ok ? await Promise.race([seen, sleep(1e4).then(() => {
+        return;
+      })]) : undefined;
+      log(`debug.startSession ${config.name}: ${ok} (${session?.id ?? "no session"}) in ${Date.now() - started} ms`);
+      return { ok: Boolean(session), realId: session?.id, member: bus.me.member };
+    } finally {
+      watch.dispose();
+    }
   });
   bus.on("dap.caps", (message) => sessions.get(String(message.realId))?.capabilities ?? null);
   bus.on("dap.state", (message) => ({ stopped: [...sessions.get(String(message.realId))?.stopped.values() ?? []] }));
@@ -2270,7 +2344,7 @@ var activate = async (context) => {
   bus.sweep().then((removed) => removed && log(`removed ${removed} stale socket(s) of closed windows`), () => {
     return;
   });
-  const name = crypto2.createHash("sha1").update(folderKey).digest("hex").slice(0, 20);
+  const name = crypto3.createHash("sha1").update(folderKey).digest("hex").slice(0, 20);
   const breakpoints = syncBreakpoints(bus, new BreakpointStore(path5.join(context.globalStorageUri.fsPath, `${name}.breakpoints.json`)), log);
   context.subscriptions.push(breakpoints);
   if (role === "terminal")

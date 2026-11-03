@@ -162,8 +162,8 @@ message:
   the rail icons, open or not (`workbench/badges.ts`): each part reads `IActivityService` for the containers the rail
   lists and sends its counts when they change (`forge.rail.setBadges`); the rail shows each entry's count from the part
   that saw it change last. Each part
-  keeps its own Source Control, which VS Code refreshes while that part has the focus: the part the user works in
-  counts first (one Source Control across the parts is round 14's bridge).
+  keeps its own Source Control, which VS Code refreshes while that part has the focus, and the bridge refreshes when
+  another part's Git changes (*One VS Code across the parts*), so the parts count the same changes.
 - The bottom shows no VS Code "Maximize Panel" or "Hide Panel": OpenChamber's bottom zone has its own, and no host API
   lets a frame act on the zone. VS Code contributes Hide Panel with no `when` and has no setting for either, so the
   terminal part's CSS hides them (`PART_CSS`).
@@ -274,8 +274,9 @@ a tab or is opened.
   didn't show its file within 2 minutes, and the first tab stopped answering too until the second went. Over HTTPS
   (HTTP/2, e.g. `tailscale serve`) requests share one connection and the per-host limit doesn't apply.
 - Each part has its own extension host: an extension's webview opened from a view (but Markdown's preview) doesn't
-  open, and says so; the Explorer doesn't show the page's unsaved dots; a terminal or task started in the page or a
-  view runs in that part, its panel hidden (round 14's bridge, `planner-vsruntime`, takes them to the bottom).
+  open, and says so; the Explorer doesn't show the page's unsaved dots. A terminal or task started in the page or a
+  view runs at the bottom through the bridge (*One VS Code across the parts*); without the bridge it runs in that
+  part, its panel hidden.
 - Rail icons follow what is installed on the server (`extensions.json`), not VS Code's `when` clauses or a
   disabled state: an installed extension whose container VS Code hides still has its icon, and opening it says so.
 - The Remixicons for the built-ins are the closest OpenChamber's sprite has to VS Code's codicons.
@@ -410,7 +411,7 @@ The page and the rail make no terminal of their own: they show at the bottom, an
   `repository.state.onDidChange`), the other parts run `git status` on theirs. A refresh to a state already
   announced isn't announced again, so the parts don't ping-pong.
 
-### Testing (investigated, not built)
+### Testing
 
 Each part's extension host runs the test extensions, each with its own controllers, items and results:
 
@@ -419,14 +420,18 @@ Each part's extension host runs the test extensions, each with its own controlle
 - the page's gutter shows the page's own controllers' items, and a run from the gutter runs and shows in the page;
 - the Test Results view is a panel view: the page's and the rail's never show (their panels stay closed), and the
   bottom's shows only runs of the runtime's own controllers;
-- **Debug Test** calls `vscode.debug.startDebugging` in the part that runs the test. The bridge starts the session
-  in the runtime and mirrors it, but the extension's `startDebugging` answers false (the launch there was handed
-  over), so the test run ends at once while the session goes on.
+- **Debug Test**, and any launch an extension starts in the page or the rail (`vscode.debug.startDebugging`, named
+  or a configuration), runs in the runtime like the user's, and the extension gets its session where it asked, as
+  from one VS Code window: `startDebugging` answers true, and the session is that part's mirror of the runtime's,
+  which ends when it does, so a test run's Debug lasts as long as its session. The frame tells an extension's launch
+  from the user's by VS Code's own mark on the user's (`IDebugSessionOptions.startedByUser`: F5, the Run and Debug
+  view, its pickers) and marks it, with the debug UI that part shows for every mirror; the launch provider then
+  answers with the mirror's configuration instead of nothing (`resolveDebugConfiguration`), bound to the session the
+  runtime started (`debug.startSession`), and the other part mirrors it as any other.
 
 Routing the run commands (`testing.*`, the gutter's) to the runtime would show results in the bottom's Test Results
 but not in the rail's tree or the page's gutter: no stable API hands one controller's results to another
-extension host's. A launch handed over could answer with the mirror session instead (return the mirror's
-configuration from `resolveDebugConfiguration`), which would keep Debug Test's run alive; that is the next step.
+extension host's.
 
 ### Deployment
 

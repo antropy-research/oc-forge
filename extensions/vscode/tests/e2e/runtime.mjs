@@ -9,8 +9,9 @@
 //          additional independent terminal panel left inside the editor or rail view."
 // And: Restart, a breakpoint's verification, a compound launch, a task and a terminal an extension makes through the
 // API (the test extension `runtime-probe`, like the NPM Scripts view), Stop from the rail; once per run the bridge
-// installing itself, and two browser tabs on the folder not talking across (each its own runtime: needs the host's
-// `window-id`).
+// installing itself, the probe's test run and debugged from the rail's Testing (its Debug is the extension's own
+// startDebugging, which must answer with a session), and two browser tabs on the folder not talking across (each its
+// own runtime: needs the host's `window-id`).
 //
 //   export WORK=/tmp/opencode/vscode-runtime/e2e STACK_PORT_BASE=35440
 //   node tests/e2e/openchamber-adapters/stack.mjs up && node <tools>/install-vscode.mjs
@@ -77,9 +78,13 @@ writeFileSync(join(project, 'app.js'), [
 writeFileSync(join(project, 'other.js'), 'module.exports = 1;\n');
 // A syntax error the page's language server reports.
 writeFileSync(join(project, 'broken.js'), 'const = 1;\n');
-// Renamed and deleted in the rail while the page shows them.
-writeFileSync(join(project, 'rename-me.js'), '// rename me\n');
-writeFileSync(join(project, 'delete-me.js'), '// delete me\n');
+// Renamed and deleted in the rail while the page shows them: one set per size, as each size's journey renames and
+// deletes its own (the folder is the same).
+const filesOf = (width) => ({ renameMe: `rename-me-${width}.js`, renamed: `renamed-${width}.js`, renamedAgain: `renamed-again-${width}.js`, deleteMe: `delete-me-${width}.js` });
+for (const width of [1440, 1024]) {
+  writeFileSync(join(project, filesOf(width).renameMe), '// rename me\n');
+  writeFileSync(join(project, filesOf(width).deleteMe), '// delete me\n');
+}
 writeFileSync(join(project, '.vscode/launch.json'), JSON.stringify({
   version: '0.2.0',
   configurations: [
@@ -951,88 +956,89 @@ const journey = async (viewport, first) => {
 
     // ── A file the page shows, renamed in the rail (F2): the page's editor moves, with its unsaved text ──
     const frameLines = [];
+    const files = filesOf(viewport.width);
     page.on('console', (message) => {
       if (/OpenChamber VS Code/.test(message.text())) frameLines.push(message.text().slice(0, 200));
     });
     const rowOf = (name) => rail.locator('.explorer-folders-view .monaco-list-row', { hasText: name }).first();
-    await rowOf('rename-me.js').click();
-    const renaming = editor(page).locator('.monaco-editor[data-uri$="rename-me.js"]').first();
+    await rowOf(files.renameMe).click();
+    const renaming = editor(page).locator(`.monaco-editor[data-uri$="${files.renameMe}"]`).first();
     await renaming.locator('.view-line').first().waitFor({ timeout: 30_000 });
     // Unsaved for sure while it is renamed (no auto-save for it, in the page only, until the check is done).
-    const held = await holdUnsaved(editor(page), ['rename-me.js', 'renamed.js']);
+    const held = await holdUnsaved(editor(page), [files.renameMe, files.renamed]);
     await renaming.locator('.view-lines').click();
     await page.keyboard.press('Control+End');
     await page.keyboard.type('// typed before the rename\n');
-    const dirtyBefore = (await fileModelIn(editor(page), 'rename-me.js'))?.dirty;
-    const savedBefore = readFileSync(join(project, 'rename-me.js'), 'utf8').includes('typed before');
-    await railMenu(page, rowOf('rename-me.js'), /^Rename/);
+    const dirtyBefore = (await fileModelIn(editor(page), files.renameMe))?.dirty;
+    const savedBefore = readFileSync(join(project, files.renameMe), 'utf8').includes('typed before');
+    await railMenu(page, rowOf(files.renameMe), /^Rename/);
     const nameBox = rail.locator('.explorer-folders-view .monaco-inputbox input').first();
     await nameBox.waitFor({ timeout: 10_000 });
-    await nameBox.fill('renamed.js');
+    await nameBox.fill(files.renamed);
     await page.keyboard.press('Enter');
     const moved = await until(async () => {
       const active = await activeIn(editor(page));
-      return active?.path?.endsWith('/renamed.js') && active.text?.includes('typed before') ? active : null;
+      return active?.path?.endsWith(`/${files.renamed}`) && active.text?.includes('typed before') ? active : null;
     }, 15_000);
     await releaseUnsaved(editor(page));
-    const renamedEditor = editor(page).locator('.monaco-editor[data-uri$="renamed.js"]').first();
+    const renamedEditor = editor(page).locator(`.monaco-editor[data-uri$="${files.renamed}"]`).first();
     await renamedEditor.locator('.view-lines').click().catch(() => undefined);
     await page.keyboard.press('Control+End');
     await page.keyboard.type('// typed after the rename\n');
     await wait(4_000);
-    const oldBack = existsSync(join(project, 'rename-me.js'));
-    const renamedText = existsSync(join(project, 'renamed.js')) ? readFileSync(join(project, 'renamed.js'), 'utf8') : '';
+    const oldBack = existsSync(join(project, files.renameMe));
+    const renamedText = existsSync(join(project, files.renamed)) ? readFileSync(join(project, files.renamed), 'utf8') : '';
     const headerTabs = (await page.locator('header [role="tab"]').allInnerTexts()).map((title) => title.trim());
     const route = decodeURIComponent(page.url());
     check(`[${size}] a file the page shows, renamed in the rail's Explorer: the page's editor moves to the new name with its unsaved text, its header tab and route follow, and nothing writes the old name`,
       dirtyBefore && moved && moved.dirty && moved.text?.includes('typed before') && !oldBack && renamedText.includes('typed before') && renamedText.includes('typed after')
-        && headerTabs.some((title) => title.includes('renamed.js')) && !headerTabs.some((title) => title.includes('rename-me.js')) && route.includes('renamed.js'),
-      `frame: ${frameLines.join(' / ')}; held unsaved ${held}; unsaved before ${dirtyBefore} (on disk ${savedBefore}); page on ${moved?.path?.split('/').pop() ?? 'the old name'} (unsaved ${moved?.dirty}); old name on disk again ${oldBack}; renamed.js has both edits ${renamedText.includes('typed before') && renamedText.includes('typed after')}; header ${headerTabs.filter((title) => /rename/.test(title)).join(' | ')}; route ${route.includes('renamed.js')}`);
+        && headerTabs.some((title) => title.includes(files.renamed)) && !headerTabs.some((title) => title.includes(files.renameMe)) && route.includes(files.renamed),
+      `frame: ${frameLines.join(' / ')}; held unsaved ${held}; unsaved before ${dirtyBefore} (on disk ${savedBefore}); page on ${moved?.path?.split('/').pop() ?? 'the old name'} (unsaved ${moved?.dirty}); old name on disk again ${oldBack}; ${files.renamed} has both edits ${renamedText.includes('typed before') && renamedText.includes('typed after')}; header ${headerTabs.filter((title) => /rename/.test(title)).join(' | ')}; route ${route.includes(files.renamed)}`);
     await shot(page, '12-renamed');
     // The same with the text unsaved for sure: renamed from the rail with no focus there (through the API, as an
     // extension or a refactoring would), the page's text unsaved meanwhile.
-    await holdUnsaved(editor(page), ['renamed.js', 'renamed-again.js']);
+    await holdUnsaved(editor(page), [files.renamed, files.renamedAgain]);
     await renamedEditor.locator('.view-lines').click().catch(() => undefined);
     await page.keyboard.press('Control+End');
     await page.keyboard.type('// unsaved while renamed again\n');
-    const unsavedThen = (await fileModelIn(editor(page), 'renamed.js'))?.dirty;
+    const unsavedThen = (await fileModelIn(editor(page), files.renamed))?.dirty;
     await wait(2_500);
-    const stillUnsaved = (await fileModelIn(editor(page), 'renamed.js'))?.dirty;
-    frameLines.push(`unsaved 2.5 s later ${stillUnsaved}, on disk ${readFileSync(join(project, 'renamed.js'), 'utf8').includes('unsaved while renamed')}`);
-    const renamedBy = await runWith(view(page), 'runtimeProbe.rename', ['renamed.js', 'renamed-again.js']);
+    const stillUnsaved = (await fileModelIn(editor(page), files.renamed))?.dirty;
+    frameLines.push(`unsaved 2.5 s later ${stillUnsaved}, on disk ${readFileSync(join(project, files.renamed), 'utf8').includes('unsaved while renamed')}`);
+    const renamedBy = await runWith(view(page), 'runtimeProbe.rename', [files.renamed, files.renamedAgain]);
     const movedAgain = await until(async () => {
       const active = await activeIn(editor(page));
-      return active?.path?.endsWith('/renamed-again.js') && active.text?.includes('unsaved while renamed') ? active : null;
+      return active?.path?.endsWith(`/${files.renamedAgain}`) && active.text?.includes('unsaved while renamed') ? active : null;
     }, 15_000);
     await wait(3_000);
-    const againOld = existsSync(join(project, 'renamed.js'));
-    const againDisk = existsSync(join(project, 'renamed-again.js')) ? readFileSync(join(project, 'renamed-again.js'), 'utf8') : '';
+    const againOld = existsSync(join(project, files.renamed));
+    const againDisk = existsSync(join(project, files.renamedAgain)) ? readFileSync(join(project, files.renamedAgain), 'utf8') : '';
     await releaseUnsaved(editor(page));
     // Saved by the user: the new name gets it.
-    await editor(page).locator('.monaco-editor[data-uri$="renamed-again.js"] .view-lines').first().click().catch(() => undefined);
+    await editor(page).locator(`.monaco-editor[data-uri$="${files.renamedAgain}"] .view-lines`).first().click().catch(() => undefined);
     await page.keyboard.press('Control+s');
-    const againSaved = await until(() => existsSync(join(project, 'renamed-again.js')) && readFileSync(join(project, 'renamed-again.js'), 'utf8').includes('unsaved while renamed'), 10_000);
+    const againSaved = await until(() => existsSync(join(project, files.renamedAgain)) && readFileSync(join(project, files.renamedAgain), 'utf8').includes('unsaved while renamed'), 10_000);
     check(`[${size}] …renamed from the rail while the page has unsaved text in it: the page's editor moves with the text still unsaved, nothing writes the old name, and the new name gets the text once saved (Ctrl+S)`,
       unsavedThen && renamedBy === true && movedAgain && movedAgain.dirty && !againOld && !againDisk.includes('unsaved while renamed') && againSaved,
       `frame: ${frameLines.slice(3).join(' / ')}; unsaved ${unsavedThen}; renamed by the rail ${renamedBy}; page on ${movedAgain?.path?.split('/').pop() ?? 'the old name'} (unsaved ${movedAgain?.dirty}); old name on disk ${againOld}; on disk before a save ${againDisk.includes('unsaved while renamed')}; after auto-save ${Boolean(againSaved)}`);
 
     // ── A file the page shows, deleted in the rail: marked in the page, never written again; Ctrl+Z in the page brings it back ──
-    await rowOf('delete-me.js').click();
-    const deleting = editor(page).locator('.monaco-editor[data-uri$="delete-me.js"]').first();
+    await rowOf(files.deleteMe).click();
+    const deleting = editor(page).locator(`.monaco-editor[data-uri$="${files.deleteMe}"]`).first();
     await deleting.locator('.view-line').first().waitFor({ timeout: 30_000 });
-    await railMenu(page, rowOf('delete-me.js'), /^(Delete|Delete Permanently|Move to Trash)$/);
+    await railMenu(page, rowOf(files.deleteMe), /^(Delete|Delete Permanently|Move to Trash)$/);
     const dialog = rail.locator('.monaco-dialog-box').first();
     if (await dialog.waitFor({ timeout: 10_000 }).then(() => true, () => false)) await page.keyboard.press('Enter');
-    const gone = await until(() => !existsSync(join(project, 'delete-me.js')), 10_000);
+    const gone = await until(() => !existsSync(join(project, files.deleteMe)), 10_000);
     await wait(4_000);
-    const notBack = !existsSync(join(project, 'delete-me.js'));
-    const deletedModel = await fileModelIn(editor(page), 'delete-me.js');
+    const notBack = !existsSync(join(project, files.deleteMe));
+    const deletedModel = await fileModelIn(editor(page), files.deleteMe);
     await deleting.locator('.view-lines').click().catch(() => undefined);
     await page.keyboard.press('Control+z');
     // VS Code asks before it undoes a delete (in the part that ran it, the rail): the user's yes.
     const asked = await rail.locator('.monaco-dialog-box').first().waitFor({ timeout: 10_000 }).then(() => true, () => false);
     if (asked) await rail.locator('.monaco-dialog-box .dialog-buttons .monaco-button', { hasText: /^Yes$/ }).first().click();
-    const restored = await until(() => existsSync(join(project, 'delete-me.js')), 10_000);
+    const restored = await until(() => existsSync(join(project, files.deleteMe)), 10_000);
     check(`[${size}] a file the page shows, deleted in the rail: the page's editor is marked deleted and never writes it again, and Ctrl+Z in the page undoes the delete (the rail's Undo)`,
       gone && notBack && deletedModel && !deletedModel.dirty && restored,
       `deleted ${Boolean(gone)}; written again ${!notBack}; page model ${JSON.stringify(deletedModel && { dirty: deletedModel.dirty, orphan: deletedModel.orphan })}; restored by Ctrl+Z in the page ${Boolean(restored)} (VS Code's confirmation in the rail ${asked})`);
@@ -1275,17 +1281,22 @@ const bounds = async () => {
     `${trail.map((item) => `${item.at}: ${item.extensionHosts ?? '?'} hosts, ${item.sockets ?? '?'} sockets`).join('; ')}; live bus ${members?.join(', ')}; server: ${JSON.stringify(measures.bounds.server)}`);
 };
 
-/** Testing, as it is across the parts (investigated, not built): where a run runs and shows, what Debug Test gets. */
+/**
+ * Testing across the parts: a test extension's Run runs where its Testing view is (the rail), and its Debug (the
+ * extension's own `vscode.debug.startDebugging`, as a test's Debug Test) answers true with its session: the launch
+ * runs in the runtime, and the rail's mirror of it is the extension's session, the page's one of ours.
+ */
 const testing = async () => {
   const size = '1440x900';
   const context = await newWindow({ width: 1440, height: 900 });
   const page = await context.newPage();
   page.setDefaultTimeout(30_000);
+  // TestResultState.Passed is 3 (src/vs/workbench/contrib/testing/common/testTypes.ts).
   const results = (frame) => frame.locator('html').evaluate(() => {
     const instantiation = window.__runtimeInstantiation;
     if (!instantiation) return null;
     const service = instantiation.invokeFunction((accessor) => accessor.get(window.__ocVSCode.serviceIds.get('testResultService')));
-    return service.results.map((result) => ({ passed: result.counts[1] ?? 0, total: Object.values(result.counts).reduce((a, b) => a + b, 0) }));
+    return service.results.map((result) => ({ passed: result.counts[3] ?? 0, total: Object.values(result.counts).reduce((a, b) => a + b, 0) }));
   }).catch(() => null);
   const observed = {};
   try {
@@ -1297,14 +1308,24 @@ const testing = async () => {
     await until(() => lines('test-run').length > 0 && lines('test-').length > before, 30_000);
     await wait(1_500);
     observed.runFromRail = { ranIn: lines('test-run').at(-1), results: { rail: await results(view(page)), page: await results(editor(page)), bottom: await results(bottom(page)) } };
+    const railResults = observed.runFromRail.results.rail ?? [];
+    check(`[${size}] Testing: Run All Tests from the rail runs the extension's test in the rail's VS Code (its Testing view), where it passed`,
+      observed.runFromRail.ranIn === 'test-run view' && railResults.some((result) => result.passed >= 1),
+      `${observed.runFromRail.ranIn}; rail results ${JSON.stringify(railResults)}`);
     await view(page).locator('.part.sidebar .composite.title').first().click();
+    const debugBefore = lines('test-debug').length;
     await command(page, view(page), 'Test: Debug All Tests');
-    await until(() => lines('test-debug').length > 0, 60_000);
+    await until(() => lines('test-debug').length > debugBefore, 60_000);
     await wait(2_000);
     observed.debugFromRail = { ranIn: lines('test-debug').at(-1), sessions: Object.fromEntries(Object.entries(await sessionsOf(page)).map(([part, list]) => [part, list.length])) };
+    const { runtime = 0, rail = 0, page: inPage = 0 } = observed.debugFromRail.sessions;
+    check(`[${size}] Testing: Debug All Tests from the rail (the extension's own startDebugging) answers true with its session, the launch running in the runtime, one mirror of each of its sessions in the rail and in the page`,
+      observed.debugFromRail.ranIn === 'test-debug view true' && runtime >= 1 && rail === runtime && inPage === runtime,
+      `${observed.debugFromRail.ranIn}; sessions runtime ${runtime}, rail ${rail}, page ${inPage}`);
     await page.screenshot({ path: join(out, `${size}-15-testing.png`) });
   } catch (error) {
     observed.error = String(error.message ?? error).split('\n')[0];
+    check(`[${size}] Testing ran to the end`, false, observed.error);
   } finally {
     measures.testing = observed;
     console.log(`Testing, as it is: ${JSON.stringify(observed)}`);

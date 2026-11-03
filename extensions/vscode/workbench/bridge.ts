@@ -5,7 +5,7 @@
 // before it runs: a task VS Code starts (its pickers, an extension through the API), a compound launch (its own
 // preLaunchTask), a terminal an extension makes. Until the bridge says hello in this workbench, VS Code's own runs.
 import type { OcForgeClient } from '../../../adapters/openchamber/client/index.ts';
-import { BRIDGE, FRAME, type BridgeHello, type BridgePart, type FilesChange, type FrameInfo, type Routed, type TaskSpec, type TerminalSpec } from '../bridge/src/protocol.ts';
+import { BRIDGE, EXTENSION_LAUNCH, FRAME, MIRROR_TYPE, mirrorUi, type BridgeHello, type BridgePart, type FilesChange, type FrameInfo, type Routed, type TaskSpec, type TerminalSpec } from '../bridge/src/protocol.ts';
 import type { FocusGuard } from '../src/focus.ts';
 import {
   PARTS,
@@ -15,6 +15,7 @@ import {
   VscodeServices,
   type CommandService,
   type DebugService,
+  type DebugSessionOptions,
   type EditorGroupsService,
   type EditorInput,
   type EditorService,
@@ -347,21 +348,32 @@ export const createBridgeFrame = (options: BridgeFrameOptions): BridgeFrame => {
     }
     // A compound launch: its own preLaunchTask runs before its configurations reach the bridge's launch provider. Named,
     // or the one chosen (F5, Select and Start Debugging).
+    // An extension's own launch (a test's Debug, a command's), not the user's (`startedByUser`): marked, so that the
+    // bridge's launch provider gives the extension the session it asked for, here: a mirror of the runtime's, with the
+    // debug UI this part shows for every mirror (bridge/src/front.ts).
     try {
       const debug = ready.get<DebugService>('debugService');
-      replaceMethod(debug, 'startDebugging', (original) => function (this: unknown, launch: Launch | undefined, configOrName?: unknown, startOptions?: { noDebug?: boolean }, saveBeforeStart?: boolean) {
-        const here = (): Promise<boolean> => original.call(this, launch, configOrName, startOptions, saveBeforeStart);
-        if (!hello || (configOrName !== undefined && typeof configOrName !== 'string')) return here();
-        const selected = configOrName === undefined ? debug.getConfigurationManager().selectedConfiguration : null;
-        const name = typeof configOrName === 'string' ? configOrName : selected?.name;
-        if (!name || !(launch ?? selected?.launch)?.getCompound(name)) return here();
-        return Promise.resolve(command()?.executeCommand(BRIDGE.startDebugging, name, Boolean(startOptions?.noDebug))).then(
-          (result) => ((result as Routed | undefined)?.routed ? Boolean((result as Routed).ok) : here()),
-          () => here(),
-        );
+      const isConfig = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+      replaceMethod(debug, 'startDebugging', (original) => function (this: unknown, launch: Launch | undefined, configOrName?: unknown, startOptions?: DebugSessionOptions, saveBeforeStart?: boolean) {
+        const here = (config: unknown = configOrName, sessionOptions: DebugSessionOptions | undefined = startOptions): Promise<boolean> => original.call(this, launch, config, sessionOptions, saveBeforeStart);
+        if (!hello) return here();
+        if (configOrName === undefined || typeof configOrName === 'string') {
+          const selected = configOrName === undefined ? debug.getConfigurationManager().selectedConfiguration : null;
+          const name = typeof configOrName === 'string' ? configOrName : selected?.name;
+          if (name && (launch ?? selected?.launch)?.getCompound(name)) {
+            return Promise.resolve(command()?.executeCommand(BRIDGE.startDebugging, name, Boolean(startOptions?.noDebug))).then(
+              (result) => ((result as Routed | undefined)?.routed ? Boolean((result as Routed).ok) : here()),
+              () => here(),
+            );
+          }
+        }
+        if (startOptions?.startedByUser) return here();
+        const config = typeof configOrName === 'string' ? launch?.getConfiguration(configOrName) : configOrName;
+        if (!isConfig(config) || config.type === MIRROR_TYPE) return here();
+        return here({ ...config, [EXTENSION_LAUNCH]: true }, { ...startOptions, ...mirrorUi(options.role) });
       });
     } catch (error) {
-      options.log('compound launches run in this part of VS Code', error);
+      options.log('compound launches and extensions\' launches run in this part of VS Code', error);
     }
     // Undo or Redo on a file with nothing for it here (Ctrl+Z in the page after the rail's Explorer deleted the file):
     // the part that ran the operation on it does it, as one window's undo would.

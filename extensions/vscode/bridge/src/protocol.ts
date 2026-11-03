@@ -43,6 +43,30 @@ export const BRIDGE = {
 
 export type BridgePart = 'view' | 'editor' | 'terminal';
 
+/** The debug type of the page's and the rail's sessions that are the runtime's (bridge/src/mirror.ts). */
+export const MIRROR_TYPE = 'openchamber-mirror';
+
+/**
+ * Set by the frame on a launch an extension starts in the page or the rail (a test's Debug, a command's), not the
+ * user's (VS Code's own `startedByUser`): the launch runs in the runtime, and the extension gets the session here, a
+ * mirror of the runtime's, as its `startDebugging` would from one VS Code window.
+ */
+export const EXTENSION_LAUNCH = '__openchamberExtensionLaunch';
+
+/** Which of the window's debug UI a part's mirror shows: the page the editor's (toolbar, status bar), the rail the debug view. */
+export const mirrorUi = (part: BridgePart | 'classic'): { suppressDebugView: boolean; suppressDebugToolbar: boolean; suppressDebugStatusbar: boolean } => ({
+  suppressDebugView: part === 'editor',
+  suppressDebugToolbar: part !== 'editor',
+  suppressDebugStatusbar: part !== 'editor',
+});
+
+/** The runtime's answer to a launch started for an extension (`debug.startSession`): its real session, and who runs it. */
+export interface StartedSession {
+  ok: boolean;
+  realId?: string;
+  member?: string;
+}
+
 export interface FrameInfo {
   role: BridgePart | 'classic';
   folder: string;

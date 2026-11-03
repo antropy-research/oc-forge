@@ -1,14 +1,15 @@
 // The page and the rail: what starts here (a launch, a terminal, a task) runs in the runtime, and the runtime's debug
 // sessions show here as mirrors.
+import * as crypto from 'node:crypto';
 import * as vscode from 'vscode';
 import type { Bus } from './bus.ts';
 import type { BreakpointState } from './dap.ts';
 import { waitFor, waitForAsync } from './events.ts';
 import { Mirror, type MirrorLink } from './mirror.ts';
-import { BRIDGE, FRAME, type BridgePart, type Routed, type TaskSpec, type TerminalSpec } from './protocol.ts';
+import { BRIDGE, EXTENSION_LAUNCH, FRAME, MIRROR_TYPE, mirrorUi, type BridgePart, type Routed, type StartedSession, type TaskSpec, type TerminalSpec } from './protocol.ts';
 import { askVariables, editorValues, needsFront, replaceVariables, variablesIn, type InputDefinition } from './variables.ts';
 
-export const MIRROR = 'openchamber-mirror';
+export const MIRROR = MIRROR_TYPE;
 
 interface MirrorEntry {
   owner: string | null;
@@ -29,6 +30,8 @@ export interface Front {
 export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: vscode.WorkspaceFolder, part: BridgePart, log: (line: string) => void): Front => {
   const mirrors = new Map<string, MirrorEntry>();
   const live = new Set<string>();
+  /** Launches an extension started here (`EXTENSION_LAUNCH`): their mirror here is the extension's session, not one of ours. */
+  const forExtensions = new Set<string>();
   const entryOf = (realId: string): MirrorEntry => {
     let entry = mirrors.get(realId);
     if (!entry) {
@@ -84,6 +87,8 @@ export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: v
   bus.on('session.started', async (message) => {
     const realId = String(message.realId);
     live.add(realId);
+    // An extension's launch from here: its own session is the mirror (`sessionFor`).
+    if (typeof message.launchId === 'string' && forExtensions.has(message.launchId)) return;
     const entry = entryOf(realId);
     if (entry.starting || entry.session) return;
     entry.starting = true;
@@ -120,9 +125,7 @@ export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: v
       consoleMode: parent ? vscode.DebugConsoleMode.MergeWithParent : vscode.DebugConsoleMode.Separate,
       noDebug: Boolean(message.noDebug),
       // The page shows the editor's debug UI and its toolbar, never a debug view; the rail shows the debug view.
-      suppressDebugView: part === 'editor',
-      suppressDebugToolbar: part !== 'editor',
-      suppressDebugStatusbar: part !== 'editor',
+      ...mirrorUi(part),
       suppressSaveBeforeStart: true,
     });
     if (!ok) entry.starting = false;
@@ -196,28 +199,67 @@ export const startFront = (bus: Bus, context: vscode.ExtensionContext, folder: v
     }
     return resolved;
   };
+  // An extension's launch (`EXTENSION_LAUNCH`): its `startDebugging` answers with a session, as from one VS Code window.
+  // The real one runs in the runtime; the extension's, here, is a mirror of it (with the debug UI the frame chose for
+  // this part's mirrors), which ends with it: a test run's Debug ends as its session does.
+  const sessionFor = async (started: StartedSession | false | null | undefined, config: vscode.DebugConfiguration): Promise<vscode.DebugConfiguration | undefined> => {
+    if (!started || !started.ok || !started.realId) return undefined;
+    const realId = started.realId;
+    live.add(realId);
+    const entry = entryOf(realId);
+    entry.starting = true;
+    entry.owner = started.member ?? bus.memberOf('terminal') ?? null;
+    const states = await bus.request<Record<string, BreakpointState[]>>(entry.owner ?? undefined, 'dap.bpstates', { realId }, 5_000).catch(() => ({}));
+    for (const [file, list] of Object.entries(states)) if (!entry.states.has(file)) entry.states.set(file, list);
+    log(`${String(config.name)} for an extension: the runtime's session, mirrored here`);
+    return {
+      type: MIRROR,
+      request: config.request === 'attach' ? 'attach' : 'launch',
+      name: String(config.name ?? 'Debug'),
+      noDebug: Boolean(config.noDebug),
+      internalConsoleOptions: 'neverOpen',
+      __openchamber: { realId, owner: entry.owner },
+    };
+  };
+  const launchFor = (): string => {
+    const launchId = crypto.randomUUID();
+    forExtensions.add(launchId);
+    // Its session's start came long before this: nothing waits on it any more.
+    setTimeout(() => forExtensions.delete(launchId), 10 * 60_000);
+    return launchId;
+  };
   context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('*', {
     resolveDebugConfiguration: async (_folder, config) => {
       // A mirror VS Code starts again for a session that ended: nothing to mirror.
       if (config.type === MIRROR) return live.has((config.__openchamber as { realId?: string } | undefined)?.realId ?? '') ? config : undefined;
       // An empty configuration (F5 with no launch.json): the type's providers make one first.
       if (!config.type && !config.request && !config.name) return config;
+      const forExtension = config[EXTENSION_LAUNCH] === true;
+      delete config[EXTENSION_LAUNCH];
       if (part === 'view' && needsFront(variablesIn(config)).editor && bus.has('editor')) {
         // The page names the active editor.
-        await bus.request('editor', 'debug.resolve', { config, noDebug: Boolean(config.noDebug) }, 120_000);
-        return undefined;
+        if (!forExtension) {
+          await bus.request('editor', 'debug.resolve', { config, noDebug: Boolean(config.noDebug) }, 120_000);
+          return undefined;
+        }
+        return sessionFor(await bus.request<StartedSession | false>('editor', 'debug.resolve', { config, noDebug: Boolean(config.noDebug), launchId: launchFor() }, 120_000), config);
       }
       if (!(await ensureRuntime('Debugging'))) return config;
       const resolved = await resolveHere(config);
       if (!resolved) return undefined;
-      await bus.request('terminal', 'debug.start', { config: resolved, noDebug: Boolean(config.noDebug) }, 120_000);
-      return undefined;
+      if (!forExtension) {
+        await bus.request('terminal', 'debug.start', { config: resolved, noDebug: Boolean(config.noDebug) }, 120_000);
+        return undefined;
+      }
+      return sessionFor(await bus.request<StartedSession>('terminal', 'debug.startSession', { config: resolved, noDebug: Boolean(config.noDebug), launchId: launchFor() }, 120_000), resolved);
     },
   }));
   if (part === 'editor') {
     bus.on('debug.resolve', async (message) => {
       const resolved = await resolveHere(message.config as vscode.DebugConfiguration);
       if (!resolved || !(await ensureRuntime('Debugging'))) return false;
+      // An extension's launch from the rail: the rail's mirror is its session.
+      if (typeof message.launchId === 'string') return bus.request('terminal', 'debug.startSession', { config: resolved, noDebug: Boolean(message.noDebug), launchId: message.launchId }, 120_000);
       return bus.request('terminal', 'debug.start', { config: resolved, noDebug: Boolean(message.noDebug) }, 120_000);
     });
   }

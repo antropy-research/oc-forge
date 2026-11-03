@@ -3,7 +3,11 @@
 import * as vscode from 'vscode';
 import type { Bus, Message } from './bus.ts';
 import { BreakpointTracker, FORWARDED, RUNS, toMainThread, type BreakpointState, type DapMessage } from './dap.ts';
-import { FRAME, type TaskSpec, type TerminalSpec } from './protocol.ts';
+import { sleep } from './events.ts';
+import { FRAME, type StartedSession, type TaskSpec, type TerminalSpec } from './protocol.ts';
+
+/** In a session's configuration: the launch another part started for an extension (`debug.startSession`). */
+const LAUNCH_ID = '__openchamberLaunch';
 
 /** VS Code's own debug UI is the page's and the rail's (mirrors); the Debug Console is the bottom's, natively. */
 export const RUNTIME_SESSION_OPTIONS = {
@@ -41,6 +45,8 @@ export const startRuntime = (bus: Bus, context: vscode.ExtensionContext, folder:
     name: session.name,
     request: session.configuration.request === 'attach' ? 'attach' : 'launch',
     noDebug: Boolean(session.configuration.noDebug),
+    // An extension's launch from another part (`debug.startSession`): that part's mirror of it is the extension's.
+    launchId: typeof session.configuration[LAUNCH_ID] === 'string' ? session.configuration[LAUNCH_ID] : undefined,
   });
   const sendStates = (data: SessionData): void => {
     data.flush = null;
@@ -101,6 +107,28 @@ export const startRuntime = (bus: Bus, context: vscode.ExtensionContext, folder:
     const ok = await vscode.debug.startDebugging(folder, target, { ...RUNTIME_SESSION_OPTIONS, noDebug: Boolean(message.noDebug) });
     log(`debug.start ${typeof target === 'string' ? target : target.name}: ${ok} in ${Date.now() - started} ms`);
     return ok;
+  });
+  // A launch an extension started in another part: the same, answering with the session it started, which that
+  // part's mirror (the extension's session) follows.
+  bus.on('debug.startSession', async (message): Promise<StartedSession> => {
+    const started = Date.now();
+    const launchId = String(message.launchId);
+    const config: vscode.DebugConfiguration = { ...(message.config as vscode.DebugConfiguration), [LAUNCH_ID]: launchId };
+    let found: (session: vscode.DebugSession) => void = () => undefined;
+    const seen = new Promise<vscode.DebugSession>((resolve) => {
+      found = resolve;
+    });
+    const watch = vscode.debug.onDidStartDebugSession((session) => {
+      if (session.configuration[LAUNCH_ID] === launchId) found(session);
+    });
+    try {
+      const ok = await vscode.debug.startDebugging(folder, config, { ...RUNTIME_SESSION_OPTIONS, noDebug: Boolean(message.noDebug) });
+      const session = ok ? await Promise.race([seen, sleep(10_000).then(() => undefined)]) : undefined;
+      log(`debug.startSession ${config.name}: ${ok} (${session?.id ?? 'no session'}) in ${Date.now() - started} ms`);
+      return { ok: Boolean(session), realId: session?.id, member: bus.me.member };
+    } finally {
+      watch.dispose();
+    }
   });
   bus.on('dap.caps', (message) => sessions.get(String(message.realId))?.capabilities ?? null);
   bus.on('dap.state', (message) => ({ stopped: [...(sessions.get(String(message.realId))?.stopped.values() ?? [])] }));

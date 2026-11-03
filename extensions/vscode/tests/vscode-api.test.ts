@@ -64,6 +64,7 @@ const REVIEWED: Record<string, Reviewed> = {
   Task: { name: 'CommonTask', file: 'workbench/contrib/tasks/common/tasks.ts', handedOutBy: 'ITaskService.run, which takes the task to run' },
   TaskService: { name: 'ITaskService', file: 'workbench/contrib/tasks/common/taskService.ts' },
   Launch: { name: 'ILaunch', file: 'workbench/contrib/debug/common/debug.ts' },
+  DebugSessionOptions: { name: 'IDebugSessionOptions', file: 'workbench/contrib/debug/common/debug.ts' },
   AdapterManager: { name: 'IAdapterManager', file: 'workbench/contrib/debug/common/debug.ts' },
   StackFrame: { name: 'IStackFrame', file: 'workbench/contrib/debug/common/debug.ts' },
   DebugThread: { name: 'IThread', file: 'workbench/contrib/debug/common/debug.ts' },
