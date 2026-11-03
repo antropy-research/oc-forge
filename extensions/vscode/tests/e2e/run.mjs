@@ -391,7 +391,10 @@ try {
     await until(async () => (await pageFrame.locator('html[data-oc-vscode-page-started="true"]').count()) > 0, 120_000);
     const tokenClasses = await grammarColors(editor);
     check("README.md opens as a header tab: VS Code's editor in OpenChamber's main area, colored by its Markdown grammar", Boolean(readmeTab && tokenClasses), (tokenClasses ?? []).join(' '));
-    check('the status bar under the editor names OpenChamber as the remote', (await pageFrame.locator('.statusbar').innerText()).includes('OpenChamber'));
+    // The page's status bar is the editor's: its language and the rest, no remote indicator (OpenChamber names the
+    // folder already; README, "One window's chrome").
+    const pageStatus = await pageFrame.locator('.statusbar').innerText();
+    check("the status bar under the editor is the editor's: its language, and no remote name", pageStatus.includes('Markdown') && !pageStatus.includes('OpenChamber'), pageStatus.replace(/\s+/g, ' ').trim());
     await editor.locator('.view-line').last().click();
     await page.keyboard.press('Control+End');
     await page.keyboard.press('Enter');
