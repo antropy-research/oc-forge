@@ -17,8 +17,9 @@
 //      OpenChamber's tab keys don't take them;
 //   6. nothing opens another page or window but the tabs Cmd/Ctrl+click opens (8);
 //   7. Markdown's preview (a VS Code webview) renders in the stock OpenChamber
-//      (the whole workbench in its panel), in the page and in a rail view; a
-//      key pressed in it reaches VS Code; VS Code restores it after a reload;
+//      (the whole workbench in its panel) and in the page, also when opened
+//      from a rail view's Explorer (the rail shows no editor area); a key
+//      pressed in it reaches VS Code; VS Code restores it after a reload;
 //   8. Cmd/Ctrl+click on a link to a file in a rail view, and on a file link in
 //      the terminal, opens a new browser tab showing that file's editor, and
 //      this tab stays as it was; a plain click opens it here, as a header tab;
@@ -713,21 +714,26 @@ const journey = async (viewport, seeded, first) => {
       await until(async () => !(await headerTabs(page)).some((tab) => tab.title.includes('Preview')), 10_000);
       await closeHeaderTab(page, 'README.md');
       await until(async () => !(await headerTabs(page)).some((tab) => tab.title.includes('README.md')), 10_000);
-      // From a rail view: a webview can't go to the page, so it opens in the rail panel.
+      // From a rail view: a webview can't go to the page, but the rail shows no editor area (pre-review rows 1a and 4),
+      // so Markdown's "Open Preview" there shows the preview in the page by its own command (workbench/handoff.ts), as
+      // one VS Code window shows it in its editor area.
       await view.locator('.explorer-folders-view .monaco-list-row', { hasText: 'README.md' }).first().click({ button: 'right' });
       const openPreview = view.locator('.context-view .action-label', { hasText: /^Open Preview$/ }).first();
       await openPreview.waitFor({ timeout: 10_000 });
       // VS Code's menus take a click only 100 ms after they show.
       await wait(500);
       await openPreview.click();
-      const viewHeading = await until(async () => (await previewHeading(view)) || null, 30_000);
+      const handedTab = await until(async () => (await headerTabs(page)).find((tab) => tab.title.includes('Preview')), 30_000);
+      const handedHeading = await until(async () => (await pageShown(page) && await previewHeading(pageFrame(page))) || null, 30_000);
       const previewParts = await partsOf(view).catch(() => ({}));
-      check(`[${size}] 7 Markdown's preview opened from the Explorer renders in the rail panel`, viewHeading === 'demo' && previewParts.editor && previewParts.sidebar, `heading ${JSON.stringify(viewHeading)}; ${JSON.stringify(previewParts)}`);
+      check(`[${size}] 7 Markdown's preview opened from the rail's Explorer shows in the page, a header tab of its own, and renders; the rail panel shows no editor area`,
+        Boolean(handedTab) && handedHeading === 'demo' && previewParts.sidebar && !previewParts.editor,
+        `${(await headerTabs(page)).map((tab) => `${tab.title}${tab.active ? '*' : ''}`).join(' | ')}; heading ${JSON.stringify(handedHeading)}; rail ${JSON.stringify(previewParts)}`);
       await shot(page, `${size}-7-preview-view`);
       await page.keyboard.press('Escape');
-      await view.locator('.part.sidebar .composite.title').first().click();
-      await runCommand(page, view, 'View: Close All Editors');
-      const bare = await until(async () => !(await partsOf(view)).editor, 10_000);
+      // Closed, as the user would: a preview left open follows the active Markdown file (8 opens linked.md).
+      await closeHeaderTab(page, 'Preview');
+      const bare = await until(async () => !(await headerTabs(page)).some((tab) => tab.title.includes('Preview')) && !(await partsOf(view)).editor, 10_000);
       check(`[${size}] 7 closed, the rail panel is the Explorer alone again`, bare);
     }
 
