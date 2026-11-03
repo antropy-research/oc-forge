@@ -961,7 +961,20 @@ const journey = async (viewport, first) => {
       if (/OpenChamber VS Code/.test(message.text())) frameLines.push(message.text().slice(0, 200));
     });
     const rowOf = (name) => rail.locator('.explorer-folders-view .monaco-list-row', { hasText: name }).first();
-    await rowOf(files.renameMe).click();
+    // A row on screen, scrolled to as the user would: the Explorer renders only the rows it shows, and at 1024 the
+    // rail's Explorer shows a few, above the Outline and the Timeline. Down first; past the end, back up.
+    const shownRow = async (name) => {
+      const row = rowOf(name);
+      const list = rail.locator('.explorer-folders-view .monaco-list').first();
+      for (let step = 0; step < 40 && !(await row.isVisible().catch(() => false)); step++) {
+        const box = await list.boundingBox();
+        if (box) await page.mouse.move(box.x + box.width / 2, box.y + Math.min(box.height / 2, 30));
+        await page.mouse.wheel(0, step < 20 ? 44 : -44);
+        await wait(150);
+      }
+      return row;
+    };
+    await (await shownRow(files.renameMe)).click();
     const renaming = editor(page).locator(`.monaco-editor[data-uri$="${files.renameMe}"]`).first();
     await renaming.locator('.view-line').first().waitFor({ timeout: 30_000 });
     // Unsaved for sure while it is renamed (no auto-save for it, in the page only, until the check is done).
@@ -971,7 +984,7 @@ const journey = async (viewport, first) => {
     await page.keyboard.type('// typed before the rename\n');
     const dirtyBefore = (await fileModelIn(editor(page), files.renameMe))?.dirty;
     const savedBefore = readFileSync(join(project, files.renameMe), 'utf8').includes('typed before');
-    await railMenu(page, rowOf(files.renameMe), /^Rename/);
+    await railMenu(page, await shownRow(files.renameMe), /^Rename/);
     const nameBox = rail.locator('.explorer-folders-view .monaco-inputbox input').first();
     await nameBox.waitFor({ timeout: 10_000 });
     await nameBox.fill(files.renamed);
@@ -1023,10 +1036,10 @@ const journey = async (viewport, first) => {
       `frame: ${frameLines.slice(3).join(' / ')}; unsaved ${unsavedThen}; renamed by the rail ${renamedBy}; page on ${movedAgain?.path?.split('/').pop() ?? 'the old name'} (unsaved ${movedAgain?.dirty}); old name on disk ${againOld}; on disk before a save ${againDisk.includes('unsaved while renamed')}; after auto-save ${Boolean(againSaved)}`);
 
     // ── A file the page shows, deleted in the rail: marked in the page, never written again; Ctrl+Z in the page brings it back ──
-    await rowOf(files.deleteMe).click();
+    await (await shownRow(files.deleteMe)).click();
     const deleting = editor(page).locator(`.monaco-editor[data-uri$="${files.deleteMe}"]`).first();
     await deleting.locator('.view-line').first().waitFor({ timeout: 30_000 });
-    await railMenu(page, rowOf(files.deleteMe), /^(Delete|Delete Permanently|Move to Trash)$/);
+    await railMenu(page, await shownRow(files.deleteMe), /^(Delete|Delete Permanently|Move to Trash)$/);
     const dialog = rail.locator('.monaco-dialog-box').first();
     if (await dialog.waitFor({ timeout: 10_000 }).then(() => true, () => false)) await page.keyboard.press('Enter');
     const gone = await until(() => !existsSync(join(project, files.deleteMe)), 10_000);
@@ -1073,7 +1086,7 @@ const journey = async (viewport, first) => {
 
     // ── Source Control follows across parts: a stage in the page shows in the rail's, without the rail's focus ──
     if ((await entry(page, 'explorer').getAttribute('aria-pressed')) !== 'true') await entry(page, 'explorer').click();
-    await rowOf('other.js').click();
+    await (await shownRow('other.js')).click();
     const otherEditor = editor(page).locator('.monaco-editor[data-uri$="other.js"]').first();
     await otherEditor.locator('.view-line').first().waitFor({ timeout: 30_000 });
     await otherEditor.locator('.view-lines').click();

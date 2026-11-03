@@ -362,12 +362,14 @@ const sunsamaLinear = async (size, { importKey, urlKey, mergeKey }) => {
   await urlStatus.waitFor({ timeout: 15_000 });
   const urlIssue = world.issues.find((item) => item.identifier === urlKey);
   const shownState = await urlStatus.evaluate((select) => select.selectedOptions[0]?.textContent ?? '');
+  // The issue's status as the field shows it: the fake moves the issue itself (PlannerSetState) once it is added.
+  const stateThen = urlIssue.state.name;
   await urlStatus.selectOption({ label: 'In Progress' });
   await h.shot(`23-sunsama-linear-url-status-${size}`);
   await day().getByRole('textbox', { name: 'New task' }).press('Enter');
   await day().getByRole('textbox', { name: 'New task' }).press('Escape').catch(() => {});
   const pasted = await until(() => taskOf(urlKey));
-  check(`${size}: a pasted issue shows its status in the add field; the one picked is set as it is added (and not asked again)`, shownState === urlIssue.state.name && Boolean(pasted) && Boolean(await until(() => moves(urlIssue.id).includes('st-h-prog'))) && (await frame.getByRole('alertdialog', { name: `Update ${urlKey} in Linear` }).count()) === 0, `${shownState} → ${moves(urlIssue.id).join(',')}`);
+  check(`${size}: a pasted issue shows its status in the add field; the one picked is set as it is added (and not asked again)`, shownState === stateThen && Boolean(pasted) && Boolean(await until(() => moves(urlIssue.id).includes('st-h-prog'))) && (await frame.getByRole('alertdialog', { name: `Update ${urlKey} in Linear` }).count()) === 0, `${shownState} (in Linear then: ${stateThen}) → ${moves(urlIssue.id).join(',')}; task ${Boolean(pasted)}`);
   // Merged (Alt/Option + drop) straight from the panel into a task: a subtask still linked to the issue.
   await day().getByRole('button', { name: 'Add task' }).click();
   await day().getByRole('textbox', { name: 'New task' }).fill(`harness triage ${size}`);
