@@ -549,8 +549,23 @@ const groups = async (size, viewport, chats, target) => {
     const zen = await frame.locator('.part.editor .tabs-container .tab').evaluateAll((items) => items.filter((tab) => tab.getBoundingClientRect().width > 0).length);
     check(`[${size}] row 12 zen mode shows no tab strip`, zen === 0, `${zen} tabs`);
     await shot(page, `${size}-12-zen`);
+    // Out of zen mode again, and sure of it: VS Code keeps zen mode for the page's next start (`zenMode.restore`), and
+    // every later run on the stack would find the page's editor without its line numbers (zenMode.hideLineNumbers).
+    const numbered = () => frame.locator('.part.editor .margin-view-overlays .line-numbers').evaluateAll((items) => items.some((item) => Number(item.textContent) > 0)).catch(() => false);
+    await frame.locator('.part.editor .monaco-editor').first().click({ position: { x: 150, y: 40 } });
     await page.keyboard.press('Escape');
+    await wait(200);
     await page.keyboard.press('Escape');
+    let left = await until(numbered, 5_000);
+    const byEscape = Boolean(left);
+    if (!left) {
+      // VS Code's own toggle, as it went in.
+      await frame.locator('.part.editor .monaco-editor').first().click({ position: { x: 150, y: 40 } });
+      await page.keyboard.press('Control+K');
+      await page.keyboard.press('z');
+      left = await until(numbered, 5_000);
+    }
+    check(`[${size}] row 12 out of zen mode again: the editor's line numbers are back`, Boolean(left), byEscape ? 'Escape twice' : left ? 'Escape twice did nothing; Ctrl+K Z did' : 'still in zen mode');
   } catch (error) {
     check(`[${size}] row 12 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {

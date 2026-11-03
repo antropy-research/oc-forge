@@ -300,7 +300,7 @@ per window (a notification with "Show Extension"). The frame installs the bridge
 
 1. Every part's extension host runs on the VS Code Server's machine, so the parts meet on a Unix socket there:
    `$TMPDIR/ocvsb-<uid>/<sha1(host|folder|window)>.sock`, in a 0700 directory. One hop: a relayed debug request
-   takes {{relay.median}} ms (median).
+   takes 48 ms (median).
 2. **One bus per OpenChamber window.** `window` is the frame's `forge.window.id()` (the same in every frame of a
    browser tab, another in each tab). Each browser tab is a VS Code window of its own, as VS Code's windows are: its
    own runtime, sessions, terminals and tasks. On a host without `window-id`, the bus is per folder.
@@ -461,13 +461,28 @@ extension host's.
 
 ### Measured
 
-{{measured}}
+Measured by `tests/e2e/runtime.mjs` on the adapters' scratch stack (VS Code 1.144.0, headless Chromium, 1440×900 and 1024×768), on a host also running other work (load average 3 to 9), 2026-11-03. Extension hosts of windows that went are VS Code's own: they wait out its reconnection grace, cut to 5 minutes once another client connects, as they did before the bridge.
+
+| What | Measured |
+|---|---|
+| A breakpoint set in the page (F9): in the rail's model | 13 ms / 10 ms |
+| F5 in the rail: paused in the rail / on the page's line | 2889 ms, 2914 ms (1440); 1904 ms, 1972 ms (1024) |
+| F10 in the page: the next line in the page / the rail | 351 ms, 268 ms (1440); 303 ms, 304 ms (1024) |
+| Restart (Ctrl+Shift+F5 in the page): paused again | 1696 ms / 1286 ms |
+| "Select and Start Debugging" in the page: the paused line; F5 there | 2320 ms / 1738 ms; 1193 ms / 925 ms |
+| "Terminal: Create New Terminal" in the page: in the bottom's list, palette / key | 347 ms, 157 ms (1440); 185 ms, 102 ms (1024) |
+| Before the bottom ever opened: a launch, a terminal, a task until running at the bottom | 9675 ms, 7830 ms, 8699 ms |
+| A stage in the page: in the rail's Source Control | 662 ms / 602 ms |
+| The bridge installs itself: all three parts joined, from the window's start | 22035 ms |
+| A relayed DAP request's round trip on the bus | median 48 ms, p95 136 ms, max 597 ms (247 requests) |
+| A window at rest (3 extension hosts): RSS, idle CPU | 510 MB, 0.37% |
+| 6 loads of a window, 4 windows opened and closed | start: 3 hosts, 1 sockets; load 1: 6 hosts, 1 sockets; load 2: 9 hosts, 1 sockets; load 3: 12 hosts, 1 sockets; load 4: 15 hosts, 1 sockets; load 5: 18 hosts, 1 sockets; load 6: 21 hosts, 1 sockets; window 1 opened and closed: 24 hosts, 2 sockets; window 2 opened and closed: 27 hosts, 2 sockets; window 3 opened and closed: 30 hosts, 2 sockets; window 4 opened and closed: 33 hosts, 2 sockets; settled: 33 hosts, 1 sockets; closed: 33 hosts, 0 sockets; the live window's bus: editor, probe, terminal, view |
 
 ### Limits
 
 - The mirror's type is `openchamber-mirror`, so UI an adapter's extension adds for its own type (js-debug's "Toggle
   Skipping This File", …) doesn't show in the page or the rail. Its custom requests, through the mirror, work.
-- Every debug request takes one more hop ({{relay.median}} ms median, {{relay.p95}} ms p95).
+- Every debug request takes one more hop (48 ms median, 136 ms p95).
 - An extension's own pseudoterminal stays in its part (with a notice).
 - A renamed file's header tab comes last in the strip (the host's tab API has no position).
 - Undo order across parts: a part's own text edits on a file come before another part's file operation on it.
