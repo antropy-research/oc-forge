@@ -1224,6 +1224,18 @@ const costs = async () => {
 /** Many reloads and windows: the bridge's sockets and the live window's bus stay one window's; VS Code's hosts, as they go. */
 const bounds = async () => {
   const size = '1440x900';
+  // The server's own word on each window that went: a client that said goodbye ("gracefully": its extension host
+  // goes at once) or one that vanished ("will wait for reconnection": its extension host waits out the grace).
+  const serverLog = () => readFileSync(join(work, 'vscode', 'vscode.log'), 'utf8');
+  const logFrom = serverLog().length;
+  const said = () => {
+    const log = serverLog().slice(logFrom);
+    return {
+      graceful: (log.match(/\[ManagementConnection\] The client has disconnected gracefully/g) ?? []).length,
+      vanished: (log.match(/\[ManagementConnection\] The client has disconnected, will wait for reconnection/g) ?? []).length,
+      exited: (log.match(/Extension Host Process exited/g) ?? []).length,
+    };
+  };
   const snapshot = (at) => ({ at, extensionHosts: extHostPids().length, sockets: socketFiles().length });
   const trail = [snapshot('start')];
   const context = await newWindow({ width: 1440, height: 900 });
@@ -1255,12 +1267,12 @@ const bounds = async () => {
   }
   await wait(25_000);
   trail.push(snapshot('closed'));
-  measures.bounds = { trail, members };
+  measures.bounds = { trail, members, server: said() };
   const settled = trail.find((item) => item.at === 'settled');
   const closed = trail.at(-1);
   check(`[${size}] across 6 loads of a window and 4 windows opened and closed: the bridge keeps one socket per live window, the live window's bus has its three parts, and they go with it`,
     settled && settled.sockets <= 1 && members?.join(',') === 'editor,probe,terminal,view' && closed.sockets === 0,
-    `${trail.map((item) => `${item.at}: ${item.extensionHosts ?? '?'} hosts, ${item.sockets ?? '?'} sockets`).join('; ')}; live bus ${members?.join(', ')}`);
+    `${trail.map((item) => `${item.at}: ${item.extensionHosts ?? '?'} hosts, ${item.sockets ?? '?'} sockets`).join('; ')}; live bus ${members?.join(', ')}; server: ${JSON.stringify(measures.bounds.server)}`);
 };
 
 /** Testing, as it is across the parts (investigated, not built): where a run runs and shows, what Debug Test gets. */
