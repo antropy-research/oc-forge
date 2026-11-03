@@ -524,6 +524,17 @@ const groups = async (size, viewport, chats, target) => {
     await openFile(page, 'src/util.ts');
     await wait(2_000);
     const frame = pageFrame(page);
+    // Zen mode hides the editor's line numbers (zenMode.hideLineNumbers): with them, the page isn't in zen mode.
+    const numbered = () => frame.locator('.part.editor .margin-view-overlays .line-numbers').evaluateAll((items) => items.some((item) => Number(item.textContent) > 0)).catch(() => false);
+    const leaveZen = async () => {
+      await frame.locator('.part.editor .monaco-editor').first().click({ position: { x: 150, y: 40 } });
+      await page.keyboard.press('Escape');
+      await wait(200);
+      await page.keyboard.press('Escape');
+      return until(numbered, 5_000);
+    };
+    // A page VS Code started in zen mode (an earlier run's, restored: zenMode.restore) leaves it first.
+    if (!(await until(numbered, 10_000))) await leaveZen();
     // A group's own tab: VS Code's tab strip (`.tab`) or its single tab (`.label-container`), not the breadcrumbs.
     const titles = () => frame.locator('.part.editor .editor-group-container').evaluateAll((items) => items.map((group) => [...group.querySelectorAll('.title .tab, .title .label-container')]
       .filter((tab) => tab.getBoundingClientRect().width > 0).map((tab) => tab.textContent?.trim() ?? '').join('/')));
@@ -551,12 +562,7 @@ const groups = async (size, viewport, chats, target) => {
     await shot(page, `${size}-12-zen`);
     // Out of zen mode again, and sure of it: VS Code keeps zen mode for the page's next start (`zenMode.restore`), and
     // every later run on the stack would find the page's editor without its line numbers (zenMode.hideLineNumbers).
-    const numbered = () => frame.locator('.part.editor .margin-view-overlays .line-numbers').evaluateAll((items) => items.some((item) => Number(item.textContent) > 0)).catch(() => false);
-    await frame.locator('.part.editor .monaco-editor').first().click({ position: { x: 150, y: 40 } });
-    await page.keyboard.press('Escape');
-    await wait(200);
-    await page.keyboard.press('Escape');
-    let left = await until(numbered, 5_000);
+    let left = await leaveZen();
     const byEscape = Boolean(left);
     if (!left) {
       // VS Code's own toggle, as it went in.
@@ -566,6 +572,8 @@ const groups = async (size, viewport, chats, target) => {
       left = await until(numbered, 5_000);
     }
     check(`[${size}] row 12 out of zen mode again: the editor's line numbers are back`, Boolean(left), byEscape ? 'Escape twice' : left ? 'Escape twice did nothing; Ctrl+K Z did' : 'still in zen mode');
+    // Saved before the window goes: a frame saves VS Code's state a few seconds after it changed (README, State).
+    await wait(8_000);
   } catch (error) {
     check(`[${size}] row 12 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {
