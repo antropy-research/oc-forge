@@ -15,6 +15,7 @@ import { roleOf, roleSettings, type Role } from '../src/surfaces.ts';
 import { isExternalAllowed, NARROW_FRAME_CSS, PART_CSS, remoteUri, webviewOriginName, workbenchConfiguration, type ServerWorkbenchConfig, type ThemeMode } from '../src/workbench.ts';
 import { installBasicShims, installResourceBridge, installWorkerShim, type Answer } from './shims.ts';
 import { persistentIndexedDB, IDBKeyRange, saveInBackground, saveThroughService, watchForChanges, type StateOp, type StateSnapshot } from './storage.ts';
+import { createBridgeFrame } from './bridge.ts';
 import { prepareSurface, reportExtensionsPath, startSurface, type SurfaceController, type SurfaceRole } from './surfaces.ts';
 import { keepLook, preferOpenChamberScheme } from './theme.ts';
 import { TunnelSocket, type TunnelService } from './tunnel.ts';
@@ -271,6 +272,8 @@ const boot = async (): Promise<void> => {
   const servicesReady = new Promise<VscodeServices>((resolve) => {
     markServices = resolve;
   });
+  // The bridge extension in this workbench's extension host, which makes the window's parts one VS Code (bridge.ts).
+  const bridge = createBridgeFrame({ role, folder: folder ?? '', authority, forge: surfaceRole ? forge : null, focus, log: (message, error) => console.warn(`[OpenChamber VS Code] ${message}`, error ?? '') });
   const hooks: Record<string, unknown> = {
     connectionToken: settings.token ?? undefined,
     originHash: async (parentOrigin: string, salt: string) => webviewOriginName(parentOrigin, salt),
@@ -283,6 +286,7 @@ const boot = async (): Promise<void> => {
       if (!(ids instanceof Map)) return;
       const services = new VscodeServices(instantiation, ids);
       if (surfaceRole && focus) prepareSurface(surfaceRole, services, focus);
+      if (surfaceRole) bridge.prepare(services);
       try {
         const storageService = services.get<StorageService>('storageService');
         saveBeforeReload = saveThroughService(storageService, storage.flush);
@@ -345,6 +349,7 @@ const boot = async (): Promise<void> => {
           { id: 'openchamber.vscode.followFolder', label: "OpenChamber: Open OpenChamber's Folder", handler: async () => {
             await reloadWith(context.directory);
           } },
+          ...bridge.commands,
         ],
       };
     },
@@ -397,6 +402,7 @@ const boot = async (): Promise<void> => {
   void Promise.all([servicesReady, running]).then(async ([services]) => {
     const serviceCall = <T>(path: string, body: Record<string, unknown> = {}): Promise<T> => call<T>(path, { ...server, ...body });
     void reportExtensionsPath(services, serviceCall).catch(() => {});
+    if (surfaceRole) void bridge.start(services, serviceCall).catch((error) => console.warn('[OpenChamber VS Code] the bridge extension', error));
     if (!surfaceRole || !forge || !focus) return;
     surface = await startSurface({
       role: surfaceRole,

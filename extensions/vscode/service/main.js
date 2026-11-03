@@ -1,8 +1,8 @@
 // service/main.ts
 import http from "node:http";
-import { readFileSync as readFileSync2 } from "node:fs";
+import { readFileSync as readFileSync3 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join4, resolve } from "node:path";
+import { dirname as dirname3, join as join5, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/settings.ts
@@ -450,10 +450,147 @@ var transform = (path, body, codicon, missing = []) => {
   return body;
 };
 
-// service/editors.ts
+// service/bridge.ts
 import { createHash as createHash2 } from "node:crypto";
-import { mkdir as mkdir2, readdir as readdir2, readFile as readFile2, rename as rename2, rm as rm2, stat as stat2, writeFile as writeFile2 } from "node:fs/promises";
+import { readFileSync as readFileSync2, statSync } from "node:fs";
 import { join as join2 } from "node:path";
+var CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0;n < 256; n++) {
+    let c = n;
+    for (let k = 0;k < 8; k++)
+      c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+var crc32 = (data) => {
+  let crc = 4294967295;
+  for (const byte of data)
+    crc = CRC_TABLE[(crc ^ byte) & 255] ^ crc >>> 8;
+  return (crc ^ 4294967295) >>> 0;
+};
+var zip = (entries) => {
+  const DOS_DATE = 0 << 9 | 1 << 5 | 1;
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const crc = crc32(entry.data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(67324752, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(2048, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(DOS_DATE, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(entry.data.length, 18);
+    local.writeUInt32LE(entry.data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    locals.push(local, name, Buffer.from(entry.data));
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(33639248, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(2048, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(DOS_DATE, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(entry.data.length, 20);
+    central.writeUInt32LE(entry.data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, name);
+    offset += local.length + name.length + entry.data.length;
+  }
+  const directory = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(101010256, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, directory, end]);
+};
+var escapeXml = (text) => text.replace(/[<>&"']/g, (char) => `&#${char.charCodeAt(0)};`);
+
+class BridgeBuilder {
+  root;
+  cache = null;
+  constructor(root) {
+    this.root = root;
+  }
+  files() {
+    return { manifest: join2(this.root, "bridge", "package.json"), bundle: join2(this.root, "bridge", "main.js") };
+  }
+  build() {
+    const { manifest, bundle } = this.files();
+    const stamp = [manifest, bundle].map((file) => `${statSync(file).mtimeMs}:${statSync(file).size}`).join("|");
+    if (this.cache?.stamp === stamp)
+      return this.cache;
+    const manifestText = readFileSync2(manifest, "utf8");
+    const bundleData = readFileSync2(bundle);
+    const build = createHash2("sha256").update(manifestText).update(bundleData).digest("hex").slice(0, 16);
+    const pkg = JSON.parse(manifestText);
+    const stamped = Buffer.from(`${JSON.stringify({ ...pkg, openchamberBuild: build }, null, 2)}
+`, "utf8");
+    const vsixManifest = `<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata><Identity Language="en-US" Id="${escapeXml(pkg.name)}" Version="${escapeXml(pkg.version)}" Publisher="${escapeXml(pkg.publisher)}" /><DisplayName>${escapeXml(pkg.displayName)}</DisplayName><Description xml:space="preserve">${escapeXml(pkg.description)}</Description><Properties><Property Id="Microsoft.VisualStudio.Code.Engine" Value="${escapeXml(pkg.engines.vscode)}" /><Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="${escapeXml(pkg.extensionKind.join(","))}" /></Properties></Metadata>
+  <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation><Dependencies/>
+  <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true" /></Assets>
+</PackageManifest>
+`;
+    const contentTypes = '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".json" ContentType="application/json"/><Default Extension=".js" ContentType="application/javascript"/><Default Extension=".vsixmanifest" ContentType="text/xml"/></Types>';
+    const vsix = zip([
+      { name: "[Content_Types].xml", data: Buffer.from(contentTypes, "utf8") },
+      { name: "extension.vsixmanifest", data: Buffer.from(vsixManifest, "utf8") },
+      { name: "extension/package.json", data: stamped },
+      { name: "extension/main.js", data: bundleData }
+    ]);
+    const meta = { id: `${pkg.publisher}.${pkg.name}`.toLowerCase(), version: pkg.version, build };
+    this.cache = { stamp, meta, vsix };
+    return this.cache;
+  }
+  meta() {
+    return this.build().meta;
+  }
+  package() {
+    const { meta, vsix } = this.build();
+    return { ...meta, vsix: vsix.toString("base64") };
+  }
+}
+
+class Claims {
+  ms;
+  now;
+  claimed = new Map;
+  constructor(ms = 60000, now = () => Date.now()) {
+    this.ms = ms;
+    this.now = now;
+  }
+  claim(key) {
+    const at = this.claimed.get(key);
+    if (at !== undefined && this.now() - at < this.ms)
+      return false;
+    this.claimed.set(key, this.now());
+    if (this.claimed.size > 1000) {
+      for (const [old, when] of this.claimed)
+        if (this.now() - when >= this.ms)
+          this.claimed.delete(old);
+    }
+    return true;
+  }
+}
+
+// service/editors.ts
+import { createHash as createHash3 } from "node:crypto";
+import { mkdir as mkdir2, readdir as readdir2, readFile as readFile2, rename as rename2, rm as rm2, stat as stat2, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join3 } from "node:path";
 
 // ../../adapters/openchamber/host/protocol.ts
 var OC_FORGE_LIMITS = {
@@ -550,14 +687,14 @@ class SavedTabs {
   }
   static keyOf(serverKey, folder, window) {
     const name = typeof folder === "string" && folder.startsWith("/") ? folder : "";
-    const key = `${serverKey}.${createHash2("sha256").update(name).digest("hex").slice(0, 16)}`;
+    const key = `${serverKey}.${createHash3("sha256").update(name).digest("hex").slice(0, 16)}`;
     return SavedTabs.isWindow(window) ? `${key}${WINDOW_MARK}${window}` : key;
   }
   static isWindow(window) {
     return typeof window === "string" && /^[0-9a-f]{32}$/.test(window);
   }
   file(key) {
-    return join2(this.dir, `${key}.tabs.json`);
+    return join3(this.dir, `${key}.tabs.json`);
   }
   async load(key) {
     return await this.loadIfKept(key) ?? [];
@@ -579,10 +716,10 @@ class SavedTabs {
     const names = (await readdir2(this.dir).catch(() => [])).filter((name) => name.startsWith(prefix) && name.endsWith(".tabs.json"));
     if (names.length <= WINDOWS_MAX)
       return;
-    const dated = await Promise.all(names.map(async (name) => ({ name, at: (await stat2(join2(this.dir, name)).catch(() => null))?.mtimeMs ?? 0 })));
+    const dated = await Promise.all(names.map(async (name) => ({ name, at: (await stat2(join3(this.dir, name)).catch(() => null))?.mtimeMs ?? 0 })));
     for (const { name } of dated.sort((a, b) => b.at - a.at).slice(WINDOWS_MAX)) {
       this.tabs.delete(name.slice(0, -".tabs.json".length));
-      await rm2(join2(this.dir, name), { force: true }).catch(() => {
+      await rm2(join3(this.dir, name), { force: true }).catch(() => {
         return;
       });
     }
@@ -1016,9 +1153,9 @@ class VscodeServer {
 }
 
 // service/state.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { mkdir as mkdir4, readFile as readFile4, rename as rename4, stat as stat3, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 var LOAD_MAX = 7000000;
 var NAME = /^[\w.:@ -]{1,200}$/;
 var isValue = (value) => {
@@ -1109,7 +1246,7 @@ class WorkbenchState {
     this.log = log;
   }
   static keyOf(serverUrl, folder) {
-    return createHash3("sha256").update(serverUrl).digest("hex").slice(0, 32);
+    return createHash4("sha256").update(serverUrl).digest("hex").slice(0, 32);
   }
   static roleKeyOf(key, role) {
     return `${key}.${role}`;
@@ -1145,7 +1282,7 @@ class WorkbenchState {
     return stat3(this.file(key)).then(() => true, () => false);
   }
   file(key) {
-    return join3(this.dir, `${key}.json`);
+    return join4(this.dir, `${key}.json`);
   }
   async get(key) {
     const cached = this.snapshots.get(key);
@@ -1493,13 +1630,15 @@ if (!port || !token) {
 var BODY_LIMIT = 200000;
 var packageRoot = resolve(dirname3(fileURLToPath(import.meta.url)), "..");
 var log = (message) => console.error(`[vscode] ${message}`);
-var assets = new WorkbenchAssets(join4(packageRoot, "vscode-web"), () => JSON.parse(readFileSync2(join4(packageRoot, "service", "web-files.json"), "utf8")), log, undefined, join4(packageRoot, "webview"));
+var assets = new WorkbenchAssets(join5(packageRoot, "vscode-web"), () => JSON.parse(readFileSync3(join5(packageRoot, "service", "web-files.json"), "utf8")), log, undefined, join5(packageRoot, "webview"));
 var tunnels = new Tunnels;
-var stateDir = process.env.OPENCHAMBER_VSCODE_DATA_DIR || join4(homedir2(), ".local", "share", "openchamber-vscode", "state");
+var stateDir = process.env.OPENCHAMBER_VSCODE_DATA_DIR || join5(homedir2(), ".local", "share", "openchamber-vscode", "state");
 var state = new WorkbenchState(stateDir, log);
-var rail = new Rail(join4(stateDir, "rail.json"), (url, token) => new VscodeServer(url, token), log);
+var rail = new Rail(join5(stateDir, "rail.json"), (url, token) => new VscodeServer(url, token), log);
 var editorRequests = new EditorRequests;
 var savedTabs = new SavedTabs(stateDir, log);
+var bridge = new BridgeBuilder(packageRoot);
+var claims = new Claims;
 var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -1549,6 +1688,12 @@ var routes = {
       throw new ServerError("extensionsPath is required", 400);
     await rail.remember(server.url, body.token ?? null, path);
     return { ok: true };
+  },
+  "/bridge/package": async (body) => body.meta === true ? bridge.meta() : bridge.package(),
+  "/bridge/claim": async (body) => {
+    if (typeof body.key !== "string" || !body.key || body.key.length > 1024)
+      throw new ServerError("key is required", 400);
+    return { claimed: claims.claim(body.key) };
   },
   "/editors/request": async (body) => {
     if (typeof body.key !== "string" || !body.key || body.key.length > 1024 || typeof body.open !== "object" || body.open === null)

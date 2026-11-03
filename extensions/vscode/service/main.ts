@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { isConnectionToken, parseServerUrl } from '../src/settings.ts';
 import { isExternalAllowed } from '../src/workbench.ts';
 import { WorkbenchAssets } from './assets.ts';
+import { BridgeBuilder, Claims } from './bridge.ts';
 import { EditorRequests, readPart, readTabs, SavedTabs } from './editors.ts';
 import { Rail } from './rail.ts';
 import { RESOURCE_MAX, ServerError, VscodeServer } from './server.ts';
@@ -41,6 +42,10 @@ const state = new WorkbenchState(stateDir, log);
 const rail = new Rail(join(stateDir, 'rail.json'), (url, token) => new VscodeServer(url, token), log);
 const editorRequests = new EditorRequests();
 const savedTabs = new SavedTabs(stateDir, log);
+// The bridge extension the frames install on the VS Code Server (bridge/): one frame of a window installs it, one
+// says it isn't running.
+const bridge = new BridgeBuilder(packageRoot);
+const claims = new Claims();
 
 const json = (res: http.ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -96,6 +101,13 @@ const routes: Record<string, (body: Record<string, unknown>) => Promise<unknown>
     if (!path) throw new ServerError('extensionsPath is required', 400);
     await rail.remember(server.url, (body.token as string | null | undefined) ?? null, path);
     return { ok: true };
+  },
+  // The bridge extension: which (`meta`), or with the .vsix (base64) to install.
+  '/bridge/package': async (body) => (body.meta === true ? bridge.meta() : bridge.package()),
+  // One frame at a time does it (installs the bridge on a server, says it isn't running in a window).
+  '/bridge/claim': async (body) => {
+    if (typeof body.key !== 'string' || !body.key || body.key.length > 1024) throw new ServerError('key is required', 400);
+    return { claimed: claims.claim(body.key) };
   },
   // An editor a rail view or the terminal hands to the page, waiting for the page to take it.
   '/editors/request': async (body) => {

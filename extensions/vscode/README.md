@@ -282,6 +282,193 @@ a tab or is opened.
 - On an adapted OpenChamber this extension's rail entries replace its one `plugin:oc-forge-vscode` icon; a check
   that compares the rail with a stock build's turns the extension off first.
 
+## One VS Code across the parts
+
+The rail view, the page and the bottom terminal of one OpenChamber window are three VS Code workbenches, each with
+its own extension host and state (*Roles* above). The bridge extension (`bridge/src/*.ts`, bundled to
+`bridge/main.js`) runs in each one's extension host and makes them one VS Code: one debugger, one list of terminals
+and tasks, one Problems list, one Output, file operations and Git that every part follows. The bottom terminal's
+workbench is the window's **runtime**: debug sessions, terminals and tasks run there, and its panel (Terminal,
+Problems, Output, Debug Console) is VS Code's own, at the bottom where VS Code has it. The page and the rail send it
+what they start, and mirror its debug sessions.
+
+Without the bridge (not installed yet, or disabled) each part works on its own, as before, and the rail says so once
+per window (a notification with "Show Extension"). The frame installs the bridge itself (*Deployment*).
+
+### The parts' bus
+
+1. Every part's extension host runs on the VS Code Server's machine, so the parts meet on a Unix socket there:
+   `$TMPDIR/ocvsb-<uid>/<sha1(host|folder|window)>.sock`, in a 0700 directory. One hop: a relayed debug request
+   takes {{relay.median}} ms (median).
+2. **One bus per OpenChamber window.** `window` is the frame's `forge.window.id()` (the same in every frame of a
+   browser tab, another in each tab). Each browser tab is a VS Code window of its own, as VS Code's windows are: its
+   own runtime, sessions, terminals and tasks. On a host without `window-id`, the bus is per folder.
+3. The first part listens and relays JSON lines; the others connect. When it goes, the next part to notice listens,
+   one at a time under a lock file (`<name>.lock`, holder's pid, taken over when its process is gone).
+4. A request for a part (`view`, `editor`, `terminal`) goes to one member of it, the first that joined (a reloaded
+   frame's old extension host lingers until it leaves).
+5. A window that went leaves its extension host on the server for VS Code's reconnection grace. Its parts leave the
+   bus while their frame doesn't answer (`openchamber.vscode.bridge.info`, every 2 s, away after 3 s). Only one
+   question waits at a time (a disconnected host queues calls), and the wait between questions doubles up to 60 s.
+
+### Debug
+
+- **Breakpoints: one list per folder.** Within a window, every change goes to the other parts at once (breakpoints
+  API). It is also kept in a file on the server (the bridge's global storage, one per folder), changed as a change
+  (put, remove) under a lock, so a window that hasn't heard of another's change doesn't undo it. **Across windows the
+  list does not follow live** (VS Code's own windows don't share breakpoints either): a part takes the file's list
+  when it joins its window's bus, so a new or reloaded tab has every tab's breakpoints.
+- **A launch from the page or the rail** (F5, the Run and Debug view, Select and Start Debugging) is caught in the
+  `'*'` provider's `resolveDebugConfiguration`, after the type's own providers and before VS Code substitutes
+  variables and runs the preLaunchTask. What only that part can resolve (the editor's `${file}`, `${lineNumber}`, …;
+  `${input:…}` and `${command:…}`, which ask the user there) is resolved there; a launch from the rail that names the
+  editor goes to the page for it. The runtime starts it (`startDebugging` with the debug view, toolbar and status
+  bar suppressed), and its preLaunchTask runs there, once.
+- **A compound launch** runs its own preLaunchTask before its configurations reach any provider, so the frame catches
+  it whole (`IDebugService.startDebugging`, named or the selected one) and the runtime starts it: its task once, its
+  `stopAll`.
+- **Mirrors.** The page and the rail show each of the runtime's sessions as a session of type `openchamber-mirror`
+  (hidden from pickers) with an inline adapter that relays every DAP request to the real session
+  (`customRequest` in the runtime) and gets its events back (a `'*'` tracker there).
+  - The page shows the editor's debug UI (paused line, hovers, inline values, F10/F11, the floating toolbar); the
+    rail shows the Run and Debug view (call stack, variables, watch, breakpoints). Neither shows a Debug side bar of
+    its own in the page.
+  - A child session (js-debug's process under its launch) is mirrored under its parent's.
+  - **Restart** (Ctrl+Shift+F5, the toolbar) is VS Code's own restart in the runtime
+    (`workbench.action.debug.restart` with the session), its tasks included. Mirrors start with no folder, so
+    VS Code's restart of a mirror never reads launch.json again.
+  - **Breakpoint verification** is the real adapter's: the runtime's tracker reads its `setBreakpoints` answers and
+    `breakpoint` events, and each mirror tells its VS Code (verified, moved lines, messages).
+  - **Stop** from any part (Shift+F5, the toolbar, the call stack) stops the real session, and its end ends every
+    mirror. A window that closes or reloads only disconnects its mirrors: the real session goes on.
+  - A bridge installed while the window runs waits until VS Code knows the mirror's type
+    (`IAdapterManager.getDebugger`) before it starts one.
+
+### Terminals and tasks
+
+The page and the rail make no terminal of their own: they show at the bottom, and the bottom opens for them
+(`forge.rail.open('terminal')`, as VS Code opens its panel).
+
+- **VS Code's commands** that make or show a terminal are the bridge's in the page and the rail (an extension's
+  registration of a command id is the one keys, menus and the palette run), and run in the runtime:
+  `workbench.action.terminal.new`, `newWithProfile`, `newWithCwd`, `newLocal`, `newInActiveWorkspace`, `split`,
+  `splitActiveTab`, `splitInActiveWorkspace`, `toggleTerminal` (Ctrl+`), `focus`, `runSelectedText`,
+  `runActiveFile`; `createTerminalEditor*` (a terminal at the bottom, as the bottom shows no editor area); the
+  Explorer's `openInIntegratedTerminal` and `openInTerminal` (in that folder); and the running tasks' `reRunTask`,
+  `restartTask`, `terminate`, `showTasks`, `showLog`.
+- **Tasks** VS Code starts in the page or the rail (Run Task, Run Build Task, a task an extension runs through the
+  API, the NPM Scripts view) are caught in `ITaskService.run`, as no extension can catch them before they run. The
+  runtime finds the same task (`vscode.tasks.fetchTasks`, by source, label and definition) and runs it.
+- **A terminal an extension makes** in the page or the rail (`createTerminal`) is its handle on a process on the
+  server's pty host. The frame creates it hidden (`hideFromUser`) and the runtime attaches to the same process
+  (`ITerminalService.createTerminal` with `attachPersistentProcess`): the user sees it in the bottom's list, and
+  `terminal.show()` shows it there (`showBackgroundTerminal`, `ITerminalGroupService.showPanel`). An extension's own
+  pseudoterminal (its process is the extension's, in that part) can't move: it stays, with a notice.
+- **The panel's views** are the bottom's: Ctrl+J, Problems (Ctrl+Shift+M), Output (Ctrl+Shift+U) and the Debug
+  Console pressed in the page or the rail open the bottom on that view. A guard closes the page's and the rail's
+  panel if anything else shows it.
+
+### Problems, Output, Outline, Timeline
+
+- **Problems, both ways.** Each part publishes the diagnostics it has of its own (`languages.getDiagnostics`, without
+  those it mirrors); the others mirror them into a diagnostic collection. The bottom's Problems lists the page's
+  language servers' problems; the page's editor marks a task's problem matches; the rail's Explorer colours files.
+- **Output.** The page's and the rail's output channels are in the bottom's Output as "<name> (page)" and
+  "<name> (rail)". Each extension host writes its channels to files on the server (`output_logging_*/<n>-<name>.log`,
+  `<extension>/<name>.log`); the page's and the rail's bridges list theirs, and the runtime's appends what each file
+  gains to a channel of its own. (Not `IOutputChannelRegistry.registerChannel`, planned first: the registry is a
+  module singleton, not a service, so a frame can't reach it without a new patch; and
+  `IOutputService.registerCompoundLogChannel`, a service member, parses log lines, which would garble a plain channel.)
+- **Outline and Timeline in the rail** follow the page's editor: the page publishes its active editor's symbols
+  (`vscode.executeDocumentSymbolProvider`) and cursor; the rail's Outline shows them, follows the cursor, and a
+  symbol chosen there is revealed in the page. The Timeline is the file's Git history (the Git extension's API),
+  loaded again when Git opens the repository or HEAD moves; a commit opens its diff in the page. VS Code's own
+  Outline and Timeline, which follow the rail's active editor (it has none), are hidden in the rail while the bridge
+  runs (`IViewContainerModel.setVisible`), and shown again when it doesn't.
+
+### Files, Undo, Search, Source Control
+
+- **Rename, move, delete.** A file operation in the rail (or the bottom) is announced by the stable
+  `workspace.onWillRenameFiles`/`onDidRenameFiles`/`onWillDeleteFiles`/`onDidDeleteFiles`; VS Code waits for the
+  page's answer before it runs the operation.
+  - Before: the page keeps the unsaved text of the files concerned and marks their models saved (VS Code's soft
+    revert), so no save, the user's or auto-save's, writes the old name again.
+  - After a rename or move: the page moves each editor of it to the new name where it was, with its view state
+    (VS Code's own move: `EditorInput.rename`, `IEditorService.replaceEditors`), and its unsaved text is unsaved in
+    the new name's model. The header tab and the route follow the editor (their key is its file). The new header tab
+    comes last: the host's tab API has no position.
+  - After a delete: the page's editors of it are marked deleted (VS Code's own mark, the file read again); their text
+    stays shown.
+- **Undo and Redo** on a file the page has nothing for (Ctrl+Z in the page after the rail's Explorer deleted or
+  renamed it) go to the part that ran the operation (`IUndoRedoService.canUndo`/`undo`, asked of each part in
+  turn). One window's undo would take the newest of the file's text edits and file operations; here a part's own
+  text edits come first.
+- **Search's replace preview** opened from the rail shows in the page: the page's bridge serves its content (a
+  content provider of VS Code's `private` scheme, asked before VS Code's own) from the rail's search, and follows a
+  new replacement typed there.
+- **Source Control.** When a part's Git repository changes (a stage, a commit, a checkout: the Git extension's
+  `repository.state.onDidChange`), the other parts run `git status` on theirs. A refresh to a state already
+  announced isn't announced again, so the parts don't ping-pong.
+
+### Testing (investigated, not built)
+
+Each part's extension host runs the test extensions, each with its own controllers, items and results:
+
+- the rail's Testing view lists the rail's tests; a run from there runs in the rail's extension host, and its pass
+  or fail shows there;
+- the page's gutter shows the page's own controllers' items, and a run from the gutter runs and shows in the page;
+- the Test Results view is a panel view: the page's and the rail's never show (their panels stay closed), and the
+  bottom's shows only runs of the runtime's own controllers;
+- **Debug Test** calls `vscode.debug.startDebugging` in the part that runs the test. The bridge starts the session
+  in the runtime and mirrors it, but the extension's `startDebugging` answers false (the launch there was handed
+  over), so the test run ends at once while the session goes on.
+
+Routing the run commands (`testing.*`, the gutter's) to the runtime would show results in the bottom's Test Results
+but not in the rail's tree or the page's gutter: no stable API hands one controller's results to another
+extension host's. A launch handed over could answer with the mirror session instead (return the mirror's
+configuration from `resolveDebugConfiguration`), which would keep Debug Test's run alive; that is the next step.
+
+### Deployment
+
+1. The service builds the bridge's .vsix from `bridge/package.json` and `bridge/main.js` (stored zip entries, a
+   fixed date: the same bytes each time), stamped with the bundle's hash (`openchamberBuild`): `/bridge/package`.
+2. A frame that finds the bridge missing or of another build claims the install (`/bridge/claim`, one frame per
+   server and build), writes the .vsix to the server (`IFileService.writeFile`, into the extensions' global storage)
+   and installs it with the documented `workbench.extensions.installExtension`. VS Code starts an extension
+   installed while it runs, in each window: the parts join within seconds.
+3. The bridge tells its frame it runs, and which build (`openchamber.vscode.bridge.hello`). Until then, everything
+   the frame catches runs as VS Code's own.
+
+### Interfaces
+
+| Interface | Kind | Used for |
+|---|---|---|
+| `vscode.debug`: breakpoints API; `registerDebugConfigurationProvider('*')`; `registerDebugAdapterTrackerFactory('*')`; `registerDebugAdapterDescriptorFactory` with `DebugAdapterInlineImplementation`; `startDebugging` with `DebugSessionOptions`; `stopDebugging`; `DebugSession.customRequest`; `onDidStart/TerminateDebugSession` | stable | debug, mirrors |
+| Debug Adapter Protocol | stable | the mirror |
+| `vscode.commands.registerCommand` with VS Code's command ids (the documented keybinding commands); `executeCommand` (`workbench.action.debug.restart`, `workbench.extensions.installExtension`, the panel views' `.focus`) | stable | terminals, tasks, the panel's views, restart, install |
+| `vscode.tasks.fetchTasks`, `executeTask`; `window.createTerminal`, `activeTerminal`; `window.createOutputChannel` | stable | tasks, terminals, Output |
+| `languages.getDiagnostics`, `onDidChangeDiagnostics`, `createDiagnosticCollection`; `executeDocumentSymbolProvider`; `window.createTreeView` | stable | Problems; Outline |
+| `workspace.onWill/DidRenameFiles`, `onWill/DidDeleteFiles`; `registerTextDocumentContentProvider`; `openTextDocument`, `onDidChangeTextDocument` | stable | file operations; the replace preview |
+| The Git extension's API (`vscode.git`, version 1): `repositories`, `onDidOpenRepository`, `getRepository`, `state.onDidChange`, `status`, `log`, `toGitUri` | stable (the extension's) | Source Control across parts; Timeline |
+| Node's `net`, `fs`; `ExtensionContext.globalStorageUri`, `logUri` | stable | the bus, the breakpoints' file, Output |
+| Embedder API `commands` (`web.api.ts`) | stable | the frame's commands for the bridge (`openchamber.vscode.bridge.*`) |
+| The frame's catches and calls listed in *Which VS Code internals the frames use* | internal, interface members | what no extension can reach in another window |
+
+### Measured
+
+{{measured}}
+
+### Limits
+
+- The mirror's type is `openchamber-mirror`, so UI an adapter's extension adds for its own type (js-debug's "Toggle
+  Skipping This File", …) doesn't show in the page or the rail. Its custom requests, through the mirror, work.
+- Every debug request takes one more hop ({{relay.median}} ms median, {{relay.p95}} ms p95).
+- An extension's own pseudoterminal stays in its part (with a notice).
+- A renamed file's header tab comes last in the strip (the host's tab API has no position).
+- Undo order across parts: a part's own text edits on a file come before another part's file operation on it.
+- Testing: see above.
+- `runOn: folderOpen` tasks run in each part as VS Code starts them, before the bridge says hello.
+
 ## Which VS Code internals the frames use
 
 Each VS Code service member a frame calls is a member of a VS Code service interface (`IEditorService`,
@@ -310,6 +497,15 @@ each under its VS Code interface's name, and `tests/vscode-api.test.ts` holds ev
 | Status bar entries' element ids (`status.host`, `status.workbench.keyboardLayout`, `status.scm.*`, `status.notifications`, `status.languageStatus`, `status.problems`), the panel title's global actions' codicon classes (`panel-close`, `panel-maximize`, `panel-restore`), and a started part's look (`.part.sidebar .pane-body`, `.part.panel .xterm`) | VS Code's DOM, in a part's own CSS (`PART_CSS`) and its boot screen (`workbench/main.ts`) | Which status items a narrow page drops and which panel buttons the bottom doesn't show, which VS Code has no settings for; when the boot screen lifts | Settings for status items and the panel's title actions |
 | The webview host page's protocol (`webview/`: `webview-ready` with `mountId` and `keyEventToken`, `load-resource`, the key and focus messages) | Internal, between `WebviewElement` and its host page (`webview/browser/pre/index.html`) | VS Code's own host page needs a service worker, `crypto.subtle` and a same-origin content frame, none of which an opaque-origin extension frame has | VS Code hosting webviews without them, or frames on real origins |
 | The other patches to the compiled workbench: the embedder's `create()` options, the handshake signature, the webview origin, keyboard support, the editor area's hiding | Compiled code, each matched exactly (`src/patch.ts`); a release they don't fit runs the whole workbench | See "How it fits in an extension frame" and the surface patches above | Each its own: see `src/patch.ts` |
+| `ITaskService.run`, replaced on the service in the page and the rail; the task's `_label`, `_source.label` and `getDefinition` | Interface member (replacing it is the frame's); public members of `CommonTask`, the class `run` takes | A task VS Code starts there (Run Task, Run Build Task, an extension's `tasks.executeTask`, the NPM Scripts view) runs in the runtime: no extension API is asked before a task runs, and none runs a task in another window | A task-start participant, or tasks run in the window an embedder names |
+| `IDebugService.startDebugging`, replaced in the page and the rail; `getConfigurationManager().selectedConfiguration`; `ILaunch.getCompound`; `getAdapterManager().getDebugger` | Interface members | A compound launch runs its own preLaunchTask before any configuration provider sees its launches, and F5 passes no name: the frame hands the compound to the runtime whole. A bridge installed while the window runs waits until VS Code knows the mirror's type | A provider hook for compounds |
+| `IDebugService.getModel().getSession().getThread().getCallStack()`, `getViewModel().focusedStackFrame`, `focusStackFrame` (in the runtime) | Interface members (`IDebugService`, `IDebugModel`, `IDebugSession`, `IThread`, `IStackFrame`, `IViewModel`) | A frame chosen in the rail's call stack is the bottom's too: its Debug Console evaluates in the runtime's focused frame. The API reads `debug.activeStackItem`; nothing sets it | A settable active stack item |
+| `ITerminalService.createTerminal` (replaced in the page and the rail: an extension's terminal is created hidden; in the runtime with `attachPersistentProcess`), `showBackgroundTerminal` (replaced), `onDidCreateInstance`; `ITerminalInstance`'s `persistentProcessId`, `processId`, `processReady`, `title`, `titleSource`, `shellLaunchConfig`, `shellIntegrationNonce`, `hasChildProcesses`, `getInitialCwd`; `ITerminalInstanceHost`'s `activeInstance`, `setActiveInstance`, `focusInstance`; `ITerminalGroupService.showPanel` (replaced) | Interface members | A terminal an extension makes in the page or the rail shows at the bottom, attached to the same process on the server's pty host, and `terminal.show()` shows it there. No API shows a terminal in another window | A terminal location in another window, or moving a terminal between windows |
+| `IWorkbenchLayoutService.onDidChangePartVisibility`, `isVisible`, `setPartHidden` for the page's and the rail's panel (with the bridge running) | Interface members | A guard: whatever else shows the panel there closes it again (the panel's views are the bottom's) | Nothing to drop: VS Code's own layout API |
+| `IUndoRedoService.canUndo`, `undo`, `canRedo`, `redo`: replaced in the page and the rail, VS Code's own in the part asked | Interface members | Undo on a file with nothing for it here goes to the part that ran the file operation (the rail's Explorer); undo stacks are per window | Undo across windows |
+| `ITextFileService.files` (`models`, `resolve`); `IWorkingCopy.isDirty`, `revert({ soft })`; `IWorkingCopyIdentifier.resource`; `ITextEditorModel.textEditorModel`; `ITextModel.getValue`, `setValue`; `IEditorService.getEditors`, `replaceEditors`; `IEditorGroup.isPinned`, `isSticky`, `isActive`, `getIndexOfEditor`; `EditorInput.rename` | Interface members; a public method of `EditorInput` | A file another part renames or deletes: the page keeps its unsaved text and marks it saved (no save writes the old name), and moves its editors to the new name as VS Code's own move does. VS Code does this only for operations its own window ran, and the API can neither mark a document saved without saving it nor replace an editor in place | File operation events that every window's editors follow |
+| `IViewDescriptorService.getViewContainerByViewId`, `getViewContainerModel`; `IViewContainerModel.setVisible`; `IStorageService.get`, `store`, `remove` | Interface members | VS Code's own Outline and Timeline in the rail (they follow the rail's editor, it has none) hidden while the bridge's stand in for them, and shown again without it (which ones the rail's storage keeps) | Nothing in the API hides VS Code's own views |
+| `IExtensionService.extensions`, `whenInstalledExtensionsRegistered`; `ExtensionIdentifier.value`; `IRemoteAgentService.getEnvironment()`'s `appRoot`, `globalStorageHome`; `IFileService.readFile`, `writeFile`; `VSBuffer.wrap` (its class from a file's content `readFile` gave); `INotificationService.prompt` | Interface members; a public static member of the class `IFileContent.value` is | The frame installs the bridge on the server it is connected to: the .vsix written where the server reads it, installed by the documented `workbench.extensions.installExtension`; the rail's notice when it isn't running | An embedder API that installs an extension from its bytes |
 
 ## Layout
 
@@ -319,6 +515,7 @@ each under its VS Code interface's name, and `tests/vscode-api.test.ts` holds ev
 | `service/` | The local service (Node): the VS Code Server (`server.ts`), the prepared workbench (`assets.ts`, `web-files.json`), web socket tunnels (`tunnel.ts`), the workbench's storage (`state.ts`), the rail (`rail.ts`), editors handed to the page and its saved tabs (`editors.ts`) |
 | `workbench/` | The VS Code view (panel and page): connection form, boot, shims, tunnel client, IndexedDB; the roles in OpenChamber's own surfaces (`surfaces.ts`) and the VS Code services they use (`vscode.ts`); each part's layout kept (`layoutGuard.ts`), editors handed over by command (`handoff.ts`), the page's side bars on the rail (`sideBars.ts`), activity badges on the rail (`badges.ts`) |
 | `panel/` | The background frame: "Open in VS Code" on a chat |
+| `bridge/` | The VS Code extension that makes a window's parts one VS Code (*One VS Code across the parts*): its sources (`src/`), its manifest, its bundle (`main.js`); the frame's side is `workbench/bridge.ts`, its .vsix the service's (`service/bridge.ts`) |
 | `webview/` | The webview host page (`host.ts`, built to `host.js` with the agent inside) and the agent that runs in each webview's content (`agent.ts`); `content.ts` makes a webview's HTML self-contained |
 | `scripts/web-files.ts` | Lists the browser's files of a VS Code Server install for `service/web-files.json` |
 
