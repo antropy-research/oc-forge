@@ -2,7 +2,7 @@
 // frame-level rows of the split pre-review, 2026-10-30), on the adapters' scratch stack, at 1440×900 and 1024×768:
 //   freeze       (row 1a) a terminal made in the rail view (Ctrl+` there, the Explorer's "Open in Integrated
 //                Terminal") leaves OpenChamber responsive: page.evaluate answers within 1 s for 60 s, the renderers'
-//                memory stays bounded, the rail view shows no panel or editor area. A frozen browser is killed.
+//                memory stays bounded, the rail view shows no panel or editor area.
 //   sideBars     (row 3) Ctrl+Shift+E/F/G/D/X in the page's editor build no side bar there: they light and open the
 //                rail entry; "Reveal Active File in Explorer View" reveals the file in the rail's Explorer.
 //   editors      (rows 4, 6, 7) from the rail: an extension's details (twice: one tab), Settings, Keyboard Shortcuts,
@@ -25,6 +25,8 @@
 //   node tests/e2e/openchamber-adapters/stack.mjs up
 //   node extensions/vscode/tests/e2e/split.mjs [outDir]
 //
+// Each phase runs in a browser of its own, killed when the phase runs past 8 minutes or its renderers hold more than
+// 4 GB (a frozen renderer, as on a build without row 1a's fix): the phase fails, and the run goes on.
 // SPLIT_ONLY=freeze,badges runs only those phases; SPLIT_SIZES=1024 only that size. Never prints the UI password or
 // the VS Code token.
 import { execFileSync } from 'node:child_process';
@@ -168,8 +170,8 @@ const runCommand = async (page, frame, title) => {
   await frame.locator('.quick-input-list .monaco-list-row').filter({ has: frame.locator('.label-name', { hasText: label }) }).first().click({ timeout: 10_000 });
 };
 
-/** A window on the first chat, logged in. */
-const open = async (size, viewport, chats, target = browser) => {
+/** A window on the first chat, logged in, in the phase's browser (`inBrowser`). */
+const open = async (size, viewport, chats, target) => {
   const context = await target.newContext({ viewport });
   await context.request.post(`${base}/auth/session`, { data: { password } });
   await context.addInitScript(seedTabs, chats);
@@ -245,19 +247,15 @@ const renderersMb = (root) => {
   return Math.round(total);
 };
 
-/** Row 1a: a terminal made in the rail view; in a browser of its own, killed if it freezes. */
-const freeze = async (size, viewport, chats, trigger) => {
-  const server = await chromium.launchServer();
-  const pid = server.process().pid;
-  let killed = false;
-  const kill = async () => {
-    if (killed) return;
-    killed = true;
-    await server.kill().catch(() => undefined);
-  };
+/**
+ * Row 1a: a terminal made in the rail view. A frozen renderer never answers again, not even the key's release that
+ * made the terminal: the press is let go after a few seconds, and the phase returns as soon as three asks go
+ * unanswered, so that its browser is killed (`inBrowser`) before the frozen renderer grows further.
+ */
+const freeze = async (size, viewport, chats, trigger, target, pid) => {
+  const letGo = (pressing) => Promise.race([pressing.catch(() => undefined), wait(5_000)]);
   try {
-    const remote = await chromium.connect(server.wsEndpoint());
-    const { page } = await open(size, viewport, chats, remote);
+    const { page } = await open(size, viewport, chats, target);
     const view = await explorer(page);
     const src = explorerRow(view, 'src');
     await src.waitFor({ timeout: 30_000 });
@@ -265,7 +263,7 @@ const freeze = async (size, viewport, chats, trigger) => {
     const before = renderersMb(pid);
     if (trigger === 'key') {
       await view.locator('.explorer-folders-view .monaco-list-row').first().click();
-      await page.keyboard.press('Control+Backquote');
+      await letGo(page.keyboard.press('Control+Backquote'));
     } else {
       await src.click({ button: 'right' });
       await view.locator('.context-view .action-label').first().waitFor({ timeout: 4_000 });
@@ -276,7 +274,7 @@ const freeze = async (size, viewport, chats, trigger) => {
       }
       if (!reached) throw new Error('the context menu has no "Open in Integrated Terminal"');
       // Playwright's clicks on VS Code's context-menu items don't fire them: the keyboard does.
-      await page.keyboard.press('Enter');
+      await letGo(page.keyboard.press('Enter'));
     }
     const what = trigger === 'key' ? 'Ctrl+` in the rail Explorer' : '"Open in Integrated Terminal" on src in the rail Explorer';
     const started = Date.now();
@@ -302,14 +300,12 @@ const freeze = async (size, viewport, chats, trigger) => {
     }
   } catch (error) {
     check(`[${size}] row 1a (${trigger}) ran to the end`, false, String(error.message ?? error).split('\n')[0]);
-  } finally {
-    await kill();
   }
 };
 
 /** Row 3: side bars from the page open on the rail. */
-const sideBars = async (size, viewport, chats) => {
-  const { context, page } = await open(size, viewport, chats);
+const sideBars = async (size, viewport, chats, target) => {
+  const { context, page } = await open(size, viewport, chats, target);
   try {
     check(`[${size}] row 3 src/util.ts opens in the page`, await openFile(page, 'src/util.ts'));
     await wait(2_000);
@@ -337,13 +333,13 @@ const sideBars = async (size, viewport, chats) => {
   } catch (error) {
     check(`[${size}] row 3 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {
-    await context.close();
+    await context.close().catch(() => undefined);
   }
 };
 
 /** Rows 4, 6, 7: editors the rail can't hand over as files open in the page by command. */
-const editors = async (size, viewport, chats) => {
-  const { context, page } = await open(size, viewport, chats);
+const editors = async (size, viewport, chats, target) => {
+  const { context, page } = await open(size, viewport, chats, target);
   const view = viewFrame(page);
   const tabs = () => tabsText(page);
   const noEditorInRail = async () => {
@@ -419,13 +415,13 @@ const editors = async (size, viewport, chats) => {
     check(`[${size}] rows 4, 6, 7 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
     await shot(page, `${size}-467-error`);
   } finally {
-    await context.close();
+    await context.close().catch(() => undefined);
   }
 };
 
 /** Row 10: two browser tabs keep their own header tabs; a new one starts from the folder's latest. */
-const windows = async (size, viewport, chats) => {
-  const { context, page } = await open(size, viewport, chats);
+const windows = async (size, viewport, chats, target) => {
+  const { context, page } = await open(size, viewport, chats, target);
   try {
     // Start from no VS Code tabs: closed in this window.
     for (const tab of await headerTabs(page)) {
@@ -473,13 +469,13 @@ const windows = async (size, viewport, chats) => {
   } catch (error) {
     check(`[${size}] row 10 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {
-    await context.close();
+    await context.close().catch(() => undefined);
   }
 };
 
 /** Row 11: the page beside the rail panel keeps the editor's status in sight; no minimap when narrow. */
-const narrow = async (size, viewport, chats) => {
-  const { context, page } = await open(size, viewport, chats);
+const narrow = async (size, viewport, chats, target) => {
+  const { context, page } = await open(size, viewport, chats, target);
   try {
     await openFile(page, 'src/app.ts');
     await wait(3_000);
@@ -517,13 +513,13 @@ const narrow = async (size, viewport, chats) => {
   } catch (error) {
     check(`[${size}] row 11 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {
-    await context.close();
+    await context.close().catch(() => undefined);
   }
 };
 
 /** Row 12: split groups name their editor; zen mode shows no tab strip. */
-const groups = async (size, viewport, chats) => {
-  const { context, page } = await open(size, viewport, chats);
+const groups = async (size, viewport, chats, target) => {
+  const { context, page } = await open(size, viewport, chats, target);
   try {
     await openFile(page, 'src/util.ts');
     await wait(2_000);
@@ -558,13 +554,13 @@ const groups = async (size, viewport, chats) => {
   } catch (error) {
     check(`[${size}] row 12 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {
-    await context.close();
+    await context.close().catch(() => undefined);
   }
 };
 
 /** Row 13: the rail panel's header names its entry; VS Code's Maximize and Hide Panel aren't in the bottom. */
-const chrome = async (size, viewport, chats) => {
-  const { context, page } = await open(size, viewport, chats);
+const chrome = async (size, viewport, chats, target) => {
+  const { context, page } = await open(size, viewport, chats, target);
   try {
     await explorer(page);
     const header = async () => page.locator('[data-context-zone="right"]').first().evaluate((zone) => {
@@ -591,13 +587,13 @@ const chrome = async (size, viewport, chats) => {
   } catch (error) {
     check(`[${size}] row 13 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {
-    await context.close();
+    await context.close().catch(() => undefined);
   }
 };
 
 /** Row 14: Source Control's count on its rail icon, following the files on disk. */
-const badges = async (size, viewport, chats) => {
-  const { context, page } = await open(size, viewport, chats);
+const badges = async (size, viewport, chats, target) => {
+  const { context, page } = await open(size, viewport, chats, target);
   const badge = async () => (await rail(page)).find((entry) => entry.id === entrySurface('scm'))?.text ?? '';
   // VS Code's own refresh in the rail's Source Control: each part's Git refreshes by itself only while that part has
   // the focus (keeping them all fresh is round 14's bridge, row 9); the badge shows what VS Code's Source Control counts.
@@ -624,7 +620,7 @@ const badges = async (size, viewport, chats) => {
     check(`[${size}] row 14 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   } finally {
     rmSync(join(project, 'split-badge.txt'), { force: true });
-    await context.close();
+    await context.close().catch(() => undefined);
   }
 };
 
@@ -643,11 +639,9 @@ const extensionHostsMb = () => {
 };
 
 /** Row 15: progress while a part starts; the page starts with the rail view; what that costs. */
-const starting = async (size, viewport, chats) => {
-  const server = await chromium.launchServer();
+const starting = async (size, viewport, chats, target, pid) => {
   try {
-    const remote = await chromium.connect(server.wsEndpoint());
-    const { context, page } = await open(size, viewport, chats, remote);
+    const { context, page } = await open(size, viewport, chats, target);
     // No saved tabs for the folder (the rail view would bring them back, which starts the page): the page then starts
     // with the first file, or with the rail view. Closed with the rail view running, which keeps them empty.
     await explorer(page);
@@ -665,7 +659,6 @@ const starting = async (size, viewport, chats) => {
     await until(async () => (await rail(page)).some((entry) => entry.id === entrySurface('explorer')), 60_000);
     await wait(8_000);
     if ((await lit(page)).length > 0 || (await headerTabs(page)).length > 0) throw new Error(`the window didn't start without VS Code: lit ${(await lit(page)).join(' ')}, tabs ${await tabsText(page)}`);
-    const pid = server.process().pid;
     const rendererBefore = renderersMb(pid);
     const hostsBefore = extensionHostsMb();
     await entryButton(page, 'explorer').click();
@@ -709,28 +702,64 @@ const starting = async (size, viewport, chats) => {
     await context.close();
   } catch (error) {
     check(`[${size}] row 15 ran to the end`, false, String(error.message ?? error).split('\n')[0]);
-  } finally {
-    await server.kill().catch(() => undefined);
   }
 };
 
 // ── Run ─────────────────────────────────────────────────────────────────
+
+/** The longest a phase may take; the most its browser's renderers may hold (a run here peaks near 1.5 GB). */
+const PHASE_MAX_MS = 8 * 60_000;
+const RENDERERS_MAX_MB = 4_000;
+
+/**
+ * Each phase in a browser of its own, killed when the phase overruns or its renderers outgrow RENDERERS_MAX_MB: a
+ * frozen renderer answers nothing (the phase's calls then fail as the browser goes) and grows by about a gigabyte a
+ * minute, which would otherwise hold the whole run until its timeout.
+ */
+const inBrowser = async (label, run) => {
+  const server = await chromium.launchServer();
+  const pid = server.process().pid;
+  let stopped = null;
+  const stop = (why) => {
+    if (stopped) return;
+    stopped = why;
+    void server.kill().catch(() => undefined);
+  };
+  const deadline = setTimeout(() => stop(`it ran past ${PHASE_MAX_MS / 60_000} min`), PHASE_MAX_MS);
+  const watch = setInterval(() => {
+    const held = renderersMb(pid);
+    if (held > RENDERERS_MAX_MB) stop(`its renderers held ${held} MB`);
+  }, 5_000);
+  try {
+    await run(await chromium.connect(server.wsEndpoint()), pid);
+  } catch (error) {
+    check(`${label} ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+  } finally {
+    clearTimeout(deadline);
+    clearInterval(watch);
+    if (stopped) check(`${label}: its browser kept answering`, false, `killed: ${stopped}`);
+    await server.kill().catch(() => undefined);
+  }
+};
 
 const runs = (phase) => !only || only.has(phase);
 try {
   const chats = await seed();
   for (const viewport of SIZES) {
     const size = `${viewport.width}x${viewport.height}`;
-    if (runs('freeze')) await freeze(size, viewport, chats, 'key');
-    if (runs('freeze')) await freeze(size, viewport, chats, 'menu');
-    if (runs('sideBars')) await sideBars(size, viewport, chats);
-    if (runs('editors')) await editors(size, viewport, chats);
-    if (runs('windows')) await windows(size, viewport, chats);
-    if (runs('narrow')) await narrow(size, viewport, chats);
-    if (runs('groups')) await groups(size, viewport, chats);
-    if (runs('chrome')) await chrome(size, viewport, chats);
-    if (runs('badges')) await badges(size, viewport, chats);
-    if (runs('starting')) await starting(size, viewport, chats);
+    const phases = [
+      ['freeze', (target, pid) => freeze(size, viewport, chats, 'key', target, pid)],
+      ['freeze', (target, pid) => freeze(size, viewport, chats, 'menu', target, pid)],
+      ['sideBars', (target) => sideBars(size, viewport, chats, target)],
+      ['editors', (target) => editors(size, viewport, chats, target)],
+      ['windows', (target) => windows(size, viewport, chats, target)],
+      ['narrow', (target) => narrow(size, viewport, chats, target)],
+      ['groups', (target) => groups(size, viewport, chats, target)],
+      ['chrome', (target) => chrome(size, viewport, chats, target)],
+      ['badges', (target) => badges(size, viewport, chats, target)],
+      ['starting', (target, pid) => starting(size, viewport, chats, target, pid)],
+    ];
+    for (const [phase, run] of phases) if (runs(phase)) await inBrowser(`[${size}] ${phase}`, run);
   }
 } catch (error) {
   check('the check ran to the end', false, String(error.message ?? error).split('\n')[0]);
