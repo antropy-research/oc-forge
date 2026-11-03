@@ -166,17 +166,25 @@ export const installResourceBridge = (options: ShimOptions): void => {
   }) as typeof fetch;
 
   const blobUrls = new Map<string, Promise<string>>();
+  /** The blob URL of each server URL fetched already, to put in at once. */
+  const ready = new Map<string, string>();
   const blobUrlOf = (url: string): Promise<string> => {
     let promise = blobUrls.get(url);
     if (!promise) {
       promise = answerFor(url).then((answer) => {
         if (!answer || answer.status >= 400) return url;
-        return URL.createObjectURL(new Blob([fromBase64(answer.data)], { type: answer.contentType }));
+        const blob = URL.createObjectURL(new Blob([fromBase64(answer.data)], { type: answer.contentType }));
+        ready.set(url, blob);
+        return blob;
       }).catch(() => url);
       blobUrls.set(url, promise);
     }
     return promise;
   };
+  // What stands in for a server URL until its blob is there: the browser never asks the server itself, which the
+  // frame's Content Security Policy refuses (a console error, and a check's), only to show the blob a moment later.
+  const PENDING = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  const shownNow = (url: string): string => ready.get(url) ?? PENDING;
   const URL_IN_CSS = /url\(\s*(['"]?)((?:\\.|[^'"\\)])+)\1\s*\)/g;
   // VS Code writes URLs into CSS escaped (`asCSSUrl`): `http\:\/\/host\:8000\/…`.
   const cssUnescape = (value: string): string => value.replace(/\\([0-9a-fA-F]{1,6}\s?|[\s\S])/g, (_whole, escaped: string) => (/^[0-9a-fA-F]/.test(escaped) && escaped.trim().length > 0 && /^[0-9a-fA-F]+\s?$/.test(escaped) ? String.fromCodePoint(Number.parseInt(escaped.trim(), 16)) : escaped));
@@ -190,25 +198,39 @@ export const installResourceBridge = (options: ShimOptions): void => {
       return replacements.has(url) && replacements.get(url) !== url ? `url("${replacements.get(url)}")` : whole;
     });
   };
+  /** The CSS as it can show now: each server URL its blob's if fetched already, else the stand-in. */
+  const cssNow = (text: string): string => text.replace(URL_IN_CSS, (whole, _quote: string, raw: string) => {
+    const url = cssUnescape(raw);
+    return bridged(url) ? `url("${shownNow(url)}")` : whole;
+  });
 
+  // Each is changed at once (the observer runs before the browser paints or fetches what was put in), then again
+  // once the blobs are there, unless something else changed it meanwhile.
   const fixImage = (image: HTMLImageElement): void => {
     const src = image.getAttribute('src');
-    if (src && bridged(src)) void blobUrlOf(src).then((blob) => {
-      if (image.getAttribute('src') === src && blob !== src) image.setAttribute('src', blob);
+    if (!src || !bridged(src)) return;
+    const now = shownNow(src);
+    image.setAttribute('src', now);
+    if (now === PENDING) void blobUrlOf(src).then((blob) => {
+      if (image.getAttribute('src') === now && blob !== src) image.setAttribute('src', blob);
     });
   };
   const fixStyleElement = (style: HTMLStyleElement): void => {
     const text = style.textContent ?? '';
     if (!cssUrls(text).length) return;
-    void rewriteCss(text).then((next) => {
-      if (style.textContent === text && next !== text) style.textContent = next;
+    const now = cssNow(text);
+    style.textContent = now;
+    if (now.includes(PENDING)) void rewriteCss(text).then((next) => {
+      if (style.textContent === now && next !== text) style.textContent = next;
     });
   };
   const fixInlineStyle = (element: HTMLElement): void => {
     const text = element.getAttribute('style') ?? '';
     if (!cssUrls(text).length) return;
-    void rewriteCss(text).then((next) => {
-      if (element.getAttribute('style') === text && next !== text) element.setAttribute('style', next);
+    const now = cssNow(text);
+    element.setAttribute('style', now);
+    if (now.includes(PENDING)) void rewriteCss(text).then((next) => {
+      if (element.getAttribute('style') === now && next !== text) element.setAttribute('style', next);
     });
   };
   const visit = (node: Node): void => {
@@ -237,8 +259,10 @@ export const installResourceBridge = (options: ShimOptions): void => {
   // Rules added through the CSSOM (VS Code's createCSSRule) never show in the DOM.
   const insertRule = CSSStyleSheet.prototype.insertRule;
   CSSStyleSheet.prototype.insertRule = function (this: CSSStyleSheet, rule: string, index?: number): number {
-    const at = insertRule.call(this, rule, index);
-    if (cssUrls(rule).length) {
+    if (!cssUrls(rule).length) return insertRule.call(this, rule, index);
+    const shown = cssNow(rule);
+    const at = insertRule.call(this, shown, index);
+    if (shown.includes(PENDING)) {
       const inserted = this.cssRules[at];
       void rewriteCss(rule).then((next) => {
         const now = [...this.cssRules].indexOf(inserted as CSSRule);
