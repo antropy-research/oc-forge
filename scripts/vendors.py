@@ -49,7 +49,7 @@ def main() -> None:
         if path.exists() and subprocess.check_output(["git", "-C", str(path), "status", "--porcelain"], text=True).strip():
             raise SystemExit(f"{name}: submodule must be pristine before sync")
         if "branch" in pin:
-            # A repository the update cannot read yet (e.g. private, no token) is skipped
+            # A repository a fresh clone cannot read (private) is skipped
             # rather than failing the sync of every other vendor.
             if commit := branch_commit(name, pin):
                 candidates[name] = (pin["branch"], commit)
@@ -105,12 +105,16 @@ def tag_commit(repository: str, tag: str) -> str:
 
 
 def branch_commit(name: str, pin: dict) -> Optional[str]:
+    # Read as a fresh clone of this public repository reads it (CI's, anyone's): anonymously, without this machine's
+    # credential helpers or its `insteadOf` rewrites to SSH. A repository that needs credentials is skipped, so it
+    # never becomes a submodule a clone can't fetch.
     listing = subprocess.run(
-        ["git", "ls-remote", pin["repository"], f"refs/heads/{pin['branch']}"],
-        capture_output=True, text=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        ["git", "-c", "credential.helper=", "ls-remote", pin["repository"], f"refs/heads/{pin['branch']}"],
+        capture_output=True, text=True, cwd="/",
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
     )
     if listing.returncode != 0:
-        print(f"{name}: cannot read {pin['repository']}; skipped", file=sys.stderr)
+        print(f"{name}: cannot read {pin['repository']} without credentials; skipped", file=sys.stderr)
         return None
     if not listing.stdout.strip():
         raise SystemExit(f"{name}: branch {pin['branch']} not found in {pin['repository']}")

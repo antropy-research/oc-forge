@@ -24,10 +24,12 @@ export const links: Adapter = {
     ],
     "packages/ui/src/hooks/useRouter.ts": [
       insertAfter("import { useDirectoryStore } from '@/stores/useDirectoryStore';", "\nimport { applyOcForgeRoute } from '@/oc-forge/routes';"),
+      // The last step of each route the router applies (load, back/forward, a notification's link). The page opens
+      // once the app has chosen its chat (routes.ts), and the address bar names it again then.
       replace(
-        "          navigateToDiff(route.diffFile);\n        }\n      } finally {",
-        "          navigateToDiff(route.diffFile);\n        }\n\n        // 5. oc-forge: an extension page deep link (`?extension=<id>&route=<route>`).\n" +
-          "        applyOcForgeRoute();\n      } finally {",
+        "        navigateToDiff(route.diffFile);\n      }\n    },\n    [setSettingsDialogOpen, setSettingsPage, navigateToDiff]",
+        "        navigateToDiff(route.diffFile);\n      }\n\n      // 5. oc-forge: an extension page deep link (`?extension=<id>&route=<route>`).\n" +
+          "      applyOcForgeRoute();\n    },\n    [setSettingsDialogOpen, setSettingsPage, navigateToDiff]",
       ),
     ],
   },
