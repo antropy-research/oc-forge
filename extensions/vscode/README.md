@@ -102,7 +102,7 @@ otherwise brings the panel back whenever the editor area hides). From there the 
 VS Code's service interfaces only (`workbench/vscode.ts`: the editor, editor groups, layout, views, pane composite,
 configuration, remote agent and file services). Unlike the others these patches may be missing: the prepared
 workbench records which (`ready.json`), and a release that moved them runs as the whole workbench per frame.
-They apply once each to VS Code 1.140.0, 1.143.1 and 1.144.0.
+They apply once each to VS Code 1.140.0, 1.143.1, 1.144.0 and 1.145.0.
 
 **Between frames.** Frames reach each other only through OpenChamber, plus the service for what doesn't fit a tab
 message:
@@ -616,17 +616,19 @@ After the VS Code pin moves, refresh `service/web-files.json` from a server of t
 before it, and run the tests against the new one (every patch, the surface patches too, must apply once).
 Microsoft's web server of the pinned version has the same compiled workbench. The list is both releases' files, so
 a server one release behind the pin, prepared over HTTP, still gets all of its own (a listed file its release lacks
-answers 404 and is skipped); it is now 1.144.0's 310 files and 1.143.1's 397, 401 in all, which hold all of
-1.140.0's too. A copy prepared over HTTP records the list it came from and is prepared again from a newer one, so
-it gains the files added since; a copy made from the install on the same machine has them all already:
+answers 404 and is skipped); it is now 1.145.0's 310 files and 1.144.0's, the same 310 (until 2026-11-04, with
+1.143.1's, 401 in all). A copy prepared over HTTP records the list it came from and is prepared again from a newer
+one, so it gains the files added since; a copy made from the install on the same machine has them all already.
+`mise run vendors:update`'s checks run the tests without a server, which skips the real-install test: after it
+moves VS Code, do this too:
 
 ```sh
-for v in 1.144.0 1.143.1; do
+for v in 1.145.0 1.144.0; do
   mkdir -p /tmp/vscode-server-$v
   curl -fsSL https://update.code.visualstudio.com/$v/server-linux-x64-web/stable | tar -xz -C /tmp/vscode-server-$v --strip-components=1
 done
-bun run web-files /tmp/vscode-server-1.144.0 /tmp/vscode-server-1.143.1
-VSCODE_SERVER_DIR=/tmp/vscode-server-1.144.0 bun test tests/
+bun run web-files /tmp/vscode-server-1.145.0 /tmp/vscode-server-1.144.0
+VSCODE_SERVER_DIR=/tmp/vscode-server-1.145.0 bun test tests/
 ```
 
 ## Install

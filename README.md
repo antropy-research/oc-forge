@@ -111,7 +111,12 @@ head, and stops at the first step that fails, committing nothing:
 3. `ci`: `mise run ci`;
 4. `openchamber`: `scripts/build-openchamber.py --check-only`, every OpenChamber
    adapter still applies and the result type-checks;
-5. `commit`: "chore: update vendor releases", the pins alone.
+5. `vscode`, only when VS Code moved: against Microsoft's build of the new
+   release (downloaded once into `build/vendors-update/`), the VS Code
+   extension's file list (`service/web-files.json`) holds every file of it, and
+   every one of its workbench patches applies once (`tests/patch.test.ts`,
+   which `mise run ci` skips without a server);
+6. `commit`: "chore: update vendor releases", the pins alone.
 
 Each step's output is also in `build/vendors-update/<step>.log`. When a new
 release breaks an adapter or a test, the new pins stay staged: fix the adapters

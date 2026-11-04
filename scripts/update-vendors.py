@@ -8,7 +8,11 @@ left. Its steps, in order, each one's output also in build/vendors-update/<step>
 2. setup: with the new pins staged, `mise run setup` (submodules at them, locked dependencies);
 3. ci: `mise run ci` (the pins verified, upstream's checks and lifecycle tests, our adapter tests, the extensions);
 4. openchamber: scripts/build-openchamber.py --check-only (every OpenChamber adapter still applies, and type-checks);
-5. commit: "chore: update vendor releases", the pins alone, on the current branch.
+5. vscode (only when VS Code moved): against Microsoft's build of the new release (downloaded once into
+   build/vendors-update/), the VS Code extension lists every file of it a server reached over HTTP is asked for
+   (service/web-files.json) and every one of its workbench patches applies once (tests/patch.test.ts), which
+   `mise run ci` skips without a server;
+6. commit: "chore: update vendor releases", the pins alone, on the current branch.
 
 A step that fails stops the run and commits nothing. The new pins stay staged, so the adapters and tests can be fixed
 against them (in commits of their own); run it again to check and commit, or with --abort to put the branch's pins
@@ -115,6 +119,21 @@ def abort() -> None:
     print(f"Pins back at HEAD's: {', '.join(f'{name} {version}' for name, version in versions(json.loads(git('show', 'HEAD:vendors.json'))).items())}")
 
 
+VSCODE_SERVER_URL = "https://update.code.visualstudio.com/{version}/server-linux-x64-web/stable"
+
+
+def check_vscode_release(version: str, timeout_minutes: int) -> None:
+    """The VS Code extension against Microsoft's build of the release VS Code moved to: its file list and its patches."""
+    server = LOGS / f"vscode-server-{version}"
+    if not (server / "out").is_dir():
+        url = VSCODE_SERVER_URL.format(version=version)
+        partial = server.with_name(server.name + ".partial")
+        script = f'rm -rf "{partial}" && mkdir -p "{partial}" && curl -fsSL "{url}" | tar -xz -C "{partial}" --strip-components=1 && mv "{partial}" "{server}"'
+        step("vscode-download", ["sh", "-c", script], timeout_minutes)
+    checks = f'cd extensions/vscode && bun scripts/web-files.ts --check "{server}" && VSCODE_SERVER_DIR="{server}" bun test tests/patch.test.ts'
+    step("vscode", ["sh", "-c", checks], timeout_minutes)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--abort", action="store_true", help="put this branch's pins back (HEAD's), ending an unfinished run")
@@ -145,9 +164,12 @@ def main() -> None:
     step("setup", ["mise", "run", "setup"], args.timeout_minutes)
     step("ci", ["mise", "run", "ci"], args.timeout_minutes)
     step("openchamber", [sys.executable, "scripts/build-openchamber.py", "--check-only"], args.timeout_minutes)
+    if after.get("vscode") and before.get("vscode") != after["vscode"]:
+        check_vscode_release(after["vscode"], args.timeout_minutes)
 
     moves = [f"- {name}: {before.get(name, 'new')} -> {version}" for name, version in after.items() if before.get(name) != version]
-    message = "chore: update vendor releases\n\n" + "\n".join(moves or ["- the pinned commits"]) + "\n\nBy `mise run vendors:update`: setup, `mise run ci` and the OpenChamber adapters passed.\n"
+    checked = "setup, `mise run ci`, the OpenChamber adapters" + (" and the VS Code extension on the new VS Code" if before.get("vscode") != after.get("vscode") else "")
+    message = "chore: update vendor releases\n\n" + "\n".join(moves or ["- the pinned commits"]) + f"\n\nBy `mise run vendors:update`: {checked} passed.\n"
     trailers = [part for trailer in args.trailer for part in ("--trailer", trailer)]
     git("commit", "-q", "-m", message, *trailers, "--", *PIN_PATHS)
     print(f"\nCommitted {git('rev-parse', '--short', 'HEAD').strip()} on {git('rev-parse', '--abbrev-ref', 'HEAD').strip()}:\n" + "\n".join(moves))
