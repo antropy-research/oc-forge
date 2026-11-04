@@ -3,6 +3,7 @@
 Run it on the branch whose pins you update (planner), in a checkout with no changes but the pins an earlier run of it
 left. Its steps, in order, each one's output also in build/vendors-update/<step>.log:
 
+0. init (a fresh checkout only): the submodules cloned, shallow;
 1. sync: scripts/vendors.py moves vendors.json, upstream.json and the submodules to the latest releases;
 2. setup: with the new pins staged, `mise run setup` (submodules at them, locked dependencies);
 3. ci: `mise run ci` (the pins verified, upstream's checks and lifecycle tests, our adapter tests, the extensions);
@@ -110,6 +111,10 @@ def main() -> None:
     if others:
         raise SystemExit("Only vendor pins may be uncommitted; commit or stash these first:\n" + "\n".join(others))
 
+    # The sync fetches and checks out inside each submodule: in a fresh checkout's empty submodule folder, those git
+    # commands would act on this repository instead. Missing ones are cloned first, shallow, as CI checks them out.
+    if any(line.startswith("-") for line in git("submodule", "status").splitlines()):
+        step("init", ["git", "submodule", "update", "--init", "--recursive", "--depth", "1"], args.timeout_minutes)
     step("sync", [sys.executable, "scripts/vendors.py", "sync"], args.timeout_minutes)
     before = versions(json.loads(git("show", "HEAD:vendors.json")))
     after = versions(json.loads((ROOT / "vendors.json").read_text()))
