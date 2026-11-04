@@ -331,7 +331,7 @@ Every edit names exact upstream text that must occur exactly once
 (`apply.ts`); otherwise the build stops with the adapter, the file and the
 anchor. The Vite plugin also fails the build if a targeted module never loaded
 (upstream stopped using it); `lib/guests/types.ts` is exempt, being imported
-only as types. 70 edits in 22 files (33 `insertAfter`, 33 `replace`, 4
+only as types. 72 edits in 23 files (34 `insertAfter`, 34 `replace`, 4
 `insertBefore`); `rail.open` and `window.id` added none, and neither did rail
 badges (the `replace` that lights a rail entry in `ContextPanelRail.tsx` now
 starts six lines higher, at the badge's count) or the rail panel's title
@@ -343,7 +343,7 @@ became a `replace`). Three in `TitlebarLeftControls.tsx`: its title bar shows
 a "New session" of its own while a page hides the header tabs, and counted an
 extension page on its tabs as hiding them; it showed a second one there, and
 its room arriving as such a tab was chosen narrowed the strip after the strip
-had scrolled that tab into view. OpenCode 2.2.5 took two away (see Fixes).
+had scrolled that tab into view.
 
 OpenChamber is compiled with the React Compiler, which memoizes on the values a
 render reads: host code that renders passes the oc-forge state it read as an
@@ -427,15 +427,16 @@ instance to list the chats, restarts the instance (`stack.mjs restart
 
 ## Fixes
 
-Host bugs an extension runs into are worked around in the adapted build until
-upstream fixes them, in an adapter of their own. None is needed with the
-current pins.
+Host bugs an extension runs into, worked around in the adapted build until
+upstream fixes them (`edits/fixes.ts`):
 
-- **A first slash command in a new folder** (OpenCode 2.2.1; fixed in 2.2.5, and the `fixes` adapter went with the 2.2.5 pin on 2026-11-04).
-  - OpenCode 2.2.1 loaded a folder's commands on the first request for them, and answered that request with none. A folder that has loaded them always lists its built-ins (`init`, `review`).
-  - OpenChamber looks a command up once, right before it sends. So `/name args` sent first in a folder whose commands nobody had asked for, such as a worktree just made, went out as a plain prompt, and the chat ran on the default agent. This is what every Planner assignment to a chosen agent or preset does: it starts the chat in a new worktree with the assignee's command.
-  - The adapter (`edits/fixes.ts`, `host/commands.ts`) had the live lookup ask again while the answer was empty, every 250 ms for up to 3 s.
-  - Measured on 2026-11-04 with a scratch server in a new git folder, asked as OpenChamber's scoped client asks (`GET /api/command`, `x-opencode-directory`): OpenCode 2.2.5's first answer had the built-ins in four runs out of four (about 210 ms); 2.2.1's, in the same probe, was still empty (45 ms), the next one listing them.
+- **A first slash command in a new folder** (OpenCode 2.2 with OpenChamber 2.5.2; still OpenCode 2.2.5 with OpenChamber 2.6.1).
+  - OpenCode 2.2 loads a folder's commands on the first request for them, and answers that request with none. A folder that has loaded them always lists its built-ins (`init`, `review`).
+  - 2.2.5 answers a quiet server's new folder with its commands at once, but a folder asked while it reloads its global commands still gets none: right after a file appears in `~/.config/opencode/command/`, which is what the Planner writes before an assignment's chat starts. Measured on 2026-11-04 (`/tmp/opencode/v260/tools/new-command-probe.sh`): a folder never asked gets 0 commands at once and all of them, the new one included, 0.3 s later; 2.2.1 the same. That day the adapter was dropped on a probe of a quiet server only, and the Planner's `sunsama.mjs` failed 4 checks on the dev container (the assignment ran on the default agent) until it came back.
+  - OpenChamber looks a command up once, right before it sends. So `/name args` sent first in a folder whose commands nobody had asked for, such as a worktree just made, went out as a plain prompt, and the chat ran on the default agent.
+  - This is what every Planner assignment to a chosen agent or preset does: it starts the chat in a new worktree with the assignee's command.
+  - The live lookup now asks again while the answer is empty, every 250 ms for up to 3 s (`host/commands.ts`).
+  - Measured on 2026-10-28 for a worktree OpenChamber had just made: the first answer was empty (18 ms), the next one had the commands (272 ms).
 
 ## Limits and choices
 
@@ -453,7 +454,9 @@ current pins.
 - **No persistence** of header tabs and routes; rail entries return with the
   next poll.
 - **Versions.** Written against 2.5.2 and run end to end there. On 2.5.3, the
-  pin since 2026-10-29, every edit applies unchanged, the adapted tree
-  type-checks, and the end-to-end check passes against the stock 2.5.3 release
-  (108/108). When CI moves the pin, `--check-only` on the new tree says which
-  anchors moved.
+  pin from 2026-10-29, every edit applied unchanged. On 2.6.1, the pin since
+  2026-11-04, two anchors had moved (`tabs`, `links`) and 2.6's strip and title
+  bar took six more edits; the adapted tree type-checks and the end-to-end check
+  passes against the stock 2.6.1 release (201/201). When `mise run
+  vendors:update` moves the pin, its `ci` and `openchamber` steps say which
+  anchors moved; the end-to-end check says what moved around them.
