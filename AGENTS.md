@@ -1,6 +1,6 @@
 0. 容器里要装好 OpenCode、OpenChamber 和 VS Code Server(Vendor对应的版编译之后安装)。
 1. 整个deliver的结果应该尽可能少的侵入到原来的code, 尽量复用一些比较稳定的接口，UX要顺滑，UI的风格要统一。
-3. Agent 本身不能改 `./vendors` 里的任何字节，它只由 CI 更新。如果CI有问题那么应该去修改CI。
+3. Agent 本身不能改 `./vendors` 里的任何字节，它只由 `mise run vendors:update` 更新：这个脚本手动运行，把 vendor 升到最新的正式 release，跑完全部检查才提交 pin。检查不过就去改 adapters、测试或者这个脚本，不改 vendor。
 4. 主要的工作都在 `./extensions` 里，这里的插件要装在 OpenChamber 最新的 release 上用。这些插件都要做到：
    - 不破坏 OpenChamber 原有的功能。
    - 在 OpenChamber 里，切换 tab 这类快捷键先由 OpenChamber 处理，不能被 Chrome 拿走：按下去切换的是 OpenChamber 的 tab，不是 Chrome 的标签页。焦点在插件里的时候，比如正在 VS Code 里面那么快捷键就应该被VS Code接管。有些键 Chrome 在普通标签页里留给自己，网页拿不到（比如 Ctrl+Tab、Cmd+Option+←/→、Cmd+W），这些键只要求在 OpenChamber 装成 app 窗口时做到。
