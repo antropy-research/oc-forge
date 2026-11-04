@@ -159,10 +159,10 @@ const shot = async (page, name) => page.screenshot({ path: join(out, `${name}.pn
 const headerTab = (page, id) => page.locator(`[data-oc-forge-tab="${TEST}:${id}"]`);
 const activeHeaderTab = (page) => page.$$eval('[role="tablist"] [role="tab"][aria-selected="true"]', (tabs) => tabs.map((tab) => tab.textContent?.trim() ?? ''));
 // An extension's page from the sidebar header: its own button while the pages fit there inline (a click on a pressed
-// one closes the page), else the "Extension pages" menu.
+// one closes the page), else the "Extension pages" menu (2.5), or the header's "More" menu, which holds every page (2.6).
 const openExtensionPage = async (page, title, timeout = 60_000) => {
   const inline = page.locator(`button[aria-label="${title}"][aria-pressed]:not([data-context-surface])`).first();
-  const menu = page.getByRole('button', { name: 'Extension pages' });
+  const menu = page.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first();
   await inline.or(menu).first().waitFor({ timeout });
   if (await inline.isVisible().catch(() => false)) {
     if ((await inline.getAttribute('aria-pressed')) !== 'true') await inline.click();
@@ -391,6 +391,35 @@ const apiChecks = async (context, page, base, size, seeded, request) => {
     await until(async () => await page.locator(`[data-oc-forge-page="${TEST}"]`).count() === 0, 20_000));
   await page.locator('[role="tablist"] [role="tab"]', { hasText: CHATS[2] }).click();
   check(`[${size}] R2 session tabs still switch chats`, await until(() => page.url().includes(seeded.sessions[2])));
+  // OpenChamber 2.6 shows an open new session's draft as a tab of its own, selected. While an extension tab is selected
+  // it is not, and a click on it goes back to the draft. The desktop app's Cmd/Ctrl+W, which its window menu sends as
+  // `openchamber:close-tab`, closes the selected extension tab, not a chat behind it (the release's closer would move
+  // to the last chat and leave the tab).
+  const draftTab = page.locator('[role="tablist"] [role="tab"]', { hasText: 'New session' });
+  await page.locator('[role="tablist"] > button[aria-label="New session"]').click();
+  await until(async () => (await draftTab.getAttribute('aria-selected').catch(() => null)) === 'true');
+  await right.locator('#open-a').click();
+  await until(async () => await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+  const selectedOverDraft = await activeHeaderTab(page);
+  check(`[${size}] R2 2.6's new-session draft tab is not selected while an extension tab is`,
+    selectedOverDraft.length === 1 && selectedOverDraft[0] === 'Tab A' && (await draftTab.getAttribute('aria-selected')) === 'false', selectedOverDraft.join(' | '));
+  // 2.6's title bar has a "New session" of its own only while a page hides the header tabs; a page on its tabs keeps
+  // them, and their "+".
+  const titlebarNewSession = await page.locator('[data-titlebar-left-controls] button').evaluateAll((buttons) => buttons
+    .filter((button) => `${button.getAttribute('aria-label') ?? ''} ${button.textContent ?? ''}`.includes('New session')).length);
+  check(`[${size}] R2 with the page on its tab the strip keeps its "+", and the title bar shows no second "New session"`,
+    titlebarNewSession === 0 && await page.locator('[role="tablist"] > button[aria-label="New session"]').count() === 1, `${titlebarNewSession} in the title bar`);
+  await shot(page, `${size}-r2-draft-and-tab`);
+  await draftTab.click();
+  check(`[${size}] R2 …and a click on the draft's tab goes back to the draft`,
+    await until(async () => !await pageShown(page) && (await draftTab.getAttribute('aria-selected')) === 'true'));
+  await headerTab(page, 'a').click();
+  await until(async () => await pageShown(page) && (await text(pageFrame(page), '#tab')) === 'a');
+  // The close target the user last worked in wins (closeTabTarget.ts): a press on the header, outside any zone.
+  await headerTab(page, 'a').click();
+  await page.evaluate(() => window.dispatchEvent(new Event('openchamber:close-tab')));
+  check(`[${size}] R2 the desktop app's Cmd/Ctrl+W closes the selected extension tab, back to the draft`,
+    await until(async () => await headerTab(page, 'a').count() === 0 && !await pageShown(page) && (await draftTab.getAttribute('aria-selected').catch(() => null)) === 'true'));
 
   // R4: keys pressed in a frame.
   await right.locator('#open-a').click();
@@ -548,12 +577,20 @@ const tabBox = (page, id) => page.evaluate((selector) => {
   if (!tab || !scroller) return null;
   const outer = scroller.getBoundingClientRect();
   const inner = tab.getBoundingClientRect();
+  const span = (rect) => `${Math.round(rect.left)}..${Math.round(rect.right)}`;
   return {
     inView: inner.left >= outer.left - 1 && inner.right <= outer.right + 1,
     scrolled: Math.round(scroller.scrollLeft),
     overflows: scroller.scrollWidth > scroller.clientWidth + 1,
     fade: Boolean(scroller.style.maskImage || scroller.style.webkitMaskImage),
     selected: tab.querySelector('[role="tab"]')?.getAttribute('aria-selected') === 'true',
+    // Where they are, to tell a strip that did not scroll far enough from one that got narrower.
+    tab: span(inner),
+    scroller: `${span(outer)} of ${Math.round(scroller.scrollWidth)}`,
+    strip: [...(scroller.parentElement?.children ?? [])].map((child) => `${child.getAttribute('aria-label') ?? child.className.split(' ')[0] ?? child.tagName} ${span(child.getBoundingClientRect())}`).join(' | '),
+    header: [...(scroller.closest('header')?.querySelectorAll('button') ?? [])]
+      .filter((button) => !scroller.parentElement?.contains(button) && button.getBoundingClientRect().width > 0)
+      .map((button) => `${button.getAttribute('aria-label') ?? button.textContent?.trim().slice(0, 24)} ${span(button.getBoundingClientRect())}`).join(' | '),
   };
 }, `[data-oc-forge-tab="${TEST}:${id}"]`);
 
@@ -625,7 +662,12 @@ const manyTabsRound = async (browser, base, viewport, seeded, request) => {
     check(`[${size}] R2 a title past the host's limit is refused at once, saying why`, longMs < 1_000 && refusedLong?.endsWith('a title is 1–512 characters.'), refusedLong ?? '');
     await right.locator('#open-full-title').click();
     await until(async () => (await result())?.startsWith('title 512'), 15_000);
-    const fullTitle = await page.locator(`[data-oc-forge-tab="${TEST}:full-title"] [role="tab"]`).getAttribute('title').catch(() => null);
+    // OpenChamber's own tooltip, as on its session tabs (2.6), not the browser's title: shown while the tab is hovered.
+    await page.locator(`[data-oc-forge-tab="${TEST}:full-title"] [role="tab"]`).hover().catch(() => undefined);
+    const fullTitle = await until(async () => {
+      const shown = await page.locator('[data-oc-forge-tab-tooltip]').allTextContents();
+      return shown.find((label) => label.startsWith('F')) ?? null;
+    }, 5_000);
     check(`[${size}] R2 a title of 512 (a file's whole name and more) is taken, all of it in the tab's tooltip`,
       (await result())?.startsWith('title 512: opened') && fullTitle?.startsWith(`${'F'.repeat(508)} end`), `${await result()}; tooltip ${fullTitle?.length ?? 0} characters; ${status}`);
     await page.locator(`[data-oc-forge-tab="${TEST}:full-title"]`).hover();
