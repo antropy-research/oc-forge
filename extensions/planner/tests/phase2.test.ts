@@ -31,7 +31,7 @@ describe('undo', () => {
       [{ type: 'task.moved', taskId: 'a', placement: { kind: 'backlog', bucket: 'someday' }, position: 5 }],
       [{ type: 'task.deleted', taskId: 'b' }],
       [{ type: 'task.completed', taskId: 'c', on: '2026-10-24' }],
-      [{ type: 'task.updated', taskId: 'a', patch: { title: 'A2', priority: 'high', subtasks: [{ id: 's', title: 'step', done: false }] } }],
+      [{ type: 'task.updated', taskId: 'a', patch: { title: 'A2', priority: 'high' } }, { type: 'subtask.added', taskId: 'a', subtask: { id: 's', title: 'step', done: false } }],
       [{ type: 'task.archived', taskId: 'c' }, { type: 'task.moved', taskId: 'b', placement: { kind: 'day', date: '2026-10-25' }, position: 1 }],
     ];
     for (const batch of batches) {

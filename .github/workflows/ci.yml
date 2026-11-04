@@ -29,3 +29,20 @@ jobs:
         run: mise run setup
       - name: Run local-compatible CI tasks
         run: mise run ci
+
+  openchamber:
+    # The OpenChamber adapters still apply to the pinned release, and the
+    # adapted web package builds, type-checks and packs (scripts/build-openchamber.py).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check out the pinned OpenChamber only
+        run: git submodule update --init --depth=1 vendors/openchamber
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.9.18
+      - name: Build OpenChamber with the oc-forge adapters
+        run: mise run build:openchamber

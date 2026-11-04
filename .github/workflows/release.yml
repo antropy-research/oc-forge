@@ -116,3 +116,11 @@ jobs:
             --target "${{ needs.plan.outputs.sha }}" \
             --title "${{ needs.plan.outputs.tag }}" \
             --notes-file notes.md
+      # The repository keeps only dev, main and planner. The sync's pin commit is on main now, so its staging branch
+      # goes, but only while it still points at this commit: a newer sync's commit stays.
+      - name: Delete the sync's staging branch
+        if: inputs.promote
+        run: |
+          if [ "$(git ls-remote origin refs/heads/upstream-sync | cut -f1)" = "${{ needs.plan.outputs.sha }}" ]; then
+            git push origin --delete upstream-sync
+          fi

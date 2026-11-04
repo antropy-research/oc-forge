@@ -3,28 +3,43 @@
 Patched, jointly pinned releases of OpenCode, OpenChamber, Orca, and VS Code.
 
 The `vendors/` submodules are pinned to official stable release git tags in
-`vendors.json` and are **never modified**. Fixes live in `adapters/` and are
-applied in memory while the OpenCode build runs.
+`vendors.json` and are **never modified**. Only upstream sync (CI) changes
+`vendors/`: a vendor newly listed in `vendors.json` becomes a submodule on its
+next run. Fixes live in `adapters/` and are applied in memory while the OpenCode
+build and the OpenChamber web build run.
 
 OpenCode V2 uses npm `@opencode/cli`'s `latest` version and its matching git tag;
 GitHub's latest release still tracks V1. OpenChamber, Orca, and VS Code use GitHub's latest
-non-draft, non-prerelease desktop release. Current binary builds cover OpenCode;
-OpenChamber, Orca, and VS Code are source-pinned for future joint packaging.
+non-draft, non-prerelease desktop release. dawn-mac-antropy has no releases, so it
+follows the head of its `main` branch; it is private, and sync skips it until CI can
+read it. Current binary builds cover OpenCode; OpenChamber, Orca, VS Code, and
+dawn-mac-antropy are source-pinned for future joint packaging.
 
 ## Adapters
 
-| Adapter | Change |
-|---|---|
-| `location-ttl` | Location inactivity eviction default 60 minutes → **24 hours**, so long silent tool calls (e.g. waiting on `codex exec`) are no longer interrupted after an hour. Override at runtime with `OPENCODE_LOCATION_TTL`, e.g. `90 minutes` or `7 days`. |
+| Vendor | Adapter | Change |
+|---|---|---|
+| OpenCode | `location-ttl` | Location inactivity eviction default 60 minutes → **24 hours**, so long silent tool calls (e.g. waiting on `codex exec`) are no longer interrupted after an hour. Override at runtime with `OPENCODE_LOCATION_TTL`, e.g. `90 minutes` or `7 days`. |
+| OpenChamber | `rail` | An extension's service lists **rail entries**: each its own rail icon with its own highlight, opening the extension's panel on that entry (or, with a zone, a panel of its own); they come and go at runtime. |
+| OpenChamber | `tabs` | Extensions open **tabs in the header**, after the session tabs; a tab shows the extension's page, kept mounted, and OpenChamber's tab shortcuts cover them. |
+| OpenChamber | `core` | The `oc-forge` channel for extension frames: **default zones** (`bottom`) for a panel or rail entry, **key forwarding** of OpenChamber's navigation shortcuts from frames, the `ocForge` manifest block in the catalog, the main layout's host. |
+| OpenChamber | `links` | `?extension=<id>&route=<route>` **deep links** to extension pages, and link prefixes for real `<a href>` (Cmd+click opens a browser tab). |
+
+The OpenChamber adapters are a small, versioned extension API with feature
+detection: the contract and the client module extensions bundle are in
+[`adapters/openchamber/README.md`](adapters/openchamber/README.md). With no
+extension using them, OpenChamber looks and behaves as the release.
 
 ## Layout
 
 | Folder | Contains |
 |---|---|
-| `vendors/` | Pristine OpenCode, OpenChamber, Orca, and VS Code release submodules. |
-| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/`, `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added. |
-| `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `upstream.py`, `verify.py`. |
-| `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`. |
+| `vendors/` | Pristine OpenCode, OpenChamber, Orca, and VS Code release submodules; `dawn-mac-antropy` is listed to follow its `main` branch and becomes a submodule once upstream sync can read it (a private repository CI cannot read yet is skipped). |
+| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/` (`edits/` to upstream files, the new `host/` UI and `server/` modules they call, `vite-plugin.ts`, and `client/`, the module extensions bundle), `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added.; `dawn-mac-antropy/` is kept empty with `.gitkeep` until patches are added. |
+| `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `build-openchamber.py` (OpenChamber's web package with its adapters), `upstream.py`, `verify.py`. |
+| `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`; `e2e/openchamber-adapters/` runs the OpenChamber adapters against the release in a browser, with a scratch extension. |
+| `extensions/` | OpenChamber extensions, installed on the latest OpenChamber release: `planner/` (Sunsama-style planning with Linear, GitHub, Google Calendar, Google Tasks, Gmail and agents) and `vscode/` (the compiled workbench of your own VS Code Server, rendered in OpenChamber's panel and page). Both are checked by `mise run test:extensions` in CI. |
+| `containers/` | `openchamber-dev/`: OpenChamber, OpenCode and VS Code Server, built from `vendors/` at their pins, and the GitHub CLI, for developing the extensions. |
 
 How it works:
 
@@ -41,6 +56,15 @@ How it works:
 
 To add an OpenCode adapter: create `adapters/opencode/<name>.ts` exporting an `Adapter`, register
 it in `adapters/opencode/index.ts`, and add a test in `tests/` that fails without it.
+
+OpenChamber's web package is built by Vite, so its adapters are a Vite plugin
+added to OpenChamber's own config: `scripts/build-openchamber.py` copies the
+vendor's tracked files to `build/openchamber/<version>/`, the plugin rewrites the
+UI sources there as they load, the server sources (which ship unbuilt) are
+adapted when the package is staged, and the result is type-checked with
+OpenChamber's own `bun check -b`, checked for the adapted code and packed to
+`dist/openchamber-web-<version>.tgz` (`npm install -g` it). The same anchor rule
+applies: an edit whose upstream text is missing or ambiguous stops the build.
 
 ## Releases
 
@@ -67,7 +91,8 @@ flowchart LR
   E --> F[GitHub Release]
 ```
 
-- `upstream-sync.yml` follows formal release tags only, never moving branches. A
+- `upstream-sync.yml` follows formal release tags, never moving branches, except
+  for a vendor without releases, which follows its branch head. A
   new version is staged on the `upstream-sync` branch; main moves and
   a release is published only after tests pass and all targets build. If an
   adapter no longer matches upstream, the run fails and publishes nothing.
@@ -85,12 +110,15 @@ mise run setup                        # submodule and locked dependencies
 mise run ci                           # same checks as GitHub Actions
 mise run test:adapters                # our adapter tests only
 mise run build opencode-linux-x64     # dist/opencode-linux-x64.tar.gz
+mise run build:openchamber            # dist/openchamber-web-<version>.tgz, with the adapters
+mise run check:openchamber            # the OpenChamber adapters apply and type-check
 mise run vendors:sync                 # pin newer formal releases, if any
 mise run release:notes
 ```
 
 `mise run ci` runs upstream lint/type checks, upstream's own lifecycle tests
-(unadapted), and our adapter tests. Tests use upstream's isolated environment
+(unadapted), and our adapter tests (OpenCode's and OpenChamber's). CI also
+builds the adapted OpenChamber web package in a job of its own. Tests use upstream's isolated environment
 (in-memory database, temporary HOME), not a live OpenCode service. Workflows are
 thin shells over these tasks, so failures reproduce locally, except runner
 permissions, secrets and the release upload.

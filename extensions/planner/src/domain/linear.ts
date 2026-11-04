@@ -1,8 +1,9 @@
 // Linear as a task source: GraphQL documents, issue → task mapping, and the
 // rules for keeping a linked task in step with its issue.
-import type { DateKey, LinearGroupBy, LinearOrderBy, Placement, PlannerState, Priority, Task, TaskSourceRef } from './types.ts';
+import type { DateKey, Placement, PlannerState, Priority, Task, TaskSourceRef } from './types.ts';
 import type { EventBody, NewTask } from './events.ts';
 import { isDateKey } from './dates.ts';
+import { PRIORITY_NAMES, VIEW_PREF_FIELDS, type GraphFilter, type ViewPrefs } from './linearDisplay.ts';
 
 export interface LinearState {
   id: string;
@@ -22,13 +23,27 @@ export interface LinearIssue {
   priority: number;
   dueDate: string | null;
   updatedAt: string;
+  createdAt?: string;
+  completedAt?: string | null;
+  canceledAt?: string | null;
+  /** Linear's manual order, and the manual order within a priority. */
+  sortOrder?: number;
+  prioritySortOrder?: number;
+  estimate?: number | null;
   /** The git branch Linear suggests for the issue. */
   branchName?: string;
   state: LinearState;
   team: { id: string; key: string; name: string };
   assignee?: { id: string; name: string } | null;
-  project: { id: string; name: string } | null;
-  cycle: { id: string; number: number } | null;
+  creator?: { id: string; name: string } | null;
+  project: { id: string; name: string; color?: string; icon?: string | null } | null;
+  cycle: { id: string; number: number; name?: string | null; isActive?: boolean; isNext?: boolean } | null;
+  /** Its project milestone; absent on issues read before lists carried it. */
+  projectMilestone?: { id: string; name: string } | null;
+  /** The issue this one is a sub-issue of. */
+  parent?: { id: string; identifier: string; title: string } | null;
+  /** Its labels, for filtering; absent on issues read before lists carried them. The first 25: `pageInfo` says when it has more. */
+  labels?: { nodes: LinearLabel[]; pageInfo?: { hasNextPage: boolean } };
   /** External items Linear keeps in sync with this issue (its GitHub Issues sync). */
   syncedWith?: { service: string; metadata?: { owner?: string | null; repo?: string | null; number?: number | null } | null }[] | null;
   /** The workspace the Planner read it from; the Planner sets this, Linear does not. */
@@ -65,6 +80,9 @@ export interface LinearProject {
   startDate: string | null;
   targetDate: string | null;
   updatedAt: string;
+  createdAt?: string;
+  /** Linear's manual order of projects. */
+  sortOrder?: number;
   /** Status type: backlog, planned, started, paused, completed or canceled. */
   status: { id: string; name: string; type: string; color: string };
   lead: { id: string; name: string } | null;
@@ -90,11 +108,81 @@ export interface LinearComment {
   parent: { id: string } | null;
 }
 
-/** An issue as the editor shows it: its Markdown description, labels and comments. */
+/** One change in an issue's history, as its activity shows it. */
+export interface LinearHistoryEntry {
+  id: string;
+  createdAt: string;
+  actor: { id: string; name: string } | null;
+  botActor: { name: string | null } | null;
+  fromState: { name: string; color: string; type: string } | null;
+  toState: { name: string; color: string; type: string } | null;
+  fromAssignee: { name: string } | null;
+  toAssignee: { name: string } | null;
+  fromPriority: number | null;
+  toPriority: number | null;
+  fromTitle: string | null;
+  toTitle: string | null;
+  addedLabels: { name: string; color: string }[] | null;
+  removedLabels: { name: string; color: string }[] | null;
+  fromDueDate: string | null;
+  toDueDate: string | null;
+  fromProject: { name: string } | null;
+  toProject: { name: string } | null;
+  fromCycle: { number: number; name: string | null } | null;
+  toCycle: { number: number; name: string | null } | null;
+  fromEstimate: number | null;
+  toEstimate: number | null;
+  updatedDescription: boolean | null;
+}
+
+export interface LinearSubIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  priority: number;
+  state: { id: string; name: string; type: string; color: string };
+  assignee: { id: string; name: string } | null;
+}
+
+export interface LinearAttachment {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  url: string;
+  sourceType: string | null;
+}
+
+/** An issue as the issue view shows it: description, sub-issues, links, activity and comments. */
 export interface LinearIssueDetail extends LinearIssue {
   description: string | null;
-  labels: { nodes: LinearLabel[] };
-  comments: { nodes: LinearComment[] };
+  labels: { nodes: LinearLabel[]; pageInfo?: { hasNextPage: boolean } };
+  comments: { nodes: LinearComment[]; pageInfo?: { hasNextPage: boolean } };
+  children?: { nodes: LinearSubIssue[]; pageInfo?: { hasNextPage: boolean } };
+  attachments?: { nodes: LinearAttachment[]; pageInfo?: { hasNextPage: boolean } };
+  history?: { nodes: LinearHistoryEntry[]; pageInfo?: { hasNextPage: boolean } };
+}
+
+/**
+ * What an issue's page shows the first of while Linear has more (its labels, sub-issues, links, comments and
+ * activity are read with it, a page of each), so the page says so instead of leaving the rest out unsaid.
+ */
+export const issueDetailMore = (issue: LinearIssueDetail): string[] =>
+  ([
+    [issue.labels.pageInfo, 'labels'],
+    [issue.children?.pageInfo, 'sub-issues'],
+    [issue.attachments?.pageInfo, 'links'],
+    [issue.comments.pageInfo, 'comments'],
+    [issue.history?.pageInfo, 'activity'],
+  ] as const).filter(([page]) => page?.hasNextPage).map(([, name]) => name);
+
+export interface LinearCycle {
+  id: string;
+  number: number;
+  name: string | null;
+  startsAt: string;
+  endsAt: string;
+  isActive: boolean;
+  isNext: boolean;
 }
 
 /** What an issue of a team can be set to. */
@@ -103,6 +191,12 @@ export interface TeamOptions {
   members: { id: string; name: string; displayName: string; active: boolean }[];
   /** The team's labels and the workspace's, without label groups. */
   labels: LinearLabel[];
+  /** The team's current and coming cycles, when it uses cycles. */
+  cycles: LinearCycle[];
+  /** The open projects the team is part of. */
+  projects: { id: string; name: string; color: string; icon: string | null }[];
+  /** Linear's estimate scale for the team: notUsed, exponential, fibonacci, linear or tShirt. */
+  estimation: { type: string; allowZero: boolean; extended: boolean };
 }
 
 /** The fields the Planner edits; Linear takes the description as Markdown. */
@@ -115,56 +209,138 @@ export interface IssueInput {
   dueDate?: string | null;
   addedLabelIds?: string[];
   removedLabelIds?: string[];
+  projectId?: string | null;
+  cycleId?: string | null;
+  estimate?: number | null;
 }
 
-export const ISSUE_INPUT_KEYS: readonly (keyof IssueInput)[] = ['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds'];
+export const ISSUE_INPUT_KEYS: readonly (keyof IssueInput)[] = ['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds', 'projectId', 'cycleId', 'estimate'];
 
 export interface LinearProjectDetail extends LinearProject {
   content: string | null;
-  projectMilestones: { nodes: { id: string; name: string; targetDate: string | null; progress: number; sortOrder: number }[] };
+  /** The first 100; `pageInfo` says when the project has more. */
+  projectMilestones: { nodes: { id: string; name: string; targetDate: string | null; progress: number; sortOrder: number }[]; pageInfo?: { hasNextPage: boolean } };
   lastUpdate: { id: string; body: string; health: string; createdAt: string; url: string; user: { id: string; name: string } } | null;
-  issues: { nodes: LinearIssue[] };
 }
 
-const ISSUE_FIELDS = `id identifier title url priority dueDate updatedAt branchName
-    state { id name type color }
+const ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrder estimate dueDate createdAt updatedAt completedAt canceledAt branchName
+    state { id name type color position }
     team { id key name }
     assignee { id name }
-    project { id name }
-    cycle { id number }
+    creator { id name }
+    project { id name color icon }
+    cycle { id number name isActive isNext }
+    projectMilestone { id name }
+    parent { id identifier title }
+    labels(first: 25) { nodes { id name color } pageInfo { hasNextPage } }
     syncedWith { service metadata { ... on ExternalEntityInfoGithubMetadata { owner repo number } } }`;
 
-const OPEN_FILTER = `{ state: { type: { nin: ["completed", "canceled"] } } }`;
+const PAGE = 'pageInfo { hasNextPage endCursor }';
 
-const PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate updatedAt
+const PROJECT_FIELDS = `id name url color icon description progress health priority startDate targetDate createdAt updatedAt sortOrder
     status { id name type color }
     lead { id name }
     teams(first: 10) { nodes { id key name } }`;
 
-export const ASSIGNED_QUERY = `query PlannerAssigned($after: String) {
+/** Issue lists are read 100 at a time, newest change first, until Linear says there are no more. */
+export const ISSUE_PAGE_SIZE = 100;
+
+/** Issues assigned to me; `filter` adds the display's and the temporary filters. */
+export const ASSIGNED_QUERY = `query PlannerAssigned($after: String, $filter: IssueFilter) {
   viewer {
     id
     name
-    assignedIssues(first: 100, after: $after, orderBy: updatedAt, filter: ${OPEN_FILTER}) {
+    assignedIssues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
       nodes { ${ISSUE_FIELDS} }
-      pageInfo { hasNextPage endCursor }
+      ${PAGE}
     }
   }
 }`;
 
-export const VIEWS_QUERY = `query PlannerViews {
-  customViews(first: 50) { nodes { id name } }
-}`;
-
-export const VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!) {
-  customView(id: $id) {
+/** Issues I created. */
+export const CREATED_QUERY = `query PlannerCreated($after: String, $filter: IssueFilter) {
+  viewer {
     id
-    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
+    createdIssues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
+      nodes { ${ISSUE_FIELDS} }
+      ${PAGE}
+    }
   }
 }`;
 
-export const SEARCH_QUERY = `query PlannerSearch($term: String!) {
-  searchIssues(term: $term, first: 25) { nodes { ${ISSUE_FIELDS} } }
+/** Any issues by filter: the ones I subscribe to, or a project's. */
+export const ISSUES_QUERY = `query PlannerIssues($after: String, $filter: IssueFilter) {
+  issues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
+    nodes { ${ISSUE_FIELDS} }
+    ${PAGE}
+  }
+}`;
+
+const VIEW_FIELDS = `id name description icon color shared modelName slugId updatedAt
+    team { id key name }
+    owner { id name }`;
+
+/** The views saved in the workspace that I can see: mine, my teams' and the workspace's, of issues and of projects. */
+export const VIEWS_QUERY = `query PlannerViews($after: String) {
+  customViews(first: 100, after: $after) {
+    nodes { ${VIEW_FIELDS} }
+    ${PAGE}
+  }
+}`;
+
+/** My favorites in Linear's sidebar: views, projects and issues, in its order. */
+export const FAVORITE_VIEWS_QUERY = `query PlannerFavoriteViews($after: String) {
+  favorites(first: 250, after: $after) {
+    nodes {
+      id type sortOrder
+      customView { id }
+      project { ${PROJECT_FIELDS} }
+      issue { id identifier title url state { id name type color } team { id key name } }
+    }
+    ${PAGE}
+  }
+}`;
+
+/** One saved view: its filter, what it lists and the display saved with it (layout, grouping, ordering, completed issues…). */
+export const VIEW_QUERY = `query PlannerView($id: String!) {
+  customView(id: $id) {
+    ${VIEW_FIELDS}
+    filterData
+    viewPreferencesValues { ${VIEW_PREF_FIELDS} }
+  }
+}`;
+
+/**
+ * A saved view's issues: Linear applies the view's own filter; `filter` adds
+ * only what the view's display hides (completed issues, sub-issues) and the
+ * temporary filters.
+ */
+export const VIEW_ISSUES_QUERY = `query PlannerViewIssues($id: String!, $after: String, $filter: IssueFilter) {
+  customView(id: $id) {
+    id
+    issues(first: 100, after: $after, orderBy: updatedAt, filter: $filter) {
+      nodes { ${ISSUE_FIELDS} }
+      ${PAGE}
+    }
+  }
+}`;
+
+/** A saved view of projects: the projects its filter selects. */
+export const VIEW_PROJECTS_QUERY = `query PlannerViewProjects($id: String!, $after: String, $filter: ProjectFilter) {
+  customView(id: $id) {
+    id
+    projects(first: 50, after: $after, filter: $filter) {
+      nodes { ${PROJECT_FIELDS} }
+      ${PAGE}
+    }
+  }
+}`;
+
+export const SEARCH_QUERY = `query PlannerSearch($term: String!, $after: String, $filter: IssueFilter) {
+  searchIssues(term: $term, first: 50, after: $after, filter: $filter) {
+    nodes { ${ISSUE_FIELDS} }
+    ${PAGE}
+  }
 }`;
 
 export const LINKED_QUERY = `query PlannerLinked($ids: [ID!]!) {
@@ -180,9 +356,9 @@ export const TEAM_STATES_QUERY = `query PlannerTeamStates($id: String!) {
   team(id: $id) { id states(first: 100) { nodes { id name type color position } } }
 }`;
 
-export const TEAMS_QUERY = `query PlannerTeams {
+export const TEAMS_QUERY = `query PlannerTeams($after: String) {
   viewer { id }
-  teams(first: 100) { nodes { id key name } }
+  teams(first: 100, after: $after) { nodes { id key name } ${PAGE} }
 }`;
 
 /** Which workspace a connection or key reaches, and as whom. */
@@ -195,42 +371,124 @@ export const WHOAMI_QUERY = `query PlannerWhoAmI {
 export const PROJECTS_QUERY = `query PlannerProjects($after: String) {
   projects(first: 50, after: $after, orderBy: updatedAt, filter: { status: { type: { nin: ["completed", "canceled"] } } }) {
     nodes { ${PROJECT_FIELDS} }
-    pageInfo { hasNextPage endCursor }
+    ${PAGE}
   }
 }`;
 
-/** One project with its overview and its open issues. */
+/** One project's overview: description, milestones and latest update (its issues are a list of their own). */
 export const PROJECT_QUERY = `query PlannerProject($id: String!) {
   project(id: $id) {
     ${PROJECT_FIELDS}
     content
-    projectMilestones(first: 25) { nodes { id name targetDate progress sortOrder } }
+    projectMilestones(first: 100) { nodes { id name targetDate progress sortOrder } pageInfo { hasNextPage } }
     lastUpdate { id body health createdAt url user { id name } }
-    issues(first: 100, filter: ${OPEN_FILTER}) { nodes { ${ISSUE_FIELDS} } }
+  }
+}`;
+
+// What filters offer: every team with its states and estimate scale, the people,
+// labels, projects, milestones and recent and coming cycles of the workspace,
+// page by page.
+export const FILTER_TEAMS_QUERY = `query PlannerFilterTeams($after: String) {
+  teams(first: 50, after: $after) {
+    nodes { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 50) { nodes { id name type color position } pageInfo { hasNextPage } } }
+    ${PAGE}
+  }
+}`;
+
+export const FILTER_MILESTONES_QUERY = `query PlannerFilterMilestones($after: String) {
+  projectMilestones(first: 250, after: $after) {
+    nodes { id name targetDate project { id name } }
+    ${PAGE}
+  }
+}`;
+
+export const FILTER_USERS_QUERY = `query PlannerFilterUsers($after: String) {
+  users(first: 250, after: $after, filter: { active: { eq: true } }) {
+    nodes { id name displayName active isMe }
+    ${PAGE}
+  }
+}`;
+
+export const FILTER_LABELS_QUERY = `query PlannerFilterLabels($after: String) {
+  issueLabels(first: 250, after: $after) {
+    nodes { id name color isGroup parent { id name } team { id key } }
+    ${PAGE}
+  }
+}`;
+
+export const FILTER_PROJECTS_QUERY = `query PlannerFilterProjects($after: String) {
+  projects(first: 250, after: $after) {
+    nodes { id name color icon status { type } }
+    ${PAGE}
+  }
+}`;
+
+export const FILTER_CYCLES_QUERY = `query PlannerFilterCycles($after: String) {
+  cycles(first: 250, after: $after, filter: { endsAt: { gt: "-P8W" } }) {
+    nodes { id number name startsAt endsAt isActive isNext team { id key } }
+    ${PAGE}
   }
 }`;
 
 const COMMENT_FIELDS = `id body createdAt editedAt user { id name } botActor { name } parent { id }`;
 
+const HISTORY_FIELDS = `id createdAt actor { id name } botActor { name }
+      fromState { name color type } toState { name color type }
+      fromAssignee { name } toAssignee { name }
+      fromPriority toPriority fromTitle toTitle
+      addedLabels { name color } removedLabels { name color }
+      fromDueDate toDueDate fromProject { name } toProject { name }
+      fromCycle { number name } toCycle { number name }
+      fromEstimate toEstimate updatedDescription`;
+
+// ISSUE_FIELDS carries the labels already.
 const DETAIL_FIELDS = `${ISSUE_FIELDS}
     description
-    labels(first: 50) { nodes { id name color } }
-    comments(first: 100) { nodes { ${COMMENT_FIELDS} } }`;
+    comments(first: 100) { nodes { ${COMMENT_FIELDS} } pageInfo { hasNextPage } }
+    children(first: 50) { nodes { id identifier title priority state { id name type color } assignee { id name } } pageInfo { hasNextPage } }
+    attachments(first: 25) { nodes { id title subtitle url sourceType } pageInfo { hasNextPage } }
+    history(first: 50) { nodes { ${HISTORY_FIELDS} } pageInfo { hasNextPage } }`;
 
-/** One issue with its description, labels and comments, for the editor. */
+/** One issue with its description, sub-issues, links, activity and comments, for the issue view. */
 export const ISSUE_DETAIL_QUERY = `query PlannerIssueDetail($id: String!) {
   issue(id: $id) { ${DETAIL_FIELDS} }
 }`;
 
-/** A team's workflow states, active members and labels (its own and the workspace's). */
+/** What an issue of a team can be set to: states, active members, labels (its own and the workspace's), cycles, projects, estimates. */
 export const TEAM_OPTIONS_QUERY = `query PlannerTeamOptions($id: String!) {
   team(id: $id) {
     id
-    states(first: 100) { nodes { id name type color position } }
-    members(first: 250) { nodes { id name displayName active } }
-    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } }
+    cyclesEnabled
+    issueEstimationType
+    issueEstimationAllowZero
+    issueEstimationExtended
+    states(first: 100) { nodes { id name type color position } ${PAGE} }
+    members(first: 250) { nodes { id name displayName active } ${PAGE} }
+    labels(first: 250, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+    cycles(first: 25, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }
+    projects(first: 100, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }
   }
-  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } }
+  issueLabels(first: 250, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
+}`;
+
+/** The rest of one of a team's options, after TEAM_OPTIONS_QUERY's first page of it, with the same filter. */
+const TEAM_OPTION_PAGES = {
+  states: `states(first: 250, after: $after) { nodes { id name type color position } ${PAGE} }`,
+  members: `members(first: 250, after: $after) { nodes { id name displayName active } ${PAGE} }`,
+  labels: `labels(first: 250, after: $after, filter: { isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }`,
+  cycles: `cycles(first: 250, after: $after, filter: { endsAt: { gt: "-P1D" } }) { nodes { id number name startsAt endsAt isActive isNext } ${PAGE} }`,
+  projects: `projects(first: 250, after: $after, filter: { status: { type: { nin: ["completed", "canceled"] } } }) { nodes { id name color icon } ${PAGE} }`,
+} as const;
+
+export type TeamOptionField = keyof typeof TEAM_OPTION_PAGES;
+
+export const teamOptionPageQuery = (field: TeamOptionField): string => `query PlannerTeamOptionPage($id: String!, $after: String) {
+  team(id: $id) { id ${TEAM_OPTION_PAGES[field]} }
+}`;
+
+/** The rest of the workspace's own labels (no team's), after TEAM_OPTIONS_QUERY's first page of them. */
+export const WORKSPACE_LABELS_QUERY = `query PlannerWorkspaceLabels($after: String) {
+  issueLabels(first: 250, after: $after, filter: { team: { null: true }, isGroup: { eq: false } }) { nodes { id name color } ${PAGE} }
 }`;
 
 export const UPDATE_ISSUE_MUTATION = `mutation PlannerUpdateIssue($id: String!, $input: IssueUpdateInput!) {
@@ -250,10 +508,21 @@ export const CREATE_ISSUE_MUTATION = `mutation PlannerCreateIssue($input: IssueC
   issueCreate(input: $input) { success issue { ${ISSUE_FIELDS} } }
 }`;
 
+/** A saved view's filters written back, as Linear's "Save" does after its filters were changed. */
+export const SAVE_VIEW_FILTER_MUTATION = `mutation PlannerSaveViewFilter($id: String!, $filterData: IssueFilter!) {
+  customViewUpdate(id: $id, input: { filterData: $filterData }) { success customView { id updatedAt } }
+}`;
+
 export const ALL_DOCUMENTS = [
+  SAVE_VIEW_FILTER_MUTATION,
   ASSIGNED_QUERY,
+  CREATED_QUERY,
+  ISSUES_QUERY,
   VIEWS_QUERY,
+  FAVORITE_VIEWS_QUERY,
+  VIEW_QUERY,
   VIEW_ISSUES_QUERY,
+  VIEW_PROJECTS_QUERY,
   SEARCH_QUERY,
   LINKED_QUERY,
   ISSUE_QUERY,
@@ -262,6 +531,12 @@ export const ALL_DOCUMENTS = [
   WHOAMI_QUERY,
   PROJECTS_QUERY,
   PROJECT_QUERY,
+  FILTER_TEAMS_QUERY,
+  FILTER_USERS_QUERY,
+  FILTER_LABELS_QUERY,
+  FILTER_PROJECTS_QUERY,
+  FILTER_CYCLES_QUERY,
+  FILTER_MILESTONES_QUERY,
   ISSUE_DETAIL_QUERY,
   TEAM_OPTIONS_QUERY,
   SET_STATE_MUTATION,
@@ -438,129 +713,118 @@ export const readGraphql = <T>(body: string): T => {
   return parsed.data;
 };
 
-// ── Views: grouping, ordering, projects ─────────────────────────────────────
+/** Linear's priority names, by its numbers (0 none, 1 urgent … 4 low). */
+export const PRIORITY_LABELS: Record<number, string> = PRIORITY_NAMES;
 
-export interface IssueGroup {
-  key: string;
-  label: string;
-  color?: string;
-  /** A status group's state type; a board card dropped there moves to the team's first state of it. */
-  stateType?: string;
-  issues: LinearIssue[];
+// ── Saved views ──────────────────────────────────────────────────────────────
+
+/** A view saved in Linear (a custom view), as the source picker lists it. */
+export interface LinearSavedView {
+  id: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  /** Shared with its team or the workspace; otherwise only its owner sees it. */
+  shared: boolean;
+  /** What the view lists, such as issues or projects. */
+  modelName: string;
+  slugId: string;
+  updatedAt: string;
+  team: { id: string; key: string; name: string } | null;
+  owner: { id: string; name: string } | null;
+  /** The workspace the Planner read it from. */
+  workspaceId?: string;
+  /** Its place among my favorites in Linear's sidebar, when I favorited it. */
+  favoriteOrder?: number;
 }
 
-/** Status groups for a list, most active first. */
-const LIST_STATUSES = [
-  { type: 'started', label: 'In progress' },
-  { type: 'unstarted', label: 'Todo' },
-  { type: 'backlog', label: 'Backlog' },
-  { type: 'triage', label: 'Triage' },
-];
+/** A saved view as opened: its filter, what it lists and the display saved with it. */
+export interface LinearViewMeta extends LinearSavedView {
+  viewPreferencesValues: ViewPrefs | null;
+  /** The view's own filter of issues, as Linear keeps it (an IssueFilter). */
+  filterData?: GraphFilter | null;
+}
 
-/** Board columns in workflow order; Done takes drops even though lists hold open issues only. */
-const BOARD_STATUSES = [
-  { type: 'triage', label: 'Triage' },
-  { type: 'backlog', label: 'Backlog' },
-  { type: 'unstarted', label: 'Todo' },
-  { type: 'started', label: 'In progress' },
-  { type: 'completed', label: 'Done' },
-];
+const NON_ISSUE_MODELS = new Set(['project', 'projects', 'initiative', 'initiatives', 'feeditem', 'feeditems', 'customer', 'customers', 'document', 'documents', 'release', 'releases']);
 
-export const PRIORITY_LABELS: Record<number, string> = { 1: 'Urgent', 2: 'High', 3: 'Medium', 4: 'Low', 0: 'No priority' };
-const PRIORITY_ORDER = [1, 2, 3, 4, 0];
-/** No priority sorts after Low, as in Linear. */
-const priorityRank = (priority: number): number => (priority >= 1 && priority <= 4 ? priority : 5);
+/** Views that list issues; Linear also saves views of projects, initiatives and the like. */
+export const isIssueView = (view: Pick<LinearSavedView, 'modelName'>): boolean => !NON_ISSUE_MODELS.has(view.modelName.replace(/[^a-z]/gi, '').toLowerCase());
 
-const byLabel = (a: IssueGroup, b: IssueGroup): number => a.label.localeCompare(b.label);
+/** A saved view of projects (`modelName` "Project"), shown as a list of projects. */
+export const isProjectView = (view: Pick<LinearSavedView, 'modelName'>): boolean => view.modelName.replace(/[^a-z]/gi, '').toLowerCase() === 'project';
 
-/** Collect issues under `keyOf`, keeping the first label seen per key. */
-const collect = (issues: readonly LinearIssue[], keyOf: (issue: LinearIssue) => { key: string; label: string; color?: string }): IssueGroup[] => {
-  const groups = new Map<string, IssueGroup>();
-  for (const issue of issues) {
-    const { key, label, color } = keyOf(issue);
-    const group = groups.get(key) ?? { key, label, ...(color ? { color } : {}), issues: [] };
-    group.issues.push(issue);
-    groups.set(key, group);
-  }
-  return [...groups.values()];
-};
+/** A favorite in Linear's sidebar, as Linear answers it. */
+export interface LinearFavoriteNode {
+  id?: string;
+  type: string;
+  sortOrder: number;
+  customView: { id: string } | null;
+  project?: LinearProject | null;
+  issue?: { id: string; identifier: string; title: string; url: string; state: { id: string; name: string; type: string; color: string }; team: { id: string; key: string; name: string } } | null;
+}
+
+/** What the Planner opens from my favorites: views, projects and issues. */
+export type LinearFavorite =
+  | { kind: 'view'; id: string; sortOrder: number; workspaceId: string }
+  | { kind: 'project'; id: string; sortOrder: number; workspaceId: string; project: LinearProject }
+  | { kind: 'issue'; id: string; sortOrder: number; workspaceId: string; identifier: string; title: string; state: { name: string; type: string; color: string } };
+
+/** My favorites' order, by view id, from Linear's favorites. */
+export const favoriteOrder = (favorites: readonly Pick<LinearFavoriteNode, 'type' | 'sortOrder' | 'customView'>[]): Map<string, number> =>
+  new Map(favorites.flatMap((favorite) => (favorite.customView ? [[favorite.customView.id, favorite.sortOrder] as const] : [])));
+
+/** The favorites the Planner can open, in Linear's sidebar order. */
+export const favoritesOf = (nodes: readonly LinearFavoriteNode[], workspaceId: string): LinearFavorite[] =>
+  [...nodes]
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .flatMap((node): LinearFavorite[] => {
+      if (node.customView) return [{ kind: 'view', id: node.customView.id, sortOrder: node.sortOrder, workspaceId }];
+      if (node.project) return [{ kind: 'project', id: node.project.id, sortOrder: node.sortOrder, workspaceId, project: { ...node.project, workspaceId } }];
+      if (node.issue) return [{ kind: 'issue', id: node.issue.id, sortOrder: node.sortOrder, workspaceId, identifier: node.issue.identifier, title: node.issue.title, state: node.issue.state }];
+      return [];
+    });
+
+export interface ViewGroup {
+  key: string;
+  label: string;
+  views: LinearSavedView[];
+}
 
 /**
- * Issues in groups, in display order. A board keeps every status column (even
- * empty) so a card can be dropped there; a list shows non-empty groups only.
- * `workspaceNames` names the workspace groups, in the order given.
+ * Saved views as the picker groups them: my favorites first, in Linear's order;
+ * then, per workspace, each team's views, the workspace's shared views and my
+ * own; by name within a group. `workspaceNames`, given while several workspaces
+ * are shown, names the workspace in each group's label.
  */
-export const groupIssues = (issues: readonly LinearIssue[], by: LinearGroupBy, options: { board?: boolean; workspaceNames?: ReadonlyMap<string, string> } = {}): IssueGroup[] => {
-  switch (by) {
-    case 'status': {
-      const statuses = options.board ? BOARD_STATUSES : LIST_STATUSES;
-      const groups = statuses.map((status) => ({ key: status.type, label: status.label, stateType: status.type, issues: issues.filter((issue) => issue.state.type === status.type) }));
-      const known = new Set(statuses.map((status) => status.type));
-      const other = issues.filter((issue) => !known.has(issue.state.type));
-      if (other.length) groups.push({ key: 'other', label: 'Other', stateType: '', issues: other });
-      return options.board ? groups.filter((group) => group.issues.length > 0 || group.key !== 'triage') : groups.filter((group) => group.issues.length > 0);
+export const groupViews = (views: readonly LinearSavedView[], workspaceNames?: ReadonlyMap<string, string>, options: { favoritesFirst?: boolean } = {}): ViewGroup[] => {
+  const byName = (a: LinearSavedView, b: LinearSavedView) => a.name.localeCompare(b.name);
+  const prefix = (workspaceId: string | undefined) => {
+    const name = workspaceNames && workspaceNames.size > 1 ? workspaceNames.get(workspaceId ?? '') : undefined;
+    return name ? `${name} · ` : '';
+  };
+  const firsts = options.favoritesFirst !== false;
+  const favorites = firsts ? views.filter((view) => view.favoriteOrder !== undefined).sort((a, b) => a.favoriteOrder! - b.favoriteOrder! || byName(a, b)) : [];
+  const groups: ViewGroup[] = favorites.length ? [{ key: 'favorites', label: 'Favorites', views: favorites }] : [];
+  const rest = firsts ? views.filter((view) => view.favoriteOrder === undefined) : [...views];
+  const workspaceOrder = [...new Set([...(workspaceNames?.keys() ?? []), ...rest.map((view) => view.workspaceId ?? '')])];
+  for (const workspaceId of workspaceOrder) {
+    const inWorkspaceViews = rest.filter((view) => (view.workspaceId ?? '') === workspaceId);
+    const teams = new Map<string, { key: string; name: string; views: LinearSavedView[] }>();
+    for (const view of inWorkspaceViews.filter((item) => item.team)) {
+      const team = teams.get(view.team!.id) ?? { key: view.team!.key, name: view.team!.name, views: [] };
+      team.views.push(view);
+      teams.set(view.team!.id, team);
     }
-    case 'priority':
-      return PRIORITY_ORDER.map((priority) => ({ key: `p${priority}`, label: PRIORITY_LABELS[priority]!, issues: issues.filter((issue) => (priorityRank(issue.priority) === 5 ? 0 : issue.priority) === priority) })).filter((group) => group.issues.length > 0);
-    case 'project': {
-      const groups = collect(issues, (issue) => (issue.project ? { key: issue.project.id, label: issue.project.name } : { key: '', label: 'No project' }));
-      return [...groups.filter((group) => group.key).sort(byLabel), ...groups.filter((group) => !group.key)];
+    for (const [teamId, team] of [...teams].sort((a, b) => a[1].key.localeCompare(b[1].key))) {
+      groups.push({ key: `${workspaceId}:team:${teamId}`, label: `${prefix(workspaceId)}${team.key} · ${team.name}`, views: team.views.sort(byName) });
     }
-    case 'team':
-      return collect(issues, (issue) => ({ key: issue.team.id, label: `${issue.team.key} · ${issue.team.name}` })).sort(byLabel);
-    case 'assignee': {
-      const groups = collect(issues, (issue) => (issue.assignee ? { key: issue.assignee.id, label: issue.assignee.name } : { key: '', label: 'Unassigned' }));
-      return [...groups.filter((group) => group.key).sort(byLabel), ...groups.filter((group) => !group.key)];
-    }
-    case 'workspace': {
-      const names = options.workspaceNames ?? new Map<string, string>();
-      const order = [...names.keys()];
-      const groups = collect(issues, (issue) => ({ key: issue.workspaceId ?? '', label: names.get(issue.workspaceId ?? '') ?? 'Linear' }));
-      const rank = (key: string) => (order.includes(key) ? order.indexOf(key) : order.length);
-      return groups.sort((a, b) => rank(a.key) - rank(b.key) || byLabel(a, b));
-    }
-    default:
-      return issues.length ? [{ key: 'all', label: 'Issues', issues: [...issues] }] : [];
+    const shared = inWorkspaceViews.filter((view) => !view.team && view.shared).sort(byName);
+    if (shared.length) groups.push({ key: `${workspaceId}:workspace`, label: `${prefix(workspaceId)}Workspace views`, views: shared });
+    const mine = inWorkspaceViews.filter((view) => !view.team && !view.shared).sort(byName);
+    if (mine.length) groups.push({ key: `${workspaceId}:mine`, label: `${prefix(workspaceId)}My views`, views: mine });
   }
-};
-
-const issueNumber = (identifier: string): number => Number(/-(\d+)$/.exec(identifier)?.[1] ?? 0);
-const newestFirst = (a: LinearIssue, b: LinearIssue): number => b.updatedAt.localeCompare(a.updatedAt);
-
-/** Issues in the chosen order; ties fall back to the most recently updated. */
-export const sortIssues = (issues: readonly LinearIssue[], by: LinearOrderBy): LinearIssue[] =>
-  [...issues].sort((a, b) => {
-    switch (by) {
-      case 'priority':
-        return priorityRank(a.priority) - priorityRank(b.priority) || newestFirst(a, b);
-      case 'due':
-        return (a.dueDate ?? '9999-12-31').localeCompare(b.dueDate ?? '9999-12-31') || priorityRank(a.priority) - priorityRank(b.priority) || newestFirst(a, b);
-      case 'identifier':
-        return a.team.key.localeCompare(b.team.key) || issueNumber(a.identifier) - issueNumber(b.identifier);
-      default:
-        return newestFirst(a, b);
-    }
-  });
-
-/** Project status groups, the active ones first. */
-export const PROJECT_STATUSES = [
-  { type: 'started', label: 'In progress' },
-  { type: 'planned', label: 'Planned' },
-  { type: 'paused', label: 'Paused' },
-  { type: 'backlog', label: 'Backlog' },
-];
-
-export const HEALTH_LABELS: Record<string, string> = { onTrack: 'On track', atRisk: 'At risk', offTrack: 'Off track' };
-
-/** Projects in status groups; within one, by priority, then the nearest target date, then name. */
-export const groupProjects = (projects: readonly LinearProject[]): { type: string; label: string; projects: LinearProject[] }[] => {
-  const sorted = [...projects].sort(
-    (a, b) => priorityRank(a.priority) - priorityRank(b.priority) || (a.targetDate ?? '9999-12-31').localeCompare(b.targetDate ?? '9999-12-31') || a.name.localeCompare(b.name),
-  );
-  const known = new Set(PROJECT_STATUSES.map((status) => status.type));
-  const groups = PROJECT_STATUSES.map((status) => ({ ...status, projects: sorted.filter((project) => project.status.type === status.type) }));
-  groups.push({ type: 'other', label: 'Other', projects: sorted.filter((project) => !known.has(project.status.type)) });
-  return groups.filter((group) => group.projects.length > 0);
+  return groups;
 };
 
 // ── Editing ──────────────────────────────────────────────────────────────────
@@ -596,6 +860,53 @@ export const workflowOrder = (states: readonly LinearState[]): LinearState[] =>
     const rank = (state: LinearState) => (STATE_ORDER.includes(state.type) ? STATE_ORDER.indexOf(state.type) : STATE_ORDER.length);
     return rank(a) - rank(b) || (a.position ?? 0) - (b.position ?? 0);
   });
+
+/** A saved view's address in Linear. */
+export const viewUrl = (urlKey: string, view: Pick<LinearSavedView, 'slugId'>): string => `https://linear.app/${urlKey}/view/${view.slugId}`;
+
+const T_SHIRT: Record<number, string> = { 0: 'None', 1: 'XS', 2: 'S', 3: 'M', 5: 'L', 8: 'XL', 13: 'XXL', 21: 'XXXL' };
+
+/** The estimates a team's scale offers (Linear's exponential, Fibonacci, linear or T-shirt), with their names. */
+export const estimateChoices = (estimation: TeamOptions['estimation']): { value: number; label: string }[] => {
+  const scales: Record<string, { base: number[]; more: number[] }> = {
+    exponential: { base: [1, 2, 4, 8, 16], more: [32, 64] },
+    fibonacci: { base: [1, 2, 3, 5, 8], more: [13, 21] },
+    linear: { base: [1, 2, 3, 4, 5], more: [6, 7] },
+    tShirt: { base: [1, 2, 3, 5, 8], more: [13, 21] },
+  };
+  const scale = scales[estimation.type];
+  if (!scale) return [];
+  const values = [...(estimation.allowZero ? [0] : []), ...scale.base, ...(estimation.extended ? scale.more : [])];
+  return values.map((value) => ({ value, label: estimation.type === 'tShirt' ? T_SHIRT[value] ?? String(value) : `${value} point${value === 1 ? '' : 's'}` }));
+};
+
+/** An estimate as its team names it, such as "3 points" or "M". */
+export const estimateLabel = (value: number | null | undefined, estimation?: TeamOptions['estimation']): string => {
+  if (value === null || value === undefined) return 'No estimate';
+  if (estimation?.type === 'tShirt') return T_SHIRT[value] ?? String(value);
+  return `${value} point${value === 1 ? '' : 's'}`;
+};
+
+/** What one history entry says changed, as Linear's activity reads ("changed status from Todo to In Progress"). */
+export const historyText = (entry: LinearHistoryEntry): string | null => {
+  const named = (value: { name: string } | null | undefined, none: string) => value?.name ?? none;
+  const cycle = (value: LinearHistoryEntry['fromCycle']) => (value ? value.name || `Cycle ${value.number}` : 'no cycle');
+  if (entry.fromState || entry.toState) return `changed status from ${named(entry.fromState, 'none')} to ${named(entry.toState, 'none')}`;
+  if (entry.fromAssignee !== entry.toAssignee && (entry.fromAssignee || entry.toAssignee)) {
+    if (!entry.toAssignee) return `removed the assignee ${named(entry.fromAssignee, '')}`.trim();
+    return entry.fromAssignee ? `reassigned from ${entry.fromAssignee.name} to ${entry.toAssignee.name}` : `assigned ${entry.toAssignee.name}`;
+  }
+  if (entry.fromPriority !== null && entry.toPriority !== null && entry.fromPriority !== entry.toPriority) return `changed priority from ${PRIORITY_NAMES[entry.fromPriority] ?? entry.fromPriority} to ${PRIORITY_NAMES[entry.toPriority] ?? entry.toPriority}`;
+  if (entry.addedLabels?.length) return `added label${entry.addedLabels.length > 1 ? 's' : ''} ${entry.addedLabels.map((label) => label.name).join(', ')}`;
+  if (entry.removedLabels?.length) return `removed label${entry.removedLabels.length > 1 ? 's' : ''} ${entry.removedLabels.map((label) => label.name).join(', ')}`;
+  if (entry.fromTitle && entry.toTitle && entry.fromTitle !== entry.toTitle) return `changed the title to "${entry.toTitle}"`;
+  if (entry.fromDueDate !== entry.toDueDate && (entry.fromDueDate || entry.toDueDate)) return entry.toDueDate ? `set the due date to ${entry.toDueDate}` : 'removed the due date';
+  if (entry.fromProject || entry.toProject) return entry.toProject ? `moved to project ${entry.toProject.name}` : `removed from project ${named(entry.fromProject, '')}`.trim();
+  if (entry.fromCycle || entry.toCycle) return entry.toCycle ? `moved to ${cycle(entry.toCycle)}` : `removed from ${cycle(entry.fromCycle)}`;
+  if (entry.fromEstimate !== entry.toEstimate && (entry.fromEstimate !== null || entry.toEstimate !== null)) return entry.toEstimate !== null ? `set the estimate to ${entry.toEstimate}` : 'removed the estimate';
+  if (entry.updatedDescription) return 'updated the description';
+  return null;
+};
 
 /** Comments oldest first, each reply right after the comment it answers. */
 export const commentThreads = (comments: readonly LinearComment[]): { comment: LinearComment; reply: boolean }[] => {

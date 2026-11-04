@@ -1,5 +1,7 @@
 // Read-only iCalendar (RFC 5545) support: parse VEVENTs and expand them into
 // concrete occurrences for a date range in the user's zone.
+import type { GoogleEventRef, GoogleTaskItem } from './google.ts';
+import type { UpcomingTask } from './gtaskKept.ts';
 import type { DateKey } from './types.ts';
 import { addDays, daysBetween, instantAt, isDateKey, isValidTimeZone, startOfWeek, weekday } from './dates.ts';
 
@@ -37,6 +39,18 @@ export interface CalendarEvent {
   end: string;
   allDay: boolean;
   busy: boolean;
+  /** A Google task due that day, shown the way Google Calendar shows tasks; planning it links it. */
+  googleTask?: GoogleTaskItem;
+  /** The Google task is shown on its deadline's day, not its date, as Google Calendar's flag in the all-day section. */
+  taskDeadline?: boolean;
+  /** An upcoming occurrence of a repeating Google task, which Google Tasks makes once the one before it is done. */
+  upcoming?: UpcomingTask;
+  /** Google Calendar's "Pending tasks" entry on today: the open tasks of the past 365 days, latest first. */
+  pendingTasks?: GoogleTaskItem[];
+  /** A Google Calendar event: where it lives, and what may be done with it. */
+  google?: GoogleEventRef;
+  /** Marked free ("transparent"): it blocks no time even when it is timed (Sunsama's "non-blocking"). */
+  transparent?: boolean;
 }
 
 // Windows zone names that Outlook writes into TZID.

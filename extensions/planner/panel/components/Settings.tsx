@@ -1,8 +1,16 @@
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
+import { GmailSettings } from './GmailSettings.tsx';
+import { MeetingSettings } from './MeetingSettings.tsx';
 import { CHANNEL_COLORS, type Settings as PlannerSettings } from '../../src/domain/types.ts';
 import { liveChannels } from '../../src/domain/selectors.ts';
 import { newId } from '../../src/domain/ids.ts';
-import { useLinear, usePlanner, useView } from '../lib/context.ts';
+import { useGoogle, useLinear, usePlanner, useView } from '../lib/context.ts';
+import type { GoogleFeature } from '../lib/google.ts';
+import type { GoogleCalendarInfo } from '../../src/domain/google.ts';
+import { AgentSettings } from './AgentSettings.tsx';
+
+
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const zones = (current: string | null): string[] => {
   const all = (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];
@@ -75,7 +83,7 @@ const Calendars = () => {
   return (
     <fieldset>
       <legend>Calendars</legend>
-      <p class="hint">Subscribe to read-only ICS feeds (for Google Calendar, use "Secret address in iCal format"). Meetings show on the calendar and auto-scheduling works around them.</p>
+      <p class="hint">Meetings show on the calendar and auto-scheduling works around them. Connect Google Calendar under Google below, or subscribe to a read-only ICS feed here.</p>
       <ul class="channel-list">
         {calendars.map((calendar) => (
           <li key={calendar.id}>
@@ -161,12 +169,16 @@ const LinearSettings = () => {
       <legend>Linear</legend>
       <LinearWorkspaceList />
       <label>
-        When I complete a Linear task
+        When I complete a Linear task (completion automation)
         <select value={settings.linearOnComplete} onChange={(event) => update({ linearOnComplete: event.currentTarget.value as PlannerSettings['linearOnComplete'] })}>
-          <option value="ask">Ask me</option>
+          <option value="ask">Show prompt to update status in Linear</option>
           <option value="complete">Move the issue to Done</option>
           <option value="nothing">Leave Linear alone</option>
         </select>
+      </label>
+      <label>
+        Import automations: Show prompt to update status in Linear (right after an issue is imported, from the panel or by its URL)
+        <input type="checkbox" checked={settings.linearImportPrompt} onChange={(event) => update({ linearImportPrompt: event.currentTarget.checked })} />
       </label>
       <label>
         When I plan a Linear issue for a day
@@ -180,6 +192,273 @@ const LinearSettings = () => {
         Complete a task when its issue is closed in Linear
         <input type="checkbox" checked={settings.linearImportCompletion} onChange={(event) => update({ linearImportCompletion: event.currentTarget.checked })} />
       </label>
+    </fieldset>
+  );
+};
+
+const FEATURE_LABELS: Record<GoogleFeature, string> = { calendar: 'Calendar', tasks: 'Tasks', mail: 'Gmail', drive: 'Drive', mailActions: 'Gmail actions', contacts: 'Contacts' };
+
+/** Signing in an account: Google's page opens; its redirect comes back here, or its address is pasted. */
+const GoogleSignIn = () => {
+  const { google } = usePlanner();
+  const gv = useGoogle();
+  const [features, setFeatures] = useState<GoogleFeature[]>(['calendar', 'tasks', 'mail']);
+  const [problem, setProblem] = useState<string | null>(null);
+  const signIn = gv.signIn;
+  if (!signIn || signIn.result.status === 'connected') {
+    return (
+      <div class="google-connect">
+        <div class="row" role="group" aria-label="What the Planner may use">
+          {(['calendar', 'tasks', 'mail', 'drive'] as const).map((feature) => (
+            <label key={feature} class="inline">
+              <input type="checkbox" checked={features.includes(feature)} onChange={(event) => setFeatures(event.currentTarget.checked ? [...features, feature] : features.filter((item) => item !== feature))} />
+              {FEATURE_LABELS[feature]}
+            </label>
+          ))}
+          <div class="nav-spacer" />
+          <button disabled={!features.length} onClick={() => { setProblem(null); google.connect(features).catch((error) => setProblem(messageOf(error))); }}>Connect a Google account</button>
+        </div>
+        <p class="hint">
+          Calendar reads your calendars and writes working sessions to the one you choose; Tasks reads and updates Google Tasks; Gmail only reads messages; Drive only sees your files'
+          names, to attach them to tasks (it can be allowed later, when you first attach one).
+        </p>
+        {problem && <p class="danger" role="alert">{problem}</p>}
+      </div>
+    );
+  }
+  return <SignInPending />;
+};
+
+/** A sign-in on its way: Google's page to open (again), or the address it sent the browser to, pasted; or why it failed. */
+export const SignInPending = () => {
+  const { google, host, client } = usePlanner();
+  const gv = useGoogle();
+  const [pasted, setPasted] = useState('');
+  const [problem, setProblem] = useState<string | null>(null);
+  const signIn = gv.signIn;
+  if (!signIn || signIn.result.status === 'connected') return null;
+  if (signIn.result.status === 'failed') {
+    return (
+      <div class="google-connect">
+        <p class="danger" role="alert">Not connected: {signIn.result.message}</p>
+        <button class="link" onClick={() => google.cancelSignIn()}>Try again</button>
+      </div>
+    );
+  }
+  const finish = () => {
+    setProblem(null);
+    google.finishSignIn(pasted).then(() => setPasted('')).catch((error) => setProblem(messageOf(error)));
+  };
+  return (
+    <div class="google-connect" aria-live="polite">
+      <p>
+        Waiting for Google… <button class="link" onClick={() => void host.openUrl(signIn.authUrl)}>Open Google's sign-in page</button> ·{' '}
+        <button class="link" onClick={() => void host.writeClipboard(signIn.authUrl).then(() => client.notify('Copied the sign-in address'))}>Copy its address</button> ·{' '}
+        <button class="link" onClick={() => google.cancelSignIn()}>Cancel</button>
+      </p>
+      <p class="hint">
+        After you allow access, Google sends the browser to <code>{signIn.redirectUri}</code>. On this machine the Planner picks that up by itself. If the browser runs elsewhere, that page
+        won't load: copy its whole address from the address bar and paste it here.
+      </p>
+      <div class="row">
+        <input class="grow" aria-label="Address Google sent the browser to" placeholder={`${signIn.redirectUri}?state=…&code=…`} value={pasted} onInput={(event) => setPasted(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Enter' && pasted.trim() && finish()} />
+        <button disabled={!pasted.trim()} onClick={finish}>Finish</button>
+      </div>
+      {problem && <p class="danger" role="alert">{problem}</p>}
+    </div>
+  );
+};
+
+/**
+ * Sunsama's "Timeboxing Channel": a channel's working sessions go to a calendar of its own, over the default ("Default
+ * for tasks" is the fallback, and never overrides a channel's).
+ */
+const ChannelTimeboxes = ({ writable, several }: { writable: GoogleCalendarInfo[]; several: boolean }) => {
+  const { client } = usePlanner();
+  const view = useView();
+  const channels = liveChannels(view.state);
+  if (!channels.length || !writable.length) return null;
+  const linked = view.state.settings.channelTimebox;
+  const choose = (channelId: string, value: string) => {
+    if (value === 'current') return;
+    const next = { ...linked };
+    const calendar = writable[Number(value)];
+    if (value === '' || !calendar) delete next[channelId];
+    else next[channelId] = { account: calendar.account, calendarId: calendar.id };
+    void client.dispatch([{ type: 'settings.updated', patch: { channelTimebox: next } }]);
+  };
+  return (
+    <div class="channel-timeboxes" role="group" aria-label="Timeboxing channels">
+      <h4>Timeboxing channels</h4>
+      <p class="hint">A channel's working sessions go to its own calendar instead of the default: #personal to a personal calendar keeps personal tasks off the work calendar.</p>
+      {channels.map((channel) => {
+        const target = linked[channel.id];
+        const index = target ? writable.findIndex((calendar) => calendar.account === target.account && calendar.id === target.calendarId) : -1;
+        return (
+          <label key={channel.id}>
+            #{channel.name}
+            <select aria-label={`Calendar for #${channel.name} working sessions`} value={index >= 0 ? String(index) : target ? 'current' : ''} onChange={(event) => choose(channel.id, event.currentTarget.value)}>
+              <option value="">Default for tasks</option>
+              {target && index < 0 && <option value="current">{target.calendarId} · {target.account}</option>}
+              {writable.map((calendar, position) => <option key={`${calendar.account}:${calendar.id}`} value={String(position)}>{several ? `${calendar.name} · ${calendar.account}` : calendar.name}</option>)}
+            </select>
+          </label>
+        );
+      })}
+    </div>
+  );
+};
+
+/** Which Google calendars show beside the plan, and where working sessions are written. */
+const GoogleCalendarChoices = () => {
+  const { google } = usePlanner();
+  const view = useView();
+  const gv = useGoogle();
+  const target = view.state.settings.googleTimebox;
+  const shown = (account: string, id: string) => Object.values(view.state.calendars).some((calendar) => calendar.google?.account === account && calendar.google.calendarId === id && calendar.visible);
+  const several = new Set(gv.calendars.map((calendar) => calendar.account)).size > 1;
+  const writable = gv.calendars.filter((calendar) => calendar.writable);
+  const selected = target ? writable.findIndex((calendar) => calendar.account === target.account && calendar.id === target.calendarId) : -1;
+  return (
+    <div class="google-calendars">
+      <h4>Google calendars to show</h4>
+      {gv.calendarErrors.map((error) => <p key={error.account} class="danger">{error.account ? `${error.account}: ` : ''}{error.message}</p>)}
+      <ul class="channel-list" aria-label="Google calendars">
+        {gv.calendars.map((calendar) => (
+          <li key={`${calendar.account}:${calendar.id}`}>
+            <span class="calendar-swatch" style={{ background: calendar.color }} aria-hidden="true" />
+            <label class="inline grow">
+              <input type="checkbox" checked={shown(calendar.account, calendar.id)} onChange={(event) => void google.showCalendar(calendar, event.currentTarget.checked)} />
+              {calendar.name}
+              {calendar.primary ? ' (primary)' : ''}
+              {several ? <span class="muted"> · {calendar.account}</span> : null}
+            </label>
+          </li>
+        ))}
+        {gv.calendars.length === 0 && !gv.calendarErrors.length && <li class="muted">Loading calendars…</li>}
+      </ul>
+      <label>
+        Write working sessions to (default for tasks)
+        <select
+          aria-label="Google calendar for working sessions"
+          value={selected >= 0 ? String(selected) : target ? 'current' : ''}
+          onChange={(event) => {
+            const value = event.currentTarget.value;
+            if (value === 'current') return;
+            const calendar = writable[Number(value)];
+            void google.setTimeboxCalendar(value === '' || !calendar ? null : { account: calendar.account, calendarId: calendar.id });
+          }}
+        >
+          <option value="">Don't write them</option>
+          {target && selected < 0 && <option value="current">{target.calendarId} · {target.account}</option>}
+          {writable.map((calendar, index) => <option key={`${calendar.account}:${calendar.id}`} value={String(index)}>{several ? `${calendar.name} · ${calendar.account}` : calendar.name}</option>)}
+        </select>
+      </label>
+      <p class="hint">Each timeboxed session becomes an event there, and moves or goes with it; move or delete that event in Google Calendar and the session follows.</p>
+      <ChannelTimeboxes writable={writable} several={several} />
+      {gv.status?.timeboxError && <p class="danger" role="alert">The last session could not be written: {gv.status.timeboxError}</p>}
+    </div>
+  );
+};
+
+const GoogleSettings = () => {
+  const { client, google } = usePlanner();
+  const view = useView();
+  const gv = useGoogle();
+  const { settings } = view.state;
+  const update = (patch: Partial<PlannerSettings>) => void client.dispatch([{ type: 'settings.updated', patch }]);
+  const [clientId, setClientId] = useState('');
+  const [secret, setSecret] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const status = gv.status;
+  const calendarAccounts = status ? google.accountsWith('calendar').length : 0;
+  useEffect(() => {
+    if (calendarAccounts) void google.loadCalendars();
+  }, [calendarAccounts]);
+  const run = (work: () => Promise<unknown>) => {
+    setBusy(true);
+    setProblem(null);
+    work()
+      .catch((error) => setProblem(messageOf(error)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <fieldset>
+      <legend>Google</legend>
+      {!status && <p class="hint">Checking…</p>}
+      {status && !status.client && (
+        <>
+          <p class="hint">
+            Google Calendar, Google Tasks, Gmail and Drive connect through an OAuth client in your own Google Cloud project: create a project, enable the Google Calendar API, Google Tasks API,
+            Gmail API and Google Drive API, set up the OAuth consent screen with yourself as a test user, then create an OAuth client ID of type <strong>Desktop app</strong> and paste its ID and secret
+            here. They stay on this machine, outside the synced plan, in a file only you can read.
+          </p>
+          <div class="row">
+            <input class="grow" autocomplete="off" aria-label="Google OAuth client ID" placeholder="1234…-abc….apps.googleusercontent.com" value={clientId} onInput={(event) => setClientId(event.currentTarget.value)} />
+          </div>
+          <div class="row">
+            <input class="grow" type="password" autocomplete="off" aria-label="Google OAuth client secret" placeholder="GOCSPX-…" value={secret} onInput={(event) => setSecret(event.currentTarget.value)} />
+            <button disabled={busy || !clientId.trim() || !secret.trim()} onClick={() => run(() => google.setClient(clientId, secret).then(() => { setClientId(''); setSecret(''); }))}>Save</button>
+          </div>
+        </>
+      )}
+      {status?.client && (
+        <>
+          <ul class="channel-list workspace-list" aria-label="Google accounts">
+            {status.accounts.map((account) => (
+              <li key={account.email}>
+                <span class="channel-name">{account.email}</span>
+                <span class="muted grow">
+                  {account.features.map((feature) => FEATURE_LABELS[feature]).join(', ') || 'nothing allowed'}
+                  {account.workspace ? ' · work or school account' : ''}
+                </span>
+                <button class="link danger" aria-label={`Remove the Google account ${account.email}`} onClick={() => run(() => google.removeAccount(account.email))}>Remove</button>
+              </li>
+            ))}
+            {status.accounts.length === 0 && <li class="muted">No account connected yet.</li>}
+          </ul>
+          <GoogleSignIn />
+          <p class="hint">
+            OAuth client <code>{status.client.id.split('-')[0]}…</code> · <button class="link danger" disabled={busy} onClick={() => run(() => google.clearClient())}>Remove the client and its accounts</button>
+          </p>
+        </>
+      )}
+      {problem && <p class="danger" role="alert">{problem}</p>}
+      {status && calendarAccounts > 0 && <GoogleCalendarChoices />}
+      {status && google.accountsWith('tasks').length > 0 && (
+        <>
+          <label>
+            When I complete a Google task
+            <select value={settings.googleTasksOnComplete} onChange={(event) => update({ googleTasksOnComplete: event.currentTarget.value as PlannerSettings['googleTasksOnComplete'] })}>
+              <option value="complete">Complete it in Google Tasks</option>
+              <option value="ask">Ask me</option>
+              <option value="nothing">Leave Google Tasks alone</option>
+            </select>
+          </label>
+          <label>
+            Complete a task when it is completed in Google Tasks
+            <input type="checkbox" checked={settings.googleTasksImportCompletion} onChange={(event) => update({ googleTasksImportCompletion: event.currentTarget.checked })} />
+          </label>
+          <label>
+            Planning a Google task on a day makes it due that day (Google Calendar shows it there)
+            <input type="checkbox" checked={settings.googleTasksDueFromPlan} onChange={(event) => update({ googleTasksDueFromPlan: event.currentTarget.checked })} />
+          </label>
+          <label>
+            Show Google tasks on the calendar on their due day, as Google Calendar does (planned ones too, marked)
+            <input type="checkbox" checked={settings.googleTasksOnCalendar} onChange={(event) => update({ googleTasksOnCalendar: event.currentTarget.checked })} />
+          </label>
+          <label>
+            Task notifications, as Google Calendar gives them: at a task's time (9 AM for one without), and at 9 AM on its deadline's day
+            <input type="checkbox" checked={settings.googleTaskNotifications} onChange={(event) => update({ googleTaskNotifications: event.currentTarget.checked })} />
+          </label>
+          <p class="hint">
+            The Planner gives these itself, as OpenChamber notifications, while one of its surfaces is open (the page, the rail panel or its Work Status section), each once,
+            and one missed meanwhile when one opens the same day: Google Tasks gets no time or deadline from the Planner, so Google's own apps notify a task the Planner
+            times only at 9 AM on its date, and never for its deadline. The notifications given are kept on this machine, outside the synced plan.
+          </p>
+        </>
+      )}
     </fieldset>
   );
 };
@@ -299,7 +578,11 @@ export const Settings = () => {
         </fieldset>
         <Channels />
         <Calendars />
+        <GoogleSettings />
+        <GmailSettings />
+        <MeetingSettings />
         <LinearSettings />
+        <AgentSettings />
         <SyncSettings />
         <fieldset>
           <legend>Storage</legend>

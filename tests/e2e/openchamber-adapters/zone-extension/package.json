@@ -1,0 +1,24 @@
+{
+  "name": "ocforge-test-zone",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scratch extension for the end-to-end check of oc-forge's OpenChamber adapters: a panel whose ocForge.zone is bottom.",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.5.2"
+    },
+    "contributes": {
+      "panel": {
+        "id": "ocforge-test-zone",
+        "name": "oc-forge bottom panel",
+        "icon": "layout-bottom",
+        "entry": "panel/index.html"
+      }
+    }
+  },
+  "ocForge": {
+    "apiVersion": 1,
+    "zone": "bottom"
+  }
+}

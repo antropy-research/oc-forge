@@ -15,6 +15,10 @@ export interface EventStoreOptions {
   log?: (message: string) => void;
   /** Called after each successful commit (to schedule a sync). */
   onCommit?: () => void;
+  /** Loose git objects that make the history get packed (default 256); see `pack`. */
+  packLooseObjects?: number;
+  /** Commits between two checks for loose objects (default 20). */
+  packCheckCommits?: number;
 }
 
 const MONTH_FILE = /^\d{4}-\d{2}\.jsonl$/;
@@ -42,6 +46,7 @@ export class EventStore {
   private gitChain: Promise<unknown> = Promise.resolve();
   private commitTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingSummaries: string[] = [];
+  private commitsSincePackCheck = 0;
   lastCommitAt: string | null = null;
   lastError: string | null = null;
   skippedLines = 0;
@@ -60,6 +65,7 @@ export class EventStore {
   async init(): Promise<void> {
     mkdirSync(this.eventsDir, { recursive: true });
     if (this.options.git !== false) this.gitEnabled = await this.ensureRepo();
+    if (this.gitEnabled) void this.pack();
   }
 
   load(): PlannerEvent[] {
@@ -131,6 +137,10 @@ export class EventStore {
       this.lastCommitAt = new Date().toISOString();
       this.lastError = null;
       this.options.onCommit?.();
+      if (++this.commitsSincePackCheck >= (this.options.packCheckCommits ?? 20)) {
+        this.commitsSincePackCheck = 0;
+        void this.pack();
+      }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (!/nothing to commit/.test(text)) {
@@ -215,6 +225,26 @@ export class EventStore {
     const next = this.gitChain.then(run, run);
     this.gitChain = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Keep the history packed. Every commit adds a few loose objects, and git
+   * packs on its own (`gc --auto`) only past about 6,700, which it estimates
+   * from a sample: a busy plan reached 1,100 commits and 285 MB of loose
+   * objects (4.9 MB once packed), and a first push to a new sync remote no
+   * longer fit in the time OpenChamber waits for an answer. So the loose
+   * objects are counted exactly, at start and every few commits, and packed
+   * past a small number; `gc --auto` then merges the packs once there are many.
+   */
+  private async pack(): Promise<void> {
+    try {
+      const count = Number(/^count: (\d+)$/m.exec(await this.git(['count-objects', '-v']))?.[1] ?? 0);
+      if (count < (this.options.packLooseObjects ?? 256)) return;
+      await this.git(['repack', '-d', '-q'], 120_000);
+      await this.git(['-c', 'gc.autoDetach=false', 'gc', '--auto', '--quiet'], 120_000);
+    } catch (error) {
+      this.log(`git pack failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+    }
   }
 
   private async ensureRepo(): Promise<boolean> {

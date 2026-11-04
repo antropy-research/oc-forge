@@ -5,7 +5,8 @@ Usage: python scripts/build.py <target>, where target is one of TARGETS.
 Runs upstream's unmodified packages/cli/script/build.ts with scripts/build-preload.ts
 preloaded, then checks that the binary contains the adapted code, that the
 upstream submodule was left untouched, and (when the host can run it) that the
-binary starts.
+binary starts. A copy of the submodule without git metadata (the dev container's
+build stage) skips the untouched check.
 """
 
 import json
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM = ROOT / "vendors/opencode"
 TARGETS = {
     "opencode-linux-x64": ("linux", "x86_64"),
+    "opencode-linux-arm64": ("linux", "aarch64"),
     "opencode-darwin-arm64": ("darwin", "arm64"),
 }
 # Present only when the location-ttl adapter was compiled in.
@@ -51,8 +53,15 @@ def main() -> None:
         # Match the official release build: stable channel and upstream version. The
         # compile runtime is mise's official Bun, so BUN_COMPILE_RELEASE is not set:
         # upstream resolves it through the unauthenticated GitHub API, which is rate
-        # limited on shared CI runners.
-        env={**os.environ, "OPENCODE_VERSION": version, "OPENCODE_CHANNEL": "latest"},
+        # limited on shared CI runners. Since v2.2.0 upstream takes the target from
+        # OPENCODE_TARGET (without the "opencode-" prefix) and ignores --target=, so
+        # without it every platform is built, the musl ones included.
+        env={
+            **os.environ,
+            "OPENCODE_VERSION": version,
+            "OPENCODE_CHANNEL": "latest",
+            "OPENCODE_TARGET": target.removeprefix("opencode-"),
+        },
     )
     require_clean("after build")
     binary = outdir / target.replace("opencode", "cli") / "bin/opencode"
@@ -74,6 +83,11 @@ def main() -> None:
 
 
 def require_clean(when: str) -> None:
+    # A copy without git metadata, like containers/openchamber-dev's build stage, cannot be
+    # checked here; the container's build.sh checks the checkout it is copied from.
+    if not (UPSTREAM / ".git").exists():
+        print(f"{UPSTREAM} has no git metadata; skipping the pristine check {when}")
+        return
     status = subprocess.check_output(["git", "-C", str(UPSTREAM), "status", "--porcelain"], text=True)
     if status:
         sys.exit(f"upstream submodule has changes {when}; it must stay pristine:\n{status}")

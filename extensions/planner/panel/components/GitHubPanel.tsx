@@ -1,9 +1,13 @@
+import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../src/domain/types.ts';
 import { addDays, monthDay } from '../../src/domain/dates.ts';
-import { shortKey, taskForGitHub, type GitHubItem } from '../../src/domain/github.ts';
+import { repoOfSearch, shortKey, taskForGitHub, withRepo, type GitHubItem } from '../../src/domain/github.ts';
 import { GITHUB_DRAG_TYPE, useGitHub, usePlanner, useView } from '../lib/context.ts';
 import { useUi } from '../lib/ui.ts';
 import type { GitHubListKind } from '../lib/github.ts';
+import { useDayTargets } from '../lib/dayTargets.ts';
+import { PlanActions } from './PlanActions.tsx';
+import { AssignButton } from './AssigneePicker.tsx';
 
 const KINDS: { id: GitHubListKind; label: string }[] = [
   { id: 'assigned', label: 'Issues assigned to me' },
@@ -11,7 +15,7 @@ const KINDS: { id: GitHubListKind; label: string }[] = [
   { id: 'mine', label: 'My open pull requests' },
 ];
 
-const plannedLabel = (task: Task, today: string): string => {
+export const plannedLabel = (task: Task, today: string): string => {
   if (task.completedAt) return 'Done';
   if (task.placement.kind === 'backlog') return 'In backlog';
   if (task.placement.date === today) return 'Today';
@@ -20,10 +24,17 @@ const plannedLabel = (task: Task, today: string): string => {
 };
 
 const ItemRow = ({ item }: { item: GitHubItem }) => {
-  const { github } = usePlanner();
+  const { github, client } = usePlanner();
   const view = useView();
   const { setUi } = useUi();
+  const targets = useDayTargets();
   const linked = taskForGitHub(view.state, item);
+  /** Plan the issue on the first day shown: the task its assignee works on. */
+  const assign = async () => {
+    const { bodies, taskId } = github.importCommands(item, { kind: 'day', date: targets.primary });
+    await client.dispatch(bodies, { undo: `Planned ${item.key}` });
+    return taskId;
+  };
   return (
     <li
       class="issue-row"
@@ -46,42 +57,110 @@ const ItemRow = ({ item }: { item: GitHubItem }) => {
       {linked ? (
         <button class="link issue-planned" onClick={() => setUi({ openTaskId: linked.id })} aria-label={`Open the task for ${item.key} (${plannedLabel(linked, view.today)})`}>{plannedLabel(linked, view.today)}</button>
       ) : (
-        <span class="issue-actions">
-          <button onClick={() => void github.plan(item, { kind: 'day', date: view.today })} aria-label={`Plan ${item.key} today`}>Today</button>
-          <button onClick={() => void github.plan(item, { kind: 'day', date: addDays(view.today, 1) })} aria-label={`Plan ${item.key} tomorrow`}>Tmrw</button>
-          <button onClick={() => void github.plan(item, { kind: 'backlog', bucket: 'next-weeks' })} aria-label={`Put ${item.key} in the backlog`}>Later</button>
-        </span>
+        <PlanActions label={item.key} onPlan={(placement) => void github.plan(item, placement)}>
+          {item.kind === 'issue' && <AssignButton taskId={null} prepare={assign} label={`Assign ${item.key} to an agent`}>Agent</AssignButton>}
+        </PlanActions>
       )}
     </li>
   );
 };
 
-/** GitHub issues and pull requests to plan, through the machine's gh CLI. */
+/** What to do when gh is missing or signed out: where to run `gh auth login`, to copy. */
+export const GitHubSignIn = () => {
+  const { github, host, client } = usePlanner();
+  const gv = useGitHub();
+  const status = gv.status!;
+  const command = status.container ? `docker exec -it ${status.container} gh auth login` : 'gh auth login';
+  const title = status.reason === 'missing' ? 'Install the GitHub CLI' : status.reason === 'signed-out' ? 'Sign in to GitHub' : 'GitHub is out of reach';
+  return (
+    <div class="connect-linear gh-signin" role="status" aria-label="GitHub sign-in">
+      <p><strong>{title}</strong></p>
+      <p>{status.message ?? 'GitHub is not available.'}</p>
+      {status.reason && (
+        <ol>
+          {status.reason === 'missing' && <li>Install <code>gh</code> where OpenChamber runs (cli.github.com).</li>}
+          <li>
+            {status.container ? 'OpenChamber runs in a container; on its host, run ' : 'Where OpenChamber runs, run '}
+            <code>{command}</code>{' '}
+            <button class="link" onClick={() => void host.writeClipboard(command).then(() => client.notify('Copied')).catch(() => client.notify('Could not copy'))}>Copy</button>
+          </li>
+          <li>Then check again here.</li>
+        </ol>
+      )}
+      <p class="hint">The Planner reads GitHub through that GitHub CLI, read-only, the way Sunsama does; assigned agents open their pull requests with it too.</p>
+      <button onClick={() => void github.checkStatus()}>Check again</button>
+    </div>
+  );
+};
+
+/** GitHub's search returns at most this many results of one search (service/github.ts `SEARCH_MAX`). */
+const SEARCH_MAX = 1000;
+
+/**
+ * GitHub issues and pull requests to plan, through the machine's gh CLI: a page at a time, every match reachable
+ * (Load more, and words to narrow the list); Refresh reads again as many as are shown.
+ */
 export const GitHubItems = () => {
   const { github } = usePlanner();
   const gv = useGitHub();
+  const [text, setText] = useState(gv.text);
+  // The list follows the words once typing stops.
+  useEffect(() => {
+    const timer = setTimeout(() => github.setText(text), 400);
+    return () => clearTimeout(timer);
+  }, [text]);
+  useEffect(() => {
+    if (gv.status?.available) void github.loadRepos();
+  }, [gv.status?.available]);
   if (!gv.status) return <p class="hint">Checking GitHub…</p>;
-  if (!gv.status.available) {
-    return (
-      <div class="connect-linear" role="status">
-        <p>{gv.status.message ?? 'GitHub is not available.'}</p>
-        <p class="hint">Planner reads GitHub through the GitHub CLI of the machine running OpenChamber, read-only, the way Sunsama does.</p>
-        <button onClick={() => void github.checkStatus()}>Check again</button>
-      </div>
-    );
-  }
+  if (!gv.status.available) return <GitHubSignIn />;
+  const kindLabel = KINDS.find((kind) => kind.id === gv.kind)?.label ?? 'GitHub';
+  const repo = repoOfSearch(text);
+  // A repository chosen narrows the search to it (its repo: term), as typing one does.
+  const chooseRepo = (value: string) => {
+    const next = withRepo(text, value || null);
+    setText(next);
+    github.setText(next);
+  };
   return (
     <div class="linear-issues">
       <div class="linear-toolbar">
         <select aria-label="GitHub items to show" value={gv.kind} onChange={(event) => github.setKind(event.currentTarget.value as GitHubListKind)}>
           {KINDS.map((kind) => <option key={kind.id} value={kind.id}>{kind.label}</option>)}
         </select>
-        <button class="icon-button" aria-label="Refresh GitHub" onClick={() => void github.refresh()}>↻</button>
+        <button class="icon-button" aria-label="Refresh GitHub" title="Refresh: reads again as many as are shown" onClick={() => void github.refresh()}>↻</button>
       </div>
+      {(gv.repos?.length || repo) && (
+        <select class="gh-repo" aria-label="Repository" title="Your repositories, the ones you most recently contributed to first" value={repo ?? ''} onChange={(event) => chooseRepo(event.currentTarget.value)}>
+          <option value="">All repositories</option>
+          {repo && !gv.repos?.some((name) => name.toLowerCase() === repo.toLowerCase()) && <option value={repo}>{repo}</option>}
+          {(gv.repos ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      )}
+      <input
+        class="gh-search"
+        type="search"
+        aria-label="Search GitHub items"
+        placeholder="Search: words, repo:owner/name, label:bug"
+        value={text}
+        onInput={(event) => setText(event.currentTarget.value)}
+        onKeyDown={(event) => event.key === 'Enter' && github.setText(event.currentTarget.value)}
+      />
       {gv.error && <p class="feed-errors" role="alert">{gv.error}</p>}
       {gv.loading && gv.items.length === 0 && <p class="hint">Loading…</p>}
-      {!gv.loading && gv.items.length === 0 && !gv.error && <p class="hint">Nothing here right now.</p>}
-      <ul class="issue-list">{gv.items.map((item) => <ItemRow key={item.id} item={item} />)}</ul>
+      {!gv.loading && gv.items.length === 0 && !gv.error && <p class="hint">{gv.text.trim() ? 'Nothing matches.' : 'Nothing here right now.'}</p>}
+      <ul class="issue-list" aria-label={kindLabel}>{gv.items.map((item) => <ItemRow key={item.id} item={item} />)}</ul>
+      {gv.items.length > 0 && (
+        <div class="gh-more" role="status" aria-label="GitHub items shown">
+          <span class="hint">{gv.next ? `Showing ${gv.items.length} of ${gv.total}` : `All ${gv.items.length} shown`}</span>
+          {gv.next && (
+            <button class="link" disabled={gv.loadingMore || gv.loading} onClick={() => void github.loadMore()}>
+              {gv.loadingMore || gv.loading ? 'Loading…' : 'Load more'}
+            </button>
+          )}
+          {gv.total > SEARCH_MAX && <p class="hint">GitHub's search gives the first {SEARCH_MAX.toLocaleString('en-US')} of {gv.total.toLocaleString('en-US')}: narrow it with words or repo:owner/name.</p>}
+        </div>
+      )}
     </div>
   );
 };

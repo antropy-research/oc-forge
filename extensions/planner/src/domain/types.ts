@@ -22,11 +22,21 @@ export interface Subtask {
   id: string;
   title: string;
   done: boolean;
+  /** A task merged in (Sunsama's Merge tasks): what it kept, so Convert to task gives it back. */
+  notes?: string;
+  plannedMinutes?: number | null;
+  source?: TaskSourceRef;
 }
 
-/** An external object the task plans; the source stays authoritative for its state. */
+/**
+ * Where a task comes from, by name: an external object the task plans (the source stays authoritative for its
+ * state); `link` is any other page, the task's backlink (Sunsama's "Tasks from URL"); `event` a Google Calendar
+ * event added to the tasks (Sunsama's meeting import).
+ */
+export const SOURCE_NAMES = { linear: 'Linear', github: 'GitHub', gtask: 'Google Tasks', email: 'Gmail', link: 'Link', event: 'Google Calendar' } as const;
+
 export interface TaskSourceRef {
-  kind: 'linear' | 'github';
+  kind: keyof typeof SOURCE_NAMES;
   id: string;
   /** Short label at the source, such as NEX-110. */
   key: string;
@@ -43,13 +53,162 @@ export interface TaskSourceRef {
   workspaceId?: string;
   /** Git branch Linear suggests for the issue; an agent's worktree uses it so its pull request links back. */
   branch?: string;
+  /** Google account (email) a Google task or message belongs to. */
+  account?: string;
+  /** Google task list the task is in. */
+  listId?: string;
+  /** A Google task's details and date last seen there: with `title`, what both sides last agreed on. */
+  notes?: string;
+  due?: DateKey | null;
+  /**
+   * A calendar event's times as last seen, whether other people are invited, its calendar, and whether the
+   * meeting import added it by itself (auto-sync) rather than the user.
+   */
+  event?: { calendarId: string; start: string; end: string; allDay: boolean; invitees: boolean; auto?: boolean };
+}
+
+/**
+ * What the Planner keeps for a Google task that Google Tasks' API does not let
+ * other apps read or write (a time, a deadline, a repeat, a star), by account
+ * and task id, with the list the task is in now (it follows moves).
+ */
+export interface GoogleTaskKept {
+  account: string;
+  listId: string;
+  taskId: string;
+  /** Minutes after midnight on the task's date; null: all day. */
+  time: number | null;
+  /** How long it takes from `time`, in minutes; null: no end time. */
+  duration: number | null;
+  /** The day it must be done by, apart from its date. */
+  deadline: DateKey | null;
+  /**
+   * A repeating task: its rule, its series, which occurrence this is, the task
+   * made next (once made), the date the series put this occurrence on (a
+   * one-off change of its date leaves it) and the series' template. A series
+   * kept before templates gets both when it is next seen. `exceptions`: the
+   * series' later occurrences changed on their own, by the date the series
+   * puts each on, carried from occurrence to occurrence as the template is.
+   */
+  repeat: { rule: string; seriesId: string; index: number; next: string | null; on?: DateKey; template?: GoogleTaskTemplate; exceptions?: Record<DateKey, GoogleTaskException> } | null;
+  /** When it was starred; null when it is not. */
+  starredAt: string | null;
+  /**
+   * Google Calendar's availability for a task with a time: Busy (absent: Free,
+   * as Google Calendar makes tasks). The Planner plans other work around it.
+   */
+  busy?: true;
+  /** Google Calendar's visibility for a task with a time; absent: the calendar's default. */
+  visibility?: 'public' | 'private';
+  /** Its color on the calendar, one of Google Calendar's; absent: its list's color. */
+  color?: string;
+  /** Google Drive files attached to it, at most 25, as Google Calendar attaches them to a task. */
+  attachments?: TaskAttachment[];
+  /**
+   * Google Calendar's "Do not disturb" for a task with a time (work and school accounts): the
+   * Planner's own notifications that come during it wait until it ends.
+   */
+  doNotDisturb?: true;
+  /** Google Calendar's "Automatically decline meetings" for a task with a time set Busy (work and school accounts). */
+  decline?: TaskDecline;
+  updatedAt: string;
+}
+
+/** Google Calendar's visibility choices for an event or a task with a time. */
+export type TaskVisibility = 'default' | 'public' | 'private';
+
+/** A Google Drive file attached to a task: Drive's id for it, its name, its type and where it opens. */
+export interface TaskAttachment {
+  id: string;
+  title: string;
+  mimeType: string;
+  /** Where Drive opens it (https). */
+  url: string;
+}
+
+/**
+ * Meetings declined during a task, as Google Calendar declines them for one set Busy: every
+ * invitation then ('all', new and existing meetings) or only those that arrive once it is on
+ * ('new'), each answered "Declined" with `message`.
+ */
+export interface TaskDecline {
+  mode: 'all' | 'new';
+  message: string;
+  /** When it was turned on. */
+  since: string;
+}
+
+/**
+ * What each next occurrence of a repeating Google task is made from, as
+ * Google Tasks keeps a series apart from its occurrences: "This task" changes
+ * one occurrence and leaves it, "All tasks" changes it.
+ */
+export interface GoogleTaskTemplate {
+  title: string;
+  notes: string;
+  /** Minutes after midnight on an occurrence's date; null: all day. */
+  time: number | null;
+  /** How long it takes from `time`, in minutes; null: no end time. */
+  duration: number | null;
+  /** The deadline, in days after an occurrence's date; null: none. */
+  deadline: number | null;
+  /** The day the schedule counts from. */
+  start: DateKey;
+  /** Busy and visibility are the series', as Google Calendar keeps one for all of a series; so are its other advanced settings. */
+  busy?: true;
+  visibility?: 'public' | 'private';
+  color?: string;
+  doNotDisturb?: true;
+  /** Declining meetings, since it was turned on for the series (when known). */
+  decline?: Omit<TaskDecline, 'since'> & { since?: string };
+  /** The Drive files each next occurrence has attached. */
+  attachments?: TaskAttachment[];
+}
+
+/**
+ * One upcoming occurrence of a series changed on its own, as Google Calendar
+ * changes one occurrence ("This task"): deleted (`skip`: the series passes
+ * over its date), or with its own title, details, date, time or deadline. A
+ * field it does not have comes from the template, so an "All tasks" change
+ * of that field reaches it too.
+ */
+export interface GoogleTaskException {
+  skip?: true;
+  title?: string;
+  notes?: string;
+  /** Moved to another day. */
+  date?: DateKey;
+  /** Minutes after midnight; null: all day. Set with `duration`. */
+  time?: number | null;
+  duration?: number | null;
+  deadline?: DateKey | null;
+  /** Its own Drive attachments in place of its series' ([]: none), as Google Calendar's This task changes them. */
+  attachments?: TaskAttachment[];
 }
 
 /** How the Linear page groups and orders issues. */
-export const LINEAR_GROUPS = ['status', 'priority', 'project', 'team', 'assignee', 'workspace', 'none'] as const;
+export const LINEAR_GROUPS = ['status', 'priority', 'project', 'team', 'assignee', 'workspace', 'none', 'cycle', 'label'] as const;
 export type LinearGroupBy = (typeof LINEAR_GROUPS)[number];
-export const LINEAR_ORDERS = ['priority', 'updated', 'due', 'identifier'] as const;
+export const LINEAR_ORDERS = ['priority', 'updated', 'due', 'identifier', 'status', 'manual', 'created'] as const;
 export type LinearOrderBy = (typeof LINEAR_ORDERS)[number];
+/** Which completed and canceled issues a Linear list shows, as Linear's Display menu offers. */
+/** Linear's windows for completed issues, and Sunsama's five days (its panel's My issues keep completed issues that long). */
+export const LINEAR_COMPLETED = ['all', 'day', '5days', 'week', 'month', '3months', '6months', 'year', 'none'] as const;
+export type LinearCompletedWindow = (typeof LINEAR_COMPLETED)[number];
+/** Issue properties a Linear row or card can show. */
+export const LINEAR_PROPERTIES = ['id', 'status', 'priority', 'assignee', 'labels', 'project', 'cycle', 'estimate', 'due', 'created', 'updated'] as const;
+export type LinearProperty = (typeof LINEAR_PROPERTIES)[number];
+/** The rest of Linear's Display menu for the Planner's own lists (saved views keep theirs). */
+export interface LinearDisplayPrefs {
+  subGroupBy: LinearGroupBy;
+  orderReverse: boolean;
+  showCompleted: LinearCompletedWindow;
+  showSubIssues: boolean;
+  /** Empty groups in a list, and empty columns on a board. */
+  showEmptyGroups: boolean;
+  showEmptyColumns: boolean;
+  properties: LinearProperty[];
+}
 
 export type Priority = 'urgent' | 'high' | 'medium' | 'low';
 
@@ -118,6 +277,15 @@ export interface WorkBlock {
   taskId: string;
   start: string;
   end: string;
+  /** The Google Calendar event the Planner wrote for this session, when it writes sessions there. */
+  google?: GoogleEventLink;
+}
+
+/** A Google Calendar event, by the account and calendar it is in. */
+export interface GoogleEventLink {
+  account: string;
+  calendarId: string;
+  eventId: string;
 }
 
 /** A backlog folder (Sunsama: folders exist only in the backlog). */
@@ -151,6 +319,10 @@ export interface Highlight {
   starred: boolean;
   /** A task-derived item the user removed; kept so it is not merged back in. */
   hidden?: boolean;
+  /** Where it opens (an item included from Other activities, such as a pull request on GitHub). */
+  url?: string;
+  /** What it was included from (`github:<kind>:<id>`), so that one shows as included. */
+  ref?: string;
 }
 
 /** What a ritual left behind for one day (or one week, keyed by its first day). */
@@ -218,6 +390,48 @@ export interface TaskRun {
   outcomeAt: string | null;
   /** A finished turn is not an accepted task: the user reviews it. */
   review: { verdict: 'accepted' | 'changes'; at: string; note: string } | null;
+  /** Assigned to the agent, as in GitHub or Linear: it was asked to open a pull request from its branch. */
+  wantsPr?: boolean;
+  /** The pull request opened from the run's branch, as gh last showed it. */
+  pullRequest?: RunPullRequest | null;
+  /** The agent the task was assigned to, as it was when the run started; absent for OpenChamber's default agent. */
+  assignee?: RunAssignee | null;
+}
+
+/**
+ * An agent to assign tasks to, named in Settings → Agents: an OpenCode agent
+ * (build, plan or one from OpenCode's config) with an optional model.
+ */
+export interface AgentPreset {
+  /** Lowercase letters, digits and dashes; names the OpenCode command `oc-planner-<id>`. */
+  id: string;
+  name: string;
+  /** OpenCode agent id, such as build or plan. */
+  agent: string;
+  /** `provider/model`, optionally `#variant`; null runs the agent's own model. */
+  model: string | null;
+}
+
+/** Who a run was assigned to: a preset, or an OpenCode agent with its own model. */
+export interface RunAssignee {
+  /** The preset id, or `agent-<name>` for an agent without a preset. */
+  id: string;
+  name: string;
+  agent: string;
+  model: string | null;
+}
+
+/** A pull request on GitHub, opened from a run's worktree branch. */
+export interface RunPullRequest {
+  number: number;
+  url: string;
+  state: 'open' | 'closed' | 'merged';
+  draft: boolean;
+  title: string;
+  /** owner/repo */
+  repo: string;
+  /** When the Planner last saw it change. */
+  seenAt: string;
 }
 
 /** A read-only calendar the service fetches (an ICS feed or file). */
@@ -227,7 +441,22 @@ export interface CalendarSubscription {
   url: string;
   color: string;
   visible: boolean;
+  /** A Google calendar, read through its connected account rather than from `url`. */
+  google?: { account: string; calendarId: string };
 }
+
+/** What the Planner can do to an email in Gmail: Sunsama's actions on an email task, and its import and completion automations. */
+export const GMAIL_ACTIONS = ['markRead', 'markUnread', 'archive', 'trash', 'star', 'unstar', 'addLabel', 'removeLabel'] as const;
+export type GmailActionKind = (typeof GMAIL_ACTIONS)[number];
+export interface GmailAction {
+  kind: GmailActionKind;
+  /** The label to apply or remove, by its name in Gmail (each account has its own ids). */
+  label?: string;
+}
+
+/** Kinds of calendar events Sunsama's meeting import leaves out ("Exclude certain types of events"). */
+export const MEETING_EXCLUSIONS = ['noAttendees', 'nonBlocking', 'oooHold', 'unconfirmed', 'multiDayAllDay'] as const;
+export type MeetingExclusion = (typeof MEETING_EXCLUSIONS)[number];
 
 export interface Settings {
   /** IANA zone that decides what "today" and midnight mean. Null until the panel reports one. */
@@ -253,11 +482,68 @@ export interface Settings {
   linearLayout: 'list' | 'board';
   linearGroupBy: LinearGroupBy;
   linearOrderBy: LinearOrderBy;
+  /** Sub-grouping, completed issues, sub-issues, empty groups and row properties of the Linear page. */
+  linearDisplay: LinearDisplayPrefs;
   /** Suggest planned time and channel for new tasks from similar past tasks. */
   suggestFromHistory: boolean;
   /** Focus mode's Pomodoro lengths, in minutes. */
   pomodoroMinutes: number;
   breakMinutes: number;
+  /** Google calendar the Planner writes working sessions to, as events; null writes none. */
+  googleTimebox: { account: string; calendarId: string } | null;
+  /**
+   * Sunsama's "Timeboxing Channel": a channel's tasks are timeboxed to its calendar instead of the default above (which
+   * is the fallback, and never overrides a channel's), by channel id.
+   */
+  channelTimebox: Record<string, { account: string; calendarId: string }>;
+  /** Completing a task linked to a Google task: complete it there too, ask first, or leave it. */
+  googleTasksOnComplete: 'ask' | 'complete' | 'nothing';
+  /** Complete a task when its Google task is completed. */
+  googleTasksImportCompletion: boolean;
+  /** Planning a Google task on a day sets its due date there, so Google Calendar shows it that day. */
+  googleTasksDueFromPlan: boolean;
+  /** Show Google tasks that are due on the calendar, as Google Calendar does, until they are planned. */
+  googleTasksOnCalendar: boolean;
+  /**
+   * Google Calendar's task notifications, from the Planner: at a task's time (9 AM for one
+   * without), and at 9 AM on its deadline's day, while a Planner surface is open.
+   */
+  googleTaskNotifications: boolean;
+  /**
+   * Google accounts whose own calendar was shown when the Planner first saw them, as Google
+   * Calendar shows yours from the start; once per account, so hiding it later stays hidden.
+   */
+  googleCalendarsIntroduced: string[];
+  /**
+   * Google Calendar's task lists under "My calendars": each list's color on the calendar and the
+   * lists hidden there, by `${account}\n${listId}`; Google Tasks' API has neither.
+   */
+  googleTaskListColors?: Record<string, string>;
+  googleTaskListsHidden?: string[];
+  /** The task lists in the order the user put them (Google Tasks lets one drag them); Google's API keeps no order. */
+  googleTaskListOrder?: string[];
+  /** Named agents (an OpenCode agent and a model) to assign tasks to. */
+  agentPresets: AgentPreset[];
+  /** Gmail: what is done to an email when it becomes a task, and when that task is completed (Sunsama's import and completion automations). */
+  gmailOnImport: GmailAction[];
+  gmailOnComplete: GmailAction[];
+  /** Ask which of them to do, email by email ("Show prompt"). */
+  gmailImportPrompt: boolean;
+  gmailCompletePrompt: boolean;
+  /** Where an email opens: Gmail, or Superhuman (Sunsama's "Custom email client"). */
+  emailClient: 'gmail' | 'superhuman';
+  /** Linear: right after an issue is imported, ask to update its status there (Sunsama's import automation). */
+  linearImportPrompt: boolean;
+  /** Meeting import: suggest the day's meetings in daily planning ("Show prompt"), or add them by themselves ahead of time ("Auto-sync"). */
+  meetingImport: 'prompt' | 'autoSync';
+  /** The calendars meetings come from (calendar subscription ids); none means the calendars shown. */
+  meetingCalendars: string[];
+  /** Kinds of events left out of the import (all of them at first, as in Sunsama). */
+  meetingExclusions: MeetingExclusion[];
+  /** A task added from an event is completed when the event ends: always, never, or only an event with other invitees. */
+  meetingAutoComplete: 'always' | 'never' | 'invitees';
+  /** The channel meetings from a calendar get ("Import channel"), by calendar subscription id. */
+  meetingChannels: Record<string, string>;
 }
 
 export interface PlannerState {
@@ -276,7 +562,12 @@ export interface PlannerState {
   runs: Record<string, TaskRun>;
   folders: Record<string, Folder>;
   settings: Settings;
+  /** What the Planner keeps for Google tasks, by `googleTaskKey`. */
+  googleTasks: Record<string, GoogleTaskKept>;
 }
+
+/** A Google task's key in `PlannerState.googleTasks`: its account and id (ids are the account's, whatever the list). */
+export const googleTaskKey = (account: string, taskId: string): string => `${account}\n${taskId}`;
 
 export const ritualKey = (ritual: Ritual, date: DateKey): string => `${ritual}:${date}`;
 
@@ -294,9 +585,30 @@ export const DEFAULT_SETTINGS: Settings = {
   linearLayout: 'list',
   linearGroupBy: 'status',
   linearOrderBy: 'priority',
+  linearDisplay: { subGroupBy: 'none', orderReverse: false, showCompleted: 'none', showSubIssues: true, showEmptyGroups: false, showEmptyColumns: true, properties: ['id', 'status', 'priority', 'labels', 'project', 'due', 'assignee', 'created'] },
   suggestFromHistory: true,
   pomodoroMinutes: 25,
   breakMinutes: 5,
+  googleTimebox: null,
+  googleTasksOnComplete: 'complete',
+  googleTasksImportCompletion: true,
+  googleTasksDueFromPlan: true,
+  googleTasksOnCalendar: true,
+  googleTaskNotifications: true,
+  googleCalendarsIntroduced: [],
+  agentPresets: [],
+  gmailOnImport: [],
+  gmailOnComplete: [],
+  gmailImportPrompt: false,
+  gmailCompletePrompt: false,
+  emailClient: 'gmail',
+  linearImportPrompt: false,
+  meetingImport: 'prompt',
+  meetingCalendars: [],
+  meetingExclusions: [...MEETING_EXCLUSIONS],
+  meetingAutoComplete: 'always',
+  meetingChannels: {},
+  channelTimebox: {},
 };
 
 export const emptyState = (): PlannerState => ({
@@ -313,4 +625,5 @@ export const emptyState = (): PlannerState => ({
   runs: {},
   folders: {},
   settings: { ...DEFAULT_SETTINGS },
+  googleTasks: {},
 });
