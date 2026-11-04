@@ -161,7 +161,8 @@ message:
 - VS Code's activity badges (Source Control's changes, the Extensions view's updates, an extension's own count) are on
   the rail icons, open or not (`workbench/badges.ts`): each part reads `IActivityService` for the containers the rail
   lists and sends its counts when they change (`forge.rail.setBadges`); the rail shows each entry's count from the part
-  that saw it change last. Each part
+  that saw it change last (OpenChamber 2.6 draws it as a dot, as its own Git badge, with the count in the icon's
+  tooltip and accessible name: "Source Control, 1 item"). Each part
   keeps its own Source Control, which VS Code refreshes while that part has the focus, and the bridge refreshes when
   another part's Git changes (*One VS Code across the parts*), so the parts count the same changes.
 - The bottom shows no VS Code "Maximize Panel" or "Hide Panel": OpenChamber's bottom zone has its own, and no host API

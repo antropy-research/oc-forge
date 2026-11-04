@@ -127,15 +127,18 @@ try {
   const page = await context.newPage();
   /**
    * The current chat's menu in OpenChamber's header: its "Open session actions" button, or, with sessions shown as
-   * tabs in the header (an OpenChamber setting), the selected tab's "Session tab actions" (shown on hover).
+   * tabs in the header (an OpenChamber setting), the selected tab's menu: "Session tab actions" (2.5, shown on hover) or a right-click (2.6).
    */
   const openChatMenu = async () => {
     const button = page.locator('header button[aria-label="Open session actions"]').first();
     const tab = page.locator('header [role="tab"][aria-selected="true"]').first();
     await button.or(tab).first().waitFor({ timeout: 20_000 });
     if (await button.isVisible().catch(() => false)) return button.click();
+    // OpenChamber 2.5: the tab's "Session tab actions" button, shown on hover; 2.6: the same menu on a right-click.
     await tab.hover();
-    await tab.getByRole('button', { name: 'Session tab actions' }).click({ timeout: 10_000 });
+    const actions = tab.getByRole('button', { name: 'Session tab actions' });
+    if (await actions.isVisible().catch(() => false)) return actions.click({ timeout: 10_000 });
+    await tab.click({ button: 'right' });
   };
   context.on('page', (opened) => popups.push(opened.url()));
   page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
@@ -300,7 +303,7 @@ try {
 
     await nativeSearchHit();
 
-    // The full page: Extension pages → VS Code, in OpenChamber's main area (the side panel closed first).
+    // The full page: Extension pages (2.6: the sidebar header's More) → VS Code, in OpenChamber's main area (the side panel closed first).
     const closeButtons = page.locator('button[aria-label="Close panel"]');
     let rightmost = null;
     for (let index = 0; index < await closeButtons.count(); index++) {
@@ -308,7 +311,7 @@ try {
       if (box && (!rightmost || box.x > rightmost.x)) rightmost = { index, x: box.x };
     }
     if (rightmost) await closeButtons.nth(rightmost.index).click().catch(() => {});
-    await page.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+    await page.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
     await page.getByRole('menuitem', { name: 'VS Code' }).click({ timeout: 10_000 });
     // The page is the widest VS Code frame (the rail panel may be open beside it).
     const widest = await until(async () => {

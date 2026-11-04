@@ -93,7 +93,7 @@ try {
       const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
       if (await button.isVisible().catch(() => false)) await button.click();
       else {
-        await other.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+        await other.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
         await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
       }
       await home.waitFor({ timeout: 30_000 });
