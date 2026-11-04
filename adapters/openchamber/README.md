@@ -323,11 +323,15 @@ Every edit names exact upstream text that must occur exactly once
 (`apply.ts`); otherwise the build stops with the adapter, the file and the
 anchor. The Vite plugin also fails the build if a targeted module never loaded
 (upstream stopped using it); `lib/guests/types.ts` is exempt, being imported
-only as types. 66 edits in 22 files (34 `insertAfter`, 28 `replace`, 4
+only as types. 69 edits in 22 files (33 `insertAfter`, 32 `replace`, 4
 `insertBefore`); `rail.open` and `window.id` added none, and neither did rail
 badges (the `replace` that lights a rail entry in `ContextPanelRail.tsx` now
 starts six lines higher, at the badge's count) or the rail panel's title
-(OpenChamber's own header toolbar slot).
+(OpenChamber's own header toolbar slot). OpenChamber 2.6 added three, all in
+`SessionTabsStrip.tsx`: its new-session draft tab and its desktop close-tab
+target (Cmd/Ctrl+W) defer to a selected extension tab as the session tabs do,
+and the list of every tab moved after its new "+" (an `insertAfter` there
+became a `replace`).
 
 OpenChamber is compiled with the React Compiler, which memoizes on the values a
 render reads: host code that renders passes the oc-forge state it read as an

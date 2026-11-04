@@ -3,14 +3,18 @@ import React from 'react';
 import { Icon } from '@/components/icon/Icon';
 import { GuestIcon } from '@/components/layout/GuestRailIcon';
 import { PluginPane } from '@/components/layout/PluginPane';
+import { TooltipLabelWithShortcut } from '@/components/ui/action-toolbar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { isDesktopShell } from '@/lib/desktop';
 import { isGuestActive } from '@/lib/guests/capabilities';
 import { FALLBACK_GUEST_ICON, guestPackageIconSrc, resolveGuestIconName } from '@/lib/guests/icon';
 import { useGuestsStore } from '@/lib/guests/store';
 import type { InstalledGuest } from '@/lib/guests/types';
 import { useI18n } from '@/lib/i18n';
 import { getRuntimeUrlResolver } from '@/lib/runtime-url';
+import { formatShortcutForDisplay, getEffectiveShortcutCombo, getEffectiveShortcutPrefix, UNASSIGNED_SHORTCUT } from '@/lib/shortcuts';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 
@@ -32,9 +36,22 @@ const tabIcon = (tab: OcForgeHeaderTab, guest: InstalledGuest | undefined): { ic
   };
 };
 
-// Memoized: a strip of hundreds of tabs re-renders only the tab that changed.
-const HeaderTab = React.memo(function HeaderTab({ tab, guest, isActive }: { tab: OcForgeHeaderTab; guest: InstalledGuest | undefined; isActive: boolean }) {
+/**
+ * One extension tab, drawn as OpenChamber draws a session's: on hover the close button takes the icon's slot at the
+ * tab's start, the tooltip names the tab with its `mod+<digit>` (the strip's number, session tabs first), and an
+ * unsaved tab's dot sits at its end, as a session's state mark. Memoized: a strip of hundreds of tabs re-renders only
+ * the tab that changed.
+ */
+const HeaderTab = React.memo(function HeaderTab({ tab, guest, isActive, tabNumber }: { tab: OcForgeHeaderTab; guest: InstalledGuest | undefined; isActive: boolean; tabNumber: number }) {
   const { t } = useI18n();
+  const shortcutOverrides = useUIStore((state) => state.shortcutOverrides);
+  const tabPrefix = getEffectiveShortcutPrefix('switch_session_tab', shortcutOverrides);
+  const tabShortcut = tabPrefix && tabPrefix !== UNASSIGNED_SHORTCUT && tabNumber <= 9
+    ? formatShortcutForDisplay(`${tabPrefix}+${tabNumber}`)
+    : undefined;
+  const closeShortcut = isActive
+    ? formatShortcutForDisplay(isDesktopShell() ? 'mod+w' : getEffectiveShortcutCombo('close_session_tab', shortcutOverrides), '')
+    : undefined;
   const select = () => activateOcForgeTab(tab.guestId, tab.id);
   const close = () => requestCloseOcForgeTab(tab.guestId, tab.id);
   // A Cmd/Ctrl+click on a tab with a route opens the page there in a new browser tab, as on a link, and this window
@@ -54,63 +71,81 @@ const HeaderTab = React.memo(function HeaderTab({ tab, guest, isActive }: { tab:
       data-oc-forge-tab={`${tab.guestId}:${tab.id}`}
       {...(isActive ? { 'data-active-session-tab': true } : {})}
     >
-      <div
-        role="tab"
-        aria-selected={isActive}
-        tabIndex={isActive ? undefined : 0}
-        title={guest ? `${tab.title} — ${guest.name}` : tab.title}
-        onClick={(event) => {
-          if (!openInNewTab(event) && !isActive) select();
-        }}
-        onKeyDown={isActive ? undefined : (event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            select();
-          }
-        }}
-        onAuxClick={(event) => {
-          if (event.button === 1) {
-            event.preventDefault();
-            close();
-          }
-        }}
-        className={cn(
-          'session-tab group/session-tab relative flex h-7 w-full min-w-0 select-none items-center rounded-md px-2',
-          isActive
-            ? 'bg-interactive-selection text-interactive-selection-foreground'
-            : 'cursor-pointer text-muted-foreground hover:bg-interactive-hover hover:text-foreground',
-        )}
-      >
-        <div className="flex min-w-0 flex-1 items-center group-hover/session-tab:pe-6">
-          <GuestIcon icon={icon} iconSrc={iconSrc} className="me-1.5 size-3.5 shrink-0" />
-          <span dir="auto" className="session-tab-title block min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[0.8125rem] font-medium leading-4">
-            {tab.title}
-          </span>
-          {tab.dirty ? (
-            <span data-oc-forge-dirty aria-hidden="true" className="ms-1.5 size-2 shrink-0 rounded-full bg-current group-hover/session-tab:opacity-0" />
-          ) : null}
-        </div>
-        <div
-          onClick={stop}
-          onPointerDown={stop}
-          className="absolute inset-e-1 top-1/2 hidden -translate-y-1/2 items-center group-hover/session-tab:flex"
-        >
-          <button
-            type="button"
-            aria-label={t('header.sessionTabs.closeTab')}
-            onClick={close}
-            className="flex size-5 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div
+            role="tab"
+            aria-selected={isActive}
+            tabIndex={isActive ? undefined : 0}
+            onClick={(event) => {
+              if (!openInNewTab(event) && !isActive) select();
+            }}
+            onKeyDown={isActive ? undefined : (event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                select();
+              }
+            }}
+            onAuxClick={(event) => {
+              if (event.button === 1) {
+                event.preventDefault();
+                close();
+              }
+            }}
+            className={cn(
+              'session-tab group/session-tab relative flex h-7 w-full min-w-0 select-none items-center rounded-md px-2',
+              isActive
+                ? 'bg-interactive-selection text-interactive-selection-foreground'
+                : 'cursor-pointer text-muted-foreground hover:bg-interactive-hover hover:text-foreground',
+            )}
           >
-            <Icon name="close" className="size-4" />
-          </button>
-        </div>
-      </div>
+            <div className="flex min-w-0 flex-1 items-center">
+              <span className="relative me-1.5 inline-flex size-3.5 shrink-0 items-center justify-center">
+                <GuestIcon
+                  icon={icon}
+                  iconSrc={iconSrc}
+                  className="size-3.5 shrink-0 group-hover/session-tab:opacity-0 group-has-[:focus-visible]/session-tab:opacity-0"
+                />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={t('header.sessionTabs.closeTab')}
+                      onClick={(event) => {
+                        stop(event);
+                        close();
+                      }}
+                      onPointerDown={stop}
+                      className="absolute inset-0 flex items-center justify-center rounded text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover/session-tab:opacity-100"
+                    >
+                      <Icon name="close" className="size-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" sideOffset={6}><TooltipLabelWithShortcut label={t('header.sessionTabs.closeTab')} shortcut={closeShortcut} /></TooltipContent>
+                </Tooltip>
+              </span>
+              <div className="session-tab-title min-w-0 flex-1 overflow-hidden whitespace-nowrap">
+                <span dir="auto" className="block max-w-full overflow-hidden whitespace-nowrap oc-ui-start-align text-[0.8125rem] font-medium leading-4">
+                  {tab.title}
+                </span>
+              </div>
+              {tab.dirty ? (
+                <span data-oc-forge-dirty aria-hidden="true" className="ms-1.5 size-2 shrink-0 rounded-full bg-current" />
+              ) : null}
+            </div>
+          </div>
+        </TooltipTrigger>
+        {/* A file's whole name and more fits (512 characters); it wraps rather than leaving the window. */}
+        <TooltipContent side="bottom" sideOffset={6} data-oc-forge-tab-tooltip className="max-w-[min(36rem,calc(100vw-2rem))] break-words">
+          <TooltipLabelWithShortcut label={guest ? `${tab.title} — ${guest.name}` : tab.title} shortcut={tabShortcut} />
+        </TooltipContent>
+      </Tooltip>
     </div>
   );
 });
 
-/** Extension tabs, after the session tabs in the header's strip. */
-export const OcForgeHeaderTabs: React.FC = () => {
+/** Extension tabs, after the session tabs in the header's strip, numbered on from them (`firstNumber`). */
+export const OcForgeHeaderTabs: React.FC<{ firstNumber: number }> = ({ firstNumber }) => {
   const tabs = useOcForgeStore((state) => state.tabs);
   const activeTab = useOcForgeStore((state) => state.activeTab);
   const guests = useGuestsStore((state) => state.guests);
@@ -123,12 +158,13 @@ export const OcForgeHeaderTabs: React.FC = () => {
   if (shown.length === 0) return null;
   return (
     <>
-      {shown.map((tab) => (
+      {shown.map((tab, index) => (
         <HeaderTab
           key={`${tab.guestId}:${tab.id}`}
           tab={tab}
           guest={guests.find((entry) => entry.id === tab.guestId)}
           isActive={tabActive && page === tab.guestId && activeTab[tab.guestId] === tab.id}
+          tabNumber={firstNumber + index}
         />
       ))}
     </>
@@ -137,8 +173,9 @@ export const OcForgeHeaderTabs: React.FC = () => {
 
 /**
  * Every tab of the strip in one list, as VS Code's "Show All Opened Editors" lists its editors: a button at the
- * strip's end while it holds extension tabs and some of its tabs are scrolled out of view (`overflowing`). Choosing
- * one selects it, and the strip scrolls it into view. The session tabs come first, as in the strip.
+ * strip's end, after OpenChamber's "+", while it holds extension tabs and some of its tabs are scrolled out of view
+ * (`overflowing`). Drawn as that "+" is, with its tooltip. Choosing one selects it, and the strip scrolls it into
+ * view. The session tabs come first, as in the strip.
  */
 export const OcForgeAllTabs: React.FC<{
   overflowing: boolean;
@@ -163,17 +200,23 @@ export const OcForgeAllTabs: React.FC<{
   };
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          data-oc-forge-all-tabs
-          aria-label={`All tabs (${count})`}
-          title="All tabs"
-          className="app-region-no-drag ms-1 flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-interactive-hover hover:text-foreground"
-        >
-          <Icon name="arrow-down-s" className="size-4" />
-        </button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0">
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                data-oc-forge-all-tabs
+                aria-label={`All tabs (${count})`}
+                className="app-region-no-drag ms-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Icon name="arrow-down-s" className="size-4" />
+              </button>
+            </DropdownMenuTrigger>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" sideOffset={6}>All tabs</TooltipContent>
+      </Tooltip>
       <DropdownMenuContent align="end" className="max-h-[min(28rem,var(--available-height))] w-72 overflow-auto">
         {sessions.map((session) => (
           <DropdownMenuItem

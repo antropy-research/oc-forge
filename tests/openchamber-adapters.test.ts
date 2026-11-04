@@ -98,12 +98,21 @@ describe("openchamber adapters", () => {
     expect(tabs).toContain("ocForgeActivateAdjacentTab(delta, activateAdjacentSessionTabInStrip)")
     const strip = adapted("packages/ui/src/components/layout/SessionTabsStrip.tsx")
     expect(strip).toContain("isActive={tab.id === currentSessionId && !ocForgeTabActive}")
-    expect(strip).toContain(") : null}\n        <OcForgeHeaderTabs />")
+    // Numbered on from the session tabs, as mod+<digit> counts them.
+    expect(strip).toContain(") : null}\n        <OcForgeHeaderTabs firstNumber={tabs.length + 1} />\n      </div>")
+    // The new session's draft tab is not selected while an extension tab is; a click goes back to the draft.
+    expect(strip).toContain("            aria-selected={!ocForgeTabActive}\n")
+    expect(strip).toContain("            onClick={ocForgeTabActive ? leaveOcForgeTab : undefined}\n")
+    expect(strip).toContain("            {...(ocForgeTabActive ? {} : { 'data-active-session-tab': true })}\n")
+    expect(strip).not.toContain("bg-interactive-selection px-2 text-interactive-selection-foreground\"\n            data-active=\"true\"\n            data-active-session-tab\n")
+    // The desktop app's Cmd/Ctrl+W closes the selected extension tab, and has one to close while it is selected.
+    expect(strip).toContain("  const hasClosableTab = ocForgeTabActive || tabs.some(")
+    expect(strip).toContain("    return registerCloseTabTarget(() => {\n      if (ocForgeCloseActiveTab()) return;\n")
     // The strip keeps the selected extension tab in view and measures its fades as they come and go; at its end, after
-    // the scroller, the list of every tab.
+    // the scroller and OpenChamber's "+", the list of every tab.
     expect(strip).toContain("  }, [currentSessionId, ocForgeActiveTabKey, updateEdges]);")
     expect(strip).toContain("  }, [updateEdges, tabs.length, ocForgeTabCount]);")
-    expect(strip).toContain("        <OcForgeHeaderTabs />\n      </div>\n      <OcForgeAllTabs\n        overflowing={edges.left || edges.right}")
+    expect(strip).toContain("        </TooltipContent>\n      </Tooltip>\n      <OcForgeAllTabs\n        overflowing={edges.left || edges.right}")
     expect(adapted("packages/ui/src/components/layout/Header.tsx")).toContain("(ocForgeTabbedPage ? undefined : state.guests.find(")
     expect(adapted("packages/ui/src/hooks/useKeyboardShortcuts.ts")).toContain(
       "      if (ocForgeCloseActiveTab()) return;\n      if (currentSessionId) {",
@@ -116,7 +125,10 @@ describe("openchamber adapters", () => {
     expect(adapted("packages/ui/src/lib/router/serializeRoute.ts")).toContain(
       "  for (const [key, value] of ocForgeRouteParams()) params.set(key, value);\n\n  return params;\n}\n\n/**\n * Convert URLSearchParams",
     )
-    expect(adapted("packages/ui/src/hooks/useRouter.ts")).toContain("        applyOcForgeRoute();\n      } finally {")
+    // The last step of each route the router applies, before it writes the address bar.
+    expect(adapted("packages/ui/src/hooks/useRouter.ts")).toContain(
+      "        navigateToDiff(route.diffFile);\n      }\n\n      // 5. oc-forge: an extension page deep link (`?extension=<id>&route=<route>`).\n      applyOcForgeRoute();\n    },",
+    )
   })
 
   test("the README's inventory counts the edits there are", () => {

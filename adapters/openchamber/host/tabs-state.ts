@@ -233,21 +233,31 @@ export const leaveOcForgeTab = (): void => {
   if (ocForgeTabbedPageShown()) useUIStore.getState().setOpenGuestPage(null);
 };
 
+/** Enter or Space on the new session's draft tab while an extension tab is selected: back to the draft, as a click. */
+export const onOcForgeLeaveTabKey = (event: React.KeyboardEvent): void => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  leaveOcForgeTab();
+};
+
 const renderableSessionIds = (): string[] => {
   const live = new Set(useGlobalSessionsStore.getState().activeSessions.map((session) => session.id));
   return useSessionTabsStore.getState().tabIds.filter((id) => live.has(id));
 };
 
-/** `mod+<digit>`: the session tabs first, then the extension tabs. */
+/**
+ * `mod+<digit>`: the session tabs first, then the extension tabs. A negative index counts the session tabs from their
+ * end, as OpenChamber's own does (closing the new session's draft tab moves to the last session tab).
+ */
 export const ocForgeActivateTabByIndex = (index: number, stock: (index: number) => boolean): boolean => {
   const tabs = ocForgeVisibleTabs();
   if (tabs.length === 0) return stock(index);
   const sessions = renderableSessionIds();
-  if (index < sessions.length) {
+  if (index < 0 ? sessions.length + index >= 0 : index < sessions.length) {
     leaveOcForgeTab();
     return stock(index);
   }
-  const tab = tabs[index - sessions.length];
+  const tab = index < 0 ? undefined : tabs[index - sessions.length];
   return tab ? activateOcForgeTab(tab.guestId, tab.id) : false;
 };
 

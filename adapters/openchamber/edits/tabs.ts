@@ -2,8 +2,11 @@
 // opened from a tab keeps the strip (the release swaps it for "← title"), and
 // OpenChamber's own tab shortcuts reach the extension tabs too. The strip keeps
 // the selected extension tab in view as it keeps the selected session's, and
-// while extension tabs overflow it a button at its end lists every tab. The
-// page staying mounted behind its tabs is the core adapter's OcForgeGuestPages.
+// while extension tabs overflow it a button at its end lists every tab. While
+// an extension tab is selected, no session tab, the new session's draft tab
+// included, shows as selected, and the close-tab key (the desktop app's
+// Cmd/Ctrl+W too) closes the extension tab. The page staying mounted behind
+// its tabs is the core adapter's OcForgeGuestPages.
 import { insertAfter, insertBefore, replace, type Adapter } from "../apply"
 
 export const tabs: Adapter = {
@@ -36,8 +39,8 @@ export const tabs: Adapter = {
     ],
     "packages/ui/src/components/layout/SessionTabsStrip.tsx": [
       insertAfter(
-        "import { closeSessionTabAndActivateNeighbour } from '@/lib/sessionTabs';",
-        "\nimport { leaveOcForgeTab, useOcForgeActiveTabKey, useOcForgeTabActive, useOcForgeTabCount } from '@/oc-forge/tabs-state';\nimport { OcForgeAllTabs, OcForgeHeaderTabs } from '@/oc-forge/tabs-ui';",
+        "import { activateSessionTabByIndex, closeSessionTabAndActivateNeighbour } from '@/lib/sessionTabs';",
+        "\nimport { leaveOcForgeTab, ocForgeCloseActiveTab, onOcForgeLeaveTabKey, useOcForgeActiveTabKey, useOcForgeTabActive, useOcForgeTabCount } from '@/oc-forge/tabs-state';\nimport { OcForgeAllTabs, OcForgeHeaderTabs } from '@/oc-forge/tabs-ui';",
       ),
       insertAfter(
         "  const activeSessions = useGlobalSessionsStore((state) => state.activeSessions);",
@@ -46,28 +49,67 @@ export const tabs: Adapter = {
           "\n  const ocForgeActiveTabKey = useOcForgeActiveTabKey();\n  const ocForgeTabCount = useOcForgeTabCount();",
       ),
       insertAfter("  const handleSelect = React.useCallback((tab: SessionTab) => {", "\n    leaveOcForgeTab();"),
+      // The desktop app's Cmd/Ctrl+W: while an extension tab is selected, it is the open tab, as for close_session_tab.
+      replace(
+        "  const hasClosableTab = tabs.some((tab) => tab.id === currentSessionId) || (showDraftTab && tabs.length > 0);",
+        "  const hasClosableTab = ocForgeTabActive || tabs.some((tab) => tab.id === currentSessionId) || (showDraftTab && tabs.length > 0);",
+      ),
+      replace(
+        "    return registerCloseTabTarget(() => {\n      const id = useSessionUIStore.getState().currentSessionId;",
+        "    return registerCloseTabTarget(() => {\n      if (ocForgeCloseActiveTab()) return;\n      const id = useSessionUIStore.getState().currentSessionId;",
+      ),
       replace("                isActive={tab.id === currentSessionId}", "                isActive={tab.id === currentSessionId && !ocForgeTabActive}"),
       replace(
         "  const showPendingTab = Boolean(currentSessionId) && !tabs.some((tab) => tab.id === currentSessionId);",
         "  const showPendingTab = Boolean(currentSessionId) && !tabs.some((tab) => tab.id === currentSessionId) && !ocForgeTabActive;",
       ),
+      // The open draft's tab, as a session's tab: not selected while an extension tab is, and a click goes back to it.
+      replace(
+        "        {showDraftTab ? (\n" +
+          "          <div\n" +
+          "            role=\"tab\"\n" +
+          "            aria-selected\n" +
+          "            className=\"app-region-no-drag session-tab-slot flex h-7 w-44 shrink-0 items-center rounded-md bg-interactive-selection px-2 text-interactive-selection-foreground\"\n" +
+          "            data-active=\"true\"\n" +
+          "            data-active-session-tab\n" +
+          "          >\n",
+        "        {showDraftTab ? (\n" +
+          "          <div\n" +
+          "            role=\"tab\"\n" +
+          "            aria-selected={!ocForgeTabActive}\n" +
+          "            tabIndex={ocForgeTabActive ? 0 : undefined}\n" +
+          "            onClick={ocForgeTabActive ? leaveOcForgeTab : undefined}\n" +
+          "            onKeyDown={ocForgeTabActive ? onOcForgeLeaveTabKey : undefined}\n" +
+          "            className={cn(\n" +
+          "              'app-region-no-drag session-tab-slot flex h-7 w-44 shrink-0 items-center rounded-md px-2',\n" +
+          "              ocForgeTabActive\n" +
+          "                ? 'cursor-pointer text-muted-foreground hover:bg-interactive-hover hover:text-foreground'\n" +
+          "                : 'bg-interactive-selection text-interactive-selection-foreground',\n" +
+          "            )}\n" +
+          "            data-active={ocForgeTabActive ? 'false' : 'true'}\n" +
+          "            {...(ocForgeTabActive ? {} : { 'data-active-session-tab': true })}\n" +
+          "          >\n",
+      ),
+      // Numbered on from the session tabs, as the tab shortcuts count them.
       insertAfter(
         "            <div className=\"min-w-0 flex-1\">{children}</div>\n          </div>\n        ) : null}",
-        "\n        <OcForgeHeaderTabs />",
+        "\n        <OcForgeHeaderTabs firstNumber={tabs.length + 1} />",
       ),
       replace("  }, [updateEdges, tabs.length]);", "  }, [updateEdges, tabs.length, ocForgeTabCount]);"),
       replace("  }, [currentSessionId, updateEdges]);", "  }, [currentSessionId, ocForgeActiveTabKey, updateEdges]);"),
-      // After the scroller, so it stays at the strip's end.
-      insertAfter(
-        "        <OcForgeHeaderTabs />\n      </div>",
-        "\n      <OcForgeAllTabs\n" +
+      // At the strip's end, after the "+" that follows the last tab.
+      replace(
+        "      </Tooltip>\n    </div>\n  );\n};",
+        "      </Tooltip>\n" +
+          "      <OcForgeAllTabs\n" +
           "        overflowing={edges.left || edges.right}\n" +
           "        sessions={tabs.map((tab) => ({ id: tab.id, title: tab.session.title?.trim() || t('sessions.sidebar.session.untitled'), active: tab.id === currentSessionId && !ocForgeTabActive }))}\n" +
           "        onSelectSession={(id) => {\n" +
           "          const tab = tabs.find((entry) => entry.id === id);\n" +
           "          if (tab) handleSelect(tab);\n" +
           "        }}\n" +
-          "      />",
+          "      />\n" +
+          "    </div>\n  );\n};",
       ),
     ],
     "packages/ui/src/components/layout/Header.tsx": [
