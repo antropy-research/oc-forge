@@ -1,18 +1,21 @@
 # oc-forge
 
-Patched, jointly pinned releases of OpenCode, OpenChamber, Orca, and VS Code.
+Patched, jointly pinned releases of OpenCode, OpenChamber, and Orca.
 
 The `vendors/` submodules are pinned to official stable release git tags in
 `vendors.json` and are **never modified**. Only `mise run vendors:update`, run by
 hand, changes `vendors/` (see *Updating the vendors*): a vendor newly listed in
-`vendors.json` becomes a submodule on its next run. Fixes live in `adapters/` and
-are applied in memory while the OpenCode build and the OpenChamber web build run.
+`vendors.json` becomes a submodule on its next run. Removing a vendor is the owner's
+decision, made by hand in one commit: its `vendors.json` entry deleted and its submodule
+`git rm`-ed, its `.gitmodules` section with it (VS Code went that way on 2026-11-04).
+Fixes live in `adapters/` and are applied in memory while the OpenCode build and the
+OpenChamber web build run.
 
 OpenCode V2 uses npm `@opencode/cli`'s `latest` version and its matching git tag;
-GitHub's latest release still tracks V1. OpenChamber, Orca, and VS Code use GitHub's latest
+GitHub's latest release still tracks V1. OpenChamber and Orca use GitHub's latest
 non-draft, non-prerelease desktop release. dawn-mac-antropy has no releases, so it
 follows the head of its `main` branch; it is private, and the update skips it until it
-can read it. Current binary builds cover OpenCode; OpenChamber, Orca, VS Code, and
+can read it. Current binary builds cover OpenCode; OpenChamber, Orca, and
 dawn-mac-antropy are source-pinned for future joint packaging.
 
 ## Adapters
@@ -34,8 +37,8 @@ extension using them, OpenChamber looks and behaves as the release.
 
 | Folder | Contains |
 |---|---|
-| `vendors/` | Pristine OpenCode, OpenChamber, Orca, and VS Code release submodules; `dawn-mac-antropy` is listed to follow its `main` branch and becomes a submodule once `mise run vendors:update` can read it (a private repository it cannot read yet is skipped). |
-| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/` (`edits/` to upstream files, the new `host/` UI and `server/` modules they call, `vite-plugin.ts`, and `client/`, the module extensions bundle), `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added.; `dawn-mac-antropy/` is kept empty with `.gitkeep` until patches are added. |
+| `vendors/` | Pristine OpenCode, OpenChamber, and Orca release submodules; `dawn-mac-antropy` is listed to follow its `main` branch and becomes a submodule once `mise run vendors:update` can read it (a private repository it cannot read yet is skipped). |
+| `adapters/` | Per-vendor changes: `opencode/`, `openchamber/` (`edits/` to upstream files, the new `host/` UI and `server/` modules they call, `vite-plugin.ts`, and `client/`, the module extensions bundle), and `orca/`. Empty vendor folders are kept with `.gitkeep` until patches are added.; `dawn-mac-antropy/` is kept empty with `.gitkeep` until patches are added. |
 | `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `build-openchamber.py` (OpenChamber's web package with its adapters), `upstream.py`, `verify.py`. |
 | `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`; `e2e/openchamber-adapters/` runs the OpenChamber adapters against the release in a browser, with a scratch extension. |
 | `extensions/` | OpenChamber extensions, installed on the latest OpenChamber release: `planner/` (Sunsama-style planning with Linear, GitHub, Google Calendar, Google Tasks, Gmail and agents), checked by `mise run test:extensions` in CI. |

@@ -31,8 +31,7 @@ def latest_tag(name: str, pin: dict) -> str:
     with urllib.request.urlopen(request, timeout=30) as response:
         release = json.load(response)
     tag = release.get("tag_name", "")
-    pattern = r"\d+\.\d+\.\d+" if name == "vscode" else r"v\d+\.\d+\.\d+"
-    if release.get("draft") or release.get("prerelease") or not re.fullmatch(pattern, tag):
+    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
         raise SystemExit(f"{name}: latest release is not a stable desktop release")
     return tag
 
