@@ -44,7 +44,7 @@ def is_pin_path(path: str) -> bool:
 
 def versions(pins: dict) -> dict[str, str]:
     """Each vendor's release tag, or the branch and commit a vendor without releases follows."""
-    return {name: pin.get("release") or f"{pin.get('branch')}@{str(pin.get('commit', ''))[:9]}" for name, pin in pins.items()}
+    return {name: pin.get("release") or (f"{pin['branch']}@{pin['commit'][:9]}" if pin.get("commit") else f"{pin.get('branch')} (not pinned yet)") for name, pin in pins.items()}
 
 
 def stop(message: str) -> None:
