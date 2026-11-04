@@ -6,7 +6,6 @@ import type { Adapter } from "./apply"
 import { core } from "./edits/core"
 import { links } from "./edits/links"
 import { pages } from "./edits/pages"
-import { fixes } from "./edits/fixes"
 import { transport } from "./edits/transport"
 import { rail } from "./edits/rail"
 import { tabs } from "./edits/tabs"
@@ -16,7 +15,7 @@ export type { Adapter, Edit } from "./apply"
 // The OpenChamber release the anchors are checked against: vendors/openchamber's pin (written against 2.5.2).
 export const TARGET = { version: "2.6.1", commit: "ce853f415704d1bfe8d076a5cfb2caabac00fffd" } as const
 
-export const adapters: readonly Adapter[] = [core, rail, tabs, links, pages, fixes, transport]
+export const adapters: readonly Adapter[] = [core, rail, tabs, links, pages, transport]
 
 // Files the adapters add: path in the OpenChamber tree -> path under adapters/openchamber.
 export const addedFiles: Readonly<Record<string, string>> = {
@@ -28,7 +27,6 @@ export const addedFiles: Readonly<Record<string, string>> = {
   "packages/ui/src/oc-forge/rail.ts": "host/rail.ts",
   "packages/ui/src/oc-forge/routes.ts": "host/routes.ts",
   "packages/ui/src/oc-forge/pages.ts": "host/pages.ts",
-  "packages/ui/src/oc-forge/commands.ts": "host/commands.ts",
   "packages/ui/src/oc-forge/service-socket.ts": "host/service-socket.ts",
   "packages/ui/src/oc-forge/service-transport.ts": "host/service-transport.ts",
   "packages/ui/src/oc-forge/tabs-state.ts": "host/tabs-state.ts",

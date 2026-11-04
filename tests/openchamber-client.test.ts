@@ -16,7 +16,6 @@ import {
   type OcForgeShortcuts,
 } from "../adapters/openchamber/client/index"
 import { ocForgeDocumentSandbox, parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
-import { ocForgeCommandsOnceLoaded } from "../adapters/openchamber/host/commands.ts"
 import { newOcForgeWindowId } from "../adapters/openchamber/host/ids.ts"
 import { createOcForgeServiceSocket, type OcForgeSocketLike } from "../adapters/openchamber/host/service-socket.ts"
 
@@ -417,21 +416,6 @@ describe("an OpenChamber window's id", () => {
       else delete (crypto as { randomUUID?: unknown }).randomUUID
     }
     expect(typeof crypto.randomUUID).toBe("function")
-  })
-})
-
-describe("a folder's commands, once OpenCode 2.2 has loaded them", () => {
-  test("an empty first answer is asked again; a list is taken as it is; an empty folder gives up after the wait", async () => {
-    const answers = [[], [], ["init", "review", "oc-planner-x"]]
-    let asked = 0
-    expect(await ocForgeCommandsOnceLoaded(async () => answers[Math.min(asked++, answers.length - 1)], 2_000, 5)).toEqual(["init", "review", "oc-planner-x"])
-    expect(asked).toBe(3)
-    let once = 0
-    expect(await ocForgeCommandsOnceLoaded(async () => { once += 1; return ["init"] }, 2_000, 5)).toEqual(["init"])
-    expect(once).toBe(1)
-    const started = Date.now()
-    expect(await ocForgeCommandsOnceLoaded(async () => [], 60, 10)).toEqual([])
-    expect(Date.now() - started).toBeGreaterThanOrEqual(55)
   })
 })
 

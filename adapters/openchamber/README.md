@@ -323,7 +323,7 @@ Every edit names exact upstream text that must occur exactly once
 (`apply.ts`); otherwise the build stops with the adapter, the file and the
 anchor. The Vite plugin also fails the build if a targeted module never loaded
 (upstream stopped using it); `lib/guests/types.ts` is exempt, being imported
-only as types. 69 edits in 22 files (33 `insertAfter`, 32 `replace`, 4
+only as types. 67 edits in 21 files (32 `insertAfter`, 31 `replace`, 4
 `insertBefore`); `rail.open` and `window.id` added none, and neither did rail
 badges (the `replace` that lights a rail entry in `ContextPanelRail.tsx` now
 starts six lines higher, at the badge's count) or the rail panel's title
@@ -331,7 +331,7 @@ starts six lines higher, at the badge's count) or the rail panel's title
 `SessionTabsStrip.tsx`: its new-session draft tab and its desktop close-tab
 target (Cmd/Ctrl+W) defer to a selected extension tab as the session tabs do,
 and the list of every tab moved after its new "+" (an `insertAfter` there
-became a `replace`).
+became a `replace`). OpenCode 2.2.5 took two away (see Fixes).
 
 OpenChamber is compiled with the React Compiler, which memoizes on the values a
 render reads: host code that renders passes the oc-forge state it read as an
@@ -415,15 +415,15 @@ instance to list the chats, restarts the instance (`stack.mjs restart
 
 ## Fixes
 
-Host bugs an extension runs into, worked around in the adapted build until
-upstream fixes them (`edits/fixes.ts`):
+Host bugs an extension runs into are worked around in the adapted build until
+upstream fixes them, in an adapter of their own. None is needed with the
+current pins.
 
-- **A first slash command in a new folder** (OpenCode 2.2 with OpenChamber 2.5.2).
-  - OpenCode 2.2 loads a folder's commands on the first request for them, and answers that request with none. A folder that has loaded them always lists its built-ins (`init`, `review`).
-  - OpenChamber looks a command up once, right before it sends. So `/name args` sent first in a folder whose commands nobody had asked for, such as a worktree just made, went out as a plain prompt, and the chat ran on the default agent.
-  - This is what every Planner assignment to a chosen agent or preset does: it starts the chat in a new worktree with the assignee's command.
-  - The live lookup now asks again while the answer is empty, every 250 ms for up to 3 s (`host/commands.ts`).
-  - Measured on 2026-10-28 for a worktree OpenChamber had just made: the first answer was empty (18 ms), the next one had the commands (272 ms).
+- **A first slash command in a new folder** (OpenCode 2.2.1; fixed in 2.2.5, and the `fixes` adapter went with the 2.2.5 pin on 2026-11-04).
+  - OpenCode 2.2.1 loaded a folder's commands on the first request for them, and answered that request with none. A folder that has loaded them always lists its built-ins (`init`, `review`).
+  - OpenChamber looks a command up once, right before it sends. So `/name args` sent first in a folder whose commands nobody had asked for, such as a worktree just made, went out as a plain prompt, and the chat ran on the default agent. This is what every Planner assignment to a chosen agent or preset does: it starts the chat in a new worktree with the assignee's command.
+  - The adapter (`edits/fixes.ts`, `host/commands.ts`) had the live lookup ask again while the answer was empty, every 250 ms for up to 3 s.
+  - Measured on 2026-11-04 with a scratch server in a new git folder, asked as OpenChamber's scoped client asks (`GET /api/command`, `x-opencode-directory`): OpenCode 2.2.5's first answer had the built-ins in four runs out of four (about 210 ms); 2.2.1's, in the same probe, was still empty (45 ms), the next one listing them.
 
 ## Limits and choices
 

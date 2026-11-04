@@ -557,11 +557,11 @@ team sharing. An extension cannot choose a chat's agent or model, so the Planner
 through OpenCode commands; OpenChamber (2.5.2, and 2.5.3, whose send code is the same here) sends a new chat's first message before
 OpenCode has loaded the commands of a folder it has just started, so an assignment's new
 worktree is made first, with an empty "Worktree for …" chat that the extension cannot
-delete. OpenCode 2.2 loads a folder's commands only when they are first asked for, and
-answers that first request with none, so on a stock OpenChamber the assignee's command can
-still go out as a plain prompt (the chat then runs on the default agent); oc-forge's
-adapted OpenChamber asks again until the folder's commands are there
-(`adapters/openchamber/README.md`, "Fixes"). The service cannot reach OpenChamber's own OpenCode server (it has a password), so
+delete. OpenCode 2.2.1 loaded a folder's commands only when they were first asked for, and
+answered that first request with none, so the assignee's command could go out as a plain
+prompt (the chat then ran on the default agent) unless the host asked again, as oc-forge's
+adapted OpenChamber did until OpenCode 2.2.5, which answers with the folder's commands at
+once (`adapters/openchamber/README.md`, "Fixes"). The service cannot reach OpenChamber's own OpenCode server (it has a password), so
 it can only ask OpenCode's background server, when one runs, whether a new command is
 listed; otherwise it waits a moment.
 Printing needs oc-forge's host: OpenChamber sandboxes an extension's frames with
