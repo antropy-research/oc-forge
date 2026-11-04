@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,7 +29,8 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN_PATHS = ("vendors", "vendors.json", "upstream.json")
+# What a sync changes: the submodules, their pins, and .gitmodules when a vendor becomes a submodule.
+PIN_PATHS = ("vendors", "vendors.json", "upstream.json", ".gitmodules")
 LOGS = ROOT / "build/vendors-update"
 
 
@@ -37,7 +39,7 @@ def git(*args: str) -> str:
 
 
 def is_pin_path(path: str) -> bool:
-    return path in ("vendors", "vendors.json", "upstream.json") or path.startswith("vendors/")
+    return path in PIN_PATHS or path.startswith("vendors/")
 
 
 def versions(pins: dict) -> dict[str, str]:
@@ -88,10 +90,27 @@ def step(name: str, command: list[str], timeout_minutes: int) -> None:
     print(f"<== {name}: passed in {minutes:.1f} min", flush=True)
 
 
+def submodule_paths(source: list[str]) -> list[str]:
+    """The submodule paths a .gitmodules lists (`--file .gitmodules`, or `--blob HEAD:.gitmodules`)."""
+    listing = subprocess.run(["git", "config", *source, "--get-regexp", r"^submodule\..*\.path$"], cwd=ROOT, capture_output=True, text=True)
+    return [line.split(" ", 1)[1] for line in listing.stdout.splitlines()]
+
+
 def abort() -> None:
-    """Puts HEAD's pins back: vendors.json, upstream.json and the submodules at HEAD's commits."""
+    """Puts HEAD's pins back: vendors.json, upstream.json, .gitmodules and the submodules at HEAD's commits; a
+    submodule the run added goes, its clone included."""
+    head = set(submodule_paths(["--blob", "HEAD:.gitmodules"]))
+    added = [path for path in submodule_paths(["--file", ".gitmodules"]) if path not in head]
     git("reset", "-q", "HEAD", "--", *PIN_PATHS)
-    git("checkout", "HEAD", "--", "vendors.json", "upstream.json")
+    git("checkout", "HEAD", "--", "vendors.json", "upstream.json", ".gitmodules")
+    for path in added:
+        dot_git = ROOT / path / ".git"
+        module = dot_git.read_text().removeprefix("gitdir:").strip() if dot_git.is_file() else ""
+        shutil.rmtree(ROOT / path, ignore_errors=True)
+        if module:
+            shutil.rmtree((ROOT / path / module).resolve(), ignore_errors=True)
+        subprocess.run(["git", "config", "--remove-section", f"submodule.{path}"], cwd=ROOT, capture_output=True)
+        print(f"{path}: the submodule this run added is gone")
     subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=ROOT, check=True)
     print(f"Pins back at HEAD's: {', '.join(f'{name} {version}' for name, version in versions(json.loads(git('show', 'HEAD:vendors.json'))).items())}")
 
