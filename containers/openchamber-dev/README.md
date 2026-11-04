@@ -48,7 +48,9 @@ git submodule update --init vendors/opencode vendors/openchamber   # once, and a
 
 The stages build in parallel. From a clean cache OpenCode's stage is the longest (13 to 25
 minutes on the 16-core host this was written on, whose Docker disk is slow and shared), then
-OpenChamber's (4 to 10). The disk load slows every container on the host while it runs.
+OpenChamber's (4 to 10). The disk load slows every container on the host while it runs. On
+2026-11-04 the build took 20 minutes (OpenCode's install 12 and its build 5, OpenChamber's stage
+15 beside them), and the image is 1.91 GB (`docker images`).
 
 A rebuild redoes only what changed: a pin that moves rebuilds that vendor's stage, and changing an
 OpenCode adapter reruns only `build.py`. `docker compose up -d --build` builds too, without
