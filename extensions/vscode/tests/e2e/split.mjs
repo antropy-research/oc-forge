@@ -617,7 +617,11 @@ const chrome = async (size, viewport, chats, target) => {
 /** Row 14: Source Control's count on its rail icon, following the files on disk. */
 const badges = async (size, viewport, chats, target) => {
   const { context, page } = await open(size, viewport, chats, target);
-  const badge = async () => (await rail(page)).find((entry) => entry.id === entrySurface('scm'))?.text ?? '';
+  // The count: the badge's digits (OpenChamber 2.5), or where 2.6 draws a dot, the icon's accessible name ("…, N items").
+  const badge = async () => {
+    const entry = (await rail(page)).find((item) => item.id === entrySurface('scm'));
+    return entry?.text || /, (\d+) items?$/.exec(entry?.label ?? '')?.[1] || '';
+  };
   // VS Code's own refresh in the rail's Source Control: each part's Git refreshes by itself only while that part has
   // the focus (keeping them all fresh is round 14's bridge, row 9); the badge shows what VS Code's Source Control counts.
   const refresh = async () => {

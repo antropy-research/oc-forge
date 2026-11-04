@@ -8,7 +8,11 @@ left. Its steps, in order, each one's output also in build/vendors-update/<step>
 2. setup: with the new pins staged, `mise run setup` (submodules at them, locked dependencies);
 3. ci: `mise run ci` (the pins verified, upstream's checks and lifecycle tests, our adapter tests, the extensions);
 4. openchamber: scripts/build-openchamber.py --check-only (every OpenChamber adapter still applies, and type-checks);
-5. commit: "chore: update vendor releases", the pins alone, on the current branch.
+5. vscode (only when VS Code moved): against Microsoft's build of the new release (downloaded once into
+   build/vendors-update/), the VS Code extension lists every file of it a server reached over HTTP is asked for
+   (service/web-files.json) and every one of its workbench patches applies once (tests/patch.test.ts), which
+   `mise run ci` skips without a server;
+6. commit: "chore: update vendor releases", the pins alone, on the current branch.
 
 A step that fails stops the run and commits nothing. The new pins stay staged, so the adapters and tests can be fixed
 against them (in commits of their own); run it again to check and commit, or with --abort to put the branch's pins
@@ -21,6 +25,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,7 +33,8 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN_PATHS = ("vendors", "vendors.json", "upstream.json")
+# What a sync changes: the submodules, their pins, and .gitmodules when a vendor becomes a submodule.
+PIN_PATHS = ("vendors", "vendors.json", "upstream.json", ".gitmodules")
 LOGS = ROOT / "build/vendors-update"
 
 
@@ -37,12 +43,12 @@ def git(*args: str) -> str:
 
 
 def is_pin_path(path: str) -> bool:
-    return path in ("vendors", "vendors.json", "upstream.json") or path.startswith("vendors/")
+    return path in PIN_PATHS or path.startswith("vendors/")
 
 
 def versions(pins: dict) -> dict[str, str]:
     """Each vendor's release tag, or the branch and commit a vendor without releases follows."""
-    return {name: pin.get("release") or f"{pin.get('branch')}@{str(pin.get('commit', ''))[:9]}" for name, pin in pins.items()}
+    return {name: pin.get("release") or (f"{pin['branch']}@{pin['commit'][:9]}" if pin.get("commit") else f"{pin.get('branch')} (not pinned yet)") for name, pin in pins.items()}
 
 
 def stop(message: str) -> None:
@@ -88,12 +94,44 @@ def step(name: str, command: list[str], timeout_minutes: int) -> None:
     print(f"<== {name}: passed in {minutes:.1f} min", flush=True)
 
 
+def submodule_paths(source: list[str]) -> list[str]:
+    """The submodule paths a .gitmodules lists (`--file .gitmodules`, or `--blob HEAD:.gitmodules`)."""
+    listing = subprocess.run(["git", "config", *source, "--get-regexp", r"^submodule\..*\.path$"], cwd=ROOT, capture_output=True, text=True)
+    return [line.split(" ", 1)[1] for line in listing.stdout.splitlines()]
+
+
 def abort() -> None:
-    """Puts HEAD's pins back: vendors.json, upstream.json and the submodules at HEAD's commits."""
+    """Puts HEAD's pins back: vendors.json, upstream.json, .gitmodules and the submodules at HEAD's commits; a
+    submodule the run added goes, its clone included."""
+    head = set(submodule_paths(["--blob", "HEAD:.gitmodules"]))
+    added = [path for path in submodule_paths(["--file", ".gitmodules"]) if path not in head]
     git("reset", "-q", "HEAD", "--", *PIN_PATHS)
-    git("checkout", "HEAD", "--", "vendors.json", "upstream.json")
+    git("checkout", "HEAD", "--", "vendors.json", "upstream.json", ".gitmodules")
+    for path in added:
+        dot_git = ROOT / path / ".git"
+        module = dot_git.read_text().removeprefix("gitdir:").strip() if dot_git.is_file() else ""
+        shutil.rmtree(ROOT / path, ignore_errors=True)
+        if module:
+            shutil.rmtree((ROOT / path / module).resolve(), ignore_errors=True)
+        subprocess.run(["git", "config", "--remove-section", f"submodule.{path}"], cwd=ROOT, capture_output=True)
+        print(f"{path}: the submodule this run added is gone")
     subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=ROOT, check=True)
     print(f"Pins back at HEAD's: {', '.join(f'{name} {version}' for name, version in versions(json.loads(git('show', 'HEAD:vendors.json'))).items())}")
+
+
+VSCODE_SERVER_URL = "https://update.code.visualstudio.com/{version}/server-linux-x64-web/stable"
+
+
+def check_vscode_release(version: str, timeout_minutes: int) -> None:
+    """The VS Code extension against Microsoft's build of the release VS Code moved to: its file list and its patches."""
+    server = LOGS / f"vscode-server-{version}"
+    if not (server / "out").is_dir():
+        url = VSCODE_SERVER_URL.format(version=version)
+        partial = server.with_name(server.name + ".partial")
+        script = f'rm -rf "{partial}" && mkdir -p "{partial}" && curl -fsSL "{url}" | tar -xz -C "{partial}" --strip-components=1 && mv "{partial}" "{server}"'
+        step("vscode-download", ["sh", "-c", script], timeout_minutes)
+    checks = f'cd extensions/vscode && bun scripts/web-files.ts --check "{server}" && VSCODE_SERVER_DIR="{server}" bun test tests/patch.test.ts'
+    step("vscode", ["sh", "-c", checks], timeout_minutes)
 
 
 def main() -> None:
@@ -126,9 +164,12 @@ def main() -> None:
     step("setup", ["mise", "run", "setup"], args.timeout_minutes)
     step("ci", ["mise", "run", "ci"], args.timeout_minutes)
     step("openchamber", [sys.executable, "scripts/build-openchamber.py", "--check-only"], args.timeout_minutes)
+    if after.get("vscode") and before.get("vscode") != after["vscode"]:
+        check_vscode_release(after["vscode"], args.timeout_minutes)
 
     moves = [f"- {name}: {before.get(name, 'new')} -> {version}" for name, version in after.items() if before.get(name) != version]
-    message = "chore: update vendor releases\n\n" + "\n".join(moves or ["- the pinned commits"]) + "\n\nBy `mise run vendors:update`: setup, `mise run ci` and the OpenChamber adapters passed.\n"
+    checked = "setup, `mise run ci`, the OpenChamber adapters" + (" and the VS Code extension on the new VS Code" if before.get("vscode") != after.get("vscode") else "")
+    message = "chore: update vendor releases\n\n" + "\n".join(moves or ["- the pinned commits"]) + f"\n\nBy `mise run vendors:update`: {checked} passed.\n"
     trailers = [part for trailer in args.trailer for part in ("--trailer", trailer)]
     git("commit", "-q", "-m", message, *trailers, "--", *PIN_PATHS)
     print(f"\nCommitted {git('rev-parse', '--short', 'HEAD').strip()} on {git('rev-parse', '--abbrev-ref', 'HEAD').strip()}:\n" + "\n".join(moves))

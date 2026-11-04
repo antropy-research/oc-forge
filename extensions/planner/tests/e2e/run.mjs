@@ -223,11 +223,11 @@ const openPlanner = async () => {
   // OpenChamber 2.5 reopens the page it showed before a reload, and the sidebar's Planner button
   // toggles it; the rail's button (a panel surface) and the Work Status heading share the name.
   if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-    // OpenChamber 2.5.1 has a sidebar button per extension page; 2.5.2 lists them under "Extension pages".
+    // OpenChamber 2.5.1 has a sidebar button per extension page; 2.5.2 lists them under "Extension pages", 2.6 in the sidebar header's "More".
     const button = page.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
     if (await button.isVisible().catch(() => false)) await button.click();
     else {
-      await page.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+      await page.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
       await page.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
     }
     await home.waitFor({ timeout: 30_000 });
@@ -239,15 +239,18 @@ const shot = (name) => page.screenshot({ path: join(out, `${name}.png`) });
 
 /**
  * The current chat's menu in OpenChamber's header: its "Open session actions" button, or, with sessions shown as
- * tabs in the header (an OpenChamber setting), the selected tab's "Session tab actions" (shown on hover).
+ * tabs in the header (an OpenChamber setting), the selected tab's menu: "Session tab actions" (2.5, shown on hover) or a right-click (2.6).
  */
 const openChatMenu = async () => {
   const button = page.locator('header button[aria-label="Open session actions"]').first();
   const tab = page.locator('header [role="tab"][aria-selected="true"]').first();
   await button.or(tab).first().waitFor({ timeout: 20_000 });
   if (await button.isVisible().catch(() => false)) return button.click();
+  // OpenChamber 2.5: the tab's "Session tab actions" button, shown on hover; 2.6: the same menu on a right-click.
   await tab.hover();
-  await tab.getByRole('button', { name: 'Session tab actions' }).click({ timeout: 10_000 });
+  const actions = tab.getByRole('button', { name: 'Session tab actions' });
+  if (await actions.isVisible().catch(() => false)) return actions.click({ timeout: 10_000 });
+  await tab.click({ button: 'right' });
 };
 
 try {

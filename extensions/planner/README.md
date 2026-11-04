@@ -554,11 +554,12 @@ No mobile or VS Code surface, no tray, menu bar or global shortcut, no notificat
 no Planner surface is open, one integration slot (Linear; further Linear workspaces use API
 keys, Google signs in through the service), no Outlook, Slack or Teams, Gmail read-only, no
 team sharing. An extension cannot choose a chat's agent or model, so the Planner does it
-through OpenCode commands; OpenChamber (2.5.2, and 2.5.3, whose send code is the same here) sends a new chat's first message before
+through OpenCode commands; OpenChamber (2.5.2 to 2.6.1, whose send code is the same here) sends a new chat's first message before
 OpenCode has loaded the commands of a folder it has just started, so an assignment's new
 worktree is made first, with an empty "Worktree for …" chat that the extension cannot
 delete. OpenCode 2.2 loads a folder's commands only when they are first asked for, and
-answers that first request with none, so on a stock OpenChamber the assignee's command can
+answers that first request with none (2.2.5 too, while it reloads its global commands, as it
+does right after the Planner wrote one), so on a stock OpenChamber the assignee's command can
 still go out as a plain prompt (the chat then runs on the default agent); oc-forge's
 adapted OpenChamber asks again until the folder's commands are there
 (`adapters/openchamber/README.md`, "Fixes"). The service cannot reach OpenChamber's own OpenCode server (it has a password), so

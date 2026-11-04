@@ -2,7 +2,8 @@
 
 oc-forge's additions to OpenChamber's extension host: what `AGENTS.md` asks
 of the Planner and VS Code extensions that the released extension API cannot
-do (2.5.2's, and 2.5.3's, whose SDK changed only a comment). They are applied
+do (2.5.2's, 2.5.3's, whose SDK changed only a comment, and 2.6.1's, whose SDK
+adds trackers, notifications and session events but none of these). They are applied
 to `vendors/openchamber` while its web package is built; the vendor is never
 written. With no extension
 using them, the adapted OpenChamber looks and behaves as the release (the
@@ -16,7 +17,7 @@ end-to-end check compares screenshots: 0.00% of pixels differ).
 | **keys** | tab shortcuts | Forward a key press to OpenChamber, which runs it through its own shortcut handlers, for navigation actions only and only with a user activation; the frame is told the current bindings. |
 | **links** | Cmd+click | `?extension=<id>&route=<route>` deep links to its page; URL prefixes for real `<a href>` links to its page and to chats; its page can keep its route in the address bar. |
 | **window** | 2.ii (one VS Code across its parts) | The id of the OpenChamber window its frame is in (`window.id`): the same in every frame of one browser tab, kept across the tab's reloads, another in each tab, so the frames of one window can find each other, keep what is the tab's, and leave other tabs' alone. |
-| **rail badges** | 2.ii.a ("用起来和在 VS Code 里一样") | A count on each of its rail entries' icons (`rail.setBadges`), shown whether its panel is open or not, as VS Code's activity bar shows its badges; its one panel's header names the entry it shows. |
+| **rail badges** | 2.ii.a ("用起来和在 VS Code 里一样") | A count on each of its rail entries' icons (`rail.setBadges`), shown whether its panel is open or not, as VS Code's activity bar shows its badges (OpenChamber 2.6 draws every rail badge, Git's too, as a dot, with the count in the icon's tooltip and accessible name); its one panel's header names the entry it shows. |
 | **warm page** | 2.ii.b | Its page kept mounted, hidden, while one of its other frames asks (`page.warm`): a tab opened later shows a page that has started already. |
 
 The study behind this (what 2.5.2 can and cannot do, and the smallest host
@@ -238,21 +239,28 @@ Chromium has no app window: `on` under the window's localStorage key
   instead (`tab-close-request`): the page shows the tab, and the tab stays
   until the frame closes it, after its own save prompt, or stays if the user
   cancels. Clean tabs, and every tab while no frame decides, close at once. While an extension tab is selected no session
-  tab is; choosing a session tab hides the page (it stays mounted) and shows
-  that chat. A page whose extension has tabs keeps the strip instead of
-  "← title". Tabs need OpenChamber's "Session tabs" setting (off by default in
-  2.5.2 and 2.5.3): without the strip they are not shown (`tabs.state().strip` says so).
-  With 2.5.3's separate tabs per workspace on, the strip shows the current
+  tab is, nor the new session's draft tab (2.6 shows an open draft as a tab of
+  its own); choosing a session tab, or the draft's, hides the page (it stays
+  mounted) and shows that chat. In the desktop app, whose window menu owns
+  Cmd/Ctrl+W, that key closes the selected extension tab too. A page whose extension has tabs keeps the strip instead of
+  "← title". Tabs need OpenChamber's "Session tabs" setting (off by default
+  from 2.5.2 to 2.6.1): without the strip they are not shown (`tabs.state().strip` says so).
+  With separate tabs per workspace on (2.5.3 and later), the strip shows the current
   workspace's session tabs, then the extension tabs, which are the same in every
   workspace.
+  An extension tab is drawn as OpenChamber 2.6 draws a session's: on hover its
+  × takes the icon's slot at the tab's start, an unsaved tab's dot sits at its
+  end, and its tooltip (OpenChamber's own, not the browser's) names the tab, its
+  extension and its `mod+<digit>` while it is among the first nine of the strip.
   The strip scrolls as it does for session tabs (the wheel, the edge fades), and
   keeps the selected extension tab in view as it keeps the selected session's:
   in the release it scrolls only when the current session changes. While the
-  strip holds extension tabs and overflows, a button at its end (`All tabs (N)`,
-  `data-oc-forge-all-tabs`) lists every tab of the strip, the chats first, the
+  strip holds extension tabs and overflows, a button at its end, after
+  OpenChamber's "+" (`All tabs (N)`, `data-oc-forge-all-tabs`, drawn as that
+  "+"), lists every tab of the strip, the chats first, the
   selected one marked and in sight; choosing one selects it, as VS Code's "Show
-  All Opened Editors" lists its editors. A tab's whole title is its tooltip and
-  its accessible name; the strip cuts it to the tab's width.
+  All Opened Editors" lists its editors. A tab's whole title is in its tooltip
+  and is its accessible name; the strip cuts it to the tab's width.
   Tabs are not persisted: after a reload the extension opens the ones it wants.
   A plain click selects a tab and a middle click closes it, as on OpenChamber's
   own tabs; a Cmd/Ctrl+click on a tab with a `route` opens the extension's page
@@ -323,11 +331,19 @@ Every edit names exact upstream text that must occur exactly once
 (`apply.ts`); otherwise the build stops with the adapter, the file and the
 anchor. The Vite plugin also fails the build if a targeted module never loaded
 (upstream stopped using it); `lib/guests/types.ts` is exempt, being imported
-only as types. 66 edits in 22 files (34 `insertAfter`, 28 `replace`, 4
+only as types. 72 edits in 23 files (34 `insertAfter`, 34 `replace`, 4
 `insertBefore`); `rail.open` and `window.id` added none, and neither did rail
 badges (the `replace` that lights a rail entry in `ContextPanelRail.tsx` now
 starts six lines higher, at the badge's count) or the rail panel's title
-(OpenChamber's own header toolbar slot).
+(OpenChamber's own header toolbar slot). OpenChamber 2.6 added six. Three in
+`SessionTabsStrip.tsx`: its new-session draft tab and its desktop close-tab
+target (Cmd/Ctrl+W) defer to a selected extension tab as the session tabs do,
+and the list of every tab moved after its new "+" (an `insertAfter` there
+became a `replace`). Three in `TitlebarLeftControls.tsx`: its title bar shows
+a "New session" of its own while a page hides the header tabs, and counted an
+extension page on its tabs as hiding them; it showed a second one there, and
+its room arriving as such a tab was chosen narrowed the strip after the strip
+had scrolled that tab into view.
 
 OpenChamber is compiled with the React Compiler, which memoizes on the values a
 render reads: host code that renders passes the oc-forge state it read as an
@@ -414,8 +430,9 @@ instance to list the chats, restarts the instance (`stack.mjs restart
 Host bugs an extension runs into, worked around in the adapted build until
 upstream fixes them (`edits/fixes.ts`):
 
-- **A first slash command in a new folder** (OpenCode 2.2 with OpenChamber 2.5.2).
+- **A first slash command in a new folder** (OpenCode 2.2 with OpenChamber 2.5.2; still OpenCode 2.2.5 with OpenChamber 2.6.1).
   - OpenCode 2.2 loads a folder's commands on the first request for them, and answers that request with none. A folder that has loaded them always lists its built-ins (`init`, `review`).
+  - 2.2.5 answers a quiet server's new folder with its commands at once, but a folder asked while it reloads its global commands still gets none: right after a file appears in `~/.config/opencode/command/`, which is what the Planner writes before an assignment's chat starts. Measured on 2026-11-04 (`/tmp/opencode/v260/tools/new-command-probe.sh`): a folder never asked gets 0 commands at once and all of them, the new one included, 0.3 s later; 2.2.1 the same. That day the adapter was dropped on a probe of a quiet server only, and the Planner's `sunsama.mjs` failed 4 checks on the dev container (the assignment ran on the default agent) until it came back.
   - OpenChamber looks a command up once, right before it sends. So `/name args` sent first in a folder whose commands nobody had asked for, such as a worktree just made, went out as a plain prompt, and the chat ran on the default agent.
   - This is what every Planner assignment to a chosen agent or preset does: it starts the chat in a new worktree with the assignee's command.
   - The live lookup now asks again while the answer is empty, every 250 ms for up to 3 s (`host/commands.ts`).
@@ -437,7 +454,9 @@ upstream fixes them (`edits/fixes.ts`):
 - **No persistence** of header tabs and routes; rail entries return with the
   next poll.
 - **Versions.** Written against 2.5.2 and run end to end there. On 2.5.3, the
-  pin since 2026-10-29, every edit applies unchanged, the adapted tree
-  type-checks, and the end-to-end check passes against the stock 2.5.3 release
-  (108/108). When CI moves the pin, `--check-only` on the new tree says which
-  anchors moved.
+  pin from 2026-10-29, every edit applied unchanged. On 2.6.1, the pin since
+  2026-11-04, two anchors had moved (`tabs`, `links`) and 2.6's strip and title
+  bar took six more edits; the adapted tree type-checks and the end-to-end check
+  passes against the stock 2.6.1 release (201/201). When `mise run
+  vendors:update` moves the pin, its `ci` and `openchamber` steps say which
+  anchors moved; the end-to-end check says what moved around them.

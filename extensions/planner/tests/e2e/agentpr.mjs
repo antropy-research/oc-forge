@@ -200,7 +200,7 @@ try {
     await page.goto(`${base}/`, { waitUntil: 'load' });
     const home = frame.getByRole('heading', { name: 'Home' });
     if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-      await page.locator('button[aria-label="Extension pages"]').first().click({ timeout: 20_000 });
+      await page.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
       await page.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
       await home.waitFor({ timeout: 30_000 });
     }
