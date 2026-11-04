@@ -114,6 +114,10 @@ describe("openchamber adapters", () => {
     expect(strip).toContain("  }, [updateEdges, tabs.length, ocForgeTabCount]);")
     expect(strip).toContain("        </TooltipContent>\n      </Tooltip>\n      <OcForgeAllTabs\n        overflowing={edges.left || edges.right}")
     expect(adapted("packages/ui/src/components/layout/Header.tsx")).toContain("(ocForgeTabbedPage ? undefined : state.guests.find(")
+    // A page on its header tabs keeps the strip's "+": the title bar shows no second "New session" (2.6).
+    expect(adapted("packages/ui/src/components/layout/TitlebarLeftControls.tsx")).toContain(
+      "    || state.runOverviewKey !== null || (state.openGuestPageId !== null && !ocForgeTabbedPage)\n  ));",
+    )
     expect(adapted("packages/ui/src/hooks/useKeyboardShortcuts.ts")).toContain(
       "      if (ocForgeCloseActiveTab()) return;\n      if (currentSessionId) {",
     )

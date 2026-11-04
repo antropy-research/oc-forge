@@ -175,7 +175,9 @@ export const OcForgeHeaderTabs: React.FC<{ firstNumber: number }> = ({ firstNumb
  * Every tab of the strip in one list, as VS Code's "Show All Opened Editors" lists its editors: a button at the
  * strip's end, after OpenChamber's "+", while it holds extension tabs and some of its tabs are scrolled out of view
  * (`overflowing`). Drawn as that "+" is, with its tooltip. Choosing one selects it, and the strip scrolls it into
- * view. The session tabs come first, as in the strip.
+ * view. The session tabs come first, as in the strip. While the strip holds extension tabs its place is kept, the
+ * button hidden until the strip overflows: showing up then never narrows the strip, which would leave the tab it had
+ * just scrolled into view (the selected one, at the end) half under its fade.
  */
 export const OcForgeAllTabs: React.FC<{
   overflowing: boolean;
@@ -191,7 +193,7 @@ export const OcForgeAllTabs: React.FC<{
     const guest = guests.find((entry) => entry.id === tab.guestId);
     return Boolean(guest?.pageEntry && isGuestActive(guest));
   });
-  if (!overflowing || shown.length === 0) return null;
+  if (shown.length === 0) return null;
   const count = sessions.length + shown.length;
   // The marked one in sight when the list opens, as VS Code's list of its editors keeps the active one: once the
   // popup has its place and size (it mounts before it is positioned, when there is nothing to scroll yet).
@@ -202,7 +204,7 @@ export const OcForgeAllTabs: React.FC<{
     <DropdownMenu>
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="inline-flex shrink-0">
+          <span className={cn('inline-flex shrink-0', !overflowing && 'invisible')} aria-hidden={overflowing ? undefined : true}>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"

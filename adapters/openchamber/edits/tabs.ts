@@ -112,6 +112,22 @@ export const tabs: Adapter = {
           "    </div>\n  );\n};",
       ),
     ],
+    // 2.6's title bar shows its own "New session" while a page hides the header tabs, and counts every extension page
+    // as hiding them. A page on its header tabs keeps the strip and its "+" (Header.tsx below): no second "New
+    // session" there, and none arriving as such a tab is chosen, whose room narrowed the strip after it had revealed
+    // the tab.
+    "packages/ui/src/components/layout/TitlebarLeftControls.tsx": [
+      insertAfter("import { publishTitlebarControlsWidth } from './titlebarControlsWidth';", "\nimport { useOcForgeTabbedPage } from '@/oc-forge/tabs-state';"),
+      replace(
+        "  const tabsShown = useUIStore((state) => state.sessionTabsEnabled && !(",
+        "  const ocForgeTabbedPage = useOcForgeTabbedPage(useUIStore((state) => state.openGuestPageId));\n" +
+          "  const tabsShown = useUIStore((state) => state.sessionTabsEnabled && !(",
+      ),
+      replace(
+        "    || state.runOverviewKey !== null || state.openGuestPageId !== null\n  ));",
+        "    || state.runOverviewKey !== null || (state.openGuestPageId !== null && !ocForgeTabbedPage)\n  ));",
+      ),
+    ],
     "packages/ui/src/components/layout/Header.tsx": [
       insertAfter(
         "import { SessionTabsStrip, type SessionTabMenuArgs } from './SessionTabsStrip';",
