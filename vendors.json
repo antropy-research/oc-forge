@@ -1,23 +1,23 @@
 {
   "opencode": {
     "repository": "https://github.com/anomalyco/opencode.git",
-    "release": "v2.2.1",
-    "commit": "3ebcf9a32c7b28f658cfee80775448929361727a"
+    "release": "v2.2.5",
+    "commit": "9bbb8ce18c80f099e0e448775f59d965ead40a21"
   },
   "openchamber": {
     "repository": "https://github.com/openchamber/openchamber.git",
-    "release": "v2.5.3",
-    "commit": "95af6769797693bf049f4e6a801e373b5220447b"
+    "release": "v2.6.1",
+    "commit": "ce853f415704d1bfe8d076a5cfb2caabac00fffd"
   },
   "orca": {
     "repository": "https://github.com/stablyai/orca.git",
-    "release": "v1.4.244",
-    "commit": "b8ec5c8d170bcb9988e65de547a3a4e98b2885a9"
+    "release": "v1.4.248",
+    "commit": "965978bc78bf03a6a43187c1ed28fcffe0e01bb5"
   },
   "vscode": {
     "repository": "https://github.com/microsoft/vscode.git",
-    "release": "1.144.0",
-    "commit": "2c33b50b16c472efe58357d1d2a8a5414bc23fbf"
+    "release": "1.145.0",
+    "commit": "a717861c07586a53d83b80d742cd3f59b20a6273"
   },
   "dawn-mac-antropy": {
     "repository": "https://github.com/neethanwu/dawn-mac-antropy.git",
