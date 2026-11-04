@@ -3,7 +3,8 @@
 // a tool-call event. Run via `mise run test:adapters`.
 import { describe, expect } from "bun:test"
 import { Effect, Option } from "effect"
-import { LLM, LLMRequest, ToolDefinition } from "../vendors/opencode/packages/ai/src/effect.js"
+// OpenCode 2.2.5's Effect API is `ai` (`ai.request` is `LLM.request`); effect.js no longer exports `LLM` itself.
+import { ai, LLMRequest, ToolDefinition } from "../vendors/opencode/packages/ai/src/effect.js"
 import { Auth, LLMClient, Route } from "../vendors/opencode/packages/ai/src/route.js"
 import * as AnthropicMessages from "../vendors/opencode/packages/ai/src/protocols/anthropic-messages.js"
 import { toolStreamStrict } from "../adapters/opencode/tool-stream-strict"
@@ -71,7 +72,7 @@ const model = AnthropicMessages.route
   .with({ endpoint: { baseURL: "https://api.anthropic.test/v1/" }, auth: Auth.header("x-api-key", "test") })
   .model({ id: "claude-sonnet-4-5" })
 
-const request = LLM.request({
+const request = ai.request({
   model,
   prompt: "Check the file.",
   tools: [ToolDefinition.make({ name: "shell", description: "Run a shell command", inputSchema: { type: "object", properties: { command: { type: "string" } } } })],
