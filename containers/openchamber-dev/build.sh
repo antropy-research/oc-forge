@@ -6,7 +6,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(git -C "$here" rev-parse --show-toplevel)"
-for vendor in opencode openchamber vscode; do
+for vendor in opencode openchamber; do
   status="$(git -C "$root" submodule status "vendors/$vendor")"
   case "$status" in
     " "*) ;;

@@ -140,7 +140,7 @@ export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; pag
   if (mod && target?.closest?.('.tasks-app')) {
     // The Tasks view's shortcut list (/) and Undo (z), anywhere in it.
     if (key === '/' || key === 'z') return true;
-    // Google Tasks' own shortcuts while focus is on a task, where its row acts on them (as VS Code keeps its keys):
+    // Google Tasks' own shortcuts while focus is on a task, where its row acts on them:
     // indent ([ ]), move (Up/Down, with Shift to the top or the bottom) and a subtask (Alt+Enter). Elsewhere, Ctrl/⌘+[
     // and ] are OpenChamber's history back and forward.
     if (onTask(target) && (event.altKey ? key === 'enter' : /^(\[|\]|arrowup|arrowdown)$/.test(key))) return true;

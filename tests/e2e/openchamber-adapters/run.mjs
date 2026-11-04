@@ -25,9 +25,7 @@ mkdirSync(out, { recursive: true });
 const { chromium } = await import(join(work, 'deps/node_modules/playwright-core/index.mjs'));
 const secrets = readFileSync(join(work, 'secrets.env'), 'utf8');
 const password = /^OPENCHAMBER_UI_PASSWORD=(.+)$/m.exec(secrets)[1].trim();
-const vscodeToken = /^VSCODE_CONNECTION_TOKEN=(.+)$/m.exec(secrets)[1].trim();
 const BASE = Number(process.env.STACK_PORT_BASE ?? 35350);
-const VSCODE_SERVER = `http://127.0.0.1:${BASE + 2}`;
 const instances = { stock: `http://127.0.0.1:${BASE}`, adapted: `http://127.0.0.1:${BASE + 1}` };
 const TEST = 'ocforge-test';
 const ZONE = 'ocforge-test-zone';
@@ -75,8 +73,8 @@ const seed = async (name, base, request) => {
   }
   const ids = CHATS.map((title) => sessions.filter((session) => session.title === title).sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))[0].id);
   const catalog = await (await request.get(`${base}/api/guests`)).json();
-  for (const folder of ['planner', 'vscode', 'ocforge-test', 'ocforge-test-zone']) {
-    const id = { planner: 'oc-forge-planner', vscode: 'oc-forge-vscode' }[folder] ?? folder;
+  for (const folder of ['planner', 'ocforge-test', 'ocforge-test-zone']) {
+    const id = { planner: 'oc-forge-planner' }[folder] ?? folder;
     if (!catalog.guests.some((guest) => guest.id === id)) await request.post(`${base}/api/guests`, { data: { path: join(work, 'extensions', folder) } });
   }
   for (const guest of (await (await request.get(`${base}/api/guests`)).json()).guests) {
@@ -921,19 +919,19 @@ const compare = async (browser, seeded, request, viewport) => {
   check(`[${size}] stock vs adapted: the Planner page looks the same`, pageDiff < 0.01, `${(pageDiff * 100).toFixed(2)}% pixels differ`);
 };
 
-// The repository's own extensions, untouched, on either build: they must load and work.
+// The repository's own extension, untouched, on either build: it must load and work.
 const realExtensions = async (browser, name, base, seeded, request) => {
   await ready(request, base, seeded);
   const { context, page } = await open(browser, base, { width: 1440, height: 900 }, seeded);
   try {
-    await plannerAndVscode(page, name);
+    await planner(page, name);
   } catch (error) {
-    check(`[${name}] the extensions' check ran to the end`, false, String(error.message ?? error).split('\n')[0]);
+    check(`[${name}] the extension's check ran to the end`, false, String(error.message ?? error).split('\n')[0]);
   }
   await context.close();
 };
 
-const plannerAndVscode = async (page, name) => {
+const planner = async (page, name) => {
   await openExtensionPage(page, 'Planner');
   const planner = page.frameLocator('.inset-0 > iframe[title="Planner"]');
   check(`[${name}] the Planner page loads`, await planner.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 120_000 }).then(() => true).catch(() => false));
@@ -958,24 +956,6 @@ const plannerAndVscode = async (page, name) => {
   const added = Object.values((await plannerService('GET', '/state')).state?.tasks ?? {}).filter((task) => task.title === title && !task.deletedAt);
   if (added.length) await plannerService('POST', '/commands', { commands: added.map((task) => ({ cmd: `e2e-clean-${task.id}`, type: 'task.deleted', taskId: task.id })) });
   await page.getByRole('button', { name: 'Back to chat' }).click();
-  // Its one rail icon on the release; on the adapted build, its first rail entry (VS Code's Explorer).
-  await page.locator('[data-context-surface="plugin:oc-forge-vscode"], [data-context-surface^="plugin:oc-forge-vscode--"]').first().click();
-  // The panel's frame in its zone: a file tab VS Code restored mounts its page, a second "VS Code" frame.
-  const panel = page.frameLocator('[data-context-zone] iframe[title="VS Code"][src*="/workbench/index.html"]').first();
-  const form = await panel.getByRole('textbox', { name: 'VS Code Server address' }).waitFor({ timeout: 30_000 }).then(() => true).catch(() => false);
-  if (form) {
-    await panel.getByRole('textbox', { name: 'VS Code Server address' }).fill(VSCODE_SERVER);
-    await panel.getByLabel('VS Code Server connection token').fill(vscodeToken);
-    await panel.getByRole('button', { name: 'Connect' }).click();
-  }
-  const started = Date.now();
-  const workbench = await panel.locator('.monaco-workbench').waitFor({ timeout: 180_000 }).then(() => true).catch(() => false);
-  check(`[${name}] the VS Code panel loads VS Code's workbench`, workbench, `${((Date.now() - started) / 1000).toFixed(0)} s after Connect`);
-  const vscodeSandbox = await page.locator('[data-context-zone] iframe[title="VS Code"][src*="/workbench/index.html"]').first().getAttribute('sandbox').catch(() => null);
-  check(`[${name}] the VS Code panel's frame keeps the release's sandbox (it doesn't ask for allow-modals)`, vscodeSandbox === 'allow-scripts', `sandbox "${vscodeSandbox}"`);
-  const listed = workbench && await panel.locator('.explorer-folders-view .monaco-list-row', { hasText: 'README.md' }).first().waitFor({ timeout: 90_000 }).then(() => true).catch(() => false);
-  check(`[${name}] VS Code works: its Explorer lists the project's files`, listed);
-  await page.screenshot({ path: join(out, `extensions-${name}-vscode.png`) });
 };
 
 const parts = new Set((process.env.OC_FORGE_E2E_PARTS ?? 'compare,extensions,api,many,runtime').split(','));
@@ -984,15 +964,14 @@ const request = (await browser.newContext()).request;
 const seeded = {};
 for (const [name, base] of Object.entries(instances)) seeded[name] = await seed(name, base, request);
 
-// With no extension using the APIs: the test extensions off, and the VS Code extension too (on the adapted build its
-// rail shows one icon per VS Code view container). The Planner only uses links and keys, which show nothing.
-const usingTheApis = [TEST, ZONE, 'oc-forge-vscode'];
+// With no extension using the APIs: the test extensions off. The Planner only uses links, keys and modals, which show
+// nothing until it is used.
+const usingTheApis = [TEST, ZONE];
 for (const base of Object.values(instances)) {
   await request.post(`${base}/auth/session`, { data: { password } });
   for (const id of usingTheApis) await setEnabled(request, base, id, false);
 }
 if (parts.has('compare')) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await compare(browser, seeded, request, viewport);
-for (const base of Object.values(instances)) await setEnabled(request, base, 'oc-forge-vscode', true);
 if (parts.has('extensions')) for (const [name, base] of Object.entries(instances)) await realExtensions(browser, name, base, seeded[name], request);
 
 // Every API, with the test extensions on.

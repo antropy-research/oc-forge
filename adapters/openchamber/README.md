@@ -375,10 +375,10 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   `window.id`, and the window id itself (made without `randomUUID`).
 - `tests/e2e/openchamber-adapters/`: two throwaway instances on this machine
   (the npm release and the adapted package), a scratch extension
-  (`extension/`, `zone-extension/`) and the repository's Planner and VS Code
-  extensions. `run.mjs` checks every API at 1440×900 and 1024×768, the release
+  (`extension/`, `zone-extension/`) and the repository's Planner
+  extension. `run.mjs` checks every API at 1440×900 and 1024×768, the release
   against the adapted build with no extension using the APIs (rail, header and
-  an extension page, pixel by pixel), and that the Planner and VS Code work on
+  an extension page, pixel by pixel), and that the Planner works on
   both. R5 also opens a deep link in a fresh window with the new-chat draft's
   folder held 2.5 s, so the draft changes after the page opened. The page
   stays; without the reopening it closed at 3.6 s. "Back to chat" still
@@ -406,7 +406,7 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   services.
 
 ```sh
-node tests/e2e/openchamber-adapters/stack.mjs prepare   # network: both builds, Playwright, a VS Code Server
+node tests/e2e/openchamber-adapters/stack.mjs prepare   # network: both builds, Playwright
 node tests/e2e/openchamber-adapters/stack.mjs up
 node tests/e2e/openchamber-adapters/run.mjs /tmp/opencode/oc-adapters/screens
 node tests/e2e/openchamber-adapters/stack.mjs down

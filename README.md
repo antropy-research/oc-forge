@@ -38,8 +38,8 @@ extension using them, OpenChamber looks and behaves as the release.
 | `adapters/` | Per-vendor changes: `opencode/`, `openchamber/` (`edits/` to upstream files, the new `host/` UI and `server/` modules they call, `vite-plugin.ts`, and `client/`, the module extensions bundle), `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added.; `dawn-mac-antropy/` is kept empty with `.gitkeep` until patches are added. |
 | `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `build-openchamber.py` (OpenChamber's web package with its adapters), `upstream.py`, `verify.py`. |
 | `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`; `e2e/openchamber-adapters/` runs the OpenChamber adapters against the release in a browser, with a scratch extension. |
-| `extensions/` | OpenChamber extensions, installed on the latest OpenChamber release: `planner/` (Sunsama-style planning with Linear, GitHub, Google Calendar, Google Tasks, Gmail and agents) and `vscode/` (the compiled workbench of your own VS Code Server, rendered in OpenChamber's panel and page). Both are checked by `mise run test:extensions` in CI. |
-| `containers/` | `openchamber-dev/`: OpenChamber, OpenCode and VS Code Server, built from `vendors/` at their pins, and the GitHub CLI, for developing the extensions. |
+| `extensions/` | OpenChamber extensions, installed on the latest OpenChamber release: `planner/` (Sunsama-style planning with Linear, GitHub, Google Calendar, Google Tasks, Gmail and agents), checked by `mise run test:extensions` in CI. |
+| `containers/` | `openchamber-dev/`: OpenChamber and OpenCode, built from `vendors/` at their pins, and the GitHub CLI, for developing the extensions. |
 
 How it works:
 
@@ -111,12 +111,7 @@ head, and stops at the first step that fails, committing nothing:
 3. `ci`: `mise run ci`;
 4. `openchamber`: `scripts/build-openchamber.py --check-only`, every OpenChamber
    adapter still applies and the result type-checks;
-5. `vscode`, only when VS Code moved: against Microsoft's build of the new
-   release (downloaded once into `build/vendors-update/`), the VS Code
-   extension's file list (`service/web-files.json`) holds every file of it, and
-   every one of its workbench patches applies once (`tests/patch.test.ts`,
-   which `mise run ci` skips without a server);
-6. `commit`: "chore: update vendor releases", the pins alone.
+5. `commit`: "chore: update vendor releases", the pins alone.
 
 Each step's output is also in `build/vendors-update/<step>.log`. When a new
 release breaks an adapter or a test, the new pins stay staged: fix the adapters

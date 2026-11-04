@@ -5,14 +5,14 @@
 // one demo project. Nothing is shared with the dev containers or with the
 // session that runs this (see instanceEnv).
 //
-//   node tests/e2e/openchamber-adapters/stack.mjs prepare  install both builds, the check's tools and a VS Code Server (network)
-//   node tests/e2e/openchamber-adapters/stack.mjs up       start both, and the VS Code Server the VS Code extension connects to
+//   node tests/e2e/openchamber-adapters/stack.mjs prepare  install both builds and the check's tools (network)
+//   node tests/e2e/openchamber-adapters/stack.mjs up       start both
 //   node tests/e2e/openchamber-adapters/stack.mjs restart <stock|adapted>   stop and start one instance
 //   node tests/e2e/openchamber-adapters/stack.mjs down     stop everything and delete the work dir
 //
 // WORK (default /tmp/opencode/oc-adapters/e2e) holds everything, including the
-// generated UI password and VS Code token (secrets.env, mode 0600); they are
-// never printed. `up` runs `prepare` first if something is missing.
+// generated UI password (secrets.env, mode 0600); it is never printed. `up`
+// runs `prepare` first if something is missing.
 import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -22,15 +22,12 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const work = process.env.WORK ?? '/tmp/opencode/oc-adapters/e2e';
-// The releases vendors.json pins (CI moves them), unless set: OpenChamber's, and the VS Code Server's for the VS Code
-// extension (Microsoft's build of that release).
+// The OpenChamber release vendors.json pins (`mise run vendors:update` moves it), unless set.
 const pins = JSON.parse(readFileSync(join(repo, 'vendors.json'), 'utf8'));
 const version = process.env.OPENCHAMBER_VERSION ?? pins.openchamber.release.replace(/^v/, '');
 const packageFile = process.env.PACKAGE ?? join(repo, `dist/openchamber-web-${version}.tgz`);
-const VSCODE_VERSION = process.env.VSCODE_VERSION ?? pins.vscode.release.replace(/^v/, '');
-// Two stacks can run side by side with their own WORK and STACK_PORT_BASE (stock, adapted, VS Code Server).
+// Two stacks can run side by side with their own WORK and STACK_PORT_BASE (stock, adapted).
 const BASE = Number(process.env.STACK_PORT_BASE ?? 35350);
-export const VSCODE_PORT = BASE + 2;
 export const instances = {
   stock: { port: BASE, install: `@openchamber/web@${version}` },
   adapted: { port: BASE + 1, install: packageFile },
@@ -59,7 +56,7 @@ const prepare = async () => {
   chmodSync(work, 0o700);
   const secrets = join(work, 'secrets.env');
   if (!existsSync(secrets)) {
-    writeFileSync(secrets, `OPENCHAMBER_UI_PASSWORD=${randomBytes(24).toString('hex')}\nVSCODE_CONNECTION_TOKEN=${randomBytes(24).toString('hex')}\n`, { mode: 0o600 });
+    writeFileSync(secrets, `OPENCHAMBER_UI_PASSWORD=${randomBytes(24).toString('hex')}\n`, { mode: 0o600 });
   }
 
   // The check's own tools: Playwright, and the SDK the test extension's page bundles.
@@ -69,18 +66,6 @@ const prepare = async () => {
     mkdirSync(deps, { recursive: true });
     writeFileSync(join(deps, 'package.json'), '{ "name": "ocforge-e2e-deps", "private": true, "type": "module" }\n');
     execFileSync('bun', ['add', 'playwright-core@1.63.0', `@openchamber/sdk@${version}`], { cwd: deps, stdio: 'inherit', env: env() });
-  }
-
-  // The VS Code Server for the web the VS Code extension connects to, the build the dev image runs.
-  const server = join(work, 'vscode-server');
-  if (!existsSync(join(server, 'bin/code-server')) || versionOf(join(server, 'product.json')) !== VSCODE_VERSION) {
-    stop('vscode');
-    rmSync(server, { recursive: true, force: true });
-    mkdirSync(server, { recursive: true });
-    const archive = join(work, `vscode-server-${VSCODE_VERSION}.tar.gz`);
-    execFileSync('curl', ['-fsSL', `https://update.code.visualstudio.com/${VSCODE_VERSION}/server-linux-x64-web/stable`, '-o', archive]);
-    execFileSync('tar', ['-xzf', archive, '-C', server, '--strip-components=1']);
-    rmSync(archive, { force: true });
   }
   for (const [name, instance] of Object.entries(instances)) {
     const prefix = join(work, name, 'prefix');
@@ -95,7 +80,6 @@ const prepare = async () => {
 };
 
 const prepared = () => existsSync(join(work, 'secrets.env')) && existsSync(join(work, 'deps/node_modules/playwright-core'))
-  && existsSync(join(work, 'vscode-server/bin/code-server'))
   && Object.entries(instances).every(([name, instance]) => {
     const stamp = join(work, name, 'installed');
     const wanted = existsSync(instance.install) ? String(statSync(instance.install).mtimeMs) : instance.install;
@@ -112,23 +96,13 @@ const spawnLogged = (name, command, args, options) => {
 
 const up = async () => {
   if (!prepared()) await prepare();
-  if (!await fetch(`http://127.0.0.1:${VSCODE_PORT}/version`).then(() => true).catch(() => false)) {
-    const tokenFile = join(work, 'vscode', 'token');
-    mkdirSync(join(work, 'vscode', 'home'), { recursive: true });
-    writeFileSync(tokenFile, secret('VSCODE_CONNECTION_TOKEN'), { mode: 0o600 });
-    spawnLogged('vscode', join(work, 'vscode-server/bin/code-server'), [
-      '--host', '127.0.0.1', '--port', String(VSCODE_PORT), '--connection-token-file', tokenFile,
-      '--accept-server-license-terms', '--server-data-dir', join(work, 'vscode', 'data'),
-    ], { cwd: join(work, 'vscode', 'home'), env: { ...instanceEnv(), HOME: join(work, 'vscode', 'home') } });
-  }
 
-  // The extensions under test, as copies (some write into their own folder) of this checkout's own files: tracked,
-  // or new and not ignored. What the checkout ignores is not theirs to start from: node_modules, and the workbench
-  // VS Code's extension prepares (`vscode-web/`), which an earlier run there may have left incomplete.
+  // The extension under test, as a copy (it writes into its own folder) of this checkout's own files: tracked, or new
+  // and not ignored. What the checkout ignores (node_modules) is not its to start from.
   const extensions = join(work, 'extensions');
   rmSync(extensions, { recursive: true, force: true });
   mkdirSync(extensions, { recursive: true });
-  for (const name of ['planner', 'vscode']) {
+  for (const name of ['planner']) {
     const files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', `extensions/${name}`], { cwd: repo }).toString().split('\0').filter(Boolean);
     for (const file of files) {
       if (!existsSync(join(repo, file))) continue;
@@ -205,7 +179,7 @@ const stop = (name) => {
 };
 
 const down = () => {
-  for (const name of [...Object.keys(instances), 'vscode']) stop(name);
+  for (const name of Object.keys(instances)) stop(name);
   if (process.argv.includes('--keep-work')) return;
   rmSync(work, { recursive: true, force: true });
 };
