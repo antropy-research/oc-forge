@@ -67,13 +67,9 @@ run = "uv run --locked python scripts/build-openchamber.py"
 description = "Apply the OpenChamber adapters to vendors/openchamber and type-check the result, without building a package"
 run = "uv run --locked python scripts/build-openchamber.py --check-only"
 
-[tasks."upstream:sync"]
-description = "Pin the submodule to the official latest V2 release if it is newer"
-run = "uv run --locked python scripts/vendors.py sync"
-
-[tasks."vendors:sync"]
-description = "Pin all vendors to their latest formal GitHub release tags"
-run = "uv run --locked python scripts/vendors.py sync"
+[tasks."vendors:update"]
+description = "By hand: move vendors/ to the latest formal releases, then setup, CI checks and the OpenChamber adapters; commits the pins only if every step passes (`-- --abort` puts them back)"
+run = "uv run --locked python scripts/update-vendors.py"
 
 [tasks."release:notes"]
 description = "Print release notes for the current pin and adapters"

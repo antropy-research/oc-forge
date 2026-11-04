@@ -3,16 +3,16 @@
 Patched, jointly pinned releases of OpenCode, OpenChamber, Orca, and VS Code.
 
 The `vendors/` submodules are pinned to official stable release git tags in
-`vendors.json` and are **never modified**. Only upstream sync (CI) changes
-`vendors/`: a vendor newly listed in `vendors.json` becomes a submodule on its
-next run. Fixes live in `adapters/` and are applied in memory while the OpenCode
-build and the OpenChamber web build run.
+`vendors.json` and are **never modified**. Only `mise run vendors:update`, run by
+hand, changes `vendors/` (see *Updating the vendors*): a vendor newly listed in
+`vendors.json` becomes a submodule on its next run. Fixes live in `adapters/` and
+are applied in memory while the OpenCode build and the OpenChamber web build run.
 
 OpenCode V2 uses npm `@opencode/cli`'s `latest` version and its matching git tag;
 GitHub's latest release still tracks V1. OpenChamber, Orca, and VS Code use GitHub's latest
 non-draft, non-prerelease desktop release. dawn-mac-antropy has no releases, so it
-follows the head of its `main` branch; it is private, and sync skips it until CI can
-read it. Current binary builds cover OpenCode; OpenChamber, Orca, VS Code, and
+follows the head of its `main` branch; it is private, and the update skips it until it
+can read it. Current binary builds cover OpenCode; OpenChamber, Orca, VS Code, and
 dawn-mac-antropy are source-pinned for future joint packaging.
 
 ## Adapters
@@ -34,7 +34,7 @@ extension using them, OpenChamber looks and behaves as the release.
 
 | Folder | Contains |
 |---|---|
-| `vendors/` | Pristine OpenCode, OpenChamber, Orca, and VS Code release submodules; `dawn-mac-antropy` is listed to follow its `main` branch and becomes a submodule once upstream sync can read it (a private repository CI cannot read yet is skipped). |
+| `vendors/` | Pristine OpenCode, OpenChamber, Orca, and VS Code release submodules; `dawn-mac-antropy` is listed to follow its `main` branch and becomes a submodule once `mise run vendors:update` can read it (a private repository it cannot read yet is skipped). |
 | `adapters/` | Per-vendor changes: `opencode/`, `openchamber/` (`edits/` to upstream files, the new `host/` UI and `server/` modules they call, `vite-plugin.ts`, and `client/`, the module extensions bundle), `orca/`, and `vscode/`. Empty vendor folders are kept with `.gitkeep` until patches are added.; `dawn-mac-antropy/` is kept empty with `.gitkeep` until patches are added. |
 | `scripts/` | Everything that builds, syncs and verifies: `adapter-plugin.ts` (adapters as a Bun plugin), `build-preload.ts` (injects it into upstream's build), `build.py`, `build-openchamber.py` (OpenChamber's web package with its adapters), `upstream.py`, `verify.py`. |
 | `tests/` | Every test we add: `preload.ts` (loads the same plugin into `bun test`) and `*.test.ts`; `e2e/openchamber-adapters/` runs the OpenChamber adapters against the release in a browser, with a scratch extension. |
@@ -84,20 +84,41 @@ compatible.
 
 ```mermaid
 flowchart LR
-  A[hourly: official stable release channels] -->|newer| B[pin all vendor submodules to tags]
-  B --> C[mise run ci]
-  C --> D[build linux-x64 + darwin-arm64]
-  D --> E[fast-forward main]
-  E --> F[GitHub Release]
+  A[by hand: mise run vendors:update] -->|newer release| B[pin the vendor submodules to tags]
+  B --> C[setup, mise run ci, OpenChamber adapters]
+  C -->|all pass| D[commit on planner]
+  D --> E[planner to dev to main]
+  E --> F[build linux-x64 + darwin-arm64]
+  F --> G[GitHub Release]
 ```
 
-- `upstream-sync.yml` follows formal release tags, never moving branches, except
-  for a vendor without releases, which follows its branch head. A
-  new version is staged on the `upstream-sync` branch; main moves and
-  a release is published only after tests pass and all targets build. If an
-  adapter no longer matches upstream, the run fails and publishes nothing.
-- `release.yml` publishes every push to main as the next `fixed.N`.
+- `release.yml` publishes every push to main as the next `fixed.N`, only after
+  tests pass and all targets build.
 - `ci.yml` runs setup and checks on pushes and pull requests.
+
+No workflow moves the vendor pins: that is `mise run vendors:update`, by hand.
+
+## Updating the vendors
+
+On the branch whose pins you update (`planner`), in a checkout with no other
+changes, run `mise run vendors:update`. It follows formal release tags, never
+moving branches, except for a vendor without releases, which follows its branch
+head, and stops at the first step that fails, committing nothing:
+
+1. `sync`: `scripts/vendors.py` moves `vendors.json`, `upstream.json` and the
+   submodules to the latest releases (if none is newer: "Up to date", and done);
+2. `setup`: with the new pins staged, `mise run setup`;
+3. `ci`: `mise run ci`;
+4. `openchamber`: `scripts/build-openchamber.py --check-only`, every OpenChamber
+   adapter still applies and the result type-checks;
+5. `commit`: "chore: update vendor releases", the pins alone.
+
+Each step's output is also in `build/vendors-update/<step>.log`. When a new
+release breaks an adapter or a test, the new pins stay staged: fix the adapters
+or tests against them, commit those fixes, and run it again; `-- --abort` puts
+the branch's pins back. It never pushes; the pins reach main like any change
+(`planner`, then `dev`, then `main`), and main's push publishes the release.
+`-- --trailer 'Co-authored-by: …'` adds a trailer to its commit.
 
 ## Local development
 
@@ -112,7 +133,7 @@ mise run test:adapters                # our adapter tests only
 mise run build opencode-linux-x64     # dist/opencode-linux-x64.tar.gz
 mise run build:openchamber            # dist/openchamber-web-<version>.tgz, with the adapters
 mise run check:openchamber            # the OpenChamber adapters apply and type-check
-mise run vendors:sync                 # pin newer formal releases, if any
+mise run vendors:update               # by hand: newer formal releases, checked, then committed
 mise run release:notes
 ```
 

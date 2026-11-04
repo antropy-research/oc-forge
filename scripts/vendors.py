@@ -49,7 +49,7 @@ def main() -> None:
         if path.exists() and subprocess.check_output(["git", "-C", str(path), "status", "--porcelain"], text=True).strip():
             raise SystemExit(f"{name}: submodule must be pristine before sync")
         if "branch" in pin:
-            # A repository CI cannot read yet (e.g. private, no token) is skipped
+            # A repository the update cannot read yet (e.g. private, no token) is skipped
             # rather than failing the sync of every other vendor.
             if commit := branch_commit(name, pin):
                 candidates[name] = (pin["branch"], commit)
@@ -69,7 +69,7 @@ def main() -> None:
             continue
         path = ROOT / "vendors" / name
         if not path.exists():
-            # A vendor new to vendors.json becomes a submodule here, so only CI adds one.
+            # A vendor new to vendors.json becomes a submodule here, so only `mise run vendors:update` adds one.
             subprocess.run(["git", "-C", str(ROOT), "submodule", "add", pin["repository"], f"vendors/{name}"], check=True)
         elif "branch" in pin:
             subprocess.run(["git", "-C", str(path), "fetch", "--depth=1", "origin", commit], check=True)

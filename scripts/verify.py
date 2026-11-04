@@ -24,7 +24,7 @@ def main() -> None:
                 raise SystemExit(f"{name}: HEAD differs from vendors.json")
         else:
             tag = f"refs/tags/{pin['release']}"
-            # CI checks submodules out shallow and without tags; fetch just the pinned one.
+            # CI and a fresh setup check submodules out shallow and without tags; fetch just the pinned one.
             if subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}"], capture_output=True).returncode != 0:
                 git("fetch", "--quiet", "--depth=1", "origin", f"+{tag}:{tag}")
             if git("rev-parse", "HEAD") != pin["commit"] or git("rev-parse", f"{tag}^{{commit}}") != pin["commit"]:
