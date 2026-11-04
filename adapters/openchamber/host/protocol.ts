@@ -10,11 +10,8 @@
 export const OC_FORGE_CHANNEL = 'oc-forge';
 export const OC_FORGE_VERSION = 1;
 
-export const OC_FORGE_FEATURES = ['rail', 'tabs', 'zones', 'keys', 'links', 'modals', 'rail-open', 'window-id', 'rail-badge', 'page-warm'] as const;
+export const OC_FORGE_FEATURES = ['keys', 'links', 'modals'] as const;
 export type OcForgeFeature = (typeof OC_FORGE_FEATURES)[number];
-
-export const OC_FORGE_ZONES = ['left', 'right', 'bottom'] as const;
-export type OcForgeZone = (typeof OC_FORGE_ZONES)[number];
 
 /**
  * OpenChamber shortcut actions a frame may forward: switching and closing
@@ -37,62 +34,16 @@ export type OcForgeForwardableAction = (typeof OC_FORGE_FORWARDABLE_ACTIONS)[num
 /** Bound to a bare modifier prefix and completed by a digit: held mod + 1–9, held mod+alt + 0–9. */
 export const OC_FORGE_DIGIT_ACTIONS = ['switch_context_surface', 'switch_session_tab'] as const;
 
-/**
- * What the host takes from a frame. `tabs` is per extension: VS Code holds as many editors as the user opens, so the
- * header has room for far more than a session holds (64 before 2026-10-30). `title` covers a file name (255 bytes at
- * most on the usual file systems) and a diff of two (80 before). A frame learns them from its `hello`; one from an
- * older host has none there, and these older values hold.
- */
+/** What the host takes from a frame: a route (a deep link's, a page's own) of at most this many characters. */
 export const OC_FORGE_LIMITS = {
-  railEntries: 100,
-  entryId: 48,
-  title: 512,
-  svg: 16_384,
-  tabs: 1000,
-  tabId: 1024,
   route: 2048,
 } as const;
-export type OcForgeLimits = { readonly [K in keyof typeof OC_FORGE_LIMITS]: number };
-/** An older host's limits, for a hello without `limits`. */
-export const OC_FORGE_LEGACY_LIMITS: OcForgeLimits = { ...OC_FORGE_LIMITS, title: 80, tabs: 64 };
 
-/** The largest count a rail badge carries (OpenChamber shows 99+ past 99). */
-export const OC_FORGE_BADGE_MAX = 1_000_000;
-
-/** Kebab-case; `--` is reserved: OpenChamber names an entry's own surface `plugin:<extension>--<entry>`. */
-export const OC_FORGE_ENTRY_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
-const ICON_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const GUEST_ID = /^[a-z][a-z0-9-]*$/;
-
-/** A Remixicon name (`git-branch`) or an inline `<svg>`; the host draws either as a mask in the rail's colour. */
-export type OcForgeIcon = string;
-
-export type OcForgeRailEntry = {
-  id: string;
-  title: string;
-  icon: OcForgeIcon;
-  /** Ascending; entries without one keep the service's order after those with one. */
-  order?: number;
-  /**
-   * Gives the entry its own panel (a frame of its own, loading `panel.entry`)
-   * that opens in this zone until the user moves it. Without a zone the entry
-   * is a view of the extension's one panel and follows its zone.
-   */
-  zone?: OcForgeZone;
-};
 
 /** The `ocForge` block of an extension's package.json, as the host read it. */
 export type OcForgeManifest = {
   apiVersion: 1;
-  /** Where the extension's panel opens until the user moves it. */
-  zone?: OcForgeZone;
-  /** The service path the host polls for rail entries, and how often (ms). */
-  rail?: { path: string; interval: number };
-  /**
-   * Its page. `keepBottomZone`: OpenChamber's bottom zone stays shown under the
-   * page instead of being covered with the chat (an editor over its terminal).
-   */
-  page?: { keepBottomZone: true };
   /**
    * Its frames are sandboxed with `allow-modals` too: `print()` opens the
    * browser's print dialog on the frame's own document (and `alert()`,
@@ -100,20 +51,6 @@ export type OcForgeManifest = {
    * `allow-scripts` alone, where Chrome ignores `print()`.
    */
   modals?: true;
-};
-
-export const OC_FORGE_RAIL_INTERVAL_DEFAULT = 3_000;
-export const OC_FORGE_RAIL_INTERVAL_MIN = 1_000;
-export const OC_FORGE_RAIL_INTERVAL_MAX = 60_000;
-
-export type OcForgeTab = {
-  id: string;
-  title: string;
-  icon?: OcForgeIcon;
-  /** Unsaved changes: the tab shows a dot instead of its close button until hovered. */
-  dirty?: boolean;
-  /** Its place on the extension's page: a Cmd/Ctrl+click on the tab opens the page there in a new browser tab. */
-  route?: string;
 };
 
 export type OcForgeShortcuts = {
@@ -137,8 +74,6 @@ export type OcForgeShortcuts = {
   aliases?: Partial<Record<OcForgeForwardableAction, string[]>>;
 };
 
-export type OcForgeTabsState = { list: OcForgeTab[]; active: string | null; shown: boolean; strip: boolean };
-
 export type OcForgeHello = {
   version: typeof OC_FORGE_VERSION;
   /** What this host supports for this frame. */
@@ -147,27 +82,11 @@ export type OcForgeHello = {
   extension: string;
   /** The SDK surface the frame is: `panel`, `page`, `status`, `file`, `dialog`. */
   surface: string;
-  /** Rail panels of extensions with rail entries: the entry shown, and whether the frame is that entry's own panel. */
-  rail: { entry: string | null; own: boolean } | null;
-  /**
-   * The extension's header tabs, the one its page shows, whether the page is
-   * on screen on it, and whether the header's tab strip is there at all (it
-   * follows OpenChamber's "Session tabs" setting).
-   */
-  tabs: OcForgeTabsState;
   /** The deep-link route handed to this frame (`?extension=<id>&route=<route>`), if any. */
   route: string | null;
   /** URL prefixes: `page + encodeURIComponent(route)` is this extension's page, `session + encodeURIComponent(id)` a chat. */
   links: { page: string; session: string } | null;
   shortcuts: OcForgeShortcuts;
-  /** What this host takes (`OC_FORGE_LIMITS`); an older host sends none, and `OC_FORGE_LEGACY_LIMITS` hold. */
-  limits?: OcForgeLimits;
-  /**
-   * This OpenChamber window's id (`window-id`): one per browser tab, the same in every frame of that tab, a reloaded
-   * frame's too, and after the tab reloads the app; another in each tab, a duplicated one included. An older host
-   * sends none; one before 2026-10-31 made a new one when the app reloaded.
-   */
-  windowId?: string;
 };
 
 export type OcForgeKey = {
@@ -183,34 +102,12 @@ export type OcForgeKey = {
 /** Frame -> host. Requests carry an `id`; the host answers each with a `result`. */
 export type OcForgeRequest =
   | { type: 'hello' }
-  | { type: 'rail-active'; payload: { entry: string } }
-  /** Shows one of the extension's own rail entries, as a click on it would, but never closes it (`rail-open`). */
-  | { type: 'rail-open'; payload: { entry: string } }
-  /**
-   * The counts this frame sees on the extension's rail entries (`rail-badge`): all of them, an entry left out has none.
-   * `fresh`: the frame's current view of every entry (the user works in it), not only of the ones that changed.
-   */
-  | { type: 'rail-badges'; payload: { badges: Record<string, number>; fresh?: boolean } }
-  /** Keep the extension's page mounted, hidden, while this frame lives (`page-warm`), or stop asking. */
-  | { type: 'page-warm'; payload: { on: boolean } }
-  | { type: 'tab-open'; payload: OcForgeTab & { activate?: boolean } }
-  | { type: 'tab-update'; payload: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean; route?: string | null } }
-  | { type: 'tab-close'; payload: { id: string } }
-  /** The frame decides how its dirty tabs close (it then gets `tab-close-request`), or stops deciding. */
-  | { type: 'tab-close-handler'; payload: { on: boolean } }
-  | { type: 'tab-activate'; payload: { id: string } }
   | { type: 'key'; payload: OcForgeKey }
   | { type: 'route'; payload: { route: string; push?: boolean } };
 
 /** Host -> frame. */
 export type OcForgeEvent =
   | { type: 'hello'; payload: OcForgeHello }
-  | { type: 'rail-entry'; payload: { entry: string } }
-  | { type: 'tab-activated'; payload: { id: string } }
-  | { type: 'tab-closed'; payload: { id: string } }
-  /** The user asked to close this dirty tab; it stays until the frame closes it. */
-  | { type: 'tab-close-request'; payload: { id: string } }
-  | { type: 'tabs'; payload: OcForgeTabsState }
   | { type: 'route'; payload: { route: string } }
   | { type: 'shortcuts'; payload: OcForgeShortcuts }
   | { type: 'result'; id: string; ok: boolean; error?: string; payload?: unknown };
@@ -225,45 +122,12 @@ export const envelope = <T extends object>(message: T, id?: string): OcForgeEnve
 
 type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
-const text = (value: unknown, max: number): string | null => (
-  typeof value === 'string' && value.trim().length > 0 && value.length <= max ? value.trim() : null
-);
-
-export const isOcForgeIcon = (value: unknown): value is OcForgeIcon => (
-  typeof value === 'string'
-  && (ICON_NAME.test(value) || (/^\s*<svg[\s>]/i.test(value) && value.length <= OC_FORGE_LIMITS.svg))
-);
 
 // What the host takes, said to the frame whose request it refuses (its developer reads it in the rejected promise).
-const TAB_ID = `a tab's id is 1–${OC_FORGE_LIMITS.tabId} characters`;
-const TITLE = `a title is 1–${OC_FORGE_LIMITS.title} characters`;
-const ICON = `an icon is a Remixicon name or an inline <svg> of at most ${OC_FORGE_LIMITS.svg} characters`;
 const ROUTE = `a route is at most ${OC_FORGE_LIMITS.route} characters`;
 const flag = (name: string) => `${name} is true or false`;
 
 const isRoute = (value: unknown): value is string => typeof value === 'string' && value.length <= OC_FORGE_LIMITS.route;
-
-/** A tab as a frame sent it, or what is wrong with it. */
-const readTab = (value: Json): OcForgeTab | string => {
-  const id = typeof value.id === 'string' && value.id.length > 0 && value.id.length <= OC_FORGE_LIMITS.tabId ? value.id : null;
-  if (!id) return TAB_ID;
-  const title = text(value.title, OC_FORGE_LIMITS.title);
-  if (!title) return TITLE;
-  const tab: OcForgeTab = { id, title };
-  if (value.icon !== undefined) {
-    if (!isOcForgeIcon(value.icon)) return ICON;
-    tab.icon = value.icon;
-  }
-  if (value.dirty !== undefined) {
-    if (typeof value.dirty !== 'boolean') return flag('dirty');
-    tab.dirty = value.dirty;
-  }
-  if (value.route !== undefined) {
-    if (!isRoute(value.route)) return ROUTE;
-    tab.route = value.route;
-  }
-  return tab;
-};
 
 type Parsed = { id: string | null; request: OcForgeRequest } | { id: string | null; error: string };
 
@@ -279,60 +143,6 @@ export const parseOcForgeRequest = (data: unknown): Parsed | null => {
   switch (data.type) {
     case 'hello':
       return { id, request: { type: 'hello' } };
-    case 'rail-active':
-    case 'rail-open':
-      return typeof payload.entry === 'string' && payload.entry.length <= OC_FORGE_LIMITS.entryId && OC_FORGE_ENTRY_ID.test(payload.entry)
-        ? { id, request: { type: data.type, payload: { entry: payload.entry } } }
-        : refuse(`an entry's id is kebab-case, at most ${OC_FORGE_LIMITS.entryId} characters`);
-    case 'rail-badges': {
-      const badges = isObject(payload.badges) ? Object.entries(payload.badges) : null;
-      if (!badges || badges.length > OC_FORGE_LIMITS.railEntries) return refuse(`badges are at most ${OC_FORGE_LIMITS.railEntries} entries' counts`);
-      const counts: Record<string, number> = {};
-      for (const [entry, count] of badges) {
-        if (entry.length > OC_FORGE_LIMITS.entryId || !OC_FORGE_ENTRY_ID.test(entry)) return refuse(`an entry's id is kebab-case, at most ${OC_FORGE_LIMITS.entryId} characters`);
-        if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > OC_FORGE_BADGE_MAX) return refuse(`a count is a whole number from 0 to ${OC_FORGE_BADGE_MAX}`);
-        if (count > 0) counts[entry] = count;
-      }
-      if (payload.fresh !== undefined && typeof payload.fresh !== 'boolean') return refuse(flag('fresh'));
-      return { id, request: { type: 'rail-badges', payload: payload.fresh ? { badges: counts, fresh: true } : { badges: counts } } };
-    }
-    case 'page-warm':
-      return typeof payload.on === 'boolean' ? { id, request: { type: 'page-warm', payload: { on: payload.on } } } : refuse(flag('on'));
-    case 'tab-open': {
-      const tab = readTab(payload);
-      if (typeof tab === 'string') return refuse(tab);
-      if (payload.activate !== undefined && typeof payload.activate !== 'boolean') return refuse(flag('activate'));
-      return { id, request: { type: 'tab-open', payload: payload.activate === undefined ? tab : { ...tab, activate: payload.activate } } };
-    }
-    case 'tab-update': {
-      if (typeof payload.id !== 'string' || !payload.id || payload.id.length > OC_FORGE_LIMITS.tabId) return refuse(TAB_ID);
-      const update: { id: string; title?: string; icon?: OcForgeIcon | null; dirty?: boolean; route?: string | null } = { id: payload.id };
-      if (payload.title !== undefined) {
-        const title = text(payload.title, OC_FORGE_LIMITS.title);
-        if (!title) return refuse(TITLE);
-        update.title = title;
-      }
-      if (payload.icon !== undefined) {
-        if (payload.icon !== null && !isOcForgeIcon(payload.icon)) return refuse(ICON);
-        update.icon = payload.icon;
-      }
-      if (payload.dirty !== undefined) {
-        if (typeof payload.dirty !== 'boolean') return refuse(flag('dirty'));
-        update.dirty = payload.dirty;
-      }
-      if (payload.route !== undefined) {
-        if (payload.route !== null && !isRoute(payload.route)) return refuse(ROUTE);
-        update.route = payload.route;
-      }
-      return { id, request: { type: 'tab-update', payload: update } };
-    }
-    case 'tab-close-handler':
-      return typeof payload.on === 'boolean' ? { id, request: { type: 'tab-close-handler', payload: { on: payload.on } } } : refuse(flag('on'));
-    case 'tab-close':
-    case 'tab-activate':
-      return typeof payload.id === 'string' && payload.id.length > 0 && payload.id.length <= OC_FORGE_LIMITS.tabId
-        ? { id, request: { type: data.type, payload: { id: payload.id } } }
-        : refuse(TAB_ID);
     case 'key': {
       const flags = ['ctrlKey', 'metaKey', 'altKey', 'shiftKey'] as const;
       const press = 'a press has its key and code (at most 32 characters each) and the four modifier flags';
@@ -382,53 +192,10 @@ export const readOcForgeEvent = (data: unknown): OcForgeEvent | null => {
   return { type: data.type, payload: data.payload } as OcForgeEvent;
 };
 
-/**
- * The entries a service answered (`{ entries: [...] }`), in display order.
- * A malformed entry is dropped on its own; an answer without a list is null.
- */
-export const readOcForgeRailEntries = (body: unknown): OcForgeRailEntry[] | null => {
-  if (!isObject(body) || !Array.isArray(body.entries)) return null;
-  const seen = new Set<string>();
-  const entries: Array<OcForgeRailEntry & { index: number }> = [];
-  body.entries.forEach((value, index) => {
-    if (!isObject(value) || entries.length >= OC_FORGE_LIMITS.railEntries) return;
-    const id = typeof value.id === 'string' && value.id.length <= OC_FORGE_LIMITS.entryId && OC_FORGE_ENTRY_ID.test(value.id) ? value.id : null;
-    const title = text(value.title, OC_FORGE_LIMITS.title);
-    if (!id || !title || seen.has(id) || !isOcForgeIcon(value.icon)) return;
-    const entry: OcForgeRailEntry & { index: number } = { id, title, icon: value.icon, index };
-    if (value.order !== undefined) {
-      if (typeof value.order !== 'number' || !Number.isFinite(value.order)) return;
-      entry.order = value.order;
-    }
-    if (value.zone !== undefined) {
-      if (!OC_FORGE_ZONES.includes(value.zone as OcForgeZone)) return;
-      entry.zone = value.zone as OcForgeZone;
-    }
-    seen.add(id);
-    entries.push(entry);
-  });
-  return entries
-    .sort((left, right) => (left.order ?? Number.POSITIVE_INFINITY) - (right.order ?? Number.POSITIVE_INFINITY) || left.index - right.index)
-    .map(({ index: _index, ...entry }) => entry);
-};
-
-const isRequestPath = (value: unknown): value is string => (
-  typeof value === 'string' && value.startsWith('/') && value.length <= 512 && !value.includes('\0')
-  && !value.includes('\\') && !value.includes('://') && !value.split('/').some((segment) => segment === '.' || segment === '..')
-);
-
 /** The catalog row's `ocForge` field (the server read it from package.json), or undefined. */
 export const readOcForgeManifest = (value: unknown): OcForgeManifest | undefined => {
   if (!isObject(value) || value.apiVersion !== 1) return undefined;
   const manifest: OcForgeManifest = { apiVersion: 1 };
-  if (OC_FORGE_ZONES.includes(value.zone as OcForgeZone)) manifest.zone = value.zone as OcForgeZone;
-  if (isObject(value.rail) && isRequestPath(value.rail.path)) {
-    const interval = typeof value.rail.interval === 'number' && Number.isInteger(value.rail.interval)
-      ? Math.min(OC_FORGE_RAIL_INTERVAL_MAX, Math.max(OC_FORGE_RAIL_INTERVAL_MIN, value.rail.interval))
-      : OC_FORGE_RAIL_INTERVAL_DEFAULT;
-    manifest.rail = { path: value.rail.path, interval };
-  }
-  if (isObject(value.page) && value.page.keepBottomZone === true) manifest.page = { keepBottomZone: true };
   if (value.modals === true) manifest.modals = true;
   return manifest;
 };

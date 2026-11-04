@@ -200,9 +200,10 @@ export async function startHarness({
   if (!password) throw new Error('no UI password in secrets.env');
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport, timezoneId });
-  // oc-forge's adapted OpenChamber sends service requests over a WebSocket (adapters/openchamber, Transport), past the
-  // HTTP routes that answer them here, to the container's own Planner service: its switch keeps them on HTTP, and any
-  // that still come over the socket are refused loudly instead of reaching the real plan.
+  // oc-forge's adapted OpenChamber before 2026-11-04 (any image tagged before then, a rollback) sent service requests
+  // over a WebSocket, past the HTTP routes that answer them here, to the container's own Planner service: its switch
+  // keeps them on HTTP, and any that still come over the socket are refused loudly instead of reaching the real plan.
+  // The current host sends them over HTTP, as the release does, and ignores both.
   await context.addInitScript(() => {
     try {
       localStorage.setItem('oc-forge:service-socket', 'off');

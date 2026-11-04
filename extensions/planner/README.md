@@ -638,9 +638,9 @@ container, and its `gh` (the agent's and the service's) reaches it through a Uni
 The journey puts the container back as it was at the end.
 
 `sunsama.mjs` runs this checkout's panel and a private copy of its service in the dev
-container's OpenChamber (`tests/e2e/harness.mjs`; on oc-forge's adapted OpenChamber it keeps
-the page's service requests on HTTP, where its routes answer them, with the host's
-`oc-forge:service-socket` switch): the sources panel, drags onto days and the
+container's OpenChamber (`tests/e2e/harness.mjs`; on an oc-forge host from before 2026-11-04,
+which sent service requests over a WebSocket, it keeps the page's on HTTP, where its routes
+answer them, with the host's `oc-forge:service-socket` switch): the sources panel, drags onto days and the
 calendar, daily planning, the assignee picker, and two real chats in `planner-demo-a` as
 OpenCode's read-only plan agent, through a command file it writes to the container
 (`oc-planner-harness-plan.md`) and removes, with the chats and worktrees, at the end.

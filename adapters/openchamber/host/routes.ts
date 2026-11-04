@@ -1,5 +1,5 @@
 // R5 deep links: `?extension=<id>&route=<route>` opens that extension's page
-// (or, without a page, its rail panel) and hands the frame the route. A page
+// (or, without a page, its panel) and hands the frame the route. A page
 // that sets its route keeps it in the address bar, so the URL can be copied,
 // reloaded or opened in a new tab. Frames learn the URL prefixes to render
 // real `<a href>` links.
@@ -46,6 +46,7 @@ export const ocForgeRouteParams = (): Array<[string, string]> => {
 
 /** Rewrites only oc-forge's parameters in the address bar, keeping the router's. */
 const syncOcForgeUrl = (push = false): void => {
+  // Not in OpenChamber's own VS Code extension (its webview): that runtime has no address bar to name the page.
   if (typeof window === 'undefined' || (window as { __VSCODE_CONFIG__?: unknown }).__VSCODE_CONFIG__ !== undefined) return;
   const url = new URL(window.location.href);
   url.searchParams.delete(OC_FORGE_EXTENSION_PARAM);
@@ -107,7 +108,7 @@ const waitForStartupSelection = (): Promise<void> => new Promise((resolve) => {
 
 const deliverRoute = (guestId: string, route: string, surface: 'page' | 'panel'): void => {
   useOcForgeStore.setState((state) => ({ routes: { ...state.routes, [guestId]: route } }));
-  broadcastOcForge(guestId, { type: 'route', payload: { route } }, (frame) => frame.surface === surface && frame.ownEntry === null);
+  broadcastOcForge(guestId, { type: 'route', payload: { route } }, (frame) => frame.surface === surface);
 };
 
 let applying = 0;

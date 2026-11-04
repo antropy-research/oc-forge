@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ADAPTERS = ROOT / "adapters/openchamber"
 CLI = ADAPTERS / "cli.ts"
 # Strings only the adapted code contains, in the built UI and in the staged server.
-UI_MARKER = b"oc-forge:default-zones"
+UI_MARKER = b"oc-forge:app-window"
 SERVER_MARKER = "parseOcForgeManifest"
 
 

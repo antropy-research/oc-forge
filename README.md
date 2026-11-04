@@ -23,10 +23,9 @@ dawn-mac-antropy are source-pinned for future joint packaging.
 | Vendor | Adapter | Change |
 |---|---|---|
 | OpenCode | `location-ttl` | Location inactivity eviction default 60 minutes → **24 hours**, so long silent tool calls (e.g. waiting on `codex exec`) are no longer interrupted after an hour. Override at runtime with `OPENCODE_LOCATION_TTL`, e.g. `90 minutes` or `7 days`. |
-| OpenChamber | `rail` | An extension's service lists **rail entries**: each its own rail icon with its own highlight, opening the extension's panel on that entry (or, with a zone, a panel of its own); they come and go at runtime. |
-| OpenChamber | `tabs` | Extensions open **tabs in the header**, after the session tabs; a tab shows the extension's page, kept mounted, and OpenChamber's tab shortcuts cover them. |
-| OpenChamber | `core` | The `oc-forge` channel for extension frames: **default zones** (`bottom`) for a panel or rail entry, **key forwarding** of OpenChamber's navigation shortcuts from frames, the `ocForge` manifest block in the catalog, the main layout's host. |
+| OpenChamber | `core` | The `oc-forge` channel for extension frames: **key forwarding** of OpenChamber's navigation shortcuts from frames (and Chrome's tab keys in an app window), **`allow-modals`** for an extension that asks (printing), the `ocForge` manifest block in the catalog, the main layout's host. |
 | OpenChamber | `links` | `?extension=<id>&route=<route>` **deep links** to extension pages, and link prefixes for real `<a href>` (Cmd+click opens a browser tab). |
+| OpenChamber | `fixes` | A slash command sent first in a folder whose commands OpenCode has not loaded yet still runs as the command (the Planner's assignments to an agent). |
 
 The OpenChamber adapters are a small, versioned extension API with feature
 detection: the contract and the client module extensions bundle are in

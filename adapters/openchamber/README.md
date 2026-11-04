@@ -1,31 +1,31 @@
 # OpenChamber adapters
 
 oc-forge's additions to OpenChamber's extension host: what `AGENTS.md` asks
-of the Planner and VS Code extensions that the released extension API cannot
-do (2.5.2's, 2.5.3's, whose SDK changed only a comment, and 2.6.1's, whose SDK
-adds trackers, notifications and session events but none of these). They are applied
-to `vendors/openchamber` while its web package is built; the vendor is never
-written. With no extension
-using them, the adapted OpenChamber looks and behaves as the release (the
-end-to-end check compares screenshots: 0.00% of pixels differ).
+of the Planner that the released extension API cannot do (2.5.2's, 2.5.3's,
+whose SDK changed only a comment, and 2.6.1's, whose SDK adds trackers,
+notifications and session events but none of these). They are applied to
+`vendors/openchamber` while its web package is built; the vendor is never
+written. With no extension using them, the adapted OpenChamber looks and
+behaves as the release (the end-to-end check compares screenshots: 0.00% of
+pixels differ).
 
 | API | `AGENTS.md` | What an extension gets |
 |---|---|---|
-| **rail** | 2.ii.a | A list of rail entries polled from its service: each its own rail icon with its own highlight; the panel's frame is told which entry was clicked. Entries come and go within a poll (1 s in the check). Any of its frames can open one of its entries (`rail.open`), as a click would, but never closing it. |
-| **tabs** | 2.ii.b | Tabs in the header's strip, after the session tabs: choosing one shows the extension's page on that tab, kept mounted while it has tabs; OpenChamber's tab shortcuts cover them. Room for 1000 per extension; the strip keeps the selected one in view and, while it overflows, lists every tab. The extension may decide how an unsaved tab closes (a save prompt). |
-| **zones** | 2.ii.c | A default zone (`bottom`) for its panel, or for one rail entry, which then gets a panel of its own; its page may keep the bottom zone shown under it (an editor over its terminal). |
-| **keys** | tab shortcuts | Forward a key press to OpenChamber, which runs it through its own shortcut handlers, for navigation actions only and only with a user activation; the frame is told the current bindings. |
+| **keys** | tab shortcuts | Forward a key press to OpenChamber, which runs it through its own shortcut handlers, for navigation actions only and only with a user activation; the frame is told the current bindings. In an installed app window, Chrome's own tab keys act on OpenChamber's tabs. |
 | **links** | Cmd+click | `?extension=<id>&route=<route>` deep links to its page; URL prefixes for real `<a href>` links to its page and to chats; its page can keep its route in the address bar. |
-| **window** | 2.ii (one VS Code across its parts) | The id of the OpenChamber window its frame is in (`window.id`): the same in every frame of one browser tab, kept across the tab's reloads, another in each tab, so the frames of one window can find each other, keep what is the tab's, and leave other tabs' alone. |
-| **rail badges** | 2.ii.a ("用起来和在 VS Code 里一样") | A count on each of its rail entries' icons (`rail.setBadges`), shown whether its panel is open or not, as VS Code's activity bar shows its badges (OpenChamber 2.6 draws every rail badge, Git's too, as a dot, with the count in the icon's tooltip and accessible name); its one panel's header names the entry it shows. |
-| **warm page** | 2.ii.b | Its page kept mounted, hidden, while one of its other frames asks (`page.warm`): a tab opened later shows a page that has started already. |
+| **modals** | (printing) | Its frames sandboxed with `allow-modals` as well, so `print()` opens the browser's print dialog (the Planner's task lists and calendar). |
+
+Beside the APIs, one fix for a host bug the Planner runs into ("Fixes", below).
 
 The study behind this (what 2.5.2 can and cannot do, and the smallest host
 change for each) is zmemory `02-draft/syncopation/2026-10-27-openchamber-extension-surfaces-feasibility.md`.
 
-Beside the APIs, the adapted host sends every extension's service requests over
-one WebSocket per window ("Behaviour in the host", Transport): with VS Code's
-long-polls, two windows over plain HTTP used to stall each other.
+Until 2026-11-04 the adapters also gave extensions rail entries, header tabs,
+default zones, the bottom zone under a page, the window's id, warm pages, rail
+badges and a WebSocket for service requests. Only the VS Code extension used
+them, and they went with it (Qihang, 2026-11-04). The last tree that has them,
+with their contract and end-to-end checks, is `bce1c16`
+(`git show bce1c16:adapters/openchamber/README.md`).
 
 ## Using it from an extension
 
@@ -38,17 +38,10 @@ OpenChamber**: that is the whole feature detection; keep the stock behaviour the
 import { connectOcForge } from '../../../adapters/openchamber/client/index.ts';
 
 const forge = await connectOcForge();          // null: stock OpenChamber
-if (forge?.has('tabs') && forge.tabs.state().strip) {
-  await forge.tabs.open({ id: uri, title: 'main.ts', dirty: false }, { activate: true });
-  forge.tabs.onActivate((id) => showEditor(id));
-  forge.tabs.onClose((id) => closeEditor(id));
-  // An unsaved tab the user closes is left to this frame: close it after the save prompt, or keep it.
-  forge.tabs.onCloseRequest((id) => void closeEditorAsking(id).then((closed) => closed && forge.tabs.close(id)));
-}
 forge?.keys.forwardHostShortcuts({ except: ['toggle_sidebar'] });   // OpenChamber's tab keys go to OpenChamber
-link.href = forge?.links.pageUrl(`/task/${id}`) ?? fallbackUrl;     // Cmd+click opens a new browser tab
-if (forge?.has('rail-open')) await forge.rail.open('terminal');     // its own entry, shown; never toggled closed
-const windowId = forge?.has('window-id') ? forge.window.id() : null; // the same in every frame of this browser tab
+link.href = forge?.links.pageUrl(`/task/${id}`) ?? fallbackUrl;     // Cmd+click opens a browser tab
+forge?.links.onRoute((route) => show(route));                       // a deep link, back/forward
+if (forge?.has('modals')) print();                                  // the print dialog, on this frame's document
 ```
 
 The manifest additions sit in a top-level `ocForge` block of `package.json`,
@@ -58,14 +51,8 @@ package installs and runs on a stock OpenChamber.
 
 ```json
 {
-  "openchamber": { "apiVersion": 1, "contributes": { "panel": { "...": "..." }, "service": { "...": "..." } } },
-  "ocForge": {
-    "apiVersion": 1,
-    "zone": "bottom",
-    "rail": { "path": "/rail", "interval": 3000 },
-    "page": { "keepBottomZone": true },
-    "modals": true
-  }
+  "openchamber": { "apiVersion": 1, "contributes": { "panel": { "...": "..." } } },
+  "ocForge": { "apiVersion": 1, "modals": true }
 }
 ```
 
@@ -76,62 +63,11 @@ package installs and runs on a stock OpenChamber.
 | Field | Meaning | Needs |
 |---|---|---|
 | `apiVersion` | `1`; any other value ignores the block | |
-| `zone` | `left`, `right` or `bottom`: where the panel opens until the user moves it | `panel.entry` |
-| `rail.path` | The service path the host polls with `GET` for rail entries (`/…`, no `..`) | `panel.entry`, `contributes.service` (approved) |
-| `rail.interval` | Poll interval in ms, 1000–60000, default 3000; never while the page is hidden | |
-| `page.keepBottomZone` | `true`: while its page shows, OpenChamber's bottom zone stays shown under the page instead of being covered with the chat (an editor area over a terminal); any other page still covers it | `panel.entry`, `page.entry` |
 | `modals` | `true`: the extension's frames (its panels and its page) are sandboxed with `allow-modals` as well as the release's `allow-scripts`, in the frame's `sandbox` attribute and in the `sandbox` of the CSP the server sends with its documents (the browser applies both), so `print()` opens the browser's print dialog on the frame's own document (a list it lays out for print, say); `alert()`, `confirm()` and `prompt()` work too. In an `allow-scripts` frame Chrome ignores `print()`. OpenChamber's own HTML preview in the Files view is sandboxed with `allow-modals` already. The hello's features then include `modals` | `panel.entry` |
 
 The server reads the block from the same `package.json` OpenChamber parsed
 (`server/manifest.js`) and publishes it in the catalog row as `ocForge`.
-
-### Rail entries: the service's answer
-
-`GET <rail.path>` answers `200 { "entries": [ … ] }`; each entry:
-
-| Field | Rules |
-|---|---|
-| `id` | kebab-case, at most 48 characters, no `--` (reserved) |
-| `title` | 1–80 characters: the icon's tooltip, and an own panel's header |
-| `icon` | A Remixicon name in OpenChamber's sprite, or an inline `<svg …>` of at most 16 KB, drawn as a mask in the rail's colour (an SVG used as a mask never runs scripts) |
-| `order` | Optional number; ascending, then the order listed |
-| `zone` | Optional. Gives the entry **a panel of its own** (a second frame loading `panel.entry`, the surface `plugin:<extension>--<entry>`) that opens in this zone until the user moves it. Without it the entry is a **view** of the extension's one panel and follows its zone. |
-
-At most 100 entries; a malformed entry is dropped on its own. While the list is
-non-empty it replaces the extension's own rail icon. When the icons are more
-than the rail's height, the rail scrolls (its scrollbar hidden); the release cut
-the last ones off. An unreachable service
-keeps the last list (no flicker while it restarts); an extension that is
-disabled or removed loses its entries, and an entry's own panel closes when the
-entry leaves the list.
-
-Clicking a view entry shows the panel on it (the frame gets `rail-entry`);
-clicking the lit one closes the panel, as for any surface. The digit shortcuts
-(`mod+alt+<n>`) select entries the same way. A frame that changes views by
-itself reports it with `rail.setActive(entry)` so the highlight follows. While
-the entry the panel shows is not in the list (it left it, or the frame reported
-one the next poll brings), the rail lights none of the panel's entries and a
-frame's `hello` names none: the frame shows what it showed until it reports
-what it shows next, and a click on any entry, the first one too, shows that
-entry rather than closing the panel.
-
-**Opening an entry from a frame** (`rail.open(entry)`, the `rail-open`
-request). Any frame of the extension (its page, its one panel, an entry's own
-panel, a zone) can show one of the extension's entries as the user's click on
-it would: a view entry shows the one panel on it (that frame gets
-`rail-entry`), an entry with a zone opens its own panel in its zone (where the
-user last put it), and the rail lights it, in the project the rail shows (the
-main chat's). Unlike a click it never closes what already shows: a second call
-changes nothing. The answer comes once OpenChamber shows the entry; its own
-panel's frame loads after that. A frame that asks before the host has its
-extension's list (its first poll is still out) waits for the list, up to 8 s.
-An entry the extension's service doesn't list is refused, saying so
-(`ocforge-test has no rail entry "explorer"; a frame opens only its own
-extension's entries.`): an extension opens its own entries only, by their id
-(`terminal`, not a surface such as `plugin:<extension>--terminal`). So is any
-entry for an extension without `ocForge.rail`. The host goes the rail's own
-way: the zone and its tab are OpenChamber's `openContextSurface`, the view is
-the panel's current entry, so a click and `rail.open` can't disagree.
+Fields only the VS Code extension used (`zone`, `rail`, `page`) are ignored.
 
 ### Wire protocol
 
@@ -142,68 +78,23 @@ stock host and the stock SDK ignore them. Each carries `channel: "oc-forge"`,
 by `event.source`, as for SDK messages; a frame of an extension that is paused
 or not approved gets `ok: false`. A request the host can't take (a field
 missing or past its limit, a type it doesn't know) gets `ok: false` at once,
-with what it takes (`Refused tab-open: a title is 1–512 characters.`); before
-2026-10-30 it got no answer, and the client gave up after 10 s.
-
-**Limits** (`OC_FORGE_LIMITS`, also in each frame's `hello` as `limits`): 1000
-header tabs per extension, tab ids of 1–1024 characters, titles of 1–512 (a
-file's whole name, a diff of two), routes of at most 2048, inline SVG icons of
-at most 16,384, 100 rail entries with kebab-case ids of at most 48. A host
-before 2026-10-30 sends no `limits`; its tabs were 64 and its titles 80
-(`OC_FORGE_LEGACY_LIMITS`), and the client's `limits()` answers those for it.
+with what it takes (`Refused route: a route is at most 2048 characters.`).
 
 | Frame → host | Payload | Effect |
 |---|---|---|
 | `hello` | | The host answers with a `hello` event; only frames that said hello get events. |
-| `rail-active` | `{ entry }` | The extension's one panel shows this entry now (rail panels of `rail` extensions). |
-| `rail-open` | `{ entry }` | Shows one of the extension's own entries as a click would, never closing it (any frame of a `rail` extension; above). |
-| `rail-badges` | `{ badges: { [entry]: count }, fresh? }` | The counts this frame sees on its extension's entries, all of them (an entry left out, or 0, has none; whole counts up to 1 000 000, at most 100 entries). Each frame of the extension may send its own, when what it sees changes; the rail shows each entry's count from the frame that saw it change last, until that frame goes (`resolveOcForgeRailBadges`): a frame that sends again for another entry's change doesn't bring back its old view of the rest. `fresh` counts (the user works in that frame) count as changed for every entry. OpenChamber shows 99+ past 99. |
-| `page-warm` | `{ on }` | Keeps the extension's page mounted, hidden, while this frame lives (any frame but the page of an extension with a page), or stops asking. The page stays while it has tabs, as always. |
-| `tab-open` | `{ id, title, icon?, dirty?, route?, activate? }` | Opens or updates a header tab; `activate` shows the page on it; `route` is the tab's place on the page (a Cmd/Ctrl+click on the tab opens the page there in a new browser tab). Needs `contributes.page`; past an extension's 1000th tab the host refuses one more (`An extension has at most 1000 header tabs: close one to open another.`) and changes nothing. |
-| `tab-update` | `{ id, title?, icon? (null clears), dirty?, route? (null clears) }` | |
-| `tab-close` | `{ id }` | The extension closed its tab (no `tab-closed` event comes back). After a `tab-close-request` for it, the host goes on as for the user's close (back to the chat after the last tab). |
-| `tab-close-handler` | `{ on }` | This frame decides how the extension's unsaved tabs close (the client sends it with the first `tabs.onCloseRequest` listener, and `on: false` after the last). A frame's `hello` resets it. |
-| `tab-activate` | `{ id }` | Shows the page on that tab. |
 | `key` | `{ key, code, ctrlKey, metaKey, altKey, shiftKey, repeat? }` | Runs the press through OpenChamber's own key handlers if it is one of the navigation actions below and the page has a user activation; answers `{ action }` or an error. |
-| `route` | `{ route, push? }` | Pages only: the page's own route; while the page shows, the address bar names it (`push` adds a history entry). |
+| `route` | `{ route, push? }` | Pages only: the page's own route (at most 2048 characters); while the page shows, the address bar names it (`push` adds a history entry). |
 
 | Host → frame | Payload |
 |---|---|
-| `hello` | `{ version: 1, features, extension, surface, rail: { entry, own } \| null, tabs: { list, active, shown, strip }, route, links: { page, session } \| null, shortcuts, limits, windowId }` |
-| `rail-entry` | `{ entry }`: the user picked this entry of the panel |
-| `tab-activated` | `{ id }`: the user chose this tab, or it became the shown one |
-| `tab-closed` | `{ id }`: the user closed it in the header (it is gone there already) |
-| `tab-close-request` | `{ id }`: the user closed this unsaved (`dirty`) tab while this frame decides; the tab stays, and the page shows it, until the frame sends `tab-close` |
-| `tabs` | `{ list, active, shown, strip }` after any change; `strip` follows OpenChamber's "Session tabs" setting |
+| `hello` | `{ version: 1, features, extension, surface, route, links: { page, session } \| null, shortcuts }` |
 | `route` | `{ route }`: a deep link or back/forward handed the frame a route |
 | `shortcuts` | the bindings again, after the user rebinds |
 
-`features` lists what the host supports for this frame: `rail` (rail panels of
-extensions with a rail source), `rail-open` and `rail-badge` (every frame of
-those extensions), `tabs` and `page-warm` (extensions with a page), `modals`
-(extensions with `ocForge.modals`: the frame may `print()`), and `zones`,
-`keys`, `links`, `window-id` everywhere.
-
-**The window's id** (`windowId`, `window.id()`): 32 hex digits (128 random
-bits), made once per browser tab. Every frame of that tab gets the same in its
-hello, whatever its extension or surface, and so does a frame that reloads, and
-OpenChamber itself after the tab reloads: the tab keeps it in its
-`sessionStorage`, handed over only as the page goes (`pagehide`), so a
-duplicated tab, which copies the session storage of a tab that hasn't gone, makes
-its own. Another tab is another window with another id. It is made with
-`crypto.getRandomValues`: `randomUUID` needs a secure context, which
-OpenChamber over plain HTTP (a tailnet address) is not. A host before 2026-10-30
-sends none, and `window.id()` throws there; one of 2026-10-30 made a new id when
-OpenChamber reloaded.
-
-**The panel's title.** An extension's one panel showing a rail entry is titled
-with that entry, not the extension, as an entry's own panel is: the host puts
-the entry's title in OpenChamber's own slot for a surface's header (the one
-`ContextPanelHeaderToolbar` renders into, which `useZoneHostsStore` lists by
-zone), while the panel is the surface its zone shows, from `useOcForgeFrame`,
-which every frame's pane runs: it takes the place of the header's label.
-OpenChamber hands that slot to its own surfaces only. No edit: PluginPane
-already runs the hook.
+`features` lists what the host supports for this frame: `keys` and `links`
+everywhere, `modals` for extensions with `ocForge.modals` (the frame may
+`print()`).
 
 **Forwardable actions** (`keys`): `switch_session_tab` (held prefix + 1–9),
 `switch_context_surface` (held prefix + 0–9), `switch_session_previous`,
@@ -230,59 +121,8 @@ Chromium has no app window: `on` under the window's localStorage key
 
 ### Behaviour in the host
 
-- **Header tabs.** The strip order is the session tabs, then the extension tabs
-  in the order they opened. `mod+<digit>` counts across both; previous/next
-  wraps across both; the close-tab shortcut and a tab's × close the selected
-  extension tab, the page moving to the extension's neighbouring tab, or back
-  to the chat after the last one. When a frame of the extension decides
-  (`tabs.onCloseRequest`), closing a `dirty` tab that way asks that frame
-  instead (`tab-close-request`): the page shows the tab, and the tab stays
-  until the frame closes it, after its own save prompt, or stays if the user
-  cancels. Clean tabs, and every tab while no frame decides, close at once. While an extension tab is selected no session
-  tab is, nor the new session's draft tab (2.6 shows an open draft as a tab of
-  its own); choosing a session tab, or the draft's, hides the page (it stays
-  mounted) and shows that chat. In the desktop app, whose window menu owns
-  Cmd/Ctrl+W, that key closes the selected extension tab too. A page whose extension has tabs keeps the strip instead of
-  "← title". Tabs need OpenChamber's "Session tabs" setting (off by default
-  from 2.5.2 to 2.6.1): without the strip they are not shown (`tabs.state().strip` says so).
-  With separate tabs per workspace on (2.5.3 and later), the strip shows the current
-  workspace's session tabs, then the extension tabs, which are the same in every
-  workspace.
-  An extension tab is drawn as OpenChamber 2.6 draws a session's: on hover its
-  × takes the icon's slot at the tab's start, an unsaved tab's dot sits at its
-  end, and its tooltip (OpenChamber's own, not the browser's) names the tab, its
-  extension and its `mod+<digit>` while it is among the first nine of the strip.
-  The strip scrolls as it does for session tabs (the wheel, the edge fades), and
-  keeps the selected extension tab in view as it keeps the selected session's:
-  in the release it scrolls only when the current session changes. While the
-  strip holds extension tabs and overflows, a button at its end, after
-  OpenChamber's "+" (`All tabs (N)`, `data-oc-forge-all-tabs`, drawn as that
-  "+"), lists every tab of the strip, the chats first, the
-  selected one marked and in sight; choosing one selects it, as VS Code's "Show
-  All Opened Editors" lists its editors. A tab's whole title is in its tooltip
-  and is its accessible name; the strip cuts it to the tab's width.
-  Tabs are not persisted: after a reload the extension opens the ones it wants.
-  A plain click selects a tab and a middle click closes it, as on OpenChamber's
-  own tabs; a Cmd/Ctrl+click on a tab with a `route` opens the extension's page
-  on that route in a new browser tab, as on a link (`?extension=<id>&route=`),
-  and this window stays as it is.
-- **Kept-alive pages.** The page of an extension with tabs is mounted (hidden,
-  with its size kept) as soon as it has a tab, and stays mounted while it has
-  any; switching away and back does not reload it. After its last tab closes
-  it stays mounted, hidden, for 8 s more (`OC_FORGE_PAGE_LINGER_MS`), so its
-  frame still gets that `tab-closed` and the empty `tabs` and can save (the
-  release removes a page that is not on screen at once, before its frame hears
-  anything); a tab opened meanwhile brings it back as it was. Pages are kept in
-  a fixed order, since a moved iframe reloads.
-- **Zones.** A default zone is placed once per device, the first time the
-  surface is known, unless the user already placed it; after that only the
-  user moves it (the placement is OpenChamber's own, per device).
-- **The bottom zone under a page.** The release hides the bottom zone (it
-  belongs to the chat column) whenever a page covers the chat. While the page
-  of an extension with `page.keepBottomZone` shows, it stays: the page takes
-  the chat column's height above it (edits/pages.ts, host/pages.ts).
 - **Deep links.** `?extension=<id>&route=<route>` opens the extension's page (or
-  its rail panel when it has none) once the catalog has loaded, and hands the
+  its panel when it has none) once the catalog has loaded, and hands the
   frame the route in `hello`/`route`. The page opens once the app's own choice
   of a chat or a new-chat draft has held for 400 ms. OpenChamber closes every
   page when a chat is selected or a draft changes. So for 10 s after that the
@@ -293,29 +133,8 @@ Chromium has no app window: `on` under the window's localStorage key
   page shows; leaving the page drops them. `links.page`/`links.session` are
   prefixes in the window's own origin, so modified clicks on real `<a href>`
   open new browser tabs even from the sandboxed frame (Chromium; see the study).
-- **Transport.** Over plain HTTP/1.1 a browser keeps six connections per host,
-  shared by all of a site's tabs, and each guest service request (`serviceRequest`)
-  was an HTTP request of its own. An extension whose frames long-poll their
-  service held all six once two windows were open (VS Code: a poll per frame,
-  three frames per window), and every other request of both windows waited:
-  the second window's VS Code stayed empty, the first stopped answering. The
-  adapted host sends service requests over one WebSocket per window
-  (`/api/oc-forge/service-socket`, which a browser pools apart from those six;
-  host/service-socket.ts, host/service-transport.ts). The server runs each one
-  as the release's `POST /api/guests/:id/service/request` on its own address,
-  with the window's cookie and host (server/service-socket.js), so the route's
-  checks, limits and answers are the release's, and a long-poll waits on the
-  server. The socket opens on the web runtime only (the page's own origin, no
-  relay or realtime proxy), behind the gate of OpenChamber's own guest
-  sockets; anywhere else, before it opens, and for 30 s after it fails to,
-  requests go over HTTP as in the release. A request whose answer is lost with
-  the socket fails, as a fetch that is cut off does: it is never sent twice.
-  Frames and services see no difference. Over HTTPS (HTTP/2, one connection
-  for everything) the limit does not exist. `off` under the window's
-  localStorage key `oc-forge:service-socket` keeps service requests on HTTP:
-  tests that answer them in place with Playwright routes set it (the Planner's
-  harness and its full end-to-end check), since requests over the socket would
-  pass their routes and reach the real service.
+- Pages, the rail, the header's tabs, zones and guest service requests are the
+  release's.
 
 ## How it is applied
 
@@ -331,23 +150,15 @@ Every edit names exact upstream text that must occur exactly once
 (`apply.ts`); otherwise the build stops with the adapter, the file and the
 anchor. The Vite plugin also fails the build if a targeted module never loaded
 (upstream stopped using it); `lib/guests/types.ts` is exempt, being imported
-only as types. 72 edits in 23 files (34 `insertAfter`, 34 `replace`, 4
-`insertBefore`); `rail.open` and `window.id` added none, and neither did rail
-badges (the `replace` that lights a rail entry in `ContextPanelRail.tsx` now
-starts six lines higher, at the badge's count) or the rail panel's title
-(OpenChamber's own header toolbar slot). OpenChamber 2.6 added six. Three in
-`SessionTabsStrip.tsx`: its new-session draft tab and its desktop close-tab
-target (Cmd/Ctrl+W) defer to a selected extension tab as the session tabs do,
-and the list of every tab moved after its new "+" (an `insertAfter` there
-became a `replace`). Three in `TitlebarLeftControls.tsx`: its title bar shows
-a "New session" of its own while a page hides the header tabs, and counted an
-extension page on its tabs as hiding them; it showed a second one there, and
-its room arriving as such a tab was chosen narrowed the strip after the strip
-had scrolled that tab into view.
+only as types. 22 edits in 10 files (16 `insertAfter`, 5 `replace`, 1
+`insertBefore`): `core` 14 (the frame channel and its sandbox in `PluginPane`,
+the `ocForge` block through the catalog and its CSP, the host in `MainLayout`),
+`links` 6 (the router), `fixes` 2. Before 2026-11-04 there were 72 in 23; the
+50 that went were the VS Code extension's.
 
 OpenChamber is compiled with the React Compiler, which memoizes on the values a
 render reads: host code that renders passes the oc-forge state it read as an
-argument (`useOcForgeRailRevision()`), never reads the store inside a render.
+argument, never reads the store inside a render.
 
 `scripts/build-openchamber.py` (`mise run build:openchamber`) copies the
 vendor's tracked files to `build/openchamber/<version>/`, checks every anchor,
@@ -367,43 +178,30 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
 - `tests/openchamber-adapters.test.ts`: every edit applies to the pinned source
   (`OPENCHAMBER_SOURCE` for another checkout) and produces the expected code; a
   moved or doubled anchor fails with a message naming it; the Vite plugin
-  rewrites targeted modules and fails a build that never loaded one; the edit
-  count above is the edits there are.
-- `tests/openchamber-client.test.ts`: the protocol readers, the rail-entry and
-  manifest rules (server and UI), shortcut matching as OpenChamber does it, the
-  client's handshake, requests, events and key forwarding, `rail.open` and
-  `window.id`, and the window id itself (made without `randomUUID`).
+  rewrites targeted modules and fails a build that never loaded one; the
+  release's rail, header tabs, zones and service requests are not adapted; the
+  edit count above is the edits there are.
+- `tests/openchamber-client.test.ts`: the protocol readers, the manifest rules
+  (server and UI), shortcut matching as OpenChamber does it, the client's
+  handshake, requests, events and key forwarding.
 - `tests/e2e/openchamber-adapters/`: two throwaway instances on this machine
-  (the npm release and the adapted package), a scratch extension
-  (`extension/`, `zone-extension/`) and the repository's Planner
-  extension. `run.mjs` checks every API at 1440×900 and 1024×768, the release
-  against the adapted build with no extension using the APIs (rail, header and
-  an extension page, pixel by pixel), and that the Planner works on
-  both. R5 also opens a deep link in a fresh window with the new-chat draft's
-  folder held 2.5 s, so the draft changes after the page opened. The page
-  stays; without the reopening it closed at 3.6 s. "Back to chat" still
-  closes it. R6 holds eight service requests open (more than a browser's six
-  connections) and times a ninth: 3 ms on the adapted build, over the socket
-  with no service HTTP request, against 11.5 s on the release. A round of its
-  own (`many`) opens seventy tabs at each size: each gets its header tab, the
-  70th is selected and scrolled into view with the strip's fade at its start,
-  the strip's list holds the three chats and all seventy, choosing the 7th or a
-  chat there shows it; a title of 513 is refused in a few milliseconds saying
-  why, one of 512 is taken whole; at 1440 a thousand tabs open, and one more is
-  refused at once while the header keeps its thousand and its selection
-  (`4ac4898`'s host failed 16 of these 18). Another (`runtime`) checks what
-  one VS Code across a window's frames needs. R7: `rail.open` from the page,
-  the rail panel and the bottom opens the bottom entry and lights it, a second
-  call leaves it open, a view entry shows the rail panel on it, and another
-  extension's entry, an unknown one and a frame of another extension are
-  refused; with the window's first rail poll held 5 s, a frame that asks
-  meanwhile waits for it. R8: `window.id` is one id in the page, the rail
-  panel, the bottom and another extension's frame, kept across a frame's
-  reload and OpenChamber's, and another in a second browser tab.
-  `OC_FORGE_E2E_PARTS` picks parts (`compare,extensions,api,many,runtime`). The instances start like fresh installs: their own HOME and data dir,
-  and none of the `OPENCODE*`/`OPENCHAMBER*` variables or credentials of the
-  session that runs the check, so they cannot load its config or reach its
-  services.
+  (the npm release and the adapted package), two scratch extensions
+  (`extension/`, which asks for `modals`, and `plain-extension/`, which
+  doesn't) and the repository's Planner extension. `run.mjs` checks every API
+  at 1440×900 and 1024×768, the release against the adapted build with no
+  extension using the APIs (rail, header and an extension page, pixel by
+  pixel), and that the Planner works on both. R4 forwards keys from a frame
+  (and refuses a non-navigation key, and one without a user activation), and
+  checks the app window's tab keys. R5 opens deep links, Cmd/Ctrl+clicks real
+  links into new browser tabs, and opens a deep link in a fresh window with the
+  new-chat draft's folder held 2.5 s, so the draft changes after the page
+  opened. The page stays; without the reopening it closed at 3.6 s. "Back to
+  chat" still closes it. `OC_FORGE_E2E_PARTS` picks parts
+  (`compare,extensions,api`). The instances start like fresh installs: their
+  own HOME and data dir, and none of the `OPENCODE*`/`OPENCHAMBER*` variables
+  or credentials of the session that runs the check, so they cannot load its
+  config or reach its services. The Planner's own `tests/e2e/forge.mjs` runs on
+  the same stack (its header says how).
 
 ```sh
 node tests/e2e/openchamber-adapters/stack.mjs prepare   # network: both builds, Playwright
@@ -440,23 +238,15 @@ upstream fixes them (`edits/fixes.ts`):
 
 ## Limits and choices
 
-- **Bottom zone width.** The bottom zone stays under the chat column, as in
-  OpenChamber. Spanning the full width would move the zone out of the chat
-  column in `MainLayout`, and with it the zone drop targets (`ZoneDropOverlay`),
-  the size arbitration (`ZoneFitArbiter`) and the Work Status card's slot, for
-  every bottom-zone surface: not additive, so not done.
-- **R3 placement** is a one-time default per device instead of a change in
-  `zoneOfMode`: that function's caller deletes the placement when a surface
-  moves back to the right, so a default inside it could never be left.
 - **Runtimes.** The APIs exist where OpenChamber mounts extensions: the web and
   desktop main window. Deep links and `links` assume an http(s) origin (not the
   desktop shell's own window handling, nor relay mode).
-- **No persistence** of header tabs and routes; rail entries return with the
-  next poll.
+- **No persistence** of routes: a page sets its own again as it starts, and a
+  deep link hands its own.
 - **Versions.** Written against 2.5.2 and run end to end there. On 2.5.3, the
   pin from 2026-10-29, every edit applied unchanged. On 2.6.1, the pin since
-  2026-11-04, two anchors had moved (`tabs`, `links`) and 2.6's strip and title
-  bar took six more edits; the adapted tree type-checks and the end-to-end check
-  passes against the stock 2.6.1 release (201/201). When `mise run
-  vendors:update` moves the pin, its `ci` and `openchamber` steps say which
-  anchors moved; the end-to-end check says what moved around them.
+  2026-11-04, the `links` anchor in `useRouter` had moved; the adapted tree
+  type-checks and the end-to-end check passes against the stock 2.6.1 release.
+  When `mise run vendors:update` moves the pin, its `ci` and `openchamber`
+  steps say which anchors moved; the end-to-end check says what moved around
+  them.

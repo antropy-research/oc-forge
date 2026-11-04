@@ -1,6 +1,6 @@
 // The shared ground every API stands on: extension frames get the oc-forge
 // channel, the catalog carries a package's `ocForge` block from package.json to
-// the UI, and the main layout mounts the oc-forge host and its pages.
+// the UI, and the main layout mounts the oc-forge host.
 import { insertAfter, replace, type Adapter } from "../apply"
 
 export const core: Adapter = {
@@ -14,7 +14,7 @@ export const core: Adapter = {
       ),
       insertAfter(
         "  const guestId = pluginIdFromMode(mode);",
-        "\n  // oc-forge: the frame's own channel (rail entries, header tabs, keys, routes).\n" +
+        "\n  // oc-forge: the frame's own channel (keys, routes).\n" +
           "  useOcForgeFrame({ iframeRef, mode, surface, enabled: !headless && !popover && !popoverHost });",
       ),
       // oc-forge: `allow-modals` too for an extension that asks (`ocForge.modals`): its print() opens the print dialog.
@@ -24,7 +24,7 @@ export const core: Adapter = {
       insertAfter("} from '@openchamber/sdk';", "\nimport type { OcForgeManifest } from '@/oc-forge/protocol';"),
       insertAfter(
         "  update?: GuestUpdate;",
-        "\n  /** oc-forge: the package.json `ocForge` block (rail entry source, default zone). */\n  ocForge?: OcForgeManifest;",
+        "\n  /** oc-forge: the package.json `ocForge` block (`modals`). */\n  ocForge?: OcForgeManifest;",
       ),
     ],
     "packages/ui/src/lib/guests/parse.ts": [
@@ -59,15 +59,7 @@ export const core: Adapter = {
       insertAfter("    enabled: guest.enabled !== false,\n  };", "\n  if (guest.ocForge) row.ocForge = guest.ocForge;"),
     ],
     "packages/ui/src/components/layout/MainLayout.tsx": [
-      replace("import { PluginPane } from './PluginPane';", "import { OcForgeGuestPages, OcForgeHost } from '@/oc-forge/host';"),
-      replace(
-        "                                            {guestPage && <div className=\"absolute inset-0 z-10 bg-background\">\n" +
-          "                                                <ErrorBoundary><PluginPane mode={`plugin:${guestPage.id}`} surface=\"page\" item={null}\n" +
-          "                                                    onDismiss={() => useUIStore.getState().setOpenGuestPage(null)} /></ErrorBoundary>\n" +
-          "                                            </div>}",
-        "                                            {/* oc-forge: the open page, and pages kept mounted behind header tabs. */}\n" +
-          "                                            <OcForgeGuestPages openPage={guestPage} />",
-      ),
+      insertAfter("import { PluginPane } from './PluginPane';", "\nimport { OcForgeHost } from '@/oc-forge/host';"),
       insertAfter("                            <ErrorBoundary><GuestHosts /></ErrorBoundary>", "\n                            <ErrorBoundary><OcForgeHost /></ErrorBoundary>"),
     ],
   },

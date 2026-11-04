@@ -3,9 +3,8 @@
 //
 //   import { connectOcForge } from '../../../adapters/openchamber/client/index.ts';
 //   const forge = await connectOcForge();      // null on a stock OpenChamber
-//   if (forge?.has('tabs')) await forge.tabs.open({ id: 'file:///a.ts', title: 'a.ts' }, { activate: true });
-//   if (forge?.has('rail-open')) await forge.rail.open('terminal');   // its own entry, shown (never toggled)
-//   const windowId = forge?.has('window-id') ? forge.window.id() : null;  // the same in every frame of this tab
+//   forge?.keys.forwardHostShortcuts();        // OpenChamber's navigation keys go to OpenChamber
+//   link.href = forge?.links.pageUrl('/task/1') ?? '#';   // a real link: Cmd+click opens a new browser tab
 //
 // It has no dependencies. Everything it sends travels on its own postMessage
 // channel, which a stock OpenChamber ignores, so `connectOcForge` resolving
@@ -13,17 +12,13 @@
 import {
   envelope,
   matchHostShortcut,
-  OC_FORGE_LEGACY_LIMITS,
   readOcForgeEvent,
   type OcForgeEvent,
   type OcForgeFeature,
   type OcForgeForwardableAction,
   type OcForgeHello,
   type OcForgeKey,
-  type OcForgeLimits,
   type OcForgeShortcuts,
-  type OcForgeTab,
-  type OcForgeTabsState,
 } from '../host/protocol.ts';
 
 export * from '../host/protocol.ts';
@@ -32,72 +27,6 @@ export type OcForgeClient = {
   /** The host's announcement for this frame. */
   readonly hello: OcForgeHello;
   has(feature: OcForgeFeature): boolean;
-  /** What the host takes (titles, tab counts, ids, routes): its hello's, else an older host's (`OC_FORGE_LEGACY_LIMITS`). */
-  limits(): OcForgeLimits;
-  rail: {
-    /** The entry this rail panel shows (its own entry for an entry's own panel); null without entries. */
-    entry(): string | null;
-    /** This frame is a rail entry's own panel (`zone` entries), not the extension's one panel. */
-    own(): boolean;
-    /** The user picked another entry of this panel on the rail. */
-    onEntry(listener: (entry: string) => void): () => void;
-    /** The panel switched entries by itself (its own navigation): move the rail's highlight. */
-    setActive(entry: string): Promise<void>;
-    /**
-     * Shows one of this extension's own rail entries, as the user's click on it would (`has('rail-open')`, from any
-     * frame of the extension: its page, a rail panel, a zone). A view entry shows the extension's one panel on it (that
-     * frame gets `onEntry`); an entry with a zone opens its own panel there (`terminal` with `zone: "bottom"` is
-     * `plugin:<extension>--terminal`, at the bottom). The rail lights it. Unlike a click it never closes an entry
-     * already shown. Resolves once OpenChamber shows it (its own panel's frame then loads); rejects, saying why, for
-     * an entry its service doesn't list, another extension's included.
-     */
-    open(entry: string): Promise<void>;
-    /**
-     * The counts this frame sees on the extension's rail entries (`has('rail-badge')`), by entry id: all of them, an
-     * entry left out (or 0) has none. Each icon shows its count, open or not. Every frame of the extension may send
-     * its own, when it changes; the rail shows each entry's count from the frame that saw it change last, until that
-     * frame goes. `fresh`: this is the frame's current view of every entry (the user works in it), which counts as
-     * changed for each.
-     */
-    setBadges(badges: Record<string, number>, options?: { fresh?: boolean }): Promise<void>;
-  };
-  window: {
-    /**
-     * This OpenChamber window's id (`has('window-id')`): one per browser tab, the same in every frame of the tab (any
-     * surface, any extension), in this one after it reloads, and after the tab reloads the app; another in each
-     * browser tab, a duplicated one included. Throws on a host without it.
-     */
-    id(): string;
-  };
-  page: {
-    /**
-     * Keeps the extension's page mounted, hidden, while this frame lives (`has('page-warm')`, from any frame but the
-     * page): a header tab opened later shows a page that has started already. `false` stops asking; the page stays
-     * while it has tabs, as always.
-     */
-    warm(on: boolean): Promise<void>;
-  };
-  tabs: {
-    state(): OcForgeTabsState;
-    /** Opens or updates a header tab; `activate` shows the extension's page on it. */
-    open(tab: OcForgeTab, options?: { activate?: boolean }): Promise<void>;
-    update(id: string, patch: { title?: string; icon?: string | null; dirty?: boolean; route?: string | null }): Promise<void>;
-    close(id: string): Promise<void>;
-    activate(id: string): Promise<void>;
-    /** The user chose this tab (the page now shows it). */
-    onActivate(listener: (id: string) => void): () => void;
-    /** The user closed this tab in the header; it is already gone there. */
-    onClose(listener: (id: string) => void): () => void;
-    /**
-     * While this has a listener, a dirty tab the user closes (its ×, its menu,
-     * the close-tab key) stays open and its page shows it; the listener gets
-     * the id and runs the extension's own flow (a save prompt), then calls
-     * `close(id)` if the tab really closes, or leaves it. Clean tabs, and every
-     * tab while nothing listens, close at once (`onClose`).
-     */
-    onCloseRequest(listener: (id: string) => void): () => void;
-    onChange(listener: (state: OcForgeTabsState) => void): () => void;
-  };
   keys: {
     shortcuts(): OcForgeShortcuts;
     /** The OpenChamber navigation action this press is bound to, if any. */
@@ -175,11 +104,6 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
     let disposed = false;
     let ids = 0;
     const pending = new Map<string, Pending>();
-    const entryListeners = new Set<Listener<string>>();
-    const activateListeners = new Set<Listener<string>>();
-    const closeListeners = new Set<Listener<string>>();
-    const closeRequestListeners = new Set<Listener<string>>();
-    const tabsListeners = new Set<Listener<OcForgeTabsState>>();
     const routeListeners = new Set<Listener<string>>();
     const shortcutListeners = new Set<Listener<OcForgeShortcuts>>();
 
@@ -213,61 +137,6 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
         return state();
       },
       has: (feature) => state().features.includes(feature),
-      limits: () => state().limits ?? OC_FORGE_LEGACY_LIMITS,
-      rail: {
-        entry: () => state().rail?.entry ?? null,
-        own: () => state().rail?.own ?? false,
-        onEntry: (listener) => subscribe(entryListeners, listener),
-        setActive: async (entry) => {
-          await request('rail-active', { entry });
-          if (hello?.rail) hello = { ...hello, rail: { ...hello.rail, entry } };
-        },
-        open: async (entry) => {
-          await request('rail-open', { entry });
-        },
-        setBadges: async (badges, { fresh } = {}) => {
-          await request('rail-badges', fresh ? { badges, fresh } : { badges });
-        },
-      },
-      window: {
-        id: () => {
-          const id = state().windowId;
-          if (!id) throw new Error('This OpenChamber names no window: its hello has no windowId (has(\'window-id\') is false).');
-          return id;
-        },
-      },
-      page: {
-        warm: async (on) => {
-          await request('page-warm', { on });
-        },
-      },
-      tabs: {
-        state: () => state().tabs,
-        open: async (tab, { activate } = {}) => {
-          await request('tab-open', activate === undefined ? tab : { ...tab, activate });
-        },
-        update: async (id, patch) => {
-          await request('tab-update', { id, ...patch });
-        },
-        close: async (id) => {
-          await request('tab-close', { id });
-        },
-        activate: async (id) => {
-          await request('tab-activate', { id });
-        },
-        onActivate: (listener) => subscribe(activateListeners, listener),
-        onClose: (listener) => subscribe(closeListeners, listener),
-        onCloseRequest: (listener) => {
-          if (closeRequestListeners.size === 0) post('tab-close-handler', { on: true });
-          const unsubscribe = subscribe(closeRequestListeners, listener);
-          return () => {
-            const had = closeRequestListeners.size > 0;
-            unsubscribe();
-            if (had && closeRequestListeners.size === 0) post('tab-close-handler', { on: false });
-          };
-        },
-        onChange: (listener) => subscribe(tabsListeners, listener),
-      },
       keys: {
         shortcuts: () => state().shortcuts,
         match: (event) => matchHostShortcut(keyOf(event), state().shortcuts),
@@ -336,24 +205,6 @@ export const connectOcForge = (options: { timeoutMs?: number; target?: Window } 
       }
       if (!hello) return;
       switch (event.type) {
-        case 'rail-entry':
-          if (hello.rail) hello = { ...hello, rail: { ...hello.rail, entry: event.payload.entry } };
-          emit(entryListeners, event.payload.entry);
-          return;
-        case 'tab-activated':
-          hello = { ...hello, tabs: { ...hello.tabs, active: event.payload.id } };
-          emit(activateListeners, event.payload.id);
-          return;
-        case 'tab-closed':
-          emit(closeListeners, event.payload.id);
-          return;
-        case 'tab-close-request':
-          emit(closeRequestListeners, event.payload.id);
-          return;
-        case 'tabs':
-          hello = { ...hello, tabs: event.payload };
-          emit(tabsListeners, event.payload);
-          return;
         case 'route':
           hello = { ...hello, route: event.payload.route };
           emit(routeListeners, event.payload.route);

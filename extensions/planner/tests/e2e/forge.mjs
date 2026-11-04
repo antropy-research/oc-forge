@@ -102,7 +102,9 @@ try {
   const page = await context.newPage();
   const problems = [];
   page.on('pageerror', (error) => problems.push(error.message));
-  const plannerFrame = (target) => target.frameLocator(`[data-oc-forge-page="${PLANNER}"] iframe`);
+  // The open page, which OpenChamber mounts over the chat (`absolute inset-0 z-10`), apart from the zones' frames.
+  const PLANNER_PAGE = '.inset-0.z-10 > iframe[title="Planner"]';
+  const plannerFrame = (target) => target.frameLocator(PLANNER_PAGE);
   // The active nav item's name, without its count badge ("Today\n3").
   const activeNav = async (frame) => (await frame.locator('#planner-nav .nav-item.is-active').first().innerText().catch(() => '')).split('\n')[0];
   const navItem = (frame, name) => frame.locator('#planner-nav').getByRole('button', { name, exact: true });
@@ -205,10 +207,7 @@ try {
   await until(async () => (await sidebarShown()) === before, 5000);
   await page.screenshot({ path: join(out, '06-keys.png') });
   // Ctrl/Cmd+1 shows the header's first tab, the first chat, where the page was over the second.
-  const plannerShown = () => page.evaluate((id) => {
-    const element = document.querySelector(`[data-oc-forge-page="${id}"]`);
-    return Boolean(element) && getComputedStyle(element).visibility === 'visible';
-  }, PLANNER);
+  const plannerShown = () => page.locator(PLANNER_PAGE).isVisible().catch(() => false);
   const overSecondChat = `${base}/?session=${otherId}&extension=${PLANNER}&route=${encodeURIComponent('/today')}`;
   await openPlanner(page, overSecondChat);
   frame = plannerFrame(page);

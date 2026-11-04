@@ -45,7 +45,7 @@ describe("openchamber adapters", () => {
   test("extension frames get the oc-forge channel", () => {
     const pane = adapted("packages/ui/src/components/layout/PluginPane.tsx")
     expect(pane).toContain(
-      "  const guestId = pluginIdFromMode(mode);\n  // oc-forge: the frame's own channel (rail entries, header tabs, keys, routes).\n" +
+      "  const guestId = pluginIdFromMode(mode);\n  // oc-forge: the frame's own channel (keys, routes).\n" +
         "  useOcForgeFrame({ iframeRef, mode, surface, enabled: !headless && !popover && !popoverHost });",
     )
   })
@@ -68,59 +68,24 @@ describe("openchamber adapters", () => {
     )
   })
 
-  test("the main layout mounts the host and renders pages through it", () => {
+  test("the main layout mounts the host and renders pages as the release does", () => {
     const layout = adapted("packages/ui/src/components/layout/MainLayout.tsx")
-    expect(layout).not.toContain("import { PluginPane }")
-    expect(layout).not.toContain("{guestPage && <div")
-    expect(layout).toContain("<OcForgeGuestPages openPage={guestPage} />")
+    expect(layout).toContain("import { PluginPane } from './PluginPane';\nimport { OcForgeHost } from '@/oc-forge/host';")
+    expect(layout).toContain("{guestPage && <div className=\"absolute inset-0 z-10 bg-background\">")
     expect(layout).toContain("<ErrorBoundary><GuestHosts /></ErrorBoundary>\n                            <ErrorBoundary><OcForgeHost /></ErrorBoundary>")
   })
 
-  test("rail entries: surfaces, highlight and selection go through oc-forge", () => {
-    expect(adapted("packages/ui/src/lib/surfaces/modes.ts")).toContain("=> ocForgeGuestIdOf(mode.slice('plugin:'.length));")
-    // OpenChamber builds with the React Compiler: a render passes the rail state it read, so a change re-renders.
-    const surfaces = adapted("packages/ui/src/lib/guests/surfaces.ts")
-    expect(surfaces).toContain("ocForgeRail: OcForgeRailState = currentOcForgeRail(),\n): ContextSurfaceDescriptor[] => ocForgeExpandRailSurfaces(guests")
-    expect(surfaces).toContain(".map((guest) => guestSurfaceFromInstalled(guest, authenticatedAsset)), ocForgeRail);")
-    expect(adapted("packages/ui/src/hooks/useGuestSurfaces.ts")).toContain("enabledGuestSurfaces(guests, getRuntimeUrlResolver().authenticatedAsset, ocForgeRail);")
-    const rail = adapted("packages/ui/src/components/layout/ContextPanelRail.tsx")
-    expect(rail).toContain("isActive={ocForgeRailSurfaceActive(surface, shownModes, ocForgeRail)}")
-    expect(rail).toContain("if (!ocForgeSelectRailSurface(directoryKey, selected)) openContextSurface(directoryKey, selected.mode);")
-    expect(adapted("packages/ui/src/hooks/useKeyboardShortcuts.ts")).toContain(
-      "if (!ocForgeSelectRailSurface(directory, target)) state.openContextSurface(directory, target.mode);",
-    )
-  })
-
-  test("header tabs: shortcuts, strip and header see the extension tabs", () => {
-    const tabs = adapted("packages/ui/src/lib/sessionTabs.ts")
-    expect(tabs).toContain("const activateSessionTabByIndexInStrip = (index: number): boolean => {")
-    expect(tabs).toContain("ocForgeActivateTabByIndex(index, activateSessionTabByIndexInStrip)")
-    expect(tabs).toContain("ocForgeActivateAdjacentTab(delta, activateAdjacentSessionTabInStrip)")
-    const strip = adapted("packages/ui/src/components/layout/SessionTabsStrip.tsx")
-    expect(strip).toContain("isActive={tab.id === currentSessionId && !ocForgeTabActive}")
-    // Numbered on from the session tabs, as mod+<digit> counts them.
-    expect(strip).toContain(") : null}\n        <OcForgeHeaderTabs firstNumber={tabs.length + 1} />\n      </div>")
-    // The new session's draft tab is not selected while an extension tab is; a click goes back to the draft.
-    expect(strip).toContain("            aria-selected={!ocForgeTabActive}\n")
-    expect(strip).toContain("            onClick={ocForgeTabActive ? leaveOcForgeTab : undefined}\n")
-    expect(strip).toContain("            {...(ocForgeTabActive ? {} : { 'data-active-session-tab': true })}\n")
-    expect(strip).not.toContain("bg-interactive-selection px-2 text-interactive-selection-foreground\"\n            data-active=\"true\"\n            data-active-session-tab\n")
-    // The desktop app's Cmd/Ctrl+W closes the selected extension tab, and has one to close while it is selected.
-    expect(strip).toContain("  const hasClosableTab = ocForgeTabActive || tabs.some(")
-    expect(strip).toContain("    return registerCloseTabTarget(() => {\n      if (ocForgeCloseActiveTab()) return;\n")
-    // The strip keeps the selected extension tab in view and measures its fades as they come and go; at its end, after
-    // the scroller and OpenChamber's "+", the list of every tab.
-    expect(strip).toContain("  }, [currentSessionId, ocForgeActiveTabKey, updateEdges]);")
-    expect(strip).toContain("  }, [updateEdges, tabs.length, ocForgeTabCount]);")
-    expect(strip).toContain("        </TooltipContent>\n      </Tooltip>\n      <OcForgeAllTabs\n        overflowing={edges.left || edges.right}")
-    expect(adapted("packages/ui/src/components/layout/Header.tsx")).toContain("(ocForgeTabbedPage ? undefined : state.guests.find(")
-    // A page on its header tabs keeps the strip's "+": the title bar shows no second "New session" (2.6).
-    expect(adapted("packages/ui/src/components/layout/TitlebarLeftControls.tsx")).toContain(
-      "    || state.runOverviewKey !== null || (state.openGuestPageId !== null && !ocForgeTabbedPage)\n  ));",
-    )
-    expect(adapted("packages/ui/src/hooks/useKeyboardShortcuts.ts")).toContain(
-      "      if (ocForgeCloseActiveTab()) return;\n      if (currentSessionId) {",
-    )
+  test("the release's rail, header tabs, zones and guest service requests are left as they are", () => {
+    const files = adaptedFiles(adapters)
+    for (const file of [
+      "packages/ui/src/components/layout/ContextPanelRail.tsx",
+      "packages/ui/src/components/layout/SessionTabsStrip.tsx",
+      "packages/ui/src/components/layout/Header.tsx",
+      "packages/ui/src/components/layout/ContextSurfacePanes.tsx",
+      "packages/ui/src/lib/sessionTabs.ts",
+      "packages/ui/src/lib/guests/service.ts",
+      "packages/web/server/index.js",
+    ]) expect(files).not.toContain(file)
   })
 
   test("deep links: the router keeps, applies and writes ?extension=&route=", () => {
@@ -143,12 +108,12 @@ describe("openchamber adapters", () => {
   })
 
   test("a moved or doubled anchor stops the build with a message naming it", () => {
-    const file = "packages/ui/src/lib/surfaces/modes.ts"
+    const file = "packages/ui/src/lib/router/parseRoute.ts"
     const original = read(file)
-    const anchor = "export const pluginIdFromMode = (mode: PluginContextPanelMode): string => mode.slice('plugin:'.length);"
-    const moved = original.replace(anchor, "export const pluginIdFromMode = (mode: PluginContextPanelMode) => mode.slice(7);")
+    const anchor = "      params.has(ROUTE_PARAMS.FILE)\n    );"
+    const moved = original.replace(anchor, "      params.has(ROUTE_PARAMS.FILE));")
     expect(() => adaptSource(adapters, file, moved)).toThrow(AdapterMismatchError)
-    expect(() => adaptSource(adapters, file, moved)).toThrow(`openchamber adapter "rail" no longer applies to ${file}`)
+    expect(() => adaptSource(adapters, file, moved)).toThrow(`openchamber adapter "links" no longer applies to ${file}`)
     expect(() => adaptSource(adapters, file, moved)).toThrow("found 0")
     expect(() => adaptSource(adapters, file, `${original}\n${anchor}\n`)).toThrow("found 2")
   })
