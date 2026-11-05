@@ -82,6 +82,13 @@ export class MeetingDecliner {
   private declined: Map<string, DeclinedMeeting> | null = null;
   /** Accounts a pass stopped in, by account. */
   private readonly cursors = new Map<string, Cursor>();
+  /**
+   * Counts the changes to the tasks' times: a pass that was running when one came keeps no cursor (its range and
+   * windows are the old ones), so the next pass starts again from the start with the new times.
+   */
+  private generation = 0;
+  /** When the queued pass runs. */
+  private timerAt = 0;
   /** Meetings Google would not take a decline for in this round (account and event): tried again in the next one. */
   private readonly failed = new Set<string>();
 
@@ -99,6 +106,7 @@ export class MeetingDecliner {
     planner.onPersist((events) => {
       if (events.some((event) => event.type === 'gtask.kept' && ['decline', 'time', 'duration', 'busy', 'repeat'].some((field) => field in event.patch))) {
         // Times changed: the next pass looks at all of them again, from the start.
+        this.generation++;
         this.cursors.clear();
         this.failed.clear();
         this.soon(AFTER_CHANGE_MS);
@@ -108,7 +116,10 @@ export class MeetingDecliner {
   }
 
   private soon(ms: number): void {
+    // A pass already queued to come sooner (after a change) stays as it is.
+    if (this.timer && this.timerAt <= Date.now() + ms) return;
     if (this.timer) clearTimeout(this.timer);
+    this.timerAt = Date.now() + ms;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.run().then(
@@ -152,6 +163,7 @@ export class MeetingDecliner {
 
   private async runNow(): Promise<DeclinePass> {
     const started = this.clock();
+    const generation = this.generation;
     const state = this.state();
     const kept = state.googleTasks;
     const wanted = Object.values(kept).filter((entry) => entry.time !== null && ((entry.busy && entry.decline) || (entry.repeat?.template?.busy && entry.repeat.template.decline && !entry.repeat.next)));
@@ -186,7 +198,7 @@ export class MeetingDecliner {
     for (const [index, account] of order.entries()) {
       // Each account has its share of the pass's time; one that needs less leaves the rest to the next.
       const deadline = started + ((index + 1) * budget) / order.length;
-      const left = await this.decline(account, byAccount.get(account)!, now, deadline, declined, out, errors);
+      const left = await this.decline(account, byAccount.get(account)!, now, deadline, declined, out, errors, generation);
       if (left) more.push({ account, from: left });
     }
     if (out.length) {
@@ -202,16 +214,20 @@ export class MeetingDecliner {
    * pass stopped), and the invitations they decline declined, in the order they come, until a bound. Returns where
    * the meetings still to be looked at start when it stopped at one, else null.
    */
-  private async decline(account: string, windows: TaskWindow[], now: number, deadline: number, declined: Map<string, DeclinedMeeting>, out: DeclinedMeeting[], errors: string[]): Promise<string | null> {
+  private async decline(account: string, windows: TaskWindow[], now: number, deadline: number, declined: Map<string, DeclinedMeeting>, out: DeclinedMeeting[], errors: string[], generation: number): Promise<string | null> {
     const range = { timeMin: new Date(Math.max(now, Date.parse(windows[0]!.start))).toISOString(), timeMax: windows.reduce((last, window) => (window.end > last ? window.end : last), windows[0]!.end) };
     const fresh = (): Cursor => ({ ...range, from: range.timeMin });
+    // Where to carry on next time; not after the times changed while this pass ran (the next starts afresh).
+    const keep = (at: Cursor) => {
+      if (this.generation === generation) this.cursors.set(account, at);
+    };
     let cursor = this.cursors.get(account) ?? fresh();
     let pages = 0;
     let tried = 0;
     let again = Boolean(cursor.page);
     for (;;) {
       if (pages > 0 && (pages >= (this.options.pagesMax ?? PAGES_MAX) || this.clock() > deadline)) {
-        this.cursors.set(account, cursor);
+        keep(cursor);
         return cursor.from;
       }
       let page: { items: Invitation[]; next: string | null };
@@ -236,7 +252,7 @@ export class MeetingDecliner {
         if (tried > 0 && this.clock() > deadline) {
           // Out of time: the next pass reads this page again and goes on from this meeting.
           cursor = { ...cursor, from: invitation.start };
-          this.cursors.set(account, cursor);
+          keep(cursor);
           return cursor.from;
         }
         tried++;

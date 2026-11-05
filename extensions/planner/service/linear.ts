@@ -32,6 +32,18 @@ export interface WorkspaceInfo {
 
 export type Fetcher = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{ status: number; text(): Promise<string> }>;
 
+/**
+ * Tests point the service at a fake Linear on this machine, as they do Google (PLANNER_GOOGLE_API_BASE):
+ * PLANNER_LINEAR_API_BASE=http://127.0.0.1:<port>/ takes every request to Linear's API there, path kept. Only a
+ * loopback address is taken.
+ */
+export const linearTestFetcher = (base: string | undefined): Fetcher | null => {
+  if (!base || !/^http:\/\/127\.0\.0\.1:\d{2,5}\/$/.test(base)) return null;
+  return (url, init) => fetch(url.replace(/^https:\/\/api\.linear\.app\//, base), init);
+};
+
+const defaultFetcher: Fetcher = linearTestFetcher(process.env.PLANNER_LINEAR_API_BASE) ?? (fetch as unknown as Fetcher);
+
 /** A refusal with the HTTP status the service answers it with. */
 export class WorkspaceError extends Error {
   constructor(readonly status: number, message: string) {
@@ -54,7 +66,7 @@ export class LinearWorkspaces {
   private loaded: Promise<void> | null = null;
   private writes: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly file: string, private readonly fetcher: Fetcher = fetch as unknown as Fetcher, private readonly log: (message: string) => void = () => {}) {}
+  constructor(private readonly file: string, private readonly fetcher: Fetcher = defaultFetcher, private readonly log: (message: string) => void = () => {}) {}
 
   async list(): Promise<WorkspaceInfo[]> {
     await this.load();

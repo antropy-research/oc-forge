@@ -97,6 +97,9 @@ export class AgentStore {
   private catalogFor: string | null | undefined = undefined;
   private catalogSeq = 0;
   private lookingUp = false;
+  /** Asked for again while a lookup or a recording ran: one more once it is done (a turn that just ended, new chats). */
+  private lookAgain = false;
+  private recordAgain = false;
   private readonly listeners = new Set<() => void>();
   private readonly watched = new Map<string, () => void>();
   private readonly byProject = new Map<string, LiveSession[]>();
@@ -146,7 +149,11 @@ export class AgentStore {
    * the machine running OpenChamber, and write down the ones that changed.
    */
   async refreshPullRequests(): Promise<void> {
-    if (this.lookingUp || !this.client.getView().loaded) return;
+    if (!this.client.getView().loaded) return;
+    if (this.lookingUp) {
+      this.lookAgain = true;
+      return;
+    }
     const lookups = pullRequestLookups(this.client.getView().state);
     if (lookups.length === 0) return;
     this.lookingUp = true;
@@ -169,6 +176,10 @@ export class AgentStore {
       this.set({ prError: messageOf(error) });
     } finally {
       this.lookingUp = false;
+      if (this.lookAgain) {
+        this.lookAgain = false;
+        void this.refreshPullRequests();
+      }
     }
   }
 
@@ -417,7 +428,10 @@ export class AgentStore {
 
   /** Write down adopted runs and settled outcomes; quiet, since another surface may do the same. */
   private async record(): Promise<void> {
-    if (this.recording) return;
+    if (this.recording) {
+      this.recordAgain = true;
+      return;
+    }
     const state = this.client.getView().state;
     if (!this.client.getView().loaded) return;
     const bodies = [...planAdoptions(state, this.view.sessions.values()), ...planRunOutcomes(state, this.view.sessions), ...planLinkedPullRequests(state, this.view.sessions)];
@@ -427,6 +441,10 @@ export class AgentStore {
       await this.client.dispatch(bodies, { origin: 'agent' });
     } finally {
       this.recording = false;
+      if (this.recordAgain) {
+        this.recordAgain = false;
+        void this.record();
+      }
     }
     // An agent that just finished a turn has likely just opened its pull request.
     if (bodies.some((body) => body.type === 'run.outcome' && body.outcome === 'completed')) void this.refreshPullRequests();

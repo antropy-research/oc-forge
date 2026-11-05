@@ -1,6 +1,6 @@
 // Google Calendar's task notifications, from the Planner (Google gets no time
 // or deadline the Planner keeps): while a Planner surface is open and its
-// window shown (the page, the rail panel or its Work Status section), it asks
+// window shown (the rail panel or its Work Status section), it asks
 // the service for the ones come by now, at the next one's time, soon after a
 // change here and at least every 30 seconds, and shows each as an OpenChamber
 // notification that stays until it is dismissed, as Google Calendar's alerts
@@ -12,7 +12,7 @@ import { notificationMessage, type TaskNotification } from '../../src/domain/gta
 import type { PlannerClient } from './client.ts';
 
 /** Surfaces that show them: not the hidden frame that answers actions and commands. */
-const SURFACES = new Set(['page', 'panel', 'status']);
+const SURFACES = new Set(['panel', 'status']);
 /** At least this often, for tasks changed elsewhere (Google's own apps, another window); Google is read at most every 90 s. */
 const EVERY_MS = 30_000;
 /** Soon after a change here, which may have set a time a minute away. */

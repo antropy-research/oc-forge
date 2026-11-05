@@ -5,7 +5,7 @@ import { dirname as dirname5, join as join4 } from "node:path";
 
 // service/store.ts
 import { execFile } from "node:child_process";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 // src/domain/types.ts
@@ -490,10 +490,13 @@ var applyInto = (state, event) => {
         state.runs[event.runId] = { ...run, pullRequest: { ...event.pullRequest, seenAt: event.at } };
       return;
     }
-    case "calendar.added":
-      if (!state.calendars[event.calendar.id])
+    case "calendar.added": {
+      const google = event.calendar.google;
+      const twin = google && Object.values(state.calendars).some((item) => item.google?.account === google.account && item.google.calendarId === google.calendarId);
+      if (!state.calendars[event.calendar.id] && !twin)
         state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
       return;
+    }
     case "calendar.updated": {
       const calendar = state.calendars[event.calendarId];
       if (calendar)
@@ -744,9 +747,13 @@ class EventStore {
 `);
     }
     for (const [file, text] of byFile) {
-      const fd = openSync(join(this.eventsDir, file), "a");
+      const fd = openSync(join(this.eventsDir, file), "a+");
       try {
-        writeSync(fd, text);
+        const { size } = fstatSync(fd);
+        const last = Buffer.alloc(1);
+        const torn = size > 0 && readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 10;
+        writeSync(fd, torn ? `
+${text}` : text);
         fsyncSync(fd);
       } finally {
         closeSync(fd);
@@ -3646,6 +3653,12 @@ var LINEAR_API = "https://api.linear.app/graphql";
 var TIMEOUT_MS2 = 20000;
 var MAX_WORKSPACES = 20;
 var ALLOWED = new Set(ALL_DOCUMENTS);
+var linearTestFetcher = (base) => {
+  if (!base || !/^http:\/\/127\.0\.0\.1:\d{2,5}\/$/.test(base))
+    return null;
+  return (url, init) => fetch(url.replace(/^https:\/\/api\.linear\.app\//, base), init);
+};
+var defaultFetcher = linearTestFetcher(process.env.PLANNER_LINEAR_API_BASE) ?? fetch;
 
 class WorkspaceError extends Error {
   status;
@@ -3668,7 +3681,7 @@ class LinearWorkspaces {
   items = [];
   loaded = null;
   writes = Promise.resolve();
-  constructor(file, fetcher = fetch, log = () => {}) {
+  constructor(file, fetcher = defaultFetcher, log = () => {}) {
     this.file = file;
     this.fetcher = fetcher;
     this.log = log;
@@ -3814,7 +3827,7 @@ var testFetcher = (base) => {
     return null;
   return (url, init) => fetch(url.replace(/^https:\/\/[a-z0-9-]+\.googleapis\.com\//, base), init);
 };
-var defaultFetcher = testFetcher(process.env.PLANNER_GOOGLE_API_BASE) ?? fetch;
+var defaultFetcher2 = testFetcher(process.env.PLANNER_GOOGLE_API_BASE) ?? fetch;
 var loopbackListen = (onRequest) => new Promise((resolve, reject) => {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -3883,7 +3896,7 @@ class GoogleAccounts {
   signIns = new Map;
   tokens = new Map;
   identifying = new Map;
-  constructor(file, fetcher = defaultFetcher, listen = loopbackListen, log = () => {}) {
+  constructor(file, fetcher = defaultFetcher2, listen = loopbackListen, log = () => {}) {
     this.file = file;
     this.fetcher = fetcher;
     this.listen = listen;
@@ -7129,6 +7142,8 @@ class MeetingDecliner {
   timer = null;
   declined = null;
   cursors = new Map;
+  generation = 0;
+  timerAt = 0;
   failed = new Set;
   constructor(file, state, reads, calendar, options = {}) {
     this.file = file;
@@ -7141,6 +7156,7 @@ class MeetingDecliner {
     setInterval(() => this.soon(0), EVERY_MS).unref?.();
     planner.onPersist((events) => {
       if (events.some((event) => event.type === "gtask.kept" && ["decline", "time", "duration", "busy", "repeat"].some((field) => (field in event.patch)))) {
+        this.generation++;
         this.cursors.clear();
         this.failed.clear();
         this.soon(AFTER_CHANGE_MS);
@@ -7149,8 +7165,11 @@ class MeetingDecliner {
     this.soon(AFTER_CHANGE_MS);
   }
   soon(ms) {
+    if (this.timer && this.timerAt <= Date.now() + ms)
+      return;
     if (this.timer)
       clearTimeout(this.timer);
+    this.timerAt = Date.now() + ms;
     this.timer = setTimeout(() => {
       this.timer = null;
       this.run().then((pass) => {
@@ -7185,6 +7204,7 @@ class MeetingDecliner {
   }
   async runNow() {
     const started = this.clock();
+    const generation = this.generation;
     const state = this.state();
     const kept = state.googleTasks;
     const wanted = Object.values(kept).filter((entry) => entry.time !== null && (entry.busy && entry.decline || entry.repeat?.template?.busy && entry.repeat.template.decline && !entry.repeat.next));
@@ -7223,7 +7243,7 @@ ${entry.listId}`;
     const order = [...byAccount.keys()];
     for (const [index, account] of order.entries()) {
       const deadline = started + (index + 1) * budget / order.length;
-      const left = await this.decline(account, byAccount.get(account), now, deadline, declined, out, errors);
+      const left = await this.decline(account, byAccount.get(account), now, deadline, declined, out, errors, generation);
       if (left)
         more.push({ account, from: left });
     }
@@ -7235,16 +7255,20 @@ ${entry.listId}`;
       this.soon(CARRY_ON_MS);
     return { declined: out, errors, more };
   }
-  async decline(account, windows, now, deadline, declined, out, errors) {
+  async decline(account, windows, now, deadline, declined, out, errors, generation) {
     const range = { timeMin: new Date(Math.max(now, Date.parse(windows[0].start))).toISOString(), timeMax: windows.reduce((last, window) => window.end > last ? window.end : last, windows[0].end) };
     const fresh = () => ({ ...range, from: range.timeMin });
+    const keep = (at) => {
+      if (this.generation === generation)
+        this.cursors.set(account, at);
+    };
     let cursor = this.cursors.get(account) ?? fresh();
     let pages = 0;
     let tried = 0;
     let again = Boolean(cursor.page);
     for (;; ) {
       if (pages > 0 && (pages >= (this.options.pagesMax ?? PAGES_MAX) || this.clock() > deadline)) {
-        this.cursors.set(account, cursor);
+        keep(cursor);
         return cursor.from;
       }
       let page;
@@ -7269,7 +7293,7 @@ ${invitation.id}`;
           continue;
         if (tried > 0 && this.clock() > deadline) {
           cursor = { ...cursor, from: invitation.start };
-          this.cursors.set(account, cursor);
+          keep(cursor);
           return cursor.from;
         }
         tried++;

@@ -32,7 +32,8 @@ export const UiContext = createContext<UiContextValue | null>(null);
  * the window, the same in every chat) and an extension page on a host that opens one. The Work Status section and
  * the hidden frame that answers actions and commands draw less.
  */
-export const isFullSurface = (surface: string): boolean => surface === 'panel' || surface === 'page';
+/** The whole Planner: the rail panel (it has no page since 2026-11-05). */
+export const isFullSurface = (surface: string): boolean => surface === 'panel';
 
 export const useUi = (): UiContextValue => {
   const value = useContext(UiContext);

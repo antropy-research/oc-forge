@@ -299,9 +299,14 @@ const applyInto = (state: PlannerState, event: PlannerEvent): void => {
       if (run) state.runs[event.runId] = { ...run, pullRequest: { ...event.pullRequest, seenAt: event.at } };
       return;
     }
-    case 'calendar.added':
-      if (!state.calendars[event.calendar.id]) state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
+    case 'calendar.added': {
+      // One subscription per Google calendar: a second one (two windows adding the same calendar at once, each the
+      // first to see its account) changes nothing.
+      const google = event.calendar.google;
+      const twin = google && Object.values(state.calendars).some((item) => item.google?.account === google.account && item.google.calendarId === google.calendarId);
+      if (!state.calendars[event.calendar.id] && !twin) state.calendars[event.calendar.id] = { ...event.calendar, visible: true };
       return;
+    }
     case 'calendar.updated': {
       const calendar = state.calendars[event.calendarId];
       if (calendar) state.calendars[event.calendarId] = { ...calendar, ...event.patch };

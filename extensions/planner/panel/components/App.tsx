@@ -31,7 +31,7 @@ import { hoveredSource, hoveredTask } from '../lib/hover.ts';
 import { moveTo } from '../lib/commands.ts';
 import { autoTimebox } from '../lib/autoSchedule.ts';
 import { startTaskNotifications } from '../lib/notifications.ts';
-import { parseRoute, routeOf } from '../lib/deepLink.ts';
+import { parseRoute } from '../lib/deepLink.ts';
 import { openInNewTab, placeUrl, plannerKeeps, useForge, watchNewTabClicks } from '../lib/forge.ts';
 import { followPanel, trackPanelShown } from '../lib/follow.ts';
 import { readPlace, savePlace } from '../lib/place.ts';
@@ -82,8 +82,7 @@ export const App = ({ surface }: { surface: string }) => {
     setUiState((current) => ({ ...current, ...patch }));
   };
   useEffect(() => watchNewTabClicks(), []);
-  // A deep link (or back and forward) puts the Planner on its place; then a page's address bar follows the page.
-  const [linkApplied, setLinkApplied] = useState(false);
+  // A deep link (or back and forward) puts the Planner on its place.
   useEffect(() => {
     if (!forge || !full) return;
     const apply = (value: string | null) => {
@@ -93,16 +92,10 @@ export const App = ({ surface }: { surface: string }) => {
         setRoute(place.page);
         setUiState((current) => ({ ...current, openTaskId: place.openTaskId ?? null, openIssue: place.openIssue ?? null }));
       }
-      setLinkApplied(true);
     };
     apply(forge.links.route());
     return forge.links.onRoute(apply);
   }, [forge, full]);
-  useEffect(() => {
-    // Only a page names its place in the address bar; the host keeps the rail panel's to the deep link that opened it.
-    if (!forge || surface !== 'page' || !linkApplied) return;
-    void forge.links.setRoute(routeOf({ page: route, openTaskId: ui.openTaskId, openIssue: ui.openIssue })).catch(() => {});
-  }, [forge, surface, linkApplied, route, ui.openTaskId, ui.openIssue?.id, ui.openIssue?.workspaceId]);
   useEffect(() => {
     if (!full) return;
     let live = true;

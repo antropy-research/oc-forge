@@ -1,7 +1,7 @@
 // Append-only event files in a git repository. Each write is fsynced before the
 // request answers; commits are batched and only add history, never durability.
 import { execFile } from 'node:child_process';
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PlannerEvent } from '../src/domain/events.ts';
 import { sortEvents } from '../src/domain/reducer.ts';
@@ -96,9 +96,14 @@ export class EventStore {
       byFile.set(file, (byFile.get(file) ?? '') + JSON.stringify(event) + '\n');
     }
     for (const [file, text] of byFile) {
-      const fd = openSync(join(this.eventsDir, file), 'a');
+      const fd = openSync(join(this.eventsDir, file), 'a+');
       try {
-        writeSync(fd, text);
+        // A crash may have left the last line torn (no newline): end it first, or the first event written now joins
+        // it and is skipped with it at the next start. The torn half alone is skipped, and said.
+        const { size } = fstatSync(fd);
+        const last = Buffer.alloc(1);
+        const torn = size > 0 && readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a;
+        writeSync(fd, torn ? `\n${text}` : text);
         fsyncSync(fd);
       } finally {
         closeSync(fd);

@@ -140,7 +140,7 @@ export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; pag
   if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable) && editsText(event, where.mac)) return true;
   const mod = event.metaKey || event.ctrlKey;
   const key = event.key.toLowerCase();
-  const full = where.surface === 'panel' || where.surface === 'page';
+  const full = where.surface === 'panel';
   if (full && mod && key === 'k') return true;
   if (full && where.page === 'linear' && mod && key === 'b') return true;
   // Print: the Tasks view's list, or the calendar's print preview, as Google Tasks and Google Calendar bind it.
