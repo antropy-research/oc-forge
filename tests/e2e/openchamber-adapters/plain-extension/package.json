@@ -2,7 +2,7 @@
   "name": "ocforge-test-plain",
   "version": "0.1.0",
   "private": true,
-  "description": "Scratch extension for the end-to-end check of oc-forge's OpenChamber adapters: a panel with no ocForge block, which keeps the release's sandbox.",
+  "description": "Scratch extension for the end-to-end check of oc-forge's OpenChamber adapters: a panel with no ocForge block, which keeps the release's sandbox, and a static page the release and the adapted build draw the same.",
   "openchamber": {
     "apiVersion": 1,
     "engines": {
@@ -14,6 +14,10 @@
         "name": "oc-forge plain panel",
         "icon": "layout-right",
         "entry": "panel/index.html"
+      },
+      "page": {
+        "entry": "page/index.html",
+        "title": "oc-forge plain page"
       }
     }
   }

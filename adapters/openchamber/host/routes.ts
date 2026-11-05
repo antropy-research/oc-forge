@@ -14,6 +14,7 @@ import { normalizeContextPanelDirectoryKey, useUIStore } from '@/stores/useUISto
 import { useSessionUIStore } from '@/sync/session-ui-store';
 
 import { broadcastOcForge } from './bus.ts';
+import { showOcForgeGlobalPanel } from './panels.ts';
 import { isGuestId, OC_FORGE_LIMITS } from './protocol.ts';
 import { useOcForgeStore } from './store.ts';
 
@@ -165,6 +166,11 @@ const openDeepLink = async (link: { guestId: string; route: string }): Promise<v
   }
   if (!guest.entry) return;
   deliverRoute(guest.id, link.route, 'panel');
+  // A global panel (`ocForge.globalPanel`) shows in the folder on screen, and so in every folder.
+  if (guest.ocForge?.globalPanel) {
+    showOcForgeGlobalPanel(pluginModeFromId(guest.id));
+    return;
+  }
   const directory = useDirectoryStore.getState().currentDirectory;
   if (!directory) return;
   const key = normalizeContextPanelDirectoryKey(directory);

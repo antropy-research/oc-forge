@@ -51,6 +51,19 @@ export type OcForgeManifest = {
    * `allow-scripts` alone, where Chrome ignores `print()`.
    */
   modals?: true;
+  /**
+   * Its panel is the window's, not a folder's: one frame, loaded (hidden) as
+   * soon as the extension is listed, kept through every change of chat or
+   * folder; whether it shows in its zone, and expanded, is the same in every
+   * folder. The release keeps a panel per folder and loads it on its first open.
+   */
+  globalPanel?: true;
+  /**
+   * The server starts its service when OpenChamber starts, and again once the
+   * package changes or the extension is enabled or approved, instead of on
+   * the first request a frame sends.
+   */
+  autostart?: true;
 };
 
 export type OcForgeShortcuts = {
@@ -197,6 +210,8 @@ export const readOcForgeManifest = (value: unknown): OcForgeManifest | undefined
   if (!isObject(value) || value.apiVersion !== 1) return undefined;
   const manifest: OcForgeManifest = { apiVersion: 1 };
   if (value.modals === true) manifest.modals = true;
+  if (value.globalPanel === true) manifest.globalPanel = true;
+  if (value.autostart === true) manifest.autostart = true;
   return manifest;
 };
 
