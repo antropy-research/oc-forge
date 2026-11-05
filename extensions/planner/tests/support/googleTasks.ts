@@ -1,12 +1,12 @@
 // Google Tasks' scenarios, on top of the shared harness (planner.ts): Planner windows whose Google store starts as the
 // panel starts it, what the fake Google has, what its calendar shows, and a task form's values as the editor sends them.
-import type { CommitListener } from '../../panel/lib/client.ts';
-import type { TaskFields } from '../../panel/lib/google.ts';
-import { addDays, zonedDateMinutes } from '../../src/domain/dates.ts';
-import type { GoogleTaskItem } from '../../src/domain/google.ts';
-import { formValuesOf, withOccurrence, type FormValues } from '../../src/domain/gtaskForm.ts';
-import { deadlineEvents, keptFor, upcomingEvent, upcomingTasks, upcomingValues, withTaskTimes, type UpcomingTask } from '../../src/domain/gtaskKept.ts';
-import type { DateKey, GoogleTaskKept, PlannerState } from '../../src/domain/types.ts';
+import type { CommitListener } from '../../panel/lib/core/client.ts';
+import type { TaskFields } from '../../panel/lib/google/store.ts';
+import { addDays, zonedDateMinutes } from '../../src/domain/core/dates.ts';
+import type { GoogleTaskItem } from '../../src/domain/google/google.ts';
+import { formValuesOf, withOccurrence, type FormValues } from '../../src/domain/google/taskForm.ts';
+import { deadlineEvents, keptFor, upcomingEvent, upcomingTasks, upcomingValues, withTaskTimes, type UpcomingTask } from '../../src/domain/google/taskKept.ts';
+import type { DateKey, GoogleTaskKept, PlannerState } from '../../src/domain/core/types.ts';
 import { until, type Planner, type PlannerWindow, type WindowOptions } from './planner.ts';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -139,7 +139,7 @@ export const deleteInGoogle = (planner: Planner, id: string): void => {
 export type CalendarTask = { kind: 'task' | 'deadline' | 'upcoming'; title: string; date: DateKey; time: number | null; completed: boolean; item?: GoogleTaskItem; upcoming?: UpcomingTask };
 
 /**
- * The window's calendar between two days, as `useCalendarEvents(from, to, { tasks: true })` (panel/lib/calendar.ts)
+ * The window's calendar between two days, as `useCalendarEvents(from, to, { tasks: true })` (panel/lib/calendar/events.ts)
  * composes it for the calendar views: the service's feed, the times the Planner keeps, deadlines on their day and the
  * series' upcoming tasks from the window's plan. (The hook itself needs Preact to render; this is its composition.)
  */

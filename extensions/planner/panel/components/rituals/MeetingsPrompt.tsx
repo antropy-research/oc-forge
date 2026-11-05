@@ -3,12 +3,12 @@
 // (the excluded kinds not, each saying why); one button imports them, in time order, and "Pick events" chooses.
 // With auto-sync they are on the list already.
 import { useState } from 'preact/hooks';
-import type { DateKey } from '../../../src/domain/types.ts';
-import { clockLabel, zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { MEETING_EXCLUSION_LABELS, addMeetingsCommands, meetingSuggestions, type MeetingSuggestion } from '../../../src/domain/meetings.ts';
-import { newId } from '../../../src/domain/ids.ts';
-import { usePlanner, useView } from '../../lib/context.ts';
-import { useCalendarEvents } from '../../lib/calendar.ts';
+import type { DateKey } from '../../../src/domain/core/types.ts';
+import { clockLabel, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { MEETING_EXCLUSION_LABELS, addMeetingsCommands, meetingSuggestions, type MeetingSuggestion } from '../../../src/domain/calendar/meetings.ts';
+import { newId } from '../../../src/domain/core/ids.ts';
+import { usePlanner, useView } from '../../lib/core/context.ts';
+import { useCalendarEvents } from '../../lib/calendar/events.ts';
 
 const why = (suggestion: MeetingSuggestion): string =>
   suggestion.excluded === 'declined' ? 'declined' : suggestion.excluded ? MEETING_EXCLUSION_LABELS[suggestion.excluded].replace(/^Exclude /, '') : '';

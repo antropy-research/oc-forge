@@ -1,9 +1,9 @@
 // Linear issues already in the plan, by when they are planned.
-import { addDays, monthDay } from '../../../src/domain/dates.ts';
-import { plannedLinearTasks } from '../../../src/domain/linear.ts';
-import type { Task } from '../../../src/domain/types.ts';
-import { useLinear, usePlanner, useView } from '../../lib/context.ts';
-import { useUi } from '../../lib/ui.ts';
+import { addDays, monthDay } from '../../../src/domain/core/dates.ts';
+import { plannedLinearTasks } from '../../../src/domain/linear/linear.ts';
+import type { Task } from '../../../src/domain/core/types.ts';
+import { useLinear, usePlanner, useView } from '../../lib/core/context.ts';
+import { useUi } from '../../lib/core/ui.ts';
 import { HeadSearch, SidebarToggle } from './chrome.tsx';
 import { workspaceLabel } from './common.tsx';
 import { StatusIcon } from './icons.tsx';

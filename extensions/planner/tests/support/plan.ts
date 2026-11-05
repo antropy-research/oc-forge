@@ -4,17 +4,17 @@
 // Braindump and Ask Planner modals do with what is typed and with the Small Model's answer (their glue lives in
 // components, so it is repeated here, step for step, over the panel's own builders).
 import type { HostClient } from '@openchamber/sdk';
-import { ASSISTANT_SYSTEM, assistantContext, readAssistantAnswer } from '../../src/domain/assistant.ts';
-import { braindumpSystem, parseBraindump, readBraindumpAnswer, type DumpItem } from '../../src/domain/braindump.ts';
-import { addDays } from '../../src/domain/dates.ts';
-import type { EventBody, SubtaskConflict } from '../../src/domain/events.ts';
-import { newId } from '../../src/domain/ids.ts';
-import { parseQuickAdd } from '../../src/domain/quickAdd.ts';
-import { liveChannels } from '../../src/domain/selectors.ts';
-import type { Placement, PlannerState, Subtask } from '../../src/domain/types.ts';
-import { assistantCommands } from '../../panel/components/Assistant.tsx';
-import { addParsedTask } from '../../panel/lib/addTask.ts';
-import { createManyTaskCommands } from '../../panel/lib/commands.ts';
+import { ASSISTANT_SYSTEM, assistantContext, readAssistantAnswer } from '../../src/domain/assistant/assistant.ts';
+import { braindumpSystem, parseBraindump, readBraindumpAnswer, type DumpItem } from '../../src/domain/assistant/braindump.ts';
+import { addDays } from '../../src/domain/core/dates.ts';
+import type { EventBody, SubtaskConflict } from '../../src/domain/core/events.ts';
+import { newId } from '../../src/domain/core/ids.ts';
+import { parseQuickAdd } from '../../src/domain/plan/quickAdd.ts';
+import { liveChannels } from '../../src/domain/core/selectors.ts';
+import type { Placement, PlannerState, Subtask } from '../../src/domain/core/types.ts';
+import { assistantCommands } from '../../panel/components/assistant/Assistant.tsx';
+import { addParsedTask } from '../../panel/lib/core/addTask.ts';
+import { createManyTaskCommands } from '../../panel/lib/core/commands.ts';
 import type { Planner, PlannerWindow, WindowOptions } from './planner.ts';
 
 const minutesIn = (zone: string, at = Date.now()): number => {

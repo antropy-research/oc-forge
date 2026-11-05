@@ -6,14 +6,14 @@
 // move through the issues, Enter opens one; more pages load at the end.
 import type { ComponentChildren } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { addDays, monthDay } from '../../../src/domain/dates.ts';
-import { githubMirrors, isClosedType, linkedTask, type LinearIssue } from '../../../src/domain/linear.ts';
-import { PRIORITY_NAMES, groupIssues, showsEmpty, sortIssues, type GroupTarget, type IssueDisplay, type IssueGroup } from '../../../src/domain/linearDisplay.ts';
-import type { LinearProperty, Task } from '../../../src/domain/types.ts';
-import { LINEAR_DRAG_TYPE, useLinear, usePlanner, useView } from '../../lib/context.ts';
-import { useUi } from '../../lib/ui.ts';
-import type { IssueRef, ListId } from '../../lib/linear.ts';
-import { AssignButton } from '../AssigneePicker.tsx';
+import { addDays, monthDay } from '../../../src/domain/core/dates.ts';
+import { githubMirrors, isClosedType, linkedTask, type LinearIssue } from '../../../src/domain/linear/linear.ts';
+import { PRIORITY_NAMES, groupIssues, showsEmpty, sortIssues, type GroupTarget, type IssueDisplay, type IssueGroup } from '../../../src/domain/linear/display.ts';
+import type { LinearProperty, Task } from '../../../src/domain/core/types.ts';
+import { LINEAR_DRAG_TYPE, useLinear, usePlanner, useView } from '../../lib/core/context.ts';
+import { useUi } from '../../lib/core/ui.ts';
+import type { IssueRef, ListId } from '../../lib/linear/store.ts';
+import { AssignButton } from '../agents/AssigneePicker.tsx';
 import { Avatar, CycleIcon, Dot, PriorityIcon, ProjectIcon, StatusIcon } from './icons.tsx';
 
 /** Drag payload for moving an issue between groups: its workspace and id. */

@@ -4,15 +4,15 @@
 // the Planner, as Google Tasks' API keeps no time), or a Planner task when no
 // list is chosen.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { EventInput } from '../../../src/domain/gevents.ts';
-import { KEPT_HINT, TASKS_API_REFERENCE } from '../../../src/domain/gtaskKept.ts';
-import { addDays, instantAt, isDateKey } from '../../../src/domain/dates.ts';
-import { edgePosition } from '../../../src/domain/selectors.ts';
-import { newId } from '../../../src/domain/ids.ts';
-import type { EventBody } from '../../../src/domain/events.ts';
-import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
-import { useUi } from '../../lib/ui.ts';
-import { addEvent, calendarUi, useCalendarUi, type Draft } from '../../lib/gcal.ts';
+import type { EventInput } from '../../../src/domain/google/events.ts';
+import { KEPT_HINT, TASKS_API_REFERENCE } from '../../../src/domain/google/taskKept.ts';
+import { addDays, instantAt, isDateKey } from '../../../src/domain/core/dates.ts';
+import { edgePosition } from '../../../src/domain/core/selectors.ts';
+import { newId } from '../../../src/domain/core/ids.ts';
+import type { EventBody } from '../../../src/domain/core/events.ts';
+import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
+import { useUi } from '../../lib/core/ui.ts';
+import { addEvent, calendarUi, useCalendarUi, type Draft } from '../../lib/calendar/calendarUi.ts';
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
 import { defaultCalendar, defaultList, endChoices, listKeyOf, startChoices, writableCalendars } from './form.ts';

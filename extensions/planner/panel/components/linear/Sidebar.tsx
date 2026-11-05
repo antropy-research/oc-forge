@@ -5,11 +5,11 @@
 // pick or on a click outside.
 import type { ComponentChildren } from 'preact';
 import { useLayoutEffect, useMemo, useState } from 'preact/hooks';
-import { groupViews, isProjectView, type LinearFavorite, type LinearSavedView } from '../../../src/domain/linear.ts';
-import { searchChoices } from '../../../src/domain/linearFilter.ts';
-import { useLinear, usePlanner } from '../../lib/context.ts';
-import { useUi } from '../../lib/ui.ts';
-import { sameSource, type LinearSource } from '../../lib/linear.ts';
+import { groupViews, isProjectView, type LinearFavorite, type LinearSavedView } from '../../../src/domain/linear/linear.ts';
+import { searchChoices } from '../../../src/domain/linear/filter.ts';
+import { useLinear, usePlanner } from '../../lib/core/context.ts';
+import { useUi } from '../../lib/core/ui.ts';
+import { sameSource, type LinearSource } from '../../lib/linear/store.ts';
 import { workspaceLabel, workspaceNames } from './common.tsx';
 import { Kbd, ProjectIcon, StatusIcon, ViewIcon } from './icons.tsx';
 import { Picker, PickerButton } from './Picker.tsx';

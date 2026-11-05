@@ -3,12 +3,12 @@ import http2 from "node:http";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname5, join as join4 } from "node:path";
 
-// service/store.ts
+// service/plan/store.ts
 import { execFile } from "node:child_process";
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
-// src/domain/types.ts
+// src/domain/core/types.ts
 var BACKLOG_BUCKETS = [
   { id: "next-weeks", label: "Someday in the next week or two" },
   { id: "next-month", label: "Someday in the next month" },
@@ -84,7 +84,7 @@ var emptyState = () => ({
   googleTasks: {}
 });
 
-// src/domain/dates.ts
+// src/domain/core/dates.ts
 var DATE_KEY = /^(\d{4})-(\d{2})-(\d{2})$/;
 var isDateKey = (value) => {
   if (typeof value !== "string")
@@ -157,7 +157,7 @@ var instantAt = (date, minutes, timeZone) => {
   return new Date(guess).toISOString();
 };
 
-// src/domain/selectors.ts
+// src/domain/core/selectors.ts
 var POSITION_STEP = 1024;
 var isLive = (task) => !task.deletedAt && !task.archivedAt;
 var byPosition = (a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt);
@@ -196,7 +196,7 @@ var edgePosition = (state, placement, edge) => {
   return edge === "top" ? list[0].position - POSITION_STEP : list[list.length - 1].position + POSITION_STEP;
 };
 
-// src/domain/reducer.ts
+// src/domain/core/reducer.ts
 var zoneOf = (state) => state.settings.timezone ?? "UTC";
 var blockDate = (state, start) => zonedDateMinutes(start, zoneOf(state)).date;
 var syncTaskToBlocks = (state, taskId, at, changedStart) => {
@@ -669,7 +669,7 @@ var applyEvents = (state, events) => {
 var sortEvents = (events) => events.sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 var foldEvents = (events) => applyEvents(emptyState(), events);
 
-// service/store.ts
+// service/plan/store.ts
 var MONTH_FILE = /^\d{4}-\d{2}\.jsonl$/;
 var README = `# Planner data
 
@@ -909,7 +909,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
   }
 }
 
-// src/domain/rrule.ts
+// src/domain/google/rrule.ts
 var WEEKDAY_CODES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 var FREQUENCIES = ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"];
 var KNOWN = new Set(["FREQ", "INTERVAL", "BYDAY", "BYMONTHDAY", "BYMONTH", "COUNT", "UNTIL"]);
@@ -1055,7 +1055,7 @@ var shiftRule = (rule, from, to) => {
   }
 };
 
-// src/domain/linearDisplay.ts
+// src/domain/linear/display.ts
 var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var oneOf = (list, value) => typeof value === "string" && list.includes(value);
 var linearDisplayProblem = (value) => {
@@ -1079,7 +1079,7 @@ var VIEW_PREF_FIELDS = `layout issueGrouping issueSubGrouping viewOrdering viewO
       fieldId fieldStatus fieldPriority fieldAssignee fieldLabels fieldProject fieldCycle fieldEstimate fieldDueDate fieldDateCreated fieldDateUpdated
       projectLayout projectGrouping projectViewOrdering showCompletedProjects`;
 
-// src/domain/assignees.ts
+// src/domain/agents/assignees.ts
 var COMMAND_PREFIX = "oc-planner-";
 var COMMAND_MARKER = "# Written by the OpenChamber Planner";
 var AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
@@ -1112,11 +1112,11 @@ var commandFile = (assignee, kind) => [
 ].join(`
 `);
 
-// src/domain/merge.ts
+// src/domain/plan/merge.ts
 var EVENT_NO_SUBTASKS = "Calendar event tasks can't have subtasks";
 var isEventTask = (task) => task?.source?.kind === "event";
 
-// src/domain/events.ts
+// src/domain/core/events.ts
 var PATCH_FIELDS = ["title", "notes", "plannedMinutes", "priority", "dueDate", "channelId", "folderId", "objectiveId", "source"];
 var SUBTASK_PATCH_FIELDS = ["title", "done", "notes", "plannedMinutes", "source"];
 var SUBTASKS_ONE_BY_ONE = "Subtasks are changed one at a time now: reload the Planner and try again";
@@ -1851,7 +1851,7 @@ var subtaskConflict = (body, context, batch = {}) => {
   return changed ? { taskId: body.taskId, subtaskId: body.subtaskId, now } : null;
 };
 
-// src/domain/recurrence.ts
+// src/domain/plan/recurrence.ts
 var RECURRENCE_HORIZON_DAYS = 7;
 var parts = (date) => date.split("-").map(Number);
 var daysInMonth2 = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
@@ -1917,7 +1917,7 @@ var instanceFrom = (series, date, position) => ({
 });
 var isUntouchedInstance = (task, series) => task.title === series.template.title && task.notes === series.template.notes && !task.subtasks.some((subtask) => subtask.done);
 
-// src/domain/rollover.ts
+// src/domain/plan/rollover.ts
 var planRollover = (state, today) => {
   const stale = Object.values(state.tasks).filter((task) => !task.deletedAt && !task.archivedAt && !task.completedAt && task.placement.kind === "day" && task.placement.date < today).sort((a, b) => dayOf(a).localeCompare(dayOf(b)) || a.position - b.position);
   if (stale.length === 0)
@@ -1949,7 +1949,7 @@ var planRollover = (state, today) => {
 };
 var dayOf = (task) => task.placement.kind === "day" ? task.placement.date : "";
 
-// src/domain/activity.ts
+// src/domain/plan/activity.ts
 var touchesTask = (event, taskId) => {
   if (event.type === "task.created")
     return event.task.id === taskId;
@@ -1960,7 +1960,7 @@ var touchesTask = (event, taskId) => {
   return "taskId" in event && event.taskId === taskId;
 };
 
-// src/domain/undo.ts
+// src/domain/plan/undo.ts
 var CHANGED_SINCE = "Changed in another window since; not undone";
 var UNDO_GONE = "This can no longer be undone";
 var restoreTask = (state, taskId) => {
@@ -2146,7 +2146,7 @@ var changedSince = (after, now, undone) => {
   return changed;
 };
 
-// src/domain/ids.ts
+// src/domain/core/ids.ts
 var ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 var newId = (now = Date.now()) => {
   const random = new Uint8Array(10);
@@ -2157,7 +2157,7 @@ var newId = (now = Date.now()) => {
   return now.toString(36).padStart(9, "0") + suffix;
 };
 
-// service/planner.ts
+// service/plan/planner.ts
 var UNDO_KEEP_MS = 60000;
 var UNDO_KEEP_MAX = 50;
 var summarize = (events, titleOf) => {
@@ -2446,12 +2446,12 @@ class Planner {
   }
 }
 
-// service/calendars.ts
+// service/calendar/feeds.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// src/domain/ics.ts
+// src/domain/calendar/ics.ts
 var WINDOWS_ZONES = {
   "pacific standard time": "America/Los_Angeles",
   "mountain standard time": "America/Denver",
@@ -2796,7 +2796,7 @@ var expandEvents = (events, calendarId, from, to, userZone) => {
   return out.sort((a, b) => a.start.localeCompare(b.start));
 };
 
-// service/calendars.ts
+// service/calendar/feeds.ts
 var TTL_MS = 10 * 60000;
 var TIMEOUT_MS = 15000;
 var MAX_CHARS = 1e7;
@@ -2868,7 +2868,7 @@ class CalendarFeeds {
   }
 }
 
-// service/sync.ts
+// service/plan/sync.ts
 var isRemoteUrl = (url) => {
   if (!url || url.length > 500 || /\s/.test(url) || url.startsWith("-"))
     return false;
@@ -2969,13 +2969,13 @@ class SyncManager {
   }
 }
 
-// service/github.ts
+// service/github/github.ts
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync3 } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute } from "node:path";
 
-// src/domain/github.ts
+// src/domain/github/github.ts
 var ITEM_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/(issues|pull)\/(\d{1,9})(?:[/?#]\S*)?$/;
 var parseGitHubUrl = (text) => {
   const match = ITEM_URL.exec(text.trim());
@@ -2986,7 +2986,7 @@ var parseGitHubUrl = (text) => {
   return { repo, number: Number(number), kind: path === "pull" ? "pull" : "issue", key: `${repo}#${Number(number)}`, url: `https://github.com/${repo}/${path}/${Number(number)}` };
 };
 
-// src/domain/githubActivity.ts
+// src/domain/github/activity.ts
 var ACTIVITY_SOURCES = ["opened", "merged", "mergedReviewed", "mergedInvolved", "reviewed", "commented", "discussions", "discussionComments"];
 var searchInstant = (iso) => `${new Date(iso).toISOString().slice(0, 19)}+00:00`;
 var searchRange = (from, to) => `${searchInstant(from)}..${searchInstant(new Date(Date.parse(to) - 1000).toISOString())}`;
@@ -3000,7 +3000,7 @@ var activitySearches = (from, to) => {
   };
 };
 
-// service/githubActivity.ts
+// service/github/activity.ts
 var ACTIVITY_PAGE_SIZE = 50;
 var PAGE_INFO = "pageInfo { hasNextPage endCursor }";
 var BOTH_WAYS = "pageInfo { hasNextPage endCursor hasPreviousPage startCursor }";
@@ -3197,7 +3197,7 @@ var readActivityPage = async (graphql, source, from, to, after) => {
   }
 };
 
-// service/github.ts
+// service/github/github.ts
 var GH_TIMEOUT_MS = 15000;
 var ghRunner = (args, options) => new Promise((resolve, reject) => {
   execFile2("gh", args, { timeout: options?.timeoutMs ?? GH_TIMEOUT_MS, maxBuffer: 8000000, ...options?.cwd ? { cwd: options.cwd } : {} }, (error, stdout, stderr) => {
@@ -3377,11 +3377,11 @@ class GitHubSource {
   }
 }
 
-// service/linear.ts
+// service/linear/workspaces.ts
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-// src/domain/linear.ts
+// src/domain/linear/linear.ts
 var ISSUE_INPUT_KEYS = ["title", "description", "stateId", "priority", "assigneeId", "dueDate", "addedLabelIds", "removedLabelIds", "projectId", "cycleId", "estimate"];
 var ISSUE_FIELDS = `id identifier title url priority prioritySortOrder sortOrder estimate dueDate createdAt updatedAt completedAt canceledAt branchName
     state { id name type color position }
@@ -3648,7 +3648,7 @@ var readGraphql = (body) => {
 };
 var NON_ISSUE_MODELS = new Set(["project", "projects", "initiative", "initiatives", "feeditem", "feeditems", "customer", "customers", "document", "documents", "release", "releases"]);
 
-// service/linear.ts
+// service/linear/workspaces.ts
 var LINEAR_API = "https://api.linear.app/graphql";
 var TIMEOUT_MS2 = 20000;
 var MAX_WORKSPACES = 20;
@@ -3790,7 +3790,7 @@ class LinearWorkspaces {
   }
 }
 
-// service/google.ts
+// service/google/accounts.ts
 import { createHash, randomBytes } from "node:crypto";
 import { chmod as chmod2, mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
 import http from "node:http";
@@ -4192,7 +4192,7 @@ class GoogleAccounts {
   }
 }
 
-// src/domain/gmail.ts
+// src/domain/google/gmail.ts
 var SYSTEM_LABELS = { inbox: "INBOX", starred: "STARRED", important: "IMPORTANT", unread: "UNREAD", spam: "SPAM", trash: "TRASH", sent: "SENT", drafts: "DRAFT" };
 var gmailChanges = (actions, labels) => {
   const add = new Set;
@@ -4269,7 +4269,7 @@ var messageText = (part) => {
   return html !== null ? htmlText(html) : "";
 };
 
-// service/gmail.ts
+// service/google/gmail.ts
 var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 var enc = encodeURIComponent;
 var SYSTEM_NAMES = { INBOX: "Inbox", STARRED: "Starred", IMPORTANT: "Important", UNREAD: "Unread", SENT: "Sent", DRAFT: "Drafts", SPAM: "Spam", TRASH: "Trash" };
@@ -4335,7 +4335,7 @@ class GmailActions {
   }
 }
 
-// service/contacts.ts
+// service/google/contacts.ts
 var PEOPLE = "https://people.googleapis.com/v1";
 var enc2 = encodeURIComponent;
 
@@ -4367,10 +4367,10 @@ class GoogleContacts {
   }
 }
 
-// service/meetings.ts
+// service/calendar/meetings.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
 
-// src/domain/meetings.ts
+// src/domain/calendar/meetings.ts
 var MEETING_SYNC_DAYS = 7;
 var eventKey = (event) => event.google ? `${event.google.account}|${event.google.calendarId}|${event.google.eventId}` : null;
 var DAY_MS = 86400000;
@@ -4544,7 +4544,7 @@ var planMeetingCompletion = (state, now, zone, mode = state.settings.meetingAuto
 };
 var applyLocally = (state, body) => applyEvents(state, [{ v: 1, id: `meeting-sync-${state.version}-${body.type}`, at: new Date().toISOString(), ...body }]);
 
-// service/meetings.ts
+// service/calendar/meetings.ts
 var COMPLETE_MS = 60000;
 var SYNC_MS = 5 * 60000;
 
@@ -4625,7 +4625,7 @@ class MeetingImport {
   }
 }
 
-// src/domain/google.ts
+// src/domain/google/google.ts
 var PLANNER_BLOCK_KEY = "plannerBlockId";
 var RESPONSES = ["needsAction", "declined", "tentative", "accepted"];
 var EVENT_COLORS = {
@@ -4744,7 +4744,7 @@ var dueTaskEvent = (item, zone) => ({
 var TASK_GONE = "This task is no longer in Google Tasks";
 var gmailUrl = (account, threadId) => `https://mail.google.com/mail/u/${encodeURIComponent(account)}/#all/${encodeURIComponent(threadId)}`;
 
-// src/domain/gevents.ts
+// src/domain/google/events.ts
 var EDIT_SCOPES = ["this", "following", "all"];
 var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isText = (value, max) => typeof value === "string" && value.length <= max;
@@ -5008,7 +5008,7 @@ var planRsvp = (args) => {
   return { ops: [{ method: "PATCH", eventId: target.id, body: { attendees: attendees.map((attendee) => attendee.self ? answer(attendee) : attendee) }, role: "change" }] };
 };
 
-// src/domain/gcalendar.ts
+// src/domain/calendar/views.ts
 var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 var SHORT = MONTHS.map((month) => month.slice(0, 3));
 var parts2 = (key) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
@@ -5024,7 +5024,7 @@ var addMonths = (key, n) => {
   return keyOf2(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth4(first)));
 };
 
-// src/domain/gtaskKept.ts
+// src/domain/google/taskKept.ts
 var TASK_MINUTES = 30;
 var keptFor = (state, item) => state.googleTasks?.[googleTaskKey(item.account, item.id)] ?? null;
 var nthWeekday = (monthKey, code) => {
@@ -5397,7 +5397,7 @@ var seriesEdit = (state, account, seriesId, taskId, own, before, after) => {
   };
 };
 
-// src/domain/gtaskAdvanced.ts
+// src/domain/google/taskAdvanced.ts
 var driveQuery = (text) => {
   const words = text.trim();
   const base = "trashed = false and mimeType != 'application/vnd.google-apps.folder'";
@@ -5473,7 +5473,7 @@ var meetingsToDecline = (windows, events, declined = new Set) => events.flatMap(
   return window ? [{ invitation, window }] : [];
 });
 
-// service/googleData.ts
+// service/google/data.ts
 var CALENDAR = "https://www.googleapis.com/calendar/v3";
 var TASKS = "https://tasks.googleapis.com/tasks/v1";
 var GMAIL2 = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -5976,7 +5976,7 @@ ${calendarId}`;
   }
 }
 
-// service/googleTimeboxes.ts
+// service/google/timeboxes.ts
 var timeboxTarget = (state, taskId) => {
   const channelId = state.tasks[taskId]?.channelId;
   const channel = channelId && !state.channels[channelId]?.deletedAt ? state.settings.channelTimebox[channelId] : undefined;
@@ -6295,7 +6295,7 @@ class GoogleTimeboxes {
   }
 }
 
-// service/googleRoutes.ts
+// service/google/routes.ts
 var isEmail = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
 var isId2 = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
 var isTitle2 = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 1024;
@@ -6547,11 +6547,11 @@ var googleWriteRoute = async (req, url, ctx) => {
   return null;
 };
 
-// service/taskNotifications.ts
+// service/google/notifications.ts
 import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
 import { dirname as dirname3 } from "node:path";
 
-// src/domain/gtaskNotify.ts
+// src/domain/google/taskNotify.ts
 var TASK_NOTIFY_MINUTES = 9 * 60;
 var taskNotifications = (dueToday, deadlineTasks, kept, today, zone) => {
   const out = [];
@@ -6601,7 +6601,7 @@ ${item.id}`;
 var dueNotifications = (all, now, given) => all.filter((item) => Date.parse(item.at) <= now && !given.has(item.key));
 var nextNotificationAt = (all, now, given) => all.find((item) => Date.parse(item.at) > now && !given.has(item.key))?.at ?? null;
 
-// service/taskNotifications.ts
+// service/google/notifications.ts
 var KEEP_MS = 3 * 24 * 60 * 60000;
 var LEASE_MS = 5000;
 var ACK_LIMITS = { keys: 200, key: 300 };
@@ -6699,7 +6699,7 @@ class TaskNotifications {
   }
 }
 
-// service/googleSeries.ts
+// service/google/series.ts
 var keptPatch = (entry) => ({
   time: entry.time,
   duration: entry.duration,
@@ -7119,7 +7119,7 @@ ${seriesId}`;
   }
 }
 
-// service/googleDecline.ts
+// service/google/decline.ts
 import { mkdir as mkdir4, readFile as readFile4, rename as rename4, writeFile as writeFile4 } from "node:fs/promises";
 import { dirname as dirname4 } from "node:path";
 var DECLINE_AHEAD_DAYS = 14;
@@ -7346,7 +7346,7 @@ ${item.eventId}`, item);
   }
 }
 
-// src/domain/gtaskPending.ts
+// src/domain/google/taskPending.ts
 var PENDING_DAYS = 365;
 var pendingRange = (today) => ({ from: addDays(today, -PENDING_DAYS), to: addDays(today, -1) });
 var pendingTasks = (items, today) => {
@@ -7364,7 +7364,7 @@ ${item.id}`;
   return out.sort((a, b) => (b.due ?? "").localeCompare(a.due ?? "") || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
 };
 
-// service/agents.ts
+// service/agents/agents.ts
 import { execFile as execFile3 } from "node:child_process";
 import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync3, readdirSync as readdirSync2, renameSync, rmSync, statSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir } from "node:os";

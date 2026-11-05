@@ -15,8 +15,8 @@ Plan and progress live in the zmemory project: `.tasks/1024-planner-sunsama-feat
 | Part | Path | Role |
 |---|---|---|
 | Domain | `src/domain/` | Types, events and validation, reducer, rollover, recurrence, scheduling (free slots, lanes, playlist), ICS parsing, Linear/GitHub mapping, agent runs, rituals, suggestions, Braindump and assistant parsing. Pure; shared by service and panel. |
-| Service | `service/` → `service/main.js` | Local Node service the host starts on the first `serviceRequest`: with a chat on screen, the Work Status section asks as OpenChamber's window loads. It validates commands, appends events, folds state, commits history, syncs with a git remote, fetches ICS feeds, reads GitHub through `gh` (issues, and the pull requests agents open), keeps the API keys of extra Linear workspaces and runs the Planner's Linear queries with them, signs in Google accounts (and tells a work or school account by Google's `hd`) and talks to Google Calendar, Google Tasks, Gmail and Drive (file names, to attach to a task), declines the meetings that overlap a Busy task set to decline them (`service/googleDecline.ts`), changes a repeating Google task's series (`service/googleSeries.ts`: its next occurrence, one upcoming occurrence changed or deleted alone, an edit of all its tasks or no repeat any more, This and following tasks or All tasks deleted, and its open task gone from Google; one change of a series at a time, whichever window asks, each worked out from the plan as it is when it is written), writes working sessions to Google Calendar (with the visibility of the Google task they plan), reads Pending tasks, gives Google Calendar's task notifications to the panel's surfaces, each once, finds OpenCode's agents (its config folders, and its running server when it is up) and models (`opencode models`), and writes one OpenCode command per agent a task can be assigned to. |
-| Panel | `panel/` → `panel/main.js` | Preact UI bundled as a classic IIFE. One bundle serves the rail panel (the whole Planner, in OpenChamber's right panel), the Work Status section and a hidden background frame (message actions and slash commands). The Planner has no page of its own since 2026-11-05: the panel is the Planner, and its expand button gives it the width a page had. It is a plain extension: it changes nothing in OpenChamber and keeps the Planner the same in every chat with the released extension API alone (`panel/lib/follow.ts`, `panel/lib/place.ts`; see "In OpenChamber" below). Markdown is parsed with `marked`'s lexer and drawn as plain elements (`panel/lib/markdown.ts`): raw HTML stays text, only http(s) and mailto links, images become links, never `innerHTML`. |
+| Service | `service/` → `service/main.js` | Local Node service the host starts on the first `serviceRequest`: with a chat on screen, the Work Status section asks as OpenChamber's window loads. It validates commands, appends events, folds state, commits history, syncs with a git remote, fetches ICS feeds, reads GitHub through `gh` (issues, and the pull requests agents open), keeps the API keys of extra Linear workspaces and runs the Planner's Linear queries with them, signs in Google accounts (and tells a work or school account by Google's `hd`) and talks to Google Calendar, Google Tasks, Gmail and Drive (file names, to attach to a task), declines the meetings that overlap a Busy task set to decline them (`service/google/decline.ts`), changes a repeating Google task's series (`service/google/series.ts`: its next occurrence, one upcoming occurrence changed or deleted alone, an edit of all its tasks or no repeat any more, This and following tasks or All tasks deleted, and its open task gone from Google; one change of a series at a time, whichever window asks, each worked out from the plan as it is when it is written), writes working sessions to Google Calendar (with the visibility of the Google task they plan), reads Pending tasks, gives Google Calendar's task notifications to the panel's surfaces, each once, finds OpenCode's agents (its config folders, and its running server when it is up) and models (`opencode models`), and writes one OpenCode command per agent a task can be assigned to. |
+| Panel | `panel/` → `panel/main.js` | Preact UI bundled as a classic IIFE. One bundle serves the rail panel (the whole Planner, in OpenChamber's right panel), the Work Status section and a hidden background frame (message actions and slash commands). The Planner has no page of its own since 2026-11-05: the panel is the Planner, and its expand button gives it the width a page had. It is a plain extension: it changes nothing in OpenChamber and keeps the Planner the same in every chat with the released extension API alone (`panel/lib/openchamber/follow.ts`, `panel/lib/openchamber/place.ts`; see "In OpenChamber" below). Markdown is parsed with `marked`'s lexer and drawn as plain elements (`panel/lib/core/markdown.ts`): raw HTML stays text, only http(s) and mailto links, images become links, never `innerHTML`. |
 | Tests | `tests/*.test.ts`, `tests/support/`, `tests/e2e/` | End to end, at two levels. **Scenarios** (`bun test tests/`, in CI): each test is one thing a user does, run against the real service process as OpenChamber starts it (a loopback port and a token, its plan and keys in a temporary home), with the journeys' own fakes for Google (`tests/e2e/fakeGoogle.mjs`), GitHub (the real `gh` against `tests/e2e/fakeGithub.mjs` on a socket) and Linear (`tests/e2e/linearFake.mjs`, through OpenChamber's connection and through API keys), and Planner windows made of the panel's own client and stores, over a headless host that records what they asked OpenChamber for (`tests/support/planner.ts`): `plan` (tasks, days, rituals, Undo, subtasks in two windows, sync between machines), `googleCalendar`, `googleTasks`, `linear`, `github`, `gmail`, `agents`. Only security properties no scenario reaches are tested on their own (Markdown drawn from a safe tree; Google's tokens sent to Google alone), and `linear.test.ts` checks every document against Linear's real schema when `LINEAR_SCHEMA` names it. **Browser journeys** (Playwright): against the dev container (`containers/openchamber-dev`), `run.mjs` and `agentpr.mjs` on the installed extension (`agentpr.mjs`: a real agent opens a pull request against the fake GitHub), and `harness.mjs` journeys on this checkout's build: `smoke.mjs`, `look.mjs`, `subtasks.mjs`, `undo.mjs`, `sunsama.mjs` (its GitHub, Gmail and meetings parts run alone with `SUNSAMA_PARTS=github,gmail,meetings`; `github` needs the real `gh` as `GH_BIN`), `linear.mjs`, `calendar.mjs` and `tasks-calendar.mjs` (their service signed in to the fake Google; task notifications are off in a harness's plan unless a journey turns them on, as `tasks-calendar.mjs` does); on the adapters' scratch stack, the release and the adapted build: `forge.mjs` (links, Cmd+click and keys) and `follow.mjs` (the Planner the same in every chat and window). |
 
 **Data.** An append-only event log, `events/YYYY-MM.jsonl`, in a git repository at
@@ -43,7 +43,7 @@ Creating, changing, answering, moving and deleting events uses the same Calendar
 scope the working sessions already need, and Google Tasks its one Tasks scope, so no
 feature asks for more than before. Lists are read page after page (calendars, events,
 task lists, tasks); where the service stops reading it says so. Changes to a recurring
-event are planned in `src/domain/gevents.ts`: "This and following events" ends the series
+event are planned in `src/domain/google/events.ts`: "This and following events" ends the series
 with UNTIL (counting earlier occurrences through `events.instances` for a series with
 COUNT) and starts a new one, deleting the new one again if ending the old one fails.
 Tests point the service at a fake Google with `PLANNER_GOOGLE_API_BASE`, which takes only
@@ -89,10 +89,10 @@ URL names.
 
 An action on the Planner's own tasks, objectives, rituals and working sessions shows "… · Undo" for
 eight seconds. The service keeps, for each such batch (named by its first command), what takes it
-back, computed against the plan just before it, and the plan just after it (`service/planner.ts`,
+back, computed against the plan just before it, and the plan just after it (`service/plan/planner.ts`,
 `POST /commands` with `undo: true`). Undo (`POST /undo`) runs that against the plan as it is then,
 and only if nothing it would change was changed since by someone else (`changedSince` in
-`src/domain/undo.ts`): a field counts when the Undo would change it now and it no longer has the
+`src/domain/plan/undo.ts`): a field counts when the Undo would change it now and it no longer has the
 value the action left. Otherwise nothing is written, the other window's change stays, the window
 takes the plan as it is, and the toast says "Changed in another window since; not undone".
 
@@ -148,7 +148,7 @@ below.
 
 Review 13 found a merged task's notes, planned time and Linear link lost when its subtask was turned back into a task
 with ↗, while Merged in's Convert to task kept them: two controls for one thing, one of them lossy. There is now one
-path for both (`taskFromSubtask` in `src/domain/merge.ts`), and every other place that makes a task was checked for
+path for both (`taskFromSubtask` in `src/domain/plan/merge.ts`), and every other place that makes a task was checked for
 the same kind of loss.
 
 | What becomes a task | How | What the task keeps | Found and fixed |
@@ -264,7 +264,7 @@ looking at the first 40 task times alone). Each is now complete, says so, or is 
 
 | Where | Bound | When it is reached |
 |---|---|---|
-| Declining meetings (`service/googleDecline.ts`) | One read of the account's calendar per pass over all the times, 4 pages of 2,500 events and 5 s of declining a pass | The next pass carries on from that page or that meeting, 5 s later; the toast and the task's details say "still going through your meetings from …" (`googleTasks.test.ts`) |
+| Declining meetings (`service/google/decline.ts`) | One read of the account's calendar per pass over all the times, 4 pages of 2,500 events and 5 s of declining a pass | The next pass carries on from that page or that meeting, 5 s later; the toast and the task's details say "still going through your meetings from …" (`googleTasks.test.ts`) |
 | Declining meetings: how far ahead | Two weeks of a task's times | A later time is declined once it comes within the two weeks; the task form's note says so. Reading a repeating task's every future time every five minutes would read the whole calendar |
 | Google Calendar's events of a range; calendar list; a series' occurrences before one | 8 pages of 2,500 events; 10 pages of 250 calendars; 8 pages of 2,500 | An error says the Planner reads at most that many |
 | Event search (`/`) | A year back and two ahead; 2 pages of 250 per calendar | The results say the range; "Google found more than this; add a word" |
@@ -291,7 +291,7 @@ fake GitHub, its pasted URLs too), `linear.test.ts` and `sunsama.mjs` (its GitHu
 
 | Source: where | Bound | Before round 12 | Now |
 |---|---|---|---|
-| GitHub: the source's lists (`service/github.ts` `list`) | Pages of 50 | One page of 50, no cursor: issue 51 unreachable; Refresh read the same page | GitHub's cursor (`pageInfo`, `after`) and its count (`issueCount`): "Showing 50 of 51", Load more, "All N shown"; a search field (GitHub's syntax, sent with the list's own qualifiers); Refresh reads again as many pages as are shown |
+| GitHub: the source's lists (`service/github/github.ts` `list`) | Pages of 50 | One page of 50, no cursor: issue 51 unreachable; Refresh read the same page | GitHub's cursor (`pageInfo`, `after`) and its count (`issueCount`): "Showing 50 of 51", Load more, "All N shown"; a search field (GitHub's syntax, sent with the list's own qualifiers); Refresh reads again as many pages as are shown |
 | GitHub: one search | 1,000 results | Not said | GitHub's own limit for a search: past it the list says to narrow it with words or `repo:owner/name` |
 | GitHub: linked items kept current (`items`, `/github/items`) | 100 ids a call | The first 100 alone (`ids.slice(0, 100)`); and one deleted issue stopped every update, as `gh api graphql` exits 1 when GitHub answers errors beside data | All, 100 a call (GitHub's `nodes(ids:)` limit); the route refuses more than 100 instead of cutting; an answer with data is taken despite errors |
 | GitHub: an agent run's pull request (`/github/pulls`, `gh pr list --head`) | 4 runs a request; a branch's 10 newest | The route cut a longer request to 4 | The panel sends 4 at a time, and the route now refuses more. A branch's 10 newest pull requests: GitHub keeps one open pull request per branch and base, and the newest come first |
@@ -307,7 +307,7 @@ fake GitHub, its pasted URLs too), `linear.test.ts` and `sunsama.mjs` (its GitHu
 | Linear: a project's milestones | 100 | 25, the rest unsaid | Says so, with Open in Linear |
 | Linear: a project's teams; an issue's labels on a list row | 10; 25 | Display | Display only: label edits add and remove a label by its id, so one past 25 is never dropped, and the issue's page says it has more |
 | Gmail: a search | 25 a page | Done before: Load more messages | The same; a pasted message address is looked up in each account |
-| GitHub: the day's work in Daily highlights (`service/githubActivity.ts`) | 50 a page of each source; 10 more pages each | New in round 12 | Read to the end of the day; past 10 more pages a source says "GitHub has more … than the Planner read (N in all): see the rest on GitHub", a link to GitHub's own search for it |
+| GitHub: the day's work in Daily highlights (`service/github/activity.ts`) | 50 a page of each source; 10 more pages each | New in round 12 | Read to the end of the day; past 10 more pages a source says "GitHub has more … than the Planner read (N in all): see the rest on GitHub", a link to GitHub's own search for it |
 | Google Calendar, Google Tasks | | Round 11 | [Google's limits, one by one](#googles-limits-one-by-one) |
 | Daily planning's sources | | | The same panels as the board's (Linear, GitHub, Gmail, Google Tasks), so the same paging; its meetings are the day's events |
 
@@ -321,7 +321,7 @@ a Load more button says "Loading…" while any read of its list is under way.
 
 | Read | Before | Now | Checked by |
 |---|---|---|---|
-| GitHub: the source's list, and its Load more (`panel/lib/github.ts`) | Another search, repository or list kind, or Refresh, during a Load more: "Loading…" for good. During a Refresh the button said Load more and did nothing. The 5-minute refresh could drop a Load more the user asked for | Another list (`replace`) or Refresh drops what was under way for the one before, its Load more flag with it; a late page changes nothing. The 5-minute refresh waits for a Load more | `github.test.ts` (each change, the old page answering before and after the new one, an old error, Load more during a Refresh, the 5-minute refresh); `sunsama.mjs`'s GitHub part at 1440 and 1024: each change during a held Load more, then the list's own Load more to #101, planned |
+| GitHub: the source's list, and its Load more (`panel/lib/github/store.ts`) | Another search, repository or list kind, or Refresh, during a Load more: "Loading…" for good. During a Refresh the button said Load more and did nothing. The 5-minute refresh could drop a Load more the user asked for | Another list (`replace`) or Refresh drops what was under way for the one before, its Load more flag with it; a late page changes nothing. The 5-minute refresh waits for a Load more | `github.test.ts` (each change, the old page answering before and after the new one, an old error, Load more during a Refresh, the 5-minute refresh); `sunsama.mjs`'s GitHub part at 1440 and 1024: each change during a held Load more, then the list's own Load more to #101, planned |
 | Linear: issue lists (`loadList`, `loadMore`) | A newer read cleared `loadingMore` only when it succeeded; one that failed (a view gone) left it set. A workspace taken off during Load more got its page back into the list. The button said Load more, doing nothing, while the list was read again | A read clears it as it starts. A page of a workspace taken off is dropped, its cursor with it. "Loading…" while the list is read | `linear.test.ts` |
 | Linear: saved views (`loadViews`, Load more views) | Read again during Load more views, the old page joined the views read since (a view deleted in Linear came back); an older read could replace a newer one | The newest read stands; Load more views adds only to the views it was asked for | `linear.test.ts` |
 | Linear: projects | Right as is: one flag for both reads; Load more projects waits for a read; a newer read drops an older Load more and clears the flag itself | A workspace taken off: its page is dropped, as for issue lists | Reading |
@@ -476,7 +476,7 @@ compared with what Sunsama documents (its [Add via URL](https://help.sunsama.com
 [GitHub](https://help.sunsama.com/docs/integrations/github), [Linear](https://help.sunsama.com/docs/integrations/linear)
 and [Gmail](https://help.sunsama.com/docs/integrations/gmail) pages, read 2026-10-29). As in Sunsama, the field
 says what Enter does before it is pressed; `~30m` and `@friday` after the URL still plan its time and day.
-Code: `src/domain/pastedUrl.ts`, `panel/lib/addTask.ts`.
+Code: `src/domain/plan/pastedUrl.ts`, `panel/lib/core/addTask.ts`.
 
 | Pasted | Sunsama | The Planner |
 |---|---|---|
@@ -507,7 +507,7 @@ GitHub) and `github.test.ts`.
 | Gmail integration | Nothing: its page covers labels and filters, importing, the thread in the task, actions on the email and import and completion automations | Emails planned as tasks are tasks, as above |
 | Calendar integration | Nothing: its page covers calendars, events, meeting import and timeboxing | Meetings planned as tasks are tasks, as above |
 
-How the Planner reads GitHub's day (`service/githubActivity.ts`), each source a page of 50 at a time with its cursor,
+How the Planner reads GitHub's day (`service/github/activity.ts`), each source a page of 50 at a time with its cursor,
 the first page of all of them in one `gh api graphql` call:
 
 | What | Read from | Why |

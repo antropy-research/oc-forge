@@ -9,8 +9,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { GuestProject, GuestSessionRecord, GuestWorktree } from '@openchamber/sdk';
-import { agentAssignee, presetAssignee } from '../src/domain/assignees.ts';
-import type { AgentPreset, PlannerState } from '../src/domain/types.ts';
+import { agentAssignee, presetAssignee } from '../src/domain/agents/assignees.ts';
+import type { AgentPreset, PlannerState } from '../src/domain/core/types.ts';
 import { MODELS, enableStandIn, makesWorktrees, opencodeCalls, opencodeStandIn, projectCheckout, sh } from './support/agents.ts';
 import { firstOf, notesOf, slowRelay } from './support/github.ts';
 import { realGh, startPlanner, until, usePlanner, type PlannerWindow } from './support/planner.ts';

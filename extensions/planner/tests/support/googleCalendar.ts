@@ -2,7 +2,7 @@
 // (ICS) served on this machine, a zone where it is about noon now, and the fake Google calendars the scenarios read.
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { addDays, instantAt, todayIn } from '../../src/domain/dates.ts';
+import { addDays, instantAt, todayIn } from '../../src/domain/core/dates.ts';
 import { defaultFakeWorld, fakeAuthCode, type FakeWorld } from '../e2e/fakeGoogle.mjs';
 import type { Planner } from './planner.ts';
 

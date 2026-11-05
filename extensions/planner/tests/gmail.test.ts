@@ -5,10 +5,10 @@
 // Gmail panel, its filters and its prompts on screen. A pasted Gmail address is in tests/github.test.ts ("a URL pasted
 // as a new task").
 import { beforeAll, describe, expect, test } from 'bun:test';
-import type { EventBody } from '../src/domain/events.ts';
-import { gmailUrl } from '../src/domain/google.ts';
-import type { MailItem } from '../src/domain/google.ts';
-import type { TaskSourceRef } from '../src/domain/types.ts';
+import type { EventBody } from '../src/domain/core/events.ts';
+import { gmailUrl } from '../src/domain/google/google.ts';
+import type { MailItem } from '../src/domain/google/google.ts';
+import type { TaskSourceRef } from '../src/domain/core/types.ts';
 import { firstOf, notesOf, slowRelay } from './support/github.ts';
 import { ME, OTHER, THREADS, addSecondAccount, labelsOf, mailWorld, threadActs } from './support/gmail.ts';
 import { until, usePlanner, type PlannerWindow } from './support/planner.ts';

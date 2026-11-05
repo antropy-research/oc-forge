@@ -4,7 +4,7 @@
 // of the Planner's documents is answered, and filters are evaluated as Linear does (tests/e2e/linearFake.mjs), so what a
 // window shows is what the filter it sent selects there.
 import { makeFilters, page } from '../e2e/linearFake.mjs';
-import { addDays, startOfWeek, todayIn } from '../../src/domain/dates.ts';
+import { addDays, startOfWeek, todayIn } from '../../src/domain/core/dates.ts';
 import { createServer, type AddressInfo } from 'node:net';
 import type { LinearAnswer, LinearCall } from './planner.ts';
 

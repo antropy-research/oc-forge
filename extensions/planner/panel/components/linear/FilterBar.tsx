@@ -9,7 +9,7 @@
 // person, label, project, milestone and cycle), and the filters go to Linear,
 // which answers with every matching issue.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { monthDay } from '../../../src/domain/dates.ts';
+import { monthDay } from '../../../src/domain/core/dates.ts';
 import {
   FILTER_FIELD_LABELS,
   LINEAR_FILTER_FIELDS,
@@ -43,9 +43,9 @@ import {
   type LinearFilterNode,
   type LinearFilterRule,
   type LinearRawFilter,
-} from '../../../src/domain/linearFilter.ts';
-import { useLinear, usePlanner } from '../../lib/context.ts';
-import type { ListId } from '../../lib/linear.ts';
+} from '../../../src/domain/linear/filter.ts';
+import { useLinear, usePlanner } from '../../lib/core/context.ts';
+import type { ListId } from '../../lib/linear/store.ts';
 import { Avatar, CycleIcon, Dot, PriorityIcon, ProjectIcon, StatusIcon } from './icons.tsx';
 import { Picker, useDismiss, useKeepInView, type PickerOption } from './Picker.tsx';
 

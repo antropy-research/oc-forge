@@ -1,7 +1,7 @@
 // Gmail for Area E's scenarios: a fake Google mailbox (tests/e2e/fakeGoogle.mjs) and a second Google account.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { todayIn } from '../../src/domain/dates.ts';
+import { todayIn } from '../../src/domain/core/dates.ts';
 import { DEFAULT_SCOPES, GMAIL_MODIFY_SCOPE, defaultFakeWorld, type FakeWorld } from '../e2e/fakeGoogle.mjs';
 import type { Planner } from './planner.ts';
 

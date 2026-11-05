@@ -2,13 +2,13 @@
 // "Other calendars" with a colored checkbox each; under "My calendars", Tasks
 // and each task list, with its own checkbox and color.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { CalendarSubscription, DateKey } from '../../../src/domain/types.ts';
-import type { GoogleCalendarInfo, GoogleTaskList } from '../../../src/domain/google.ts';
-import { orderedLists, taskListColor, taskListKey } from '../../../src/domain/gtaskAdvanced.ts';
-import { addDays } from '../../../src/domain/dates.ts';
-import { addMonths, longDay, monthStart, monthWeeks } from '../../../src/domain/gcalendar.ts';
-import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
-import { anchorOf, calendarUi, useCalendarUi } from '../../lib/gcal.ts';
+import type { CalendarSubscription, DateKey } from '../../../src/domain/core/types.ts';
+import type { GoogleCalendarInfo, GoogleTaskList } from '../../../src/domain/google/google.ts';
+import { orderedLists, taskListColor, taskListKey } from '../../../src/domain/google/taskAdvanced.ts';
+import { addDays } from '../../../src/domain/core/dates.ts';
+import { addMonths, longDay, monthStart, monthWeeks } from '../../../src/domain/calendar/views.ts';
+import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
+import { anchorOf, calendarUi, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
 import { Icon } from './Icon.tsx';
 import { GOOGLE_TASKS_COLOR } from './items.ts';
 

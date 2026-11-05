@@ -1,15 +1,15 @@
 import { useState } from 'preact/hooks';
 import { HostRequestError } from '@openchamber/sdk';
-import type { DateKey, Highlight, RitualRecord } from '../../../src/domain/types.ts';
-import { addDays, clockLabel, formatMinutes, instantAt, monthDay, weekdayName, zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { actualMinutes, tasksForDay } from '../../../src/domain/selectors.ts';
-import { completedOnDay, highlightItems, ritualRecord } from '../../../src/domain/rituals.ts';
-import { ACTIVITY_SECTIONS, ACTIVITY_SOURCE_NOUNS, activityGroups, activityLabel, activityMoreUrl, activityText, type ActivityGroup } from '../../../src/domain/githubActivity.ts';
-import { newId } from '../../../src/domain/ids.ts';
-import { useGitHub, usePlanner, useView } from '../../lib/context.ts';
-import { useGitHubActivity } from '../../lib/githubActivity.ts';
-import { GitHubSignIn } from '../GitHubPanel.tsx';
-import { ExternalLink } from '../ExternalLink.tsx';
+import type { DateKey, Highlight, RitualRecord } from '../../../src/domain/core/types.ts';
+import { addDays, clockLabel, formatMinutes, instantAt, monthDay, weekdayName, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { actualMinutes, tasksForDay } from '../../../src/domain/core/selectors.ts';
+import { completedOnDay, highlightItems, ritualRecord } from '../../../src/domain/plan/rituals.ts';
+import { ACTIVITY_SECTIONS, ACTIVITY_SOURCE_NOUNS, activityGroups, activityLabel, activityMoreUrl, activityText, type ActivityGroup } from '../../../src/domain/github/activity.ts';
+import { newId } from '../../../src/domain/core/ids.ts';
+import { useGitHub, usePlanner, useView } from '../../lib/core/context.ts';
+import { useGitHubActivity } from '../../lib/github/activity.ts';
+import { GitHubSignIn } from '../github/GitHubPanel.tsx';
+import { ExternalLink } from '../common/ExternalLink.tsx';
 import { ChannelBreakdown, TimeSummary } from './DailyShutdown.tsx';
 
 /** A highlight included from GitHub's activity names it by this, so the activity shows as included. */

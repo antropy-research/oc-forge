@@ -1,6 +1,6 @@
 // Google Calendar in the Planner, end to end: the real service signed in to the journeys' fake Google
 // (tests/e2e/fakeGoogle.mjs), Planner windows made of the panel's own client and stores (tests/support/planner.ts),
-// and the calendar view's own requests (panel/lib/gcal.ts). Signing in (the OAuth client, Google's consent page, a
+// and the calendar view's own requests (panel/lib/calendar/calendarUi.ts). Signing in (the OAuth client, Google's consent page, a
 // pasted address, features as Google granted them, secrets kept on this machine, an account removed); the account's
 // own calendar shown from the start; the week read page after page, with what may be done with each event; events
 // made, changed, answered, moved, deleted and put back; recurring events (This event, This and following, All events)
@@ -12,11 +12,11 @@ import { beforeAll, afterAll, describe, expect, test } from 'bun:test';
 import { readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addDays, instantAt, todayIn } from '../src/domain/dates.ts';
-import type { GoogleEventRef } from '../src/domain/google.ts';
-import type { CalendarEvent } from '../src/domain/ics.ts';
-import { createEvent, deleteEvent, eventDetail, moveEventToCalendar, respondToEvent, restoreEvent, searchEvents, updateEvent } from '../panel/lib/gcal.ts';
-import { GoogleAccounts, testFetcher } from '../service/google.ts';
+import { addDays, instantAt, todayIn } from '../src/domain/core/dates.ts';
+import type { GoogleEventRef } from '../src/domain/google/google.ts';
+import type { CalendarEvent } from '../src/domain/calendar/ics.ts';
+import { createEvent, deleteEvent, eventDetail, moveEventToCalendar, respondToEvent, restoreEvent, searchEvents, updateEvent } from '../panel/lib/calendar/calendarUi.ts';
+import { GoogleAccounts, testFetcher } from '../service/google/accounts.ts';
 import { defaultFakeWorld } from './e2e/fakeGoogle.mjs';
 import { until, usePlanner, type PlannerWindow } from './support/planner.ts';
 import { LA, ME, WORK, calendarWorld, consentRedirect, eventsIn, meetingWorld, noonZone, requestsTo, serveFeed, showCalendar } from './support/googleCalendar.ts';

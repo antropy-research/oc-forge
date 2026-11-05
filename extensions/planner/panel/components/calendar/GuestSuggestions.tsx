@@ -2,7 +2,7 @@
 // account (its contacts, and the people it emailed) whose name or address starts so, to pick from. An account that has
 // not allowed Contacts offers to allow them.
 import { useEffect, useState } from 'preact/hooks';
-import { useGoogle, usePlanner } from '../../lib/context.ts';
+import { useGoogle, usePlanner } from '../../lib/core/context.ts';
 
 export interface ContactSuggestions {
   listId: string;

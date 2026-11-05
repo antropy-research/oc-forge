@@ -9,15 +9,15 @@
 // Do not disturb, declining meetings); and task notifications, lent to the window that takes them until it shows them.
 import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
-import { FreshnessError, listKey, OCCURRENCE_KEEPS_DATE, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, TaskConflict } from '../panel/lib/google.ts';
-import { startTaskNotifications } from '../panel/lib/notifications.ts';
-import { instantAt, todayIn, zonedDateMinutes } from '../src/domain/dates.ts';
-import type { EventBody } from '../src/domain/events.ts';
-import type { GoogleTaskItem } from '../src/domain/google.ts';
-import { settleConflicts } from '../src/domain/gtaskForm.ts';
-import { newId } from '../src/domain/ids.ts';
-import { mergeTaskCommands } from '../src/domain/merge.ts';
-import type { DateKey, TaskAttachment } from '../src/domain/types.ts';
+import { FreshnessError, listKey, OCCURRENCE_KEEPS_DATE, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, TaskConflict } from '../panel/lib/google/store.ts';
+import { startTaskNotifications } from '../panel/lib/google/notifications.ts';
+import { instantAt, todayIn, zonedDateMinutes } from '../src/domain/core/dates.ts';
+import type { EventBody } from '../src/domain/core/events.ts';
+import type { GoogleTaskItem } from '../src/domain/google/google.ts';
+import { settleConflicts } from '../src/domain/google/taskForm.ts';
+import { newId } from '../src/domain/core/ids.ts';
+import { mergeTaskCommands } from '../src/domain/plan/merge.ts';
+import type { DateKey, TaskAttachment } from '../src/domain/core/types.ts';
 import { DEFAULT_SCOPES, defaultFakeWorld, fakeAuthCode } from './e2e/fakeGoogle.mjs';
 import { usePlanner, type Planner } from './support/planner.ts';
 import {

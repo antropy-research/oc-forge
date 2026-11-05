@@ -6,18 +6,18 @@
 // date; a time kept in the Planner stays), and Edit opens the task's editor
 // over the calendar. A task done or moved past yesterday leaves the list.
 import { useState } from 'preact/hooks';
-import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { DateKey } from '../../../src/domain/types.ts';
-import { addDays, isDateKey } from '../../../src/domain/dates.ts';
-import { longDay } from '../../../src/domain/gcalendar.ts';
-import { describeRecurrence } from '../../../src/domain/rrule.ts';
-import type { GoogleTaskItem } from '../../../src/domain/google.ts';
-import { keptFor, keptTimeLabel } from '../../../src/domain/gtaskKept.ts';
-import { dateBlock, PENDING_DAYS } from '../../../src/domain/gtaskPending.ts';
-import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
-import { calendarUi, type Anchor } from '../../lib/gcal.ts';
-import { undoAction } from '../../lib/google.ts';
-import { pendingStore, usePendingTasks } from '../../lib/pendingTasks.ts';
+import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
+import type { DateKey } from '../../../src/domain/core/types.ts';
+import { addDays, isDateKey } from '../../../src/domain/core/dates.ts';
+import { longDay } from '../../../src/domain/calendar/views.ts';
+import { describeRecurrence } from '../../../src/domain/google/rrule.ts';
+import type { GoogleTaskItem } from '../../../src/domain/google/google.ts';
+import { keptFor, keptTimeLabel } from '../../../src/domain/google/taskKept.ts';
+import { dateBlock, PENDING_DAYS } from '../../../src/domain/google/taskPending.ts';
+import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
+import { calendarUi, type Anchor } from '../../lib/calendar/calendarUi.ts';
+import { undoAction } from '../../lib/google/store.ts';
+import { pendingStore, usePendingTasks } from '../../lib/google/pendingTasks.ts';
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
 

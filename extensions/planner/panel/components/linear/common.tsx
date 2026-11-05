@@ -1,6 +1,6 @@
 // Pieces the Linear page and the side panels share.
-import { usePlanner } from '../../lib/context.ts';
-import type { LinearView } from '../../lib/linear.ts';
+import { usePlanner } from '../../lib/core/context.ts';
+import type { LinearView } from '../../lib/linear/store.ts';
 
 export const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 

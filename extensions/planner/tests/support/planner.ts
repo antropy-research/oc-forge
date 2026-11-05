@@ -32,15 +32,15 @@ import type {
   StartSessionRequest,
   ToastRequest,
 } from '@openchamber/sdk';
-import { PlannerClient } from '../../panel/lib/client.ts';
-import { LinearStore } from '../../panel/lib/linear.ts';
-import { AgentStore } from '../../panel/lib/agents.ts';
-import { GitHubStore } from '../../panel/lib/github.ts';
-import { GoogleStore } from '../../panel/lib/google.ts';
-import { GmailStore } from '../../panel/lib/gmail.ts';
-import { registerBackground } from '../../panel/lib/background.ts';
-import type { EventBody } from '../../src/domain/events.ts';
-import type { PlannerState } from '../../src/domain/types.ts';
+import { PlannerClient } from '../../panel/lib/core/client.ts';
+import { LinearStore } from '../../panel/lib/linear/store.ts';
+import { AgentStore } from '../../panel/lib/agents/store.ts';
+import { GitHubStore } from '../../panel/lib/github/store.ts';
+import { GoogleStore } from '../../panel/lib/google/store.ts';
+import { GmailStore } from '../../panel/lib/google/gmail.ts';
+import { registerBackground } from '../../panel/lib/core/background.ts';
+import type { EventBody } from '../../src/domain/core/events.ts';
+import type { PlannerState } from '../../src/domain/core/types.ts';
 import { defaultFakeWorld, startFakeGoogle, type FakeGoogle, type FakeWorld } from '../e2e/fakeGoogle.mjs';
 import { defaultGithubWorld, ghConfigFiles, startFakeGithub, type FakeGithub } from '../e2e/fakeGithub.mjs';
 import { answerLinear, defaultLinearWorld, type LinearWorld } from '../e2e/linearFake.mjs';

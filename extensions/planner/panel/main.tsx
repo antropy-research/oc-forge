@@ -2,15 +2,15 @@
 import { render } from 'preact';
 import { connectHost } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
-import { PlannerClient } from './lib/client.ts';
-import { LinearStore } from './lib/linear.ts';
-import { AgentStore } from './lib/agents.ts';
-import { GitHubStore } from './lib/github.ts';
-import { GoogleStore } from './lib/google.ts';
-import { GmailStore } from './lib/gmail.ts';
-import { registerBackground } from './lib/background.ts';
-import { PlannerContext } from './lib/context.ts';
-import { App } from './components/App.tsx';
+import { PlannerClient } from './lib/core/client.ts';
+import { LinearStore } from './lib/linear/store.ts';
+import { AgentStore } from './lib/agents/store.ts';
+import { GitHubStore } from './lib/github/store.ts';
+import { GoogleStore } from './lib/google/store.ts';
+import { GmailStore } from './lib/google/gmail.ts';
+import { registerBackground } from './lib/core/background.ts';
+import { PlannerContext } from './lib/core/context.ts';
+import { App } from './components/app/App.tsx';
 
 const host = connectHost();
 const client = new PlannerClient(host);

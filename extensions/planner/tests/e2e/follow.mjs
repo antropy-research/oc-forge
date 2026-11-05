@@ -1,5 +1,5 @@
 // The Planner as one right panel for the whole window, with OpenChamber's released extension API alone (the Planner
-// changes nothing in OpenChamber: panel/lib/follow.ts, panel/lib/place.ts), on both instances of the scratch stack,
+// changes nothing in OpenChamber: panel/lib/openchamber/follow.ts, panel/lib/openchamber/place.ts), on both instances of the scratch stack,
 // the npm release (`stock`) and oc-forge's adapted build (`adapted`):
 //
 // - the rail icon shows the whole Planner in the right panel;

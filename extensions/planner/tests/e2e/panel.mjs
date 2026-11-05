@@ -15,7 +15,7 @@ const RAIL = 'button[data-context-surface="plugin:oc-forge-planner"]';
 const plannerZone = (page) => page.locator('aside[data-context-zone]', { has: page.locator('iframe[title="Planner"]:not(.bg-transparent)') }).first();
 
 /**
- * A new Planner frame starts where the Planner was (panel/lib/place.ts, this browser's storage): a journey starts on
+ * A new Planner frame starts where the Planner was (panel/lib/openchamber/place.ts, this browser's storage): a journey starts on
  * Home, with nothing open over it, as it always has.
  */
 const toHome = async (frame) => {

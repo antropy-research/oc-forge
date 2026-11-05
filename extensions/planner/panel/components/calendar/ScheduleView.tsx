@@ -1,13 +1,13 @@
 // Google Calendar's Schedule view: day after day, only days with something on
 // them, each event with its time, calendar color and place.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { DateKey } from '../../../src/domain/types.ts';
-import { zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { compactRange, longDay, scheduleDays, shortDay, weekdayShort } from '../../../src/domain/gcalendar.ts';
-import { usePlanner, useView } from '../../lib/context.ts';
-import { useUi } from '../../lib/ui.ts';
-import { anchorOf, calendarUi, popoverKind, searchEvents, useCalendarUi } from '../../lib/gcal.ts';
+import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
+import type { DateKey } from '../../../src/domain/core/types.ts';
+import { zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { compactRange, longDay, scheduleDays, shortDay, weekdayShort } from '../../../src/domain/calendar/views.ts';
+import { usePlanner, useView } from '../../lib/core/context.ts';
+import { useUi } from '../../lib/core/ui.ts';
+import { anchorOf, calendarUi, popoverKind, searchEvents, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
 import { answerClass, calendarItems, deadlinePassed, eventColor, eventLabel, isTaskEvent, itemKey, plannedTask, taskClass, taskEventLabel } from './items.ts';
 import { Icon } from './Icon.tsx';
 

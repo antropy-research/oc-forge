@@ -1,11 +1,11 @@
 import { useState } from 'preact/hooks';
-import type { DateKey, Task } from '../../../src/domain/types.ts';
-import { addDays, formatMinutes, monthDay, weekdayName } from '../../../src/domain/dates.ts';
-import { actualIsFromPlan, actualMinutes, tasksForDay } from '../../../src/domain/selectors.ts';
-import { completedOnDay, ritualRecord, timeByChannel } from '../../../src/domain/rituals.ts';
-import { usePlanner, useView } from '../../lib/context.ts';
-import { moveTo } from '../../lib/commands.ts';
-import { useUi } from '../../lib/ui.ts';
+import type { DateKey, Task } from '../../../src/domain/core/types.ts';
+import { addDays, formatMinutes, monthDay, weekdayName } from '../../../src/domain/core/dates.ts';
+import { actualIsFromPlan, actualMinutes, tasksForDay } from '../../../src/domain/core/selectors.ts';
+import { completedOnDay, ritualRecord, timeByChannel } from '../../../src/domain/plan/rituals.ts';
+import { usePlanner, useView } from '../../lib/core/context.ts';
+import { moveTo } from '../../lib/core/commands.ts';
+import { useUi } from '../../lib/core/ui.ts';
 import { Wizard } from './Wizard.tsx';
 
 const STEPS = ['Review today', 'Unfinished work', 'Reflect'];

@@ -3,7 +3,7 @@
 // Backspace on an empty field to go back), with ticks for several choices.
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { searchChoices } from '../../../src/domain/linearFilter.ts';
+import { searchChoices } from '../../../src/domain/linear/filter.ts';
 
 export interface PickerOption {
   value: string;

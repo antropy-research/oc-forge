@@ -1,10 +1,10 @@
 import { useState } from 'preact/hooks';
-import type { DateKey, Objective } from '../../../src/domain/types.ts';
-import { addDays, formatMinutes, monthDay, weekdayName } from '../../../src/domain/dates.ts';
-import { actualMinutes } from '../../../src/domain/selectors.ts';
-import { completedOnDay, objectivesForWeek, planningWeek, ritualRecord, tasksForObjective, weekDates, weekStartOf } from '../../../src/domain/rituals.ts';
-import { newId } from '../../../src/domain/ids.ts';
-import { usePlanner, useView } from '../../lib/context.ts';
+import type { DateKey, Objective } from '../../../src/domain/core/types.ts';
+import { addDays, formatMinutes, monthDay, weekdayName } from '../../../src/domain/core/dates.ts';
+import { actualMinutes } from '../../../src/domain/core/selectors.ts';
+import { completedOnDay, objectivesForWeek, planningWeek, ritualRecord, tasksForObjective, weekDates, weekStartOf } from '../../../src/domain/plan/rituals.ts';
+import { newId } from '../../../src/domain/core/ids.ts';
+import { usePlanner, useView } from '../../lib/core/context.ts';
 import { ChannelBreakdown, TimeSummary } from './DailyShutdown.tsx';
 import { Wizard } from './Wizard.tsx';
 

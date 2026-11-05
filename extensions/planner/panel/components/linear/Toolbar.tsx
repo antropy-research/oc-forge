@@ -1,7 +1,7 @@
 // The bar above a list, as in Linear: filters on the left, then how many
 // issues and the Display options on the right.
-import { useLinear, useView } from '../../lib/context.ts';
-import { displayOf, type ListId } from '../../lib/linear.ts';
+import { useLinear, useView } from '../../lib/core/context.ts';
+import { displayOf, type ListId } from '../../lib/linear/store.ts';
 import { DisplayMenu, ProjectDisplayMenu } from './DisplayMenu.tsx';
 import { FilterBar } from './FilterBar.tsx';
 

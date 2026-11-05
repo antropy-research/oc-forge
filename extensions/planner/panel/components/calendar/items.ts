@@ -1,16 +1,16 @@
 // What the calendar views draw: events, working sessions and Google tasks as
 // one kind of item, their colors (Google Calendar's solid fills, with ink that
 // reads on them), labels, and the drag payloads between calendar cells.
-import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { DateKey, PlannerState, Task, WorkBlock } from '../../../src/domain/types.ts';
-import { TASKS_COLOR, taskColor, taskListColor, taskListShown } from '../../../src/domain/gtaskAdvanced.ts';
-import { blocksOnDay } from '../../../src/domain/selectors.ts';
-import { addDays, zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { compactClock, compactRange, eventSpan, longDay, shortDay, type RowItem } from '../../../src/domain/gcalendar.ts';
-import { GOOGLE_TASKS_CALENDAR, taskForGoogleTask } from '../../../src/domain/google.ts';
-import { keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/gtaskKept.ts';
-import { PENDING_DAYS } from '../../../src/domain/gtaskPending.ts';
-import { describeRecurrence } from '../../../src/domain/rrule.ts';
+import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
+import type { DateKey, PlannerState, Task, WorkBlock } from '../../../src/domain/core/types.ts';
+import { TASKS_COLOR, taskColor, taskListColor, taskListShown } from '../../../src/domain/google/taskAdvanced.ts';
+import { blocksOnDay } from '../../../src/domain/core/selectors.ts';
+import { addDays, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { compactClock, compactRange, eventSpan, longDay, shortDay, type RowItem } from '../../../src/domain/calendar/views.ts';
+import { GOOGLE_TASKS_CALENDAR, taskForGoogleTask } from '../../../src/domain/google/google.ts';
+import { keptFor, keptTimeLabel, upcomingValues } from '../../../src/domain/google/taskKept.ts';
+import { PENDING_DAYS } from '../../../src/domain/google/taskPending.ts';
+import { describeRecurrence } from '../../../src/domain/google/rrule.ts';
 
 /** Google Calendar's color for tasks. */
 export const GOOGLE_TASKS_COLOR = TASKS_COLOR;

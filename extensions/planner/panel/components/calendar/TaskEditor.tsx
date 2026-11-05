@@ -10,12 +10,12 @@
 // is then; a field changed meanwhile too is asked about. It closes once
 // Google has the edit; a refusal stays in it, with the edit, to save again.
 import { useEffect } from 'preact/hooks';
-import { keptFor, upcomingValues } from '../../../src/domain/gtaskKept.ts';
-import { seriesShown, templateAdvanced } from '../../../src/domain/gtaskForm.ts';
-import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
-import { calendarUi, type TaskEditorTarget } from '../../lib/gcal.ts';
-import { listKey, REPEATING_STAYS } from '../../lib/google.ts';
-import { repeatBlock, TaskForm, useTaskSave } from '../TasksView.tsx';
+import { keptFor, upcomingValues } from '../../../src/domain/google/taskKept.ts';
+import { seriesShown, templateAdvanced } from '../../../src/domain/google/taskForm.ts';
+import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
+import { calendarUi, type TaskEditorTarget } from '../../lib/calendar/calendarUi.ts';
+import { listKey, REPEATING_STAYS } from '../../lib/google/store.ts';
+import { repeatBlock, TaskForm, useTaskSave } from '../google/TasksView.tsx';
 import { Icon } from './Icon.tsx';
 
 /** Why one task of a series does not change the repeat: its series has it. */

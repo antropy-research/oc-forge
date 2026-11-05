@@ -2,11 +2,11 @@
 // progress on each row), saved views of projects, and one project's page: its
 // facts, its issues as a full list (filters, display, board) and its overview.
 import { useState } from 'preact/hooks';
-import { monthDay } from '../../../src/domain/dates.ts';
-import { HEALTH_LABELS, groupProjects } from '../../../src/domain/linearDisplay.ts';
-import type { LinearProject, LinearProjectDetail } from '../../../src/domain/linear.ts';
-import { useLinear, usePlanner, useView } from '../../lib/context.ts';
-import { displayOf, type OpenProject } from '../../lib/linear.ts';
+import { monthDay } from '../../../src/domain/core/dates.ts';
+import { HEALTH_LABELS, groupProjects } from '../../../src/domain/linear/display.ts';
+import type { LinearProject, LinearProjectDetail } from '../../../src/domain/linear/linear.ts';
+import { useLinear, usePlanner, useView } from '../../lib/core/context.ts';
+import { displayOf, type OpenProject } from '../../lib/linear/store.ts';
 import { HeadSearch, SidebarToggle } from './chrome.tsx';
 import { LinearErrors, excerpt, workspaceLabel } from './common.tsx';
 import { Avatar, ProjectIcon } from './icons.tsx';

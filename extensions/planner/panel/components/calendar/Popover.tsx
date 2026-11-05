@@ -1,6 +1,6 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
-import type { Anchor } from '../../lib/gcal.ts';
+import type { Anchor } from '../../lib/calendar/calendarUi.ts';
 
 const MARGIN = 8;
 

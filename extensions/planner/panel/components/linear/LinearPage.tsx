@@ -5,10 +5,10 @@
 // [ the sidebar, G then I (my issues), V (views) or P (projects). Where the
 // page is narrow the sidebar folds behind a toggle and opens over the list.
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
-import { isProjectView, viewUrl } from '../../../src/domain/linear.ts';
-import { useLinear, usePlanner, useView } from '../../lib/context.ts';
-import { useUi } from '../../lib/ui.ts';
-import { displayOf, sameSource, type IssueList, type LinearView } from '../../lib/linear.ts';
+import { isProjectView, viewUrl } from '../../../src/domain/linear/linear.ts';
+import { useLinear, usePlanner, useView } from '../../lib/core/context.ts';
+import { useUi } from '../../lib/core/ui.ts';
+import { displayOf, sameSource, type IssueList, type LinearView } from '../../lib/linear/store.ts';
 import { HeadSearch, LinearChromeContext, SidebarToggle, type LinearChrome } from './chrome.tsx';
 import { ConnectLinear, LinearErrors, needsConnect, workspaceLabel } from './common.tsx';
 import { ViewIcon } from './icons.tsx';

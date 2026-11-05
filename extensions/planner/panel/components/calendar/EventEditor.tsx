@@ -5,14 +5,14 @@
 // event with guests asks whether to email them, as Google Calendar does.
 import { GuestSuggestions, useContactSuggestions } from './GuestSuggestions.tsx';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { DateKey } from '../../../src/domain/types.ts';
-import { addDays, daysBetween, instantAt, isDateKey, zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { customOf, customRule, describeRecurrence, monthlyLabels, presetIdOf, recurrencePresets, splitRecurrence, type CustomRecurrence } from '../../../src/domain/rrule.ts';
-import { descriptionText, isEmailAddress, type EditScope, type EventInput } from '../../../src/domain/gevents.ts';
-import { EVENT_COLORS, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google.ts';
-import { useGoogle, usePlanner, useView } from '../../lib/context.ts';
-import { addEvent, askScope, askSend, calendarUi, eventDetail, moveEventToCalendar, updateEvent, useCalendarUi, type EditorTarget } from '../../lib/gcal.ts';
+import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
+import type { DateKey } from '../../../src/domain/core/types.ts';
+import { addDays, daysBetween, instantAt, isDateKey, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { customOf, customRule, describeRecurrence, monthlyLabels, presetIdOf, recurrencePresets, splitRecurrence, type CustomRecurrence } from '../../../src/domain/google/rrule.ts';
+import { descriptionText, isEmailAddress, type EditScope, type EventInput } from '../../../src/domain/google/events.ts';
+import { EVENT_COLORS, type GoogleEventDetail, type GoogleReminder, type GoogleResponse } from '../../../src/domain/google/google.ts';
+import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
+import { addEvent, askScope, askSend, calendarUi, eventDetail, moveEventToCalendar, updateEvent, useCalendarUi, type EditorTarget } from '../../lib/calendar/calendarUi.ts';
 import { Icon } from './Icon.tsx';
 import { calendarKey, defaultCalendar, endChoices, startChoices, writableCalendars } from './form.ts';
 

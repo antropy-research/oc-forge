@@ -1,7 +1,7 @@
 // Helpers for Area E's scenarios (tests/github.test.ts, gmail.test.ts, agents.test.ts): OpenChamber's relay between a
 // window and the service when it is slow, what a window's error line said, and GitHub worlds for the fake GitHub
 // behind the real gh (tests/e2e/fakeGithub.mjs).
-import type { GitHubItem } from '../../src/domain/github.ts';
+import type { GitHubItem } from '../../src/domain/github/github.ts';
 import { fakeIssue, type FakeGithubWorld, type FakeIssue } from '../e2e/fakeGithub.mjs';
 import type { PlannerWindow } from './planner.ts';
 

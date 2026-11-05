@@ -7,12 +7,12 @@
 // range: events of the calendars shown, Google tasks (their deadlines, upcoming
 // occurrences and Pending tasks) and the Planner's working sessions.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { DateKey } from '../../../src/domain/types.ts';
-import type { GoogleResponse } from '../../../src/domain/google.ts';
-import { clockLabel, daysBetween, zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { compactRange, scheduleDays, weekdayShort, longDay, type CalendarMode } from '../../../src/domain/gcalendar.ts';
-import { layoutLanes } from '../../../src/domain/schedule.ts';
+import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
+import type { DateKey } from '../../../src/domain/core/types.ts';
+import type { GoogleResponse } from '../../../src/domain/google/google.ts';
+import { clockLabel, daysBetween, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { compactRange, scheduleDays, weekdayShort, longDay, type CalendarMode } from '../../../src/domain/calendar/views.ts';
+import { layoutLanes } from '../../../src/domain/plan/schedule.ts';
 import {
   PRINT_COLORS,
   PRINT_FONT_SIZES,
@@ -26,12 +26,12 @@ import {
   type PrintLayout,
   type PrintOptions,
   type PrintPage,
-} from '../../../src/domain/calendarPrint.ts';
-import { usePlanner, useView } from '../../lib/context.ts';
-import { useCalendarEvents } from '../../lib/calendar.ts';
-import { eventDetail, useCalendarUi } from '../../lib/gcal.ts';
-import { useForge } from '../../lib/forge.ts';
-import { PRINT_NEEDS_HOST, canPrint, clearPrintable, printNow, setPrintable } from '../../lib/print.ts';
+} from '../../../src/domain/calendar/print.ts';
+import { usePlanner, useView } from '../../lib/core/context.ts';
+import { useCalendarEvents } from '../../lib/calendar/events.ts';
+import { eventDetail, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
+import { useForge } from '../../lib/openchamber/forge.ts';
+import { PRINT_NEEDS_HOST, canPrint, clearPrintable, printNow, setPrintable } from '../../lib/openchamber/print.ts';
 import { calendarItems, eventColor, isTaskEvent } from './items.ts';
 
 /** The longest print range: a year of days, so a printout stays one the browser can lay out. */

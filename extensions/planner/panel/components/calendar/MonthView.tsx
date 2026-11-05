@@ -2,17 +2,17 @@
 // as bars, timed ones as a dot, a time and a title, "N more" when a day is
 // full. Drag anything to another day; drop a task on a day to plan it there.
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
-import type { CalendarEvent } from '../../../src/domain/ics.ts';
-import type { DateKey, Placement } from '../../../src/domain/types.ts';
-import { addDays, daysBetween, instantAt, zonedDateMinutes } from '../../../src/domain/dates.ts';
-import { eventSpan, fitRow, layoutRow, longDay, monthWeeks, weekdayShort, type RowItem } from '../../../src/domain/gcalendar.ts';
-import { isGoogleTaskItem } from '../../../src/domain/google.ts';
-import { isGitHubItem } from '../../../src/domain/github.ts';
-import { isLinearIssue } from '../../../src/domain/linear.ts';
-import { edgePosition } from '../../../src/domain/selectors.ts';
-import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../../lib/context.ts';
-import { useUi } from '../../lib/ui.ts';
-import { anchorOf, calendarUi, changeEventTimes, popoverKind, useCalendarUi } from '../../lib/gcal.ts';
+import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
+import type { DateKey, Placement } from '../../../src/domain/core/types.ts';
+import { addDays, daysBetween, instantAt, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { eventSpan, fitRow, layoutRow, longDay, monthWeeks, weekdayShort, type RowItem } from '../../../src/domain/calendar/views.ts';
+import { isGoogleTaskItem } from '../../../src/domain/google/google.ts';
+import { isGitHubItem } from '../../../src/domain/github/github.ts';
+import { isLinearIssue } from '../../../src/domain/linear/linear.ts';
+import { edgePosition } from '../../../src/domain/core/selectors.ts';
+import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../../lib/core/context.ts';
+import { useUi } from '../../lib/core/ui.ts';
+import { anchorOf, calendarUi, changeEventTimes, popoverKind, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
 import { answerClass, calendarItems, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_BLOCK_TYPE, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, itemKey, plannedTask, startLabel, taskClass, taskEventLabel, type CalItem } from './items.ts';
 import { Icon } from './Icon.tsx';
 

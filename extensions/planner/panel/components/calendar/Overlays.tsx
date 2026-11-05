@@ -3,8 +3,8 @@
 // questions ("Edit recurring event", "Send update emails?") and its snackbar.
 // Mounted once by each calendar surface.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { DateKey } from '../../../src/domain/types.ts';
-import { calendarUi, useCalendarUi, type Question, type Snack } from '../../lib/gcal.ts';
+import type { DateKey } from '../../../src/domain/core/types.ts';
+import { calendarUi, useCalendarUi, type Question, type Snack } from '../../lib/calendar/calendarUi.ts';
 import { EventEditor } from './EventEditor.tsx';
 import { Icon } from './Icon.tsx';
 import { DayPopover, EventPopover, TaskPopover, UpcomingPopover } from './Popovers.tsx';
