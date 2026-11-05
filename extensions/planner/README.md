@@ -234,18 +234,43 @@ the same kind of loss.
 
 ## OpenChamber's look
 
-Colours, fonts and radii come from the host theme (`--oc-*`, which OpenChamber keeps live), and nothing falls back to
-the browser's own look. `look.mjs` checks every view, a task's details and the Sources panel, in OpenChamber's light
-and dark themes, Nord and Flexoki, at both sizes, against the browser's defaults read in the same frame.
+The Planner looks like a part of OpenChamber: it follows OpenChamber's own UI guidance (its `openchamber-ui-guidance`
+skill) and draws its controls with the light of OpenChamber's UI kit. Three sources, all from the host:
 
-| What | As | Before (review 13) |
+- **Theme tokens** (`--oc-*`): colours, fonts and the radius, which `applyHostReady` writes on the frame's root and
+  OpenChamber keeps live.
+- **The kit's control light** (`--oc-sdk-*`): a control's hairline edge, a field's fill and inner shadow, a raised
+  control's fill and lift, a popup's edge and shadow, light and dark. The OpenChamber server appends them to every
+  extension document after the Planner's stylesheet, so the app's copy wins and the Planner follows the app without a
+  rebuild; `panel/styles.css` keeps a copy for a host that appends none.
+- **Its sizes and motion**, written down in `panel/styles.css`: OpenChamber's type scale (13.5px rows and labels, 12.5px
+  meta, 12px the smallest, 17px a page's title), its tone steps, its popup spring.
+
+The stylesheet starts with one look layer (zero specificity, so a feature's own rule always wins); the feature rules
+after it hold layout and only what is the feature's own.
+
+| What | As (OpenChamber's) | Before (2026-11-05) |
 |---|---|---|
-| Links (Create a view in Linear, Open, links in notes) | The accent text (`--oc-primary-text`), visited too; action links (`a.link`) underlined on hover and focus, links in text underlined | The browser's blue: `rgb(0, 0, 238)`, `rgb(158, 158, 255)` in dark themes |
-| Keyboard focus | The hover fill, as OpenChamber's own controls draw it; a check, a ring in the focus colour; a field, a darker edge | The browser's ring |
-| Checks | The accent | The browser's blue |
-| Selected text | The host's selection pair | The browser's |
-| A field, select or textarea with no look of its own | The Planner's surface and line | The browser's (the Linear team choice in a task's details) |
+| Buttons, pickers (selects) | Raised: the canvas in light themes, the elevated surface in dark ones, a hairline edge and a short lift; hover and press lay the host's fills over them; a picker hugs its value, its chevron after it | A grey fill and a 1px border; the browser's own select |
+| The primary action | The tinted button: a pale fill of the accent, its text and a tinted edge | A solid accent fill |
+| Text fields | Pressed in: no border, a half-pixel ring that focus brightens | A 1px border |
+| Checks and radios | Neutral: the mark carries the state (a calendar's check keeps its colour, as Google draws it) | The accent |
+| A choice of one among a few (tabs, Calendar or Tasks, Layout) | A recessed track, the chosen option raised in it | Bordered buttons |
+| Cards and rows (tasks, issues, lists) | A tone step from the page, no border; hover one more | A grey fill and a 1px border |
+| Menus, pickers, popovers, prompts | Floating: the dropdown's light and corners, opening on the popup spring | A 1px border and a drop shadow |
+| Dialogs | The canvas, OpenChamber's modal shadow and corners over the dimmed page, easing in | The elevated surface |
+| Navigation | Rows like OpenChamber's sidebar, the page open in the selection pair (no bold); captions bare muted words; the sidebar's tone | Bold rows, uppercase captions |
+| Lines | Only where they mean something (a section's divider, a grid, an empty slot), at OpenChamber's edge strengths | Around most things |
+| Status (a warning, a running timer, an overdue chip) | A tinted fill, no border | Borders |
+| Links | The accent text (`--oc-primary-text`), visited too; action links (`a.link`) underlined on hover and focus, links in text underlined | The browser's blue (review 13) |
+| Keyboard focus | The hover fill, checks too; a field brightens its own edge | The browser's ring (review 13) |
+| Selected text | The host's selection pair | The browser's (review 13) |
 | Scrollbars | OpenChamber's own thin ones, which the host adds to every extension | — |
+
+`look.mjs` checks it in OpenChamber's light and dark themes, Nord and Flexoki: a button, the primary button, a text
+field, a picker and a menu draw as their twins in OpenChamber's kit (`.oc-sdk-*`, as the host draws them in the same
+frame); and nothing in any view, a task's details or the Sources panel falls back to the browser's own look (read
+from a shadow root no stylesheet reaches), at both sizes.
 
 A visited link can't be shown in the Planner's frame in a test: Chrome tells no script a `:visited` colour, keys a
 link's visited state to the page and frame it was followed from, and the Planner's links open through OpenChamber.

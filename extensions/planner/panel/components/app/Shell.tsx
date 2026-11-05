@@ -90,13 +90,12 @@ export const Nav = ({ route, onRoute, onSearch, onAsk, onClose }: { route: Route
         }
       }}
     >
-      <div class="brand">Planner</div>
       <button class="nav-search" onClick={onSearch} aria-label="Search and commands">
         <span>Search</span>
         <kbd>⌘K</kbd>
       </button>
       <button class="nav-item nav-ask" onClick={onAsk} aria-label="Ask Planner">
-        <span>✦ Ask Planner</span>
+        <span><span class="nav-ask-mark" aria-hidden="true">✦</span> Ask Planner</span>
       </button>
       <NavItem route="home" current={route} onRoute={onRoute}>Home</NavItem>
       <NavItem route="today" current={route} onRoute={onRoute} badge={open}>Today</NavItem>

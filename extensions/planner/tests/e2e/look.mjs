@@ -1,11 +1,15 @@
-// The Planner wears OpenChamber's look in every theme (review 13, P2), at 1440×900 and 1024×768, in the dev container's
-// OpenChamber with this checkout's panel and a private copy of its service (harness.mjs; nothing else is written).
-// Its links take the host's accent text (`--oc-primary-text`), visited too, underlined on hover, and keyboard focus
-// draws the host's hover fill, not the browser's ring. Nothing else falls back to the browser's own look either: a
-// native button, field, select or check, the text selection, a focus ring. The browser's defaults are read in the same
-// frame and colour scheme, from a shadow root no stylesheet reaches; every view of the Planner is looked at, with a
-// task's details (a merged item's Open link) and the right-hand Sources panel, in OpenChamber's light and dark themes,
-// Nord and Flexoki.
+// The Planner wears OpenChamber's look in every theme (review 13, P2; Qihang 2026-11-05: "参考openchamber原来的风格"),
+// at 1440×900 and 1024×768, in the dev container's OpenChamber with this checkout's panel and a private copy of its
+// service (harness.mjs; nothing else is written).
+// - Its controls are OpenChamber's own: a button, the primary button, a text field, a picker and a menu draw as their
+//   twins in OpenChamber's UI kit, whose look the host appends to the frame (`.oc-sdk-*`, read in the same frame), so
+//   the Planner follows the app's look, theme by theme.
+// - Its links take the host's accent text (`--oc-primary-text`), visited too, underlined on hover, and keyboard focus
+//   draws the host's hover fill, not the browser's ring. Nothing else falls back to the browser's own look either: a
+//   native button, field, select or check, the text selection, a focus ring. The browser's defaults are read in the
+//   same frame and colour scheme, from a shadow root no stylesheet reaches; every view of the Planner is looked at, with
+//   a task's details (a merged item's Open link) and the right-hand Sources panel, in OpenChamber's light and dark
+//   themes, Nord and Flexoki.
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/look.mjs [outDir]
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -61,7 +65,8 @@ const audit = ({ focus }) => {
       if (style.color === ua.link) found.push(`link colour ${name(element)} ${style.color}`);
     } else if (element.matches('button')) native(element, 'button');
     else if (element.matches('input') && (type === 'checkbox' || type === 'radio')) {
-      if (style.accentColor === ua.accent) found.push(`native check colour ${name(element)}`);
+      // A check the Planner draws itself (appearance: none) has no browser look; a native one must not keep its colour.
+      if (style.appearance !== 'none' && style.accentColor === ua.accent) found.push(`native check colour ${name(element)}`);
     } else if (element.matches('input')) {
       if (!['range', 'color', 'hidden', 'file'].includes(type ?? '')) native(element, 'input');
     } else if (element.matches('select')) native(element, 'select');
@@ -80,6 +85,38 @@ const audit = ({ focus }) => {
     else document.activeElement?.blur?.();
   }
   return [...new Set(found)];
+};
+
+/**
+ * In the Planner's frame: its controls beside OpenChamber's own, the UI kit's twins as the host draws them (the look it
+ * appends to every extension document), each pair's look properties where they differ. Both are probes the frame's
+ * stylesheets draw: the kit's by their classes, the Planner's as any button, primary button, field, select and menu.
+ */
+const twins = () => {
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;left:-9999px;top:0;';
+  box.innerHTML = '<div class="oc-sdk"><button class="oc-sdk-btn" data-variant="outline">b</button><button class="oc-sdk-btn" data-variant="default">p</button><input class="oc-sdk-input"><button class="oc-sdk-trigger">t</button><div class="oc-sdk-popup">m</div></div>'
+    + '<div><button>b</button><button class="primary">p</button><input><select><option>t</option></select><div class="menu">m</div></div>';
+  document.body.append(box);
+  const [kit, planner] = [...box.children].map((group) => [...group.children]);
+  const look = ['background-color', 'color', 'border-top-left-radius', 'box-shadow'];
+  const pairs = [
+    ['a button (the outline button)', [...look, 'border-top-color']],
+    ['the primary button', [...look, 'border-top-color']],
+    ['a text field', look],
+    ['a picker (the dropdown trigger)', [...look, 'border-top-color']],
+    ['a menu (the popup)', [...look, 'border-top-color']],
+  ];
+  const differences = [];
+  pairs.forEach(([what, properties], index) => {
+    const [theirs, ours] = [getComputedStyle(kit[index]), getComputedStyle(planner[index])];
+    for (const property of properties) {
+      const [a, b] = [theirs.getPropertyValue(property), ours.getPropertyValue(property)];
+      if (a !== b) differences.push(`${what} ${property}: OpenChamber ${a}, Planner ${b}`);
+    }
+  });
+  box.remove();
+  return differences;
 };
 
 /** The host's accent text, resolved in the frame, as an rgb() string. */
@@ -182,6 +219,10 @@ try {
     for (const [id, mode] of THEMES) {
       if (themeKey) await setTheme(id, mode);
       const accent = await frame.locator('body').evaluate(token);
+      if (size === 1440) {
+        const differences = await frame.locator('body').evaluate(twins);
+        check(`${id}: a button, the primary button, a text field, a picker and a menu draw as OpenChamber's own (its UI kit's look, from the host)`, differences.length === 0, differences.join(' | '));
+      }
       const fallbacks = [];
       // Every view.
       for (const view of VIEWS) {
