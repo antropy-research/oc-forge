@@ -91,6 +91,7 @@ import {
   type Page,
   type ProjectDisplay,
 } from '../../src/domain/linearDisplay.ts';
+import { isFullSurface } from './ui.ts';
 import {
   beyondSaved,
   compileFilter,
@@ -374,7 +375,7 @@ export class LinearStore {
   start(): void {
     if (this.started) return;
     this.started = true;
-    this.restoring = this.surface === 'page' ? this.restoreLocation() : Promise.resolve();
+    this.restoring = isFullSurface(this.surface) ? this.restoreLocation() : Promise.resolve();
     this.host.onConnection((connection) => {
       const was = this.view.connected;
       const accountChanged = was === true && connection.account !== this.view.account;
@@ -1608,7 +1609,7 @@ export class LinearStore {
   }
 
   private saveLocation(): void {
-    if (this.surface !== 'page') return;
+    if (!isFullSurface(this.surface)) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       const project = this.view.project?.project;

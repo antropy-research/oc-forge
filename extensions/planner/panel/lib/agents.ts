@@ -441,9 +441,10 @@ export class AgentStore {
       if (needsYou(runStatus(run, this.view.sessions.get(run.sessionId)))) tasks.add(run.taskId);
     }
     if (tasks.size !== this.view.attention) this.set({ attention: tasks.size });
-    // The rail icon counts tasks whose agents wait on you; an open rail panel clears it anyway.
+    // The rail icon counts tasks whose agents wait on you, from every surface: the rail panel too, which oc-forge keeps
+    // loaded for the window, so OpenChamber's clearing the badge when a panel opens would not happen.
     const badge = tasks.size || null;
-    if (badge !== this.lastBadge && this.surface !== 'panel') {
+    if (badge !== this.lastBadge) {
       this.lastBadge = badge;
       void this.host.setBadge(badge).catch(() => {});
     }

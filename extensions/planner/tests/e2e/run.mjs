@@ -10,6 +10,7 @@ import { chromium } from 'playwright-core';
 import { makeFilters, page as linearPage } from './linearFake.mjs';
 import { minutesToMidnight, waitOutMidnight } from './days.mjs';
 import { watchPlannerRequests } from './drain.mjs';
+import { openPlannerPanel, PLANNER_FRAME } from './panel.mjs';
 
 const base = process.argv[2] ?? 'http://127.0.0.1:35310';
 const out = process.argv[3] ?? '/tmp/opencode/planner-e2e';
@@ -215,24 +216,12 @@ page.on('console', (message) => {
 const openPlanner = async () => {
   // Never reload while the Planner says "Saving…": a change still on its way to the service would be lost, as it
   // would for anyone reloading then. A slow answer from the service made "survives a reload" checks flaky.
-  await page.frameLocator('.inset-0 > iframe[title="Planner"]').locator('.save-state.is-saving').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => {});
+  await page.frameLocator(PLANNER_FRAME).locator('.save-state.is-saving').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => {});
   await page.goto(`${base}/`, { waitUntil: 'load' });
-  // The full page sits in the host's inset overlay; the Work Status section is a separate frame.
-  // OpenChamber 2.5 serves extension frames from /api/guest-files/<grant>/; their title is the panel name.
-  const frame = page.frameLocator('.inset-0 > iframe[title="Planner"]');
-  const home = frame.getByRole('heading', { name: 'Home' });
-  // OpenChamber 2.5 reopens the page it showed before a reload, and the sidebar's Planner button
-  // toggles it; the rail's button (a panel surface) and the Work Status heading share the name.
-  if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-    // OpenChamber 2.5.1 has a sidebar button per extension page; 2.5.2 lists them under "Extension pages", 2.6 in the sidebar header's "More".
-    const button = page.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
-    if (await button.isVisible().catch(() => false)) await button.click();
-    else {
-      await page.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-      await page.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-    }
-    await home.waitFor({ timeout: 30_000 });
-  }
+  // The Planner is the right panel's (the rail's Planner icon), expanded; the Work Status section is a separate frame.
+  // OpenChamber serves extension frames from /api/guest-files/<grant>/; their title is the panel name.
+  const frame = await openPlannerPanel(page);
+  await frame.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 30_000 });
   return frame;
 };
 

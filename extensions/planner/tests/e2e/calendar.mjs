@@ -38,6 +38,7 @@
 import { startHarness } from './harness.mjs';
 import { defaultFakeWorld, startFakeGoogle } from './fakeGoogle.mjs';
 import { waitOutMidnight } from './days.mjs';
+import { openPlannerPanel, PLANNER_FRAME } from './panel.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-calendar';
 const ZONE = 'America/Los_Angeles';
@@ -1625,20 +1626,13 @@ try {
     other.on('console', (message) => {
       if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(`second window: ${message.text().slice(0, 300)}`);
     });
-    const g = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+    const g = other.frameLocator(PLANNER_FRAME);
     /** The second window on the Tasks view, opened as the harness opens the first. */
     const openOther = async () => {
       await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
       const home = g.getByRole('heading', { name: 'Home' });
-      if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-        const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
-        if (await button.isVisible().catch(() => false)) await button.click();
-        else {
-          await other.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-          await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-        }
-        await home.waitFor({ timeout: 30_000 });
-      }
+      await openPlannerPanel(other);
+      await home.waitFor({ timeout: 30_000 });
       const menu = g.getByRole('button', { name: 'Planner menu' });
       if (await menu.isVisible().catch(() => false)) await menu.click();
       await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: 'Calendar', exact: true }).click();
@@ -1796,7 +1790,7 @@ try {
     other.on('console', (message) => {
       if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(`second window: ${message.text().slice(0, 300)}`);
     });
-    const g = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+    const g = other.frameLocator(PLANNER_FRAME);
     const gLane = (date) => g.locator(`.day-lane[data-date="${date}"]`);
     const gWeekOf = async (date) => {
       if (await gLane(date).count()) return;
@@ -1813,15 +1807,8 @@ try {
     const openOther = async () => {
       await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
       const home = g.getByRole('heading', { name: 'Home' });
-      if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-        const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
-        if (await button.isVisible().catch(() => false)) await button.click();
-        else {
-          await other.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-          await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-        }
-        await home.waitFor({ timeout: 30_000 });
-      }
+      await openPlannerPanel(other);
+      await home.waitFor({ timeout: 30_000 });
       const menu = g.getByRole('button', { name: 'Planner menu' });
       if (await menu.isVisible().catch(() => false)) await menu.click();
       await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: 'Calendar', exact: true }).click();
@@ -2058,7 +2045,7 @@ try {
     other.on('console', (message) => {
       if (message.type() === 'error' && /guest-files\/[^/]+\/panel\//.test(message.location().url ?? '')) plannerErrors.push(`second window: ${message.text().slice(0, 300)}`);
     });
-    const g = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+    const g = other.frameLocator(PLANNER_FRAME);
     const gTasks = g.getByRole('region', { name: 'My Tasks' });
     const gQuestion = g.getByRole('alertdialog', { name: 'Edit repeating task' });
     const gLane = (date) => g.locator(`.day-lane[data-date="${date}"]`);
@@ -2066,15 +2053,8 @@ try {
     const openOther = async (pageName = 'Calendar') => {
       await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
       const home = g.getByRole('heading', { name: 'Home' });
-      if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-        const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
-        if (await button.isVisible().catch(() => false)) await button.click();
-        else {
-          await other.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-          await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-        }
-        await home.waitFor({ timeout: 30_000 });
-      }
+      await openPlannerPanel(other);
+      await home.waitFor({ timeout: 30_000 });
       const menu = g.getByRole('button', { name: 'Planner menu' });
       if (await menu.isVisible().catch(() => false)) await menu.click();
       await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: pageName, exact: true }).click();
@@ -2371,7 +2351,7 @@ try {
         return route.fallback();
       });
       try {
-        const g = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+        const g = other.frameLocator(PLANNER_FRAME);
         const gTasks = g.getByRole('region', { name: 'My Tasks' });
         const title = `Harness fresh ${size}`;
         const theirs = `${title} from the first window`;
@@ -2379,15 +2359,8 @@ try {
         const task = await newTask(title, { due: today });
         await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
         const home = g.getByRole('heading', { name: 'Home' });
-        if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-          const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
-          if (await button.isVisible().catch(() => false)) await button.click();
-          else {
-            await other.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-            await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-          }
-          await home.waitFor({ timeout: 30_000 });
-        }
+        await openPlannerPanel(other);
+        await home.waitFor({ timeout: 30_000 });
         const menu = g.getByRole('button', { name: 'Planner menu' });
         if (await menu.isVisible().catch(() => false)) await menu.click();
         await g.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name: 'Calendar', exact: true }).click();

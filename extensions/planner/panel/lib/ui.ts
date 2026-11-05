@@ -27,6 +27,13 @@ export interface UiContextValue {
 
 export const UiContext = createContext<UiContextValue | null>(null);
 
+/**
+ * The surfaces that draw the whole Planner: its rail panel (OpenChamber's right panel; oc-forge keeps it loaded for
+ * the window, the same in every chat) and an extension page on a host that opens one. The Work Status section and
+ * the hidden frame that answers actions and commands draw less.
+ */
+export const isFullSurface = (surface: string): boolean => surface === 'panel' || surface === 'page';
+
 export const useUi = (): UiContextValue => {
   const value = useContext(UiContext);
   if (!value) throw new Error('UiContext is missing');

@@ -27,6 +27,7 @@ import { chromium } from 'playwright-core';
 import { defaultGithubWorld, ghConfigFiles } from './fakeGithub.mjs';
 import { watchPlannerRequests } from './drain.mjs';
 import { devBase } from './harness.mjs';
+import { openPlannerPanel, PLANNER_FRAME } from './panel.mjs';
 
 const base = process.argv[2] ?? devBase();
 const out = process.argv[3] ?? '/tmp/opencode/planner-agentpr';
@@ -196,15 +197,11 @@ try {
   // Restart the Planner's service so it runs the installed build, then open the Planner.
   for (const enabled of [false, true]) await context.request.put(`${base}/api/guests/oc-forge-planner/enabled`, { data: { enabled } });
   await page.goto(`${base}/`, { waitUntil: 'load' });
-  const frame = page.frameLocator('.inset-0 > iframe[title="Planner"]');
+  const frame = page.frameLocator(PLANNER_FRAME);
   const openPlanner = async () => {
     await page.goto(`${base}/`, { waitUntil: 'load' });
-    const home = frame.getByRole('heading', { name: 'Home' });
-    if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-      await page.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-      await page.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-      await home.waitFor({ timeout: 30_000 });
-    }
+    await openPlannerPanel(page);
+    await frame.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 30_000 });
   };
   await openPlanner();
   const nav = (name) => frame.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name, exact: true });

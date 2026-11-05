@@ -7,6 +7,7 @@
 // Run on the host after `bun run build`: node extensions/planner/tests/e2e/undo.mjs [outDir]
 import { startHarness } from './harness.mjs';
 import { minutesToMidnight, waitOutMidnight } from './days.mjs';
+import { openPlannerPanel, PLANNER_FRAME } from './panel.mjs';
 
 const out = process.argv[2] ?? '/tmp/opencode/planner-undo-journey';
 const CHANGED = 'Changed in another window since; not undone';
@@ -54,19 +55,12 @@ try {
     await other.locator('li.toast', { hasText: 'OpenCode update' }).getByRole('button', { name: 'Close', exact: true }).first().click({ timeout: 2000 }).catch(() => {});
   });
   other.on('pageerror', (error) => h.problems.push(`second window pageerror: ${error.message}`));
-  const second = other.frameLocator('.inset-0 > iframe[title="Planner"]');
+  const second = other.frameLocator(PLANNER_FRAME);
   const openSecond = async () => {
     await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
     const home = second.getByRole('heading', { name: 'Home' });
-    if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-      const button = other.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
-      if (await button.isVisible().catch(() => false)) await button.click();
-      else {
-        await other.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-        await other.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-      }
-      await home.waitFor({ timeout: 30_000 });
-    }
+    await openPlannerPanel(other);
+    await home.waitFor({ timeout: 30_000 });
   };
 
   const todayIn = (where) => where.locator('section.day-column.is-today');

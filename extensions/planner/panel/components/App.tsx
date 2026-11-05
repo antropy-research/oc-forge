@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { openSource } from '../lib/sourcePanel.ts';
 import { sourceUrl } from '../../src/domain/gmail.ts';
 import { usePlanner, useView } from '../lib/context.ts';
-import { UiContext, type UiState } from '../lib/ui.ts';
+import { isFullSurface, UiContext, type UiState } from '../lib/ui.ts';
 import { ArchiveView } from './ArchiveView.tsx';
 import { Backlog } from './Backlog.tsx';
 import { Board } from './Board.tsx';
@@ -16,7 +16,7 @@ import { Settings } from './Settings.tsx';
 import { Nav, NavRail, ServiceGate, Toasts, useNarrow, type Route } from './Shell.tsx';
 import { StatusSection } from './StatusSection.tsx';
 import { TaskDetail } from './TaskDetail.tsx';
-import { CompactToday, TodayView } from './TodayView.tsx';
+import { TodayView } from './TodayView.tsx';
 import { StatsView } from './StatsView.tsx';
 import { LinearPage, LinearPromptBar } from './LinearPanel.tsx';
 import { GmailPromptBar } from './GmailPanel.tsx';
@@ -36,6 +36,8 @@ import { openInNewTab, placeUrl, plannerKeeps, useForge, watchNewTabClicks } fro
 
 export const App = ({ surface }: { surface: string }) => {
   const { client, host, linear, agents, github, google } = usePlanner();
+  // The rail panel draws the whole Planner, as a page does.
+  const full = isFullSurface(surface);
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
   // A narrow page folds the menu into a rail; it opens over the page and closes on a pick.
@@ -62,18 +64,18 @@ export const App = ({ surface }: { surface: string }) => {
   const [ui, setUiState] = useState<UiState>({ openTaskId: null, channelFilter: null, focusTaskId: null, folderFilter: null, playlist: false, openIssue: null, agentForm: null });
   const setUi = (patch: Partial<UiState>) => {
     if (patch.openIssue || patch.openTaskId) {
-      // From the rail panel's Today, a task opens on the page's Today.
-      const page = surface === 'page' ? route : 'today';
+      // From the Work Status section's Today, a task opens on the Planner's Today.
+      const page = full ? route : 'today';
       const place = patch.openIssue ? { page, openIssue: patch.openIssue } : { page, openTaskId: patch.openTaskId };
       if (openInNewTab(placeUrl(place), (url) => host.openUrl(url))) return;
     }
     setUiState((current) => ({ ...current, ...patch }));
   };
   useEffect(() => watchNewTabClicks(), []);
-  // A deep link (or back and forward) puts the page on its place; then the address bar follows the page.
+  // A deep link (or back and forward) puts the Planner on its place; then a page's address bar follows the page.
   const [linkApplied, setLinkApplied] = useState(false);
   useEffect(() => {
-    if (!forge || surface !== 'page') return;
+    if (!forge || !full) return;
     const apply = (value: string | null) => {
       const place = parseRoute(value);
       if (place) {
@@ -84,8 +86,9 @@ export const App = ({ surface }: { surface: string }) => {
     };
     apply(forge.links.route());
     return forge.links.onRoute(apply);
-  }, [forge, surface]);
+  }, [forge, full]);
   useEffect(() => {
+    // Only a page names its place in the address bar; the host keeps the rail panel's to the deep link that opened it.
     if (!forge || surface !== 'page' || !linkApplied) return;
     void forge.links.setRoute(routeOf({ page: route, openTaskId: ui.openTaskId, openIssue: ui.openIssue })).catch(() => {});
   }, [forge, surface, linkApplied, route, ui.openTaskId, ui.openIssue?.id, ui.openIssue?.workspaceId]);
@@ -131,9 +134,9 @@ export const App = ({ surface }: { surface: string }) => {
     [host, client],
   );
 
-  // Sunsama's keyboard shortcuts, on the full page only and never while typing.
+  // Sunsama's keyboard shortcuts, wherever the whole Planner shows and never while typing.
   useEffect(() => {
-    if (surface !== 'page') return;
+    if (!full) return;
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = Boolean(target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable));
@@ -203,42 +206,38 @@ export const App = ({ surface }: { surface: string }) => {
   }
   return (
     <UiContext.Provider value={{ ui, setUi }}>
-      {surface === 'panel' ? (
-        <CompactToday />
-      ) : (
-        <div class={`app${narrow ? ' is-narrow' : ''}${navOpen ? ' is-nav-open' : ''}`}>
-          {narrow && <NavRail open={navOpen} onToggle={() => (navOpen ? closeNav() : setNavOpen(true))} onSearch={() => setOverlay('palette')} />}
-          {(!narrow || navOpen) && (
-            <Nav
-              route={route}
-              onRoute={go}
-              onSearch={() => { setNavOpen(false); setOverlay('palette'); }}
-              onAsk={() => { setNavOpen(false); setAskText(''); setOverlay('ask'); }}
-              onClose={narrow ? closeNav : undefined}
-            />
-          )}
-          {narrow && navOpen && <div class="nav-scrim" aria-hidden="true" onClick={closeNav} />}
-          <main class="main">
-            {route === 'home' && <Board />}
-            {route === 'today' && <TodayView onShutdown={() => setRoute('shutdown')} />}
-            {route === 'calendar' && <CalendarView />}
-            {route === 'focus' && <FocusView onExit={() => setRoute('today')} />}
-            {route === 'planning' && <DailyPlanning onDone={() => setRoute('today')} />}
-            {route === 'shutdown' && <DailyShutdown onDone={() => setRoute('highlights')} />}
-            {route === 'highlights' && <Highlights />}
-            {route === 'weeklyPlanning' && <WeeklyPlanning onDone={() => setRoute('home')} />}
-            {route === 'weeklyReview' && <WeeklyReview />}
-            {route === 'backlog' && <Backlog />}
-            {route === 'linear' && <LinearPage />}
-            {route === 'agents' && <AgentsView />}
-            {route === 'github' && <GitHubPage />}
-            {route === 'google' && <GooglePage />}
-            {route === 'archive' && <ArchiveView />}
-            {route === 'stats' && <StatsView />}
-            {route === 'settings' && <Settings />}
-          </main>
-        </div>
-      )}
+      <div class={`app${narrow ? ' is-narrow' : ''}${navOpen ? ' is-nav-open' : ''}`}>
+        {narrow && <NavRail open={navOpen} onToggle={() => (navOpen ? closeNav() : setNavOpen(true))} onSearch={() => setOverlay('palette')} />}
+        {(!narrow || navOpen) && (
+          <Nav
+            route={route}
+            onRoute={go}
+            onSearch={() => { setNavOpen(false); setOverlay('palette'); }}
+            onAsk={() => { setNavOpen(false); setAskText(''); setOverlay('ask'); }}
+            onClose={narrow ? closeNav : undefined}
+          />
+        )}
+        {narrow && navOpen && <div class="nav-scrim" aria-hidden="true" onClick={closeNav} />}
+        <main class="main">
+          {route === 'home' && <Board />}
+          {route === 'today' && <TodayView onShutdown={() => setRoute('shutdown')} />}
+          {route === 'calendar' && <CalendarView />}
+          {route === 'focus' && <FocusView onExit={() => setRoute('today')} />}
+          {route === 'planning' && <DailyPlanning onDone={() => setRoute('today')} />}
+          {route === 'shutdown' && <DailyShutdown onDone={() => setRoute('highlights')} />}
+          {route === 'highlights' && <Highlights />}
+          {route === 'weeklyPlanning' && <WeeklyPlanning onDone={() => setRoute('home')} />}
+          {route === 'weeklyReview' && <WeeklyReview />}
+          {route === 'backlog' && <Backlog />}
+          {route === 'linear' && <LinearPage />}
+          {route === 'agents' && <AgentsView />}
+          {route === 'github' && <GitHubPage />}
+          {route === 'google' && <GooglePage />}
+          {route === 'archive' && <ArchiveView />}
+          {route === 'stats' && <StatsView />}
+          {route === 'settings' && <Settings />}
+        </main>
+      </div>
       {ui.openTaskId && <TaskDetail key={ui.openTaskId} taskId={ui.openTaskId} />}
       {ui.openIssue && <IssueEditor key={`${ui.openIssue.workspaceId}:${ui.openIssue.id}`} issueRef={ui.openIssue} />}
       {overlay === 'palette' && (

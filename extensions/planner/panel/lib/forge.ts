@@ -120,9 +120,9 @@ const editsText = (event: KeyboardEvent, mac: boolean): boolean => {
  * OpenChamber navigation action (switching tabs, surfaces or chats, closing a
  * tab, the sidebar, its command palette) goes to OpenChamber, not to Chrome,
  * from a field too (Cmd/Ctrl+1 in a task's title switches OpenChamber's tab).
- * Kept: what a field uses for editing (editsText), the Planner page's own
- * command palette (Cmd/Ctrl+K), the Linear page's Cmd/Ctrl+B (list or
- * board), and in the Tasks view Google Tasks' own shortcuts: its list and
+ * Kept: what a field uses for editing (editsText), the Planner's own command
+ * palette (Cmd/Ctrl+K) and the Linear page's Cmd/Ctrl+B (list or board)
+ * wherever the whole Planner shows (its rail panel, a page), and in the Tasks view Google Tasks' own shortcuts: its list and
  * Undo anywhere there, the ones on a task while a task has the focus.
  * Cmd/Ctrl+P prints where Google binds it, in the Tasks view (Print list) and
  * the calendar (its print preview); elsewhere it is OpenChamber's command
@@ -133,8 +133,9 @@ export const plannerKeeps = (event: KeyboardEvent, where: { surface: string; pag
   if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable) && editsText(event, where.mac)) return true;
   const mod = event.metaKey || event.ctrlKey;
   const key = event.key.toLowerCase();
-  if (where.surface === 'page' && mod && key === 'k') return true;
-  if (where.surface === 'page' && where.page === 'linear' && mod && key === 'b') return true;
+  const full = where.surface === 'panel' || where.surface === 'page';
+  if (full && mod && key === 'k') return true;
+  if (full && where.page === 'linear' && mod && key === 'b') return true;
   // Print: the Tasks view's list, or the calendar's print preview, as Google Tasks and Google Calendar bind it.
   if (mod && key === 'p' && !event.altKey && !event.shiftKey && target?.closest?.('.tasks-app, .gcal-view')) return true;
   if (mod && target?.closest?.('.tasks-app')) {

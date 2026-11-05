@@ -46,7 +46,10 @@ describe('the keys the Planner keeps from OpenChamber', () => {
     expect(plannerKeeps(press('b', { ctrl: true }), { ...linux, page: 'linear' })).toBe(true);
     expect(plannerKeeps(press('b', { ctrl: true }), linux)).toBe(false);
     expect(plannerKeeps(press('1', { ctrl: true }), linux)).toBe(false);
-    expect(plannerKeeps(press('k', { ctrl: true }), { ...linux, surface: 'panel' })).toBe(false);
+    // The rail panel draws the whole Planner now, and keeps them as the page did; the Work Status section does not.
+    expect(plannerKeeps(press('k', { ctrl: true }), { ...linux, surface: 'panel' })).toBe(true);
+    expect(plannerKeeps(press('b', { ctrl: true }), { ...linux, surface: 'panel', page: 'linear' })).toBe(true);
+    expect(plannerKeeps(press('k', { ctrl: true }), { ...linux, surface: 'status' })).toBe(false);
   });
 });
 

@@ -1,8 +1,9 @@
 // The Planner on oc-forge's adapted OpenChamber (adapters/openchamber): AGENTS.md's
 // Cmd+click rule (a Cmd/Ctrl+click or a middle click on a page, a task or a chat
-// opens it in a new browser tab; a plain click goes there in place) and its
+// opens it in a new browser tab; a plain click goes there in place), its
 // shortcut rule (OpenChamber's own navigation keys reach OpenChamber while the
-// Planner has focus; the Planner keeps its own). Runs against the `adapted`
+// Planner has focus; the Planner keeps its own), and the Planner as the window's
+// right panel: a deep link opens it, and it stays through a switch of chat. Runs against the `adapted`
 // instance of the scratch stack the adapters' own check uses, on ports and in a
 // folder of its own:
 //
@@ -17,6 +18,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { waitOutMidnight } from './days.mjs';
 import { watchPlannerRequests } from './drain.mjs';
+import { openPlannerPanel } from './panel.mjs';
 
 const work = process.env.WORK ?? '/tmp/opencode/planner-forge/e2e';
 const out = process.argv[2] ?? '/tmp/opencode/planner-forge/screens';
@@ -47,6 +49,17 @@ const routeIn = (url) => new URL(url).searchParams.get('route');
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+// The address each new tab loaded: a deep link to a panel opens it there and leaves the address bar to OpenChamber's
+// router, which drops `extension` and `route` once it writes the next one (only a page kept them).
+const loaded = new WeakMap();
+context.on('page', (opened) => {
+  // A tab the page opens has its address from the start; one that starts blank gets it on its first navigation.
+  if (opened.url().startsWith('http')) loaded.set(opened, opened.url());
+  opened.on('framenavigated', (navigated) => {
+    if (navigated === opened.mainFrame() && !loaded.has(opened) && navigated.url().startsWith('http')) loaded.set(opened, navigated.url());
+  });
+});
+const routeLoaded = (tab) => (loaded.has(tab) ? routeIn(loaded.get(tab)) : null);
 // Closed only once no Planner request is on its way (drain.mjs, as the harness's close()).
 const drain = watchPlannerRequests(context);
 let cleanup = async () => {};
@@ -91,7 +104,7 @@ try {
   const seeded = await service('POST', '/commands', { commands: [{ cmd: `${run}-c1`, type: 'task.created', task: { id: taskId, title: `${run} write the brief`, placement: { kind: 'day', date: today }, position: 1024, sessionRef: { sessionId: chatId, title: `${run} chat`, directory: project } } }] });
   if (!seeded.applied) throw new Error(`the Planner did not take the journey's task: ${JSON.stringify(seeded)}`);
 
-  // The chats are the header's first two tabs; the Planner page opens beside them.
+  // The chats are the header's first two tabs; the Planner's panel opens beside them.
   await context.addInitScript((ids) => {
     if (window.top !== window) return;
     if (!localStorage.getItem('oc-forge-planner-forge-seeded')) {
@@ -102,9 +115,9 @@ try {
   const page = await context.newPage();
   const problems = [];
   page.on('pageerror', (error) => problems.push(error.message));
-  // The open page, which OpenChamber mounts over the chat (`absolute inset-0 z-10`), apart from the zones' frames.
-  const PLANNER_PAGE = '.inset-0.z-10 > iframe[title="Planner"]';
-  const plannerFrame = (target) => target.frameLocator(PLANNER_PAGE);
+  // The Planner's panel frame (its zone pane is `absolute inset-0`); the Work Status card's frame is transparent.
+  const PLANNER_PANEL = '.inset-0 > iframe[title="Planner"]:not(.bg-transparent)';
+  const plannerFrame = (target) => target.frameLocator(PLANNER_PANEL);
   // The active nav item's name, without its count badge ("Today\n3").
   const activeNav = async (frame) => (await frame.locator('#planner-nav .nav-item.is-active').first().innerText().catch(() => '')).split('\n')[0];
   const navItem = (frame, name) => frame.locator('#planner-nav').getByRole('button', { name, exact: true });
@@ -117,26 +130,30 @@ try {
     const listed = await (await request.get(`${base}/api/session?directory=${encodeURIComponent(project)}`, { timeout: 10_000 })).json();
     return (Array.isArray(listed) ? listed : listed.data ?? []).some((session) => session.id === chatId);
   }, 120_000);
+  // The deep link shows the panel; expanded, the Planner has room for the menu the checks click (as on the page it had).
   const openPlanner = async (target, url) => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await target.goto(url);
-      const shown = await until(async () => (await plannerFrame(target).locator('#planner-nav').count()) > 0 || (await target.getByText('This panel failed to load.').count()) > 0, 90_000);
-      if (shown && (await plannerFrame(target).locator('#planner-nav').count()) > 0) return true;
+      const shown = await until(async () => (await plannerFrame(target).locator('.app').count()) > 0 || (await target.getByText('This panel failed to load.').count()) > 0, 90_000);
+      if (shown && (await plannerFrame(target).locator('.app').count()) > 0) {
+        await openPlannerPanel(target);
+        return Boolean(await until(() => plannerFrame(target).locator('#planner-nav').isVisible(), 30_000));
+      }
     }
     return false;
   };
 
-  // ── 1. A deep link opens the Planner page on its place ──
+  // ── 1. A deep link opens the Planner's panel on its place ──
   await openPlanner(page, `${base}/?extension=${PLANNER}&route=${encodeURIComponent('/calendar')}`);
   let frame = plannerFrame(page);
   const onCalendar = await until(async () => (await activeNav(frame)).trim() === 'Calendar', 30_000);
-  check('a deep link (?extension=oc-forge-planner&route=/calendar) opens the Planner page on Calendar', onCalendar, await activeNav(frame));
+  check('a deep link (?extension=oc-forge-planner&route=/calendar) opens the Planner on Calendar', onCalendar, await activeNav(frame));
   await page.screenshot({ path: join(out, '01-deep-link-calendar.png') });
 
-  // ── 2. A plain click goes there in place, and the address bar follows ──
+  // ── 2. A plain click goes there in place (a panel, unlike a page, leaves the address bar alone) ──
   await navItem(frame, 'Linear').click();
-  const inPlace = await until(async () => (await activeNav(frame)).trim() === 'Linear' && routeIn(page.url()) === '/linear');
-  check('a plain click on a page goes there in this tab, and the address bar names it', inPlace, `${(await activeNav(frame)).trim()} · ${routeIn(page.url())}`);
+  const inPlace = await until(async () => (await activeNav(frame)).trim() === 'Linear');
+  check('a plain click on a page goes there in this tab', inPlace, (await activeNav(frame)).trim());
 
   // ── 3. A Cmd/Ctrl+click on a page opens it in a new tab; this one stays ──
   const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
@@ -144,7 +161,7 @@ try {
   await navItem(frame, 'Today').click({ modifiers: [modifier] });
   const tab = await opened;
   const tabOnToday = tab && (await until(async () => (await activeNav(plannerFrame(tab))).trim() === 'Today', 90_000));
-  check('a Cmd/Ctrl+click on a page opens it in a new browser tab, on that page', Boolean(tab && routeIn(tab.url()) === '/today' && tabOnToday), tab ? `${routeIn(tab.url())} · ${tabOnToday ? 'Today shown' : 'not shown'}` : 'no new tab');
+  check('a Cmd/Ctrl+click on a page opens it in a new browser tab, on that page', Boolean(tab && routeLoaded(tab) === '/today' && tabOnToday), tab ? `${routeLoaded(tab)} · ${tabOnToday ? 'Today shown' : 'not shown'}` : 'no new tab');
   check('…and this tab stays where it was', (await activeNav(frame)).trim() === 'Linear');
   if (tab) {
     await tab.screenshot({ path: join(out, '02-new-tab-today.png') });
@@ -155,7 +172,8 @@ try {
   const opened2 = context.waitForEvent('page', { timeout: 20_000 }).catch(() => null);
   await navItem(frame, 'Stats').click({ button: 'middle' });
   const tab2 = await opened2;
-  check('a middle click on a page opens it in a new browser tab', Boolean(tab2 && routeIn(tab2.url()) === '/stats'), tab2 ? routeIn(tab2.url()) : 'no new tab');
+  if (tab2) await until(() => loaded.has(tab2), 10_000);
+  check('a middle click on a page opens it in a new browser tab', Boolean(tab2 && routeLoaded(tab2) === '/stats'), tab2 ? String(routeLoaded(tab2)) : 'no new tab');
   await tab2?.close();
 
   // ── 5. A Cmd/Ctrl+click on a task opens it, on the Planner page, in a new tab; a plain click opens it here ──
@@ -166,7 +184,7 @@ try {
   await card.click({ modifiers: [modifier] });
   const tab3 = await opened3;
   const detailThere = tab3 && (await until(() => plannerFrame(tab3).getByRole('dialog', { name: 'Task details' }).isVisible(), 90_000));
-  check('a Cmd/Ctrl+click on a task opens it on the Planner page in a new tab, its details open', Boolean(tab3 && routeIn(tab3.url()) === `/today?task=${taskId}` && detailThere), tab3 ? routeIn(tab3.url()) : 'no new tab');
+  check('a Cmd/Ctrl+click on a task opens it in the Planner in a new tab, its details open', Boolean(tab3 && routeLoaded(tab3) === `/today?task=${taskId}` && detailThere), tab3 ? `${routeLoaded(tab3)} · details ${detailThere ? 'open' : 'not open'}` : 'no new tab');
   check('…and its details did not open here', (await frame.getByRole('dialog', { name: 'Task details' }).count()) === 0);
   if (tab3) {
     await tab3.screenshot({ path: join(out, '03-new-tab-task.png') });
@@ -174,8 +192,8 @@ try {
   }
   await card.click();
   const detail = frame.getByRole('dialog', { name: 'Task details' });
-  const named = await until(async () => (await detail.isVisible()) && routeIn(page.url()) === `/today?task=${taskId}`);
-  check('a plain click on a task opens its details here, and the address bar names the task', named, routeIn(page.url()));
+  const named = await until(() => detail.isVisible());
+  check('a plain click on a task opens its details here', named);
 
   // ── 6. A Cmd/Ctrl+click on "Open the chat" opens the chat in a new tab ──
   const opened4 = context.waitForEvent('page', { timeout: 20_000 }).catch(() => null);
@@ -206,15 +224,17 @@ try {
   await page.keyboard.press(`${modifier}+b`);
   await until(async () => (await sidebarShown()) === before, 5000);
   await page.screenshot({ path: join(out, '06-keys.png') });
-  // Ctrl/Cmd+1 shows the header's first tab, the first chat, where the page was over the second.
-  const plannerShown = () => page.locator(PLANNER_PAGE).isVisible().catch(() => false);
+  // Ctrl/Cmd+1 shows the header's first tab, the first chat, where the Planner was beside the second; the Planner is
+  // the window's panel, so it stays.
+  const plannerShown = () => page.locator(PLANNER_PANEL).isVisible().catch(() => false);
   const overSecondChat = `${base}/?session=${otherId}&extension=${PLANNER}&route=${encodeURIComponent('/today')}`;
   await openPlanner(page, overSecondChat);
   frame = plannerFrame(page);
   await frame.locator('main.main').click({ position: { x: 5, y: 5 } });
   await page.keyboard.press(`${modifier}+1`);
-  const switched = await until(async () => !await plannerShown() && new URL(page.url()).searchParams.get('session') === chatId, 5000);
+  const switched = await until(async () => new URL(page.url()).searchParams.get('session') === chatId, 5000);
   check("Ctrl/Cmd+1 in the Planner switches OpenChamber's header to its first tab (the chat), not Chrome's", Boolean(switched) && context.pages().length === 1, page.url().replace(base, ''));
+  check('…and the Planner stays beside it', await plannerShown());
   await page.screenshot({ path: join(out, '07-ctrl-1-chat.png') });
   // From a field too: the field keeps what editing uses (Cmd/Ctrl+B is bold in the notes), and OpenChamber's
   // navigation keys go to OpenChamber, not to Chrome.
@@ -230,7 +250,7 @@ try {
   check('Cmd/Ctrl+B typed in a Planner field stays with the field (the sidebar does not toggle)', (await sidebarShown()) === sidebarBefore && await plannerShown() && (await field.inputValue()) === 'forge-typing');
   await page.keyboard.press(`${modifier}+1`);
   check("Ctrl/Cmd+1 typed in a Planner field switches OpenChamber's header to its first tab, not Chrome's",
-    Boolean(await until(async () => !await plannerShown() && new URL(page.url()).searchParams.get('session') === chatId, 5000)) && context.pages().length === 1, page.url().replace(base, ''));
+    Boolean(await until(async () => new URL(page.url()).searchParams.get('session') === chatId, 5000)) && context.pages().length === 1, page.url().replace(base, ''));
   await page.screenshot({ path: join(out, '08-ctrl-1-from-field.png') });
   check('no page errors', problems.length === 0, problems.slice(0, 3).join(' | '));
 } catch (error) {

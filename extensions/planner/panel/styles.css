@@ -183,8 +183,6 @@ input[type="checkbox"], input[type="radio"], input[type="range"], progress { acc
 .side-panel h2 { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
 
 /* Rail panel */
-.compact { display: flex; flex-direction: column; gap: 8px; padding: 12px; height: 100%; }
-.compact .task-list { flex: 1; }
 
 /* Settings */
 .settings fieldset { border: 0; padding: 0; margin: 0 0 22px; max-width: 560px; display: flex; flex-direction: column; gap: 10px; }

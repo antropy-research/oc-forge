@@ -453,7 +453,7 @@ const GoogleSettings = () => {
             <input type="checkbox" checked={settings.googleTaskNotifications} onChange={(event) => update({ googleTaskNotifications: event.currentTarget.checked })} />
           </label>
           <p class="hint">
-            The Planner gives these itself, as OpenChamber notifications, while one of its surfaces is open (the page, the rail panel or its Work Status section), each once,
+            The Planner gives these itself, as OpenChamber notifications, while its rail panel is loaded (oc-forge's OpenChamber loads it with the window) or its Work Status section shows, each once,
             and one missed meanwhile when one opens the same day: Google Tasks gets no time or deadline from the Planner, so Google's own apps notify a task the Planner
             times only at 9 AM on its date, and never for its deadline. The notifications given are kept on this machine, outside the synced plan.
           </p>

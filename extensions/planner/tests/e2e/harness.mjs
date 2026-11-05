@@ -33,6 +33,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { openPlannerPanel, PLANNER_FRAME } from './panel.mjs';
 
 /**
  * The shared dev container's OpenChamber, where Docker publishes it (OC_DEV_BIND in the deploy checkout's
@@ -338,20 +339,11 @@ export async function startHarness({
   page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
   page.on('console', (message) => { if (message.type() === 'error') problems.push(`console: ${message.text().slice(0, 300)}`); });
 
-  const frame = page.frameLocator('.inset-0 > iframe[title="Planner"]');
+  const frame = page.frameLocator(PLANNER_FRAME);
   const openPlanner = async () => {
     await page.goto(`${base}/`, { waitUntil: 'load' });
-    const home = frame.getByRole('heading', { name: 'Home' });
-    if (!(await home.waitFor({ timeout: 6000 }).then(() => true).catch(() => false))) {
-      // OpenChamber 2.5.1 has a sidebar button per extension page; 2.5.2 lists them under "Extension pages", 2.6 in the sidebar header's "More".
-      const button = page.locator('button[aria-label="Planner"]:not([data-context-surface])').first();
-      if (await button.isVisible().catch(() => false)) await button.click();
-      else {
-        await page.locator('button[aria-label="Extension pages"], button[aria-label="More"]').first().click({ timeout: 20_000 });
-        await page.getByRole('menuitem', { name: 'Planner' }).click({ timeout: 10_000 });
-      }
-      await home.waitFor({ timeout: 30_000 });
-    }
+    await openPlannerPanel(page);
+    await frame.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 30_000 });
     return frame;
   };
   const nav = (name) => frame.getByRole('navigation', { name: 'Planner' }).getByRole('button', { name, exact: true });
