@@ -626,7 +626,11 @@ node ../../extensions/planner/tests/e2e/forge.mjs                          # Cmd
 The journeys find the Planner where a user does: in OpenChamber's right panel, opened from the rail's
 Planner icon (only when it is not shown already: the icon toggles) and expanded, since they were written for
 the wide page the Planner had until 2026-11-05 (`tests/e2e/panel.mjs`, `openPlannerPanel`). Its frame is
-`.inset-0 > iframe[title="Planner"]`, as the page's was; the Work Status card's frame is another.
+`.inset-0 > iframe[title="Planner"]`, as the page's was; the Work Status card's frame is another. The harness
+opens each window 56 px wider than the size a journey names (`PANEL_ROOM`), its resizes too: the expanded panel
+leaves the chat a column of at least 320 px and the zone's margins where the page left the sidebar's 280, so the
+Planner gets the width the page had at that size (1118 px at "1440" against the page's 1116, 702 at "1024" against
+700), the widths the journeys' layout checks were written for.
 
 `agentpr.mjs` assigns a task to OpenCode's build agent on the installed Planner, on
 `AGENTPR_MODEL` (default `openai/gpt-6-luna`, through a preset it adds and removes; the

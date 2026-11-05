@@ -3,6 +3,13 @@
 // in every chat (adapters/openchamber README, "global panel"). The journeys were written for the wide page, so they
 // expand the panel: the Planner then has about the room the page gave it.
 export const PLANNER_FRAME = '.inset-0 > iframe[title="Planner"]';
+/**
+ * How much wider than a journey's named window (1440, 1024) the harness opens it. The page had the window less
+ * OpenChamber's sidebar (280 px) and rail (44): 1116 px at 1440, 700 at 1024, the widths the journeys' layout checks
+ * were written for. The expanded panel leaves a chat column of at least 320 px and its card's margins, 56 px more:
+ * with these 56 px the Planner gets the width the page gave it.
+ */
+export const PANEL_ROOM = 56;
 const RAIL = 'button[data-context-surface="plugin:oc-forge-planner"]';
 
 /** The zone holding the Planner's panel frame (the Work Status card's frame, transparent, is another). */

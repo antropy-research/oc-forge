@@ -1504,9 +1504,19 @@ try {
   await page.mouse.move(source.x + 24, source.y + 12);
   await page.mouse.down();
   const edgeX = boardBox.x + boardBox.width - 10;
-  const middleY = boardBox.y + Math.min(boardBox.height / 2, 260);
+  // The pointer holds still at the board's edge, at a height on one element: Chromium answers a move that changes the
+  // element under it with a dragenter, not a dragover, so a 1 px jitter across a border (a card's title and the card,
+  // where the panel's height put it on 2026-11-05) scrolled the board once. Moves to the same point are dragovers.
+  const middleY = await frame.locator('body').evaluate((body, [x, top, bottom, left, frameTop]) => {
+    const at = (px, py) => body.ownerDocument.elementFromPoint(px - left, py - frameTop);
+    for (let y = top; y < bottom; y += 4) {
+      const element = at(x, y);
+      if (element && [[x - 1, y + 1], [x, y + 2], [x - 1, y]].every(([px, py]) => at(px, py) === element)) return y;
+    }
+    return top;
+  }, [edgeX, boardBox.y + Math.min(boardBox.height / 2, 260), boardBox.y + boardBox.height - 20, frameBox.x, frameBox.y]);
   await page.mouse.move(edgeX, middleY, { steps: 8 });
-  for (let i = 0; i < 40 && (await board.evaluate((element) => element.scrollLeft)) < 160; i++) await page.mouse.move(edgeX - (i % 2), middleY + (i % 3));
+  for (let i = 0; i < 40 && (await board.evaluate((element) => element.scrollLeft)) < 160; i++) await page.mouse.move(edgeX, middleY);
   const scrolled = await board.evaluate((element) => element.scrollLeft);
   const target = await column('Tomorrow').locator('ul.task-list').boundingBox();
   await page.mouse.move(target.x + Math.min(target.width / 2, 80), target.y + 24, { steps: 5 });

@@ -33,7 +33,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { openPlannerPanel, PLANNER_FRAME } from './panel.mjs';
+import { openPlannerPanel, PANEL_ROOM, PLANNER_FRAME } from './panel.mjs';
 
 /**
  * The shared dev container's OpenChamber, where Docker publishes it (OC_DEV_BIND in the deploy checkout's
@@ -212,7 +212,7 @@ export async function startHarness({
   const password = /^OPENCHAMBER_UI_PASSWORD=(.+)$/m.exec(secrets)?.[1]?.trim();
   if (!password) throw new Error('no UI password in secrets.env');
   const browser = await chromium.launch();
-  const context = await browser.newContext({ viewport, timezoneId });
+  const context = await browser.newContext({ viewport: { ...viewport, width: viewport.width + PANEL_ROOM }, timezoneId });
   // oc-forge's adapted OpenChamber before 2026-11-04 (any image tagged before then, a rollback) sent service requests
   // over a WebSocket, past the HTTP routes that answer them here, to the container's own Planner service: its switch
   // keeps them on HTTP, and any that still come over the socket are refused loudly instead of reaching the real plan.
@@ -329,6 +329,9 @@ export async function startHarness({
 
   const page = await context.newPage();
   page.setDefaultTimeout(15_000);
+  // A journey's own resizes name the page's window too (see PANEL_ROOM).
+  const setViewportSize = page.setViewportSize.bind(page);
+  page.setViewportSize = (size) => setViewportSize({ ...size, width: size.width + PANEL_ROOM });
   await page.addLocatorHandler(page.getByText('OpenCode update'), async () => {
     // The toast's own Close (an older host had Dismiss); never its Update, which would change the container.
     await page.locator('li.toast', { hasText: 'OpenCode update' }).getByRole('button', { name: 'Close', exact: true }).first().click({ timeout: 2000 })
