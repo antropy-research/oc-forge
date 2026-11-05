@@ -53,9 +53,9 @@ export const openPlannerPanel = async (page, { expand = true, home = true, timeo
   const frame = page.frameLocator(PLANNER_FRAME);
   const rail = page.locator(RAIL).first();
   await step(page, 'the rail\'s Planner icon', rail.waitFor({ timeout }));
-  // Pressed: an open zone shows the Planner (OpenChamber's shownContextModes). Something may open it at the same
-  // moment as the click (its Work Status section, following it from another folder or window), which the click then
-  // closes again: look once it has settled, and click again.
+  // Pressed: an open zone shows the Planner (OpenChamber's shownContextModes). Its Work Status section may open it at
+  // the same moment as the click (following it from the chat before, in another folder), which the click then closes
+  // again: look once it has settled, and click again.
   const pressed = async () => (await rail.getAttribute('aria-pressed')) === 'true';
   for (let attempt = 0; attempt < 3 && !(await pressed()); attempt += 1) {
     if (process.env.PANEL_DEBUG) console.error(`PANEL click ${attempt}: ${await looks(page)}`);

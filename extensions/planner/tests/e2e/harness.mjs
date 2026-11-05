@@ -34,6 +34,10 @@ import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { openPlannerPanel, PANEL_ROOM, PLANNER_FRAME } from './panel.mjs';
+import { answerLinear, defaultLinearWorld } from './linearFake.mjs';
+
+// The fake Linear's world and answers live in linearFake.mjs (the bun tests' harness uses them too).
+export { answerLinear, defaultLinearWorld };
 
 /**
  * The shared dev container's OpenChamber, where Docker publishes it (OC_DEV_BIND in the deploy checkout's
@@ -53,98 +57,6 @@ const freePort = () => new Promise((resolve, reject) => {
   server.on('error', reject);
 });
 
-/** A small Linear world: one workspace, four states, a team, issues, saved views, projects, members, labels. */
-export const defaultLinearWorld = () => {
-  const states = [
-    { id: 'st-backlog', name: 'Backlog', type: 'backlog', color: '#bec2c8', position: 0 },
-    { id: 'st-todo', name: 'Todo', type: 'unstarted', color: '#e2e2e2', position: 1 },
-    { id: 'st-prog', name: 'In Progress', type: 'started', color: '#f2c94c', position: 2 },
-    { id: 'st-review', name: 'In Review', type: 'started', color: '#0f783c', position: 3 },
-    { id: 'st-done', name: 'Done', type: 'completed', color: '#5e6ad2', position: 4 },
-    { id: 'st-canceled', name: 'Canceled', type: 'canceled', color: '#95a2b3', position: 5 },
-  ];
-  const team = { id: 'team-h', key: 'HAR', name: 'Harness Team' };
-  const viewer = { id: 'u-h', name: 'Harness User' };
-  const members = [{ id: 'u-h', name: 'Harness User', displayName: 'harness', active: true }, { id: 'u-mate', name: 'Teammate', displayName: 'mate', active: true }];
-  const labels = [{ id: 'lbl-bug', name: 'Bug', color: '#eb5757' }, { id: 'lbl-feat', name: 'Feature', color: '#bb87fc' }];
-  const issue = (n, title, stateId, extra = {}) => ({
-    id: `iss-h-${n}`, identifier: `HAR-${n}`, title: `harness ${title}`, url: `https://linear.app/harness/issue/HAR-${n}/x`, priority: (n % 4) + 1, dueDate: null,
-    branchName: `harness/har-${n}`, updatedAt: new Date(Date.now() - n * 3600_000).toISOString(), state: states.find((s) => s.id === stateId), team,
-    assignee: viewer, project: { id: 'p1', name: 'Planner' }, cycle: null, assigned: true, description: `Issue ${n} description.\n\n- [ ] first\n- [x] second`,
-    labels: { nodes: n % 2 ? [labels[0]] : [labels[1]] }, comments: { nodes: [] }, ...extra,
-  });
-  const issues = [
-    issue(1, 'first', 'st-todo'), issue(2, 'second', 'st-prog'), issue(3, 'third', 'st-backlog'), issue(4, 'in review', 'st-review'),
-    issue(5, 'finished', 'st-done'), issue(6, 'dropped', 'st-canceled'), issue(7, 'unassigned', 'st-todo', { assignee: null, assigned: false }),
-  ];
-  const view = (id, name, extra = {}) => ({ id, name: `harness ${name}`, description: null, icon: null, color: null, shared: true, modelName: 'Issue', slugId: `slug-${id}`, updatedAt: new Date().toISOString(), team, owner: viewer, ...extra });
-  const project = (id, name, statusType, extra = {}) => ({
-    id, name, url: `https://linear.app/harness/project/${id}`, color: '#26b5ce', icon: null, description: `${name} in one line`, progress: 0.25, health: 'onTrack', priority: 2, startDate: '2026-10-01', targetDate: '2026-11-30',
-    updatedAt: new Date().toISOString(), status: { id: `ps-${statusType}`, name: statusType === 'started' ? 'In Progress' : 'Planned', type: statusType, color: '#f2c94c' }, lead: viewer, teams: { nodes: [team] }, ...extra,
-  });
-  return {
-    org: { id: 'org-h', name: 'Harness Org', urlKey: 'harness' }, viewer, states, teams: [team], issues, members, labels, workspaceLabels: [],
-    projects: [project('p1', 'Planner', 'started')],
-    views: [view('v-open', 'Open work'), view('v-done', 'Finished work'), view('v-proj', 'Projects view', { modelName: 'Project' })],
-    favorites: [{ type: 'customView', sortOrder: 1, customView: { id: 'v-open' } }],
-    // Which issues each saved view holds; a real saved view may hold completed issues.
-    viewIssues: { 'v-open': { prefs: { layout: 'list', issueGrouping: 'workflowState', viewOrdering: 'priority' }, ids: ['iss-h-1', 'iss-h-2', 'iss-h-3', 'iss-h-4'] }, 'v-done': { prefs: { layout: 'list', issueGrouping: 'none', viewOrdering: 'updatedAt' }, ids: ['iss-h-5', 'iss-h-6'] } },
-  };
-};
-
-/** The default GraphQL answers for the Planner's documents, by operation name; null when unknown. */
-export const answerLinear = (o, op, variables = {}) => {
-  const strip = ({ assigned, ...rest }) => rest;
-  const open = (i) => !['completed', 'canceled'].includes(i.state.type);
-  const find = (id) => o.issues.find((i) => i.id === id || i.identifier === id);
-  const page = (nodes) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
-  switch (op) {
-    case 'PlannerWhoAmI': return { viewer: o.viewer, organization: o.org };
-    case 'PlannerAssigned': return { viewer: { ...o.viewer, assignedIssues: page(o.issues.filter((i) => i.assigned && open(i)).map(strip)) } };
-    case 'PlannerViews': return { customViews: page(o.views) };
-    case 'PlannerFavoriteViews': return { favorites: { nodes: o.favorites } };
-    case 'PlannerSaveViewFilter': {
-      const found = o.views.find((v) => v.id === variables.id);
-      if (!found) return { customViewUpdate: null };
-      found.filterData = variables.filterData;
-      return { customViewUpdate: { success: true, customView: { id: found.id, updatedAt: new Date().toISOString() } } };
-    }
-    case 'PlannerViewIssues': {
-      const saved = o.viewIssues[variables.id];
-      if (!o.views.some((v) => v.id === variables.id)) return { customView: null };
-      return { customView: { id: variables.id, viewPreferencesValues: saved?.prefs ?? null, issues: page((saved?.ids ?? []).map(find).filter(Boolean).map(strip)) } };
-    }
-    case 'PlannerLinked': return { issues: { nodes: o.issues.filter((i) => (variables.ids ?? []).includes(i.id)).map(strip) } };
-    case 'PlannerIssue': case 'PlannerIssueDetail': return { issue: find(variables.id) ? strip(find(variables.id)) : null };
-    case 'PlannerTeamStates': return { team: { id: variables.id, states: { nodes: o.states } } };
-    case 'PlannerTeams': return { viewer: { id: o.viewer.id }, teams: { nodes: o.teams } };
-    // Linear's search is a page like any list (the Planner reads pageInfo), and ignores case.
-    case 'PlannerSearch': return { searchIssues: page(o.issues.filter((i) => i.title.toLowerCase().includes(String(variables.term ?? '').toLowerCase())).map(strip)) };
-    case 'PlannerProjects': return { projects: page(o.projects) };
-    case 'PlannerTeamOptions': return { team: { id: variables.id, states: { nodes: o.states }, members: { nodes: o.members }, labels: { nodes: o.labels } }, issueLabels: { nodes: o.workspaceLabels } };
-    case 'PlannerSetState': {
-      const i = find(variables.id); const s = o.states.find((x) => x.id === variables.stateId);
-      if (!i || !s) return null; i.state = s; return { issueUpdate: { success: true, issue: strip(i) } };
-    }
-    case 'PlannerUpdateIssue': {
-      const i = find(variables.id); const input = variables.input ?? {};
-      if (!i) return null;
-      if ('stateId' in input) i.state = o.states.find((x) => x.id === input.stateId) ?? i.state;
-      for (const f of ['title', 'description', 'priority', 'dueDate']) if (f in input) i[f] = input[f];
-      if ('assigneeId' in input) i.assignee = input.assigneeId ? o.members.find((m) => m.id === input.assigneeId) ?? null : null;
-      for (const id of input.addedLabelIds ?? []) if (!i.labels.nodes.some((l) => l.id === id)) i.labels.nodes.push(o.labels.find((l) => l.id === id));
-      if (input.removedLabelIds) i.labels.nodes = i.labels.nodes.filter((l) => !input.removedLabelIds.includes(l.id));
-      i.updatedAt = new Date().toISOString();
-      return { issueUpdate: { success: true, issue: strip(i) } };
-    }
-    case 'PlannerAddComment': {
-      const i = find(variables.input.issueId); if (!i) return null;
-      const comment = { id: `c-${i.comments.nodes.length + 1}`, body: variables.input.body, createdAt: new Date().toISOString(), editedAt: null, user: { id: o.viewer.id, name: o.viewer.name }, botActor: null, parent: null };
-      i.comments.nodes.push(comment); return { commentCreate: { success: true, comment } };
-    }
-    default: return null;
-  }
-};
 
 export async function startHarness({
   worktree = resolve(import.meta.dirname, '../../../..'),

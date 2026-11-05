@@ -9,7 +9,7 @@
 // their labels, by words and the in:/is:/label: terms; threads with their text;
 // labels; and, with gmail.modify, a thread's labels changed or trashed), and the
 // People API's contact searches (with the contacts scopes). Every request is
-// logged in `requests`. Used by tests/googleService.test.ts and the e2e journeys.
+// logged in `requests`. Used by the bun scenarios (tests/support/planner.ts) and the browser journeys.
 import http from 'node:http';
 
 const pad = (n, width = 2) => String(n).padStart(width, '0');
@@ -246,7 +246,12 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
     };
     if (path === '/gmail/v1/users/me/messages' && method === 'GET') {
       const found = (world.mail ?? []).filter((message) => matches(message, query.get('q') ?? ''));
-      return [200, { messages: found.map((message) => ({ id: message.id, threadId: message.threadId })), resultSizeEstimate: found.length }];
+      // Gmail's pages, for a world that sets `pageSize.mail`: at most that many (and maxResults), the rest after
+      // nextPageToken. Without it, one page of everything, as the journeys have it.
+      const size = world.pageSize?.mail ? Math.min(Number(query.get('maxResults') ?? 100) || 100, world.pageSize.mail) : found.length;
+      const from = Number(query.get('pageToken') ?? 0);
+      const slice = found.slice(from, from + size);
+      return [200, { messages: slice.map((message) => ({ id: message.id, threadId: message.threadId })), resultSizeEstimate: found.length, ...(from + size < found.length ? { nextPageToken: String(from + size) } : {}) }];
     }
     if (path === '/gmail/v1/users/me/labels' && method === 'GET') {
       const system = ['INBOX', 'STARRED', 'IMPORTANT', 'UNREAD', 'SENT', 'DRAFT', 'SPAM', 'TRASH', 'CATEGORY_SOCIAL', 'CHAT'].map((id) => ({ id, name: id, type: 'system' }));

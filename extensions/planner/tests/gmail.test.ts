@@ -1,304 +1,213 @@
-// Round 12, Gmail as Sunsama's integration has it (help.sunsama.com/docs/integrations/gmail): the actions on an email
-// task (Archive, Move to trash, Mark as unread, labels) as Gmail label changes; the panel's labels (one, Cmd/Ctrl adds)
-// and filters (archived, spam and trash) as one Gmail search; the custom email client; a message's text; the import
-// and completion automations (or their prompt) after the user's own changes; and the service's routes against the
-// fake Google: labels, a thread with its text, the actions (only with Gmail actions allowed), Google Contacts.
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer, type AddressInfo } from 'node:net';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DEFAULT_MAIL_FILTER, emailUrl, gmailChanges, mailQuery, messageText, pickLabel, sourceUrl, threadIdOf } from '../src/domain/gmail.ts';
-import { GmailStore } from '../panel/lib/gmail.ts';
-import type { GoogleStore } from '../panel/lib/google.ts';
-import type { PlannerClient, CommitListener } from '../panel/lib/client.ts';
-import { applyEvents } from '../src/domain/reducer.ts';
-import type { Command, EventBody, PlannerEvent } from '../src/domain/events.ts';
-import { emptyState, type PlannerState, type TaskSourceRef } from '../src/domain/types.ts';
-import { todayIn } from '../src/domain/dates.ts';
-import { CONTACTS_SCOPES, DEFAULT_SCOPES, GMAIL_MODIFY_SCOPE, defaultFakeWorld, startFakeGoogle, type FakeGoogle } from './e2e/fakeGoogle.mjs';
+// Gmail as Sunsama's Gmail integration has it (help.sunsama.com/docs/integrations/gmail), end to end: the Planner's
+// service signed in to the fake Google (tests/e2e/fakeGoogle.mjs) as two accounts, one that allowed Gmail actions and
+// one that did not, and Planner windows made of the panel's own stores. An email task's actions and the import and
+// completion automations are label changes in the fake Gmail. The browser journey tests/e2e/sunsama.mjs shows the same
+// Gmail panel, its filters and its prompts on screen. A pasted Gmail address is in tests/github.test.ts ("a URL pasted
+// as a new task").
+import { beforeAll, describe, expect, test } from 'bun:test';
+import type { EventBody } from '../src/domain/events.ts';
+import { gmailUrl } from '../src/domain/google.ts';
+import type { MailItem } from '../src/domain/google.ts';
+import type { TaskSourceRef } from '../src/domain/types.ts';
+import { firstOf, notesOf, slowRelay } from './support/github.ts';
+import { ME, OTHER, THREADS, addSecondAccount, labelsOf, mailWorld, threadActs } from './support/gmail.ts';
+import { until, usePlanner, type PlannerWindow } from './support/planner.ts';
 
-const ME = 'harness@example.com';
-const OTHER = 'other@example.com';
-const labels = [{ id: 'Label_7', name: 'In progress', type: 'user' as const }];
-const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64url');
+const ZONE = 'America/Los_Angeles';
+const planner = usePlanner({ zone: ZONE, google: mailWorld(ZONE) });
+beforeAll(() => addSecondAccount(planner));
 
-describe("Gmail's actions and the panel's view, as Gmail takes them", () => {
-  test('actions are label changes on the thread (the last word wins), the trash last; a label the account lacks is named', () => {
-    expect(gmailChanges([{ kind: 'markRead' }, { kind: 'removeLabel', label: 'Inbox' }, { kind: 'addLabel', label: 'in progress' }], labels)).toEqual({ add: ['Label_7'], remove: ['UNREAD', 'INBOX'], trash: false, missing: [] });
-    expect(gmailChanges([{ kind: 'archive' }, { kind: 'markUnread' }, { kind: 'star' }], labels)).toEqual({ add: ['UNREAD', 'STARRED'], remove: ['INBOX'], trash: false, missing: [] });
-    expect(gmailChanges([{ kind: 'markUnread' }, { kind: 'markRead' }], labels)).toEqual({ add: [], remove: ['UNREAD'], trash: false, missing: [] });
-    expect(gmailChanges([{ kind: 'trash' }, { kind: 'addLabel', label: 'Waiting' }], labels)).toEqual({ add: [], remove: [], trash: true, missing: ['Waiting'] });
-  });
+/** A window with its Google accounts read, as the panel has them once open. */
+const open = async (surface: 'panel' | 'status' = 'panel'): Promise<PlannerWindow> => {
+  const window = await planner.window({ surface });
+  await window.google.checkStatus();
+  return window;
+};
+const today = (window: PlannerWindow) => window.client.getView().today;
+const email = (account: string, thread: string, title: string): TaskSourceRef => ({ kind: 'email', id: `m-${thread}`, key: 'Gmail', url: gmailUrl(account, thread), title, account });
+const created = (window: PlannerWindow, id: string, source: TaskSourceRef | null, title = source?.title ?? 'Task'): EventBody => ({ type: 'task.created', task: { id, title, placement: { kind: 'day', date: today(window) }, position: 1024, ...(source ? { source } : {}) } });
 
-  test("labels and filters make one search: the Inbox at first; a label alone, or several (all must match); archived, spam and trash only when shown", () => {
-    expect(mailQuery(DEFAULT_MAIL_FILTER)).toBe('in:inbox');
-    expect(mailQuery({ ...DEFAULT_MAIL_FILTER, labels: ['In progress'] })).toBe('label:in-progress in:inbox');
-    expect(mailQuery({ ...DEFAULT_MAIL_FILTER, labels: ['In progress', 'Starred'], archived: true })).toBe('label:in-progress is:starred');
-    expect(mailQuery({ ...DEFAULT_MAIL_FILTER, labels: ['Inbox'], archived: true, spamTrash: true, words: ' from:ann  budget ' })).toBe('in:inbox in:anywhere from:ann budget');
-    // A click shows that label alone; Cmd/Ctrl adds it, or takes it off (the Inbox when none are left).
-    expect(pickLabel(['Inbox'], 'Starred', false)).toEqual(['Starred']);
-    expect(pickLabel(['Inbox'], 'Starred', true)).toEqual(['Inbox', 'Starred']);
-    expect(pickLabel(['Starred'], 'starred', true)).toEqual(['Inbox']);
-  });
+describe("an email task's actions", () => {
+  test('Archive, a label by name, Mark as unread and Move to trash happen in Gmail, to the whole thread; the task\'s thread and the Inbox follow; a label Gmail lacks is refused before anything changes; an account without Gmail actions is told how', async () => {
+    const window = await open();
+    const notes = notesOf(window);
+    expect(window.google.getView().mailAccount).toBe(ME);
+    await window.google.searchMail(window.gmail.query());
+    const inbox = () => window.google.getView().mail.map((item) => item.subject);
+    expect(inbox()).toEqual(expect.arrayContaining(['Quarterly numbers', 'Re: Quarterly numbers', 'Lunch?']));
+    expect((await window.gmail.labels(ME)).map((label) => label.name)).toEqual(['Inbox', 'Starred', 'Important', 'Unread', 'Sent', 'Drafts', 'Spam', 'Trash', 'In progress']);
 
-  test('an email opens in Gmail, or in Superhuman when that is the email client; other links open as they are', () => {
-    const source: TaskSourceRef = { kind: 'email', id: 'm1', key: 'Gmail', url: `https://mail.google.com/mail/u/${encodeURIComponent(ME)}/#all/18b2f3c4d5e6f700`, account: ME };
-    expect(threadIdOf(source)).toBe('18b2f3c4d5e6f700');
-    expect(emailUrl(source, 'gmail')).toBe(source.url);
-    expect(emailUrl(source, 'superhuman')).toBe(`https://mail.superhuman.com/${encodeURIComponent(ME)}/thread/18b2f3c4d5e6f700`);
-    expect(sourceUrl({ kind: 'github', id: 'I_1', key: 'acme/app#1', url: 'https://github.com/acme/app/issues/1' }, { emailClient: 'superhuman' })).toBe('https://github.com/acme/app/issues/1');
-  });
+    const latest = window.google.getView().mail.find((item) => item.subject === 'Re: Quarterly numbers')!;
+    await window.google.planMail(latest, { kind: 'day', date: today(window) });
+    const task = Object.values(window.client.getView().state.tasks).find((item) => item.source?.kind === 'email')!;
+    expect(task).toMatchObject({ title: 'Re: Quarterly numbers', source: { kind: 'email', account: ME } });
+    await window.gmail.loadThread(ME, THREADS.numbers);
+    const thread = () => window.gmail.getView().threads[`${ME}|${THREADS.numbers}`]!.thread!;
+    expect(thread().messages.map((message) => [message.from, message.text, message.unread])).toEqual([['Ann Lee <ann@example.com>', 'Hi,\nthe first draft.', false], ['Bo <bo@example.com>', 'Looks good', true]]);
 
-  test("a message's text: its plain part first, else its HTML without tags; UTF-8 kept", () => {
-    expect(messageText({ mimeType: 'multipart/alternative', parts: [{ mimeType: 'text/html', body: { data: b64('<p>Hi</p>') } }, { mimeType: 'text/plain', body: { data: b64('Hi Ann,\r\nsee you — Bo') } }] })).toBe('Hi Ann,\nsee you — Bo');
-    expect(messageText({ mimeType: 'text/html', body: { data: b64('<div>Line 1<br>Line&nbsp;2 &amp; more</div><style>p{}</style>') } })).toBe('Line 1\nLine 2 & more');
-    expect(messageText(undefined)).toBe('');
+    expect(await window.gmail.act(ME, THREADS.numbers, [{ kind: 'markRead' }, { kind: 'addLabel', label: 'In progress' }, { kind: 'archive' }])).toBe(true);
+    expect([labelsOf(planner, '18b2f3c4d5e6f701'), labelsOf(planner, '18b2f3c4d5e6f702')]).toEqual([['Label_7'], ['Label_7']]);
+    await until(() => thread().labelIds.join() === 'Label_7' && !inbox().includes('Quarterly numbers'));
+    expect(inbox()).toEqual(expect.arrayContaining(['Lunch?']));
+    expect(await window.gmail.act(ME, THREADS.numbers, [{ kind: 'markUnread' }, { kind: 'removeLabel', label: 'In progress' }])).toBe(true);
+    expect(labelsOf(planner, '18b2f3c4d5e6f701')).toEqual(['UNREAD']);
+    expect(await window.gmail.act(ME, THREADS.numbers, [{ kind: 'trash' }])).toBe(true);
+    expect(labelsOf(planner, '18b2f3c4d5e6f702')).toEqual(['TRASH', 'UNREAD']);
+
+    const before = threadActs(planner, THREADS.lunch);
+    expect(await window.gmail.act(ME, THREADS.lunch, [{ kind: 'archive' }, { kind: 'addLabel', label: 'Waiting' }])).toBe(false);
+    expect(notes.at(-1)).toBe(`Gmail did not take it: Gmail has no label "Waiting" in ${ME}: make it in Gmail first`);
+    expect(await window.gmail.act(OTHER, THREADS.lunch, [{ kind: 'archive' }])).toBe(false);
+    expect(notes.at(-1)).toBe(`Gmail did not take it: Gmail actions are not allowed for ${OTHER}: allow them in Settings → Google`);
+    expect([labelsOf(planner, THREADS.lunch), threadActs(planner, THREADS.lunch)]).toEqual([['INBOX', 'UNREAD'], before]);
   });
 });
 
-describe('the import and completion automations', () => {
-  let clock = Date.parse('2026-10-29T15:00:00Z');
-  const ev = (body: EventBody): PlannerEvent => ({ v: 1, id: `e${(clock += 1000)}`, at: new Date(clock).toISOString(), ...body }) as PlannerEvent;
-  const email = (thread: string, subject: string): TaskSourceRef => ({ kind: 'email', id: `m-${thread}`, key: 'Gmail', url: `https://mail.google.com/mail/u/${encodeURIComponent(ME)}/#all/${thread}`, title: subject, account: ME });
-  const setup = (settings: Partial<PlannerState['settings']>, options: { allowed?: boolean; surface?: string } = {}) => {
-    let state: PlannerState = applyEvents(emptyState(), [ev({ type: 'settings.updated', patch: settings })]);
-    let listener: CommitListener | null = null;
-    const calls: { path: string; body: any }[] = [];
-    const notes: string[] = [];
-    const client = {
-      getView: () => ({ state }),
-      onCommitted: (fn: CommitListener) => {
-        listener = fn;
-        return () => {};
-      },
-      call: async (_method: string, path: string, body?: unknown) => {
-        calls.push({ path, body });
-        return { labelIds: [] };
-      },
-      notify: (message: string) => notes.push(message),
-    } as unknown as PlannerClient;
-    const google = { allows: (_account: string, feature: string) => feature === 'mailActions' && (options.allowed ?? true), searchMail: async () => {} } as unknown as GoogleStore;
-    const gmail = new GmailStore(client, google, options.surface ?? 'page');
-    /** The user's change, as the client reports it once committed. */
-    const commit = (bodies: EventBody[], origin: 'user' | 'sync' = 'user') => {
-      const before = state;
-      state = applyEvents(state, bodies.map(ev));
-      listener!(bodies.map((body, index) => ({ cmd: `c${index}`, ...body }) as Command), before, state, origin as never);
+describe("Gmail's automations, from Settings → Gmail", () => {
+  test('importing an email does what the import automations say, completing its task what the completion ones say, in the window that did it and only there; reopening does nothing; a setting Gmail cannot do is refused; an account without Gmail actions is told how', async () => {
+    const window = await open();
+    const other = await open();
+    const notes = notesOf(window);
+    await window.client.dispatch([{ type: 'settings.updated', patch: { gmailOnImport: [{ kind: 'markRead' }, { kind: 'addLabel', label: 'In progress' }], gmailOnComplete: [{ kind: 'archive' }, { kind: 'removeLabel', label: 'In progress' }] } }]);
+    await window.client.dispatch([{ type: 'settings.updated', patch: { gmailOnImport: [{ kind: 'delete' }] as never } }]);
+    expect(notes.at(-1)).toContain('gmailOnImport must be');
+    expect((await planner.state()).settings.gmailOnImport).toEqual([{ kind: 'markRead' }, { kind: 'addLabel', label: 'In progress' }]);
+    await other.client.refresh();
+
+    await window.google.searchMail('in:inbox');
+    const lunch = window.google.getView().mail.find((item) => item.subject === 'Lunch?') as MailItem;
+    await window.google.planMail(lunch, { kind: 'day', date: today(window) });
+    await until(() => labelsOf(planner, THREADS.lunch).join() === 'INBOX,Label_7');
+    const taskId = Object.values(window.client.getView().state.tasks).find((task) => task.source?.kind === 'email' && task.title === 'Lunch?')!.id;
+    await window.client.dispatch([{ type: 'task.completed', taskId, on: today(window) }]);
+    await until(() => labelsOf(planner, THREADS.lunch).length === 0);
+    await window.client.dispatch([{ type: 'task.reopened', taskId }]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect([labelsOf(planner, THREADS.lunch), threadActs(planner, THREADS.lunch)]).toEqual([[], 2]);
+
+    // An email of the account that did not allow Gmail actions: nothing is done, and the Planner says how to allow them.
+    await window.client.dispatch([created(window, 'other-mail', email(OTHER, THREADS.trip, 'Trip'))]);
+    expect(notes.at(-1)).toBe(`Gmail's import automations need Gmail actions for ${OTHER}: allow them in Settings → Google`);
+    expect(threadActs(planner, THREADS.trip)).toBe(0);
+  });
+
+  test("an email merged into a task is imported, and completed when checked off there or when the task is (the ones still open, once each); asked instead when Show prompt is on; Convert to task does nothing in Gmail again; the Work Status frame never acts", async () => {
+    const window = await open();
+    await window.client.dispatch([{ type: 'settings.updated', patch: { gmailOnImport: [{ kind: 'markRead' }], gmailOnComplete: [{ kind: 'star' }], gmailCompletePrompt: false } }]);
+    const merged = (taskId: string, id: string, thread: string, title: string): EventBody => ({ type: 'subtask.added', taskId, subtask: { id, title, done: false, source: email(ME, thread, title) } });
+    await window.client.dispatch([created(window, 'triage', email(ME, THREADS.triage, 'Inbox triage')), merged('triage', 's-budget', THREADS.budget, 'Budget'), merged('triage', 's-numbers', THREADS.numbers, 'Quarterly numbers')]);
+    await until(() => !labelsOf(planner, '18c0000000000a01').includes('UNREAD') && !labelsOf(planner, '18c0000000000b01').includes('UNREAD'));
+    await window.client.dispatch([{ type: 'subtask.updated', taskId: 'triage', subtaskId: 's-budget', patch: { done: true }, seen: { done: false } }]);
+    await until(() => labelsOf(planner, '18c0000000000b01').includes('STARRED'));
+    await window.client.dispatch([{ type: 'task.completed', taskId: 'triage', on: today(window) }]);
+    await until(() => labelsOf(planner, '18c0000000000a01').includes('STARRED') && labelsOf(planner, '18b2f3c4d5e6f702').includes('STARRED'));
+    // Budget: imported, then starred once, when checked off; not again with the task.
+    expect(threadActs(planner, THREADS.budget)).toBe(2);
+
+    // Show prompt: completing asks once, about the task's email and the ones merged into it, the configured actions ticked.
+    await window.client.dispatch([{ type: 'settings.updated', patch: { gmailCompletePrompt: true, gmailOnComplete: [{ kind: 'archive' }] } }, { type: 'task.reopened', taskId: 'triage' }, { type: 'subtask.updated', taskId: 'triage', subtaskId: 's-budget', patch: { done: false }, seen: { done: true } }]);
+    await window.client.dispatch([{ type: 'task.completed', taskId: 'triage', on: today(window) }]);
+    expect(window.gmail.getView().prompt).toMatchObject({ when: 'complete', taskId: 'triage', subject: 'Inbox triage and 2 more', actions: [{ kind: 'archive' }] });
+    window.gmail.answerPrompt([{ kind: 'trash' }]);
+    await until(() => [THREADS.triage, THREADS.budget, THREADS.numbers].every((thread) => planner.google!.world.mail!.filter((item) => item.threadId === thread).every((item) => item.labels?.includes('TRASH'))));
+
+    // Convert to task gives a merged email back as a task: it was imported when merged, so nothing happens in Gmail.
+    const acts = threadActs(planner, THREADS.budget);
+    await window.client.dispatch([{ type: 'subtask.deleted', taskId: 'triage', subtaskId: 's-budget', seen: { title: 'Budget' } }, created(window, 'budget-back', email(ME, THREADS.budget, 'Budget'))]);
+    // The Work Status frame shows tasks but never acts in Gmail.
+    const status = await open('status');
+    await status.client.dispatch([created(status, 'status-mail', email(ME, THREADS.trip, 'Trip'))]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect([threadActs(planner, THREADS.budget), threadActs(planner, THREADS.trip)]).toEqual([acts, 0]);
+  });
+});
+
+// Round 12's audit after its Load more finding (P1-2): a read a newer one overtakes never shows over it, its error
+// neither, and nothing is left loading.
+describe("Google's lists in the panel show the newest read", () => {
+  test("a Gmail search left behind that fails says nothing; Refresh while Load more is on its way: the old page never joins the list read again; a Google Tasks list and the Tasks view read twice show the newer read; an email task's thread too; another account while a search is on its way leaves nothing loading", async () => {
+    const window = await open();
+    const relay = slowRelay(window);
+    relay.hold(firstOf((request) => request.path.startsWith('/google/mail?')));
+    void window.google.searchMail('in:inbox');
+    await until(() => relay.held.length === 1);
+    await window.google.searchMail('is:starred');
+    relay.held[0]!.fail(500, 'Gmail answered HTTP 500');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect([window.google.getView().mailQuery, window.google.getView().mailError, window.google.getView().mailLoading]).toEqual(['is:starred', null, false]);
+
+    // Gmail in pages of two. Refresh while Load more is on its way, a message come in meanwhile: the list is the new
+    // first page, whenever the old page answers.
+    const world = planner.google!.world;
+    world.pageSize = { ...world.pageSize, mail: 2 };
+    const listed = () => window.google.getView().mail.map((item) => item.id);
+    await window.google.searchMail('in:anywhere');
+    expect([listed().length, window.google.getView().mailNext]).toEqual([2, '2']);
+    relay.held.length = 0;
+    relay.hold(firstOf((request) => request.path.startsWith('/google/mail?') && request.path.includes('pageToken=')));
+    const more = window.google.searchMail(window.google.getView().mailQuery, true);
+    await until(() => relay.held.length === 1);
+    await relay.held[0]!.answered;
+    world.mail!.unshift({ id: '18d0000000000001', threadId: '18d0000000000001', subject: 'Just in', from: 'Gus <gus@example.com>', date: '2026-10-30T09:00:00.000Z', snippet: 'Hello', unread: true });
+    await window.google.searchMail();
+    const refreshed = listed();
+    relay.held[0]!.release();
+    await more;
+    expect([refreshed[0], listed(), window.google.getView().mailNext, window.google.getView().mailLoading]).toEqual(['18d0000000000001', refreshed, '2', false]);
+    delete world.pageSize.mail;
+
+    const tasks = planner.google!.tasks.get('L1')!;
+    const reads = async (read: () => Promise<void>, path: string, shownTitles: () => string[]) => {
+      relay.hold(firstOf((request) => request.path.startsWith(path)));
+      const older = read();
+      await until(() => relay.held.length > 0);
+      const held = relay.held.at(-1)!;
+      await held.answered;
+      tasks[0]!.title = `${tasks[0]!.title} again`;
+      await read();
+      held.release();
+      await older;
+      expect(shownTitles()).toContain(tasks[0]!.title);
     };
-    return { gmail, calls, notes, commit, state: () => state };
-  };
-  const created = (id: string, source: TaskSourceRef): EventBody => ({ type: 'task.created', task: { id, title: source.title ?? 'x', placement: { kind: 'day', date: '2026-10-29' }, position: 1024, source } });
+    relay.held.length = 0;
+    window.google.selectList(ME, 'L1');
+    await until(() => !window.google.getView().tasksLoading);
+    await reads(() => window.google.refreshTasks(), '/google/tasks?', () => window.google.getView().tasks.map((item) => item.title));
+    relay.held.length = 0;
+    await reads(() => window.google.loadBoard(ME, 'L1'), '/google/tasks/all?', () => window.google.getView().board[`${ME}\nL1`]!.items.map((item) => item.title));
+    // A list's read failing after another list was chosen says nothing over it.
+    relay.held.length = 0;
+    relay.hold(firstOf((request) => request.path.startsWith('/google/tasks?')));
+    void window.google.refreshTasks();
+    await until(() => relay.held.length === 1);
+    window.google.selectList(ME, 'L2');
+    await until(() => !window.google.getView().tasksLoading);
+    relay.held[0]!.fail(503, 'Google answered HTTP 503');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect([window.google.getView().tasks.map((item) => item.title), window.google.getView().tasksError]).toEqual([['Buy stamps'], null]);
 
-  test('importing an email does what the import automations say, in Gmail; completing its task, the completion ones', async () => {
-    const fake = setup({ gmailOnImport: [{ kind: 'markRead' }, { kind: 'removeLabel', label: 'Inbox' }], gmailOnComplete: [{ kind: 'archive' }] });
-    fake.commit([created('t1', email('th1', 'Budget'))]);
-    fake.commit([{ type: 'task.completed', taskId: 't1', on: '2026-10-29' }]);
-    // Another window's change, or the Planner's own sync, does nothing here.
-    fake.commit([created('t2', email('th2', 'Other'))], 'sync');
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => call.body)).toEqual([
-      { account: ME, thread: 'th1', actions: [{ kind: 'markRead' }, { kind: 'removeLabel', label: 'Inbox' }] },
-      { account: ME, thread: 'th1', actions: [{ kind: 'archive' }] },
-    ]);
-  });
+    // An email task's thread read twice (after an action on it): the newer read shows.
+    relay.held.length = 0;
+    relay.hold(firstOf((request) => request.path.startsWith('/google/mail/thread')));
+    const older = window.gmail.loadThread(ME, THREADS.trip);
+    await until(() => relay.held.length === 1);
+    await relay.held[0]!.answered;
+    await planner.call('POST', '/google/mail/act', { account: ME, thread: THREADS.trip, actions: [{ kind: 'star' }] });
+    await window.gmail.loadThread(ME, THREADS.trip);
+    relay.held[0]!.release();
+    await older;
+    expect(window.gmail.getView().threads[`${ME}|${THREADS.trip}`]).toMatchObject({ loading: false, error: null, thread: { labelIds: expect.arrayContaining(['STARRED']) } });
 
-  test('"Show prompt" asks with the configured actions ticked, and does the ones picked; without Gmail actions allowed, it says how', async () => {
-    const asking = setup({ gmailOnComplete: [{ kind: 'archive' }], gmailCompletePrompt: true });
-    asking.commit([created('t1', email('th1', 'Budget'))]);
-    expect(asking.gmail.getView().prompt).toBeNull();
-    asking.commit([{ type: 'task.completed', taskId: 't1', on: '2026-10-29' }]);
-    expect(asking.gmail.getView().prompt).toEqual({ when: 'complete', taskId: 't1', mails: [{ account: ME, thread: 'th1', subject: 'Budget' }], subject: 'Budget', actions: [{ kind: 'archive' }] });
-    asking.gmail.answerPrompt([{ kind: 'trash' }]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(asking.calls.filter((call) => call.path === '/google/mail/act').map((call) => call.body.actions)).toEqual([[{ kind: 'trash' }]]);
-    const notAllowed = setup({ gmailOnImport: [{ kind: 'archive' }] }, { allowed: false });
-    notAllowed.commit([created('t1', email('th1', 'Budget'))]);
-    expect(notAllowed.calls).toEqual([]);
-    expect(notAllowed.notes).toEqual([`Gmail's import automations need Gmail actions for ${ME}: allow them in Settings → Google`]);
-  });
-
-  test('an email merged straight into a task is imported; checked off there, it is completed (Sunsama keeps merged items integrated)', async () => {
-    const fake = setup({ gmailOnImport: [{ kind: 'markRead' }], gmailOnComplete: [{ kind: 'archive' }] });
-    fake.commit([{ type: 'task.created', task: { id: 'triage', title: 'Inbox triage', placement: { kind: 'day', date: '2026-10-29' }, position: 1024 } }]);
-    fake.commit([{ type: 'subtask.added', taskId: 'triage', subtask: { id: 's1', title: 'Budget', done: false, source: email('th9', 'Budget') } }]);
-    fake.commit([{ type: 'subtask.updated', taskId: 'triage', subtaskId: 's1', patch: { done: true }, seen: { done: false } }]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => [call.body.thread, call.body.actions])).toEqual([['th9', [{ kind: 'markRead' }]], ['th9', [{ kind: 'archive' }]]]);
-  });
-
-  test("completing a task completes its email and the emails merged into it, as checking each off would (not one checked off on its own: that ran then); asked, once for all; reopening does nothing in Gmail", async () => {
-    const merged: EventBody[] = [
-      { type: 'subtask.added', taskId: 'triage', subtask: { id: 's1', title: 'Budget', done: false, source: email('th1', 'Budget') } },
-      { type: 'subtask.added', taskId: 'triage', subtask: { id: 's2', title: 'Lunch', done: false, source: email('th2', 'Lunch') } },
-    ];
-    const acts = (calls: { path: string; body: any }[]) => calls.filter((call) => call.path === '/google/mail/act').map((call) => [call.body.thread, call.body.actions]);
-    const doing = setup({ gmailOnComplete: [{ kind: 'archive' }] });
-    doing.commit([created('triage', email('th0', 'Inbox triage')), ...merged]);
-    doing.commit([{ type: 'subtask.updated', taskId: 'triage', subtaskId: 's2', patch: { done: true }, seen: { done: false } }]);
-    doing.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-29' }]);
-    doing.commit([{ type: 'task.reopened', taskId: 'triage' }]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(acts(doing.calls)).toEqual([['th2', [{ kind: 'archive' }]], ['th0', [{ kind: 'archive' }]], ['th1', [{ kind: 'archive' }]]]);
-
-    const asking = setup({ gmailOnComplete: [{ kind: 'archive' }], gmailCompletePrompt: true });
-    asking.commit([created('triage', email('th0', 'Inbox triage')), ...merged]);
-    asking.commit([{ type: 'task.completed', taskId: 'triage', on: '2026-10-29' }]);
-    expect(asking.gmail.getView().prompt).toEqual({
-      when: 'complete',
-      taskId: 'triage',
-      mails: [{ account: ME, thread: 'th0', subject: 'Inbox triage' }, { account: ME, thread: 'th1', subject: 'Budget' }, { account: ME, thread: 'th2', subject: 'Lunch' }],
-      subject: 'Inbox triage and 2 more',
-      actions: [{ kind: 'archive' }],
-    });
-    asking.gmail.answerPrompt([{ kind: 'star' }]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(acts(asking.calls)).toEqual([['th0', [{ kind: 'star' }]], ['th1', [{ kind: 'star' }]], ['th2', [{ kind: 'star' }]]]);
-    asking.commit([{ type: 'task.reopened', taskId: 'triage' }]);
-    expect(asking.gmail.getView().prompt).toBeNull();
-  });
-
-  test('Convert to task gives back a merged email as a task: not an import, nothing done in Gmail again', async () => {
-    const fake = setup({ gmailOnImport: [{ kind: 'markRead' }] });
-    fake.commit([{ type: 'task.created', task: { id: 'triage', title: 'Inbox triage', placement: { kind: 'day', date: '2026-10-29' }, position: 1024 } }, { type: 'subtask.added', taskId: 'triage', subtask: { id: 's1', title: 'Budget', done: false, source: email('th9', 'Budget') } }]);
-    fake.commit([{ type: 'subtask.deleted', taskId: 'triage', subtaskId: 's1', seen: { title: 'Budget' } }, created('back', email('th9', 'Budget'))]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(fake.calls.filter((call) => call.path === '/google/mail/act').map((call) => call.body.actions)).toEqual([[{ kind: 'markRead' }]]);
-  });
-
-  test('the Work Status frame and the background never act', () => {
-    for (const surface of ['status', 'background']) {
-      const fake = setup({ gmailOnImport: [{ kind: 'archive' }] }, { surface });
-      fake.commit([created('t1', email('th1', 'Budget'))]);
-      expect(fake.calls).toEqual([]);
-    }
-  });
-});
-
-describe('the service, against the fake Google', () => {
-  const token = 'gmail-routes-test-token';
-  let child: ChildProcess;
-  let fake: FakeGoogle;
-  let base = '';
-  let root = '';
-  const call = async (method: string, path: string, body?: unknown) => {
-    const response = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    return { status: response.status, body: (await response.json()) as Record<string, any> };
-  };
-  const labelsOf = (id: string) => fake.world.mail!.find((message) => message.id === id)!.labels ?? null;
-
-  beforeAll(async () => {
-    const world = defaultFakeWorld({ account: ME, today: todayIn('America/Los_Angeles'), zone: 'America/Los_Angeles' });
-    world.granted = [...DEFAULT_SCOPES, GMAIL_MODIFY_SCOPE, ...CONTACTS_SCOPES];
-    world.mailLabels = [{ id: 'Label_7', name: 'In progress' }];
-    world.mail = [
-      { id: 'a1', threadId: 'ta', subject: 'Quarterly numbers', from: 'Ann Lee <ann@example.com>', date: '2026-10-28T09:00:00.000Z', snippet: 'First draft', body: 'Hi,\nthe first draft.' },
-      { id: 'a2', threadId: 'ta', subject: 'Re: Quarterly numbers', from: 'Bo <bo@example.com>', date: '2026-10-29T10:00:00.000Z', snippet: 'Looks good', unread: true },
-      { id: 'b1', threadId: 'tb', subject: 'Lunch?', from: 'Cy <cy@example.com>', date: '2026-10-29T11:00:00.000Z', snippet: 'Tacos', unread: true },
-    ];
-    world.contacts = [{ name: 'Ann Lee', email: 'ann@example.com' }, { name: 'Andy Roe', email: 'andy@example.com' }];
-    world.otherContacts = [{ name: '', email: 'ann@example.com' }, { name: 'Annika', email: 'annika@example.org' }];
-    fake = await startFakeGoogle(world);
-    root = mkdtempSync(join(tmpdir(), 'planner-gmail-routes-'));
-    // Two accounts: one allowed Gmail actions and Contacts, one not.
-    const file = JSON.parse(fake.accountsFile());
-    file.accounts = [{ ...file.accounts[0], scopes: world.granted }, { ...file.accounts[0], email: OTHER, scopes: DEFAULT_SCOPES }];
-    writeFileSync(join(root, 'google-accounts.json'), JSON.stringify(file), { mode: 0o600 });
-    const port = await new Promise<number>((resolve) => {
-      const server = createServer();
-      server.listen(0, '127.0.0.1', () => {
-        const { port: free } = server.address() as AddressInfo;
-        server.close(() => resolve(free));
-      });
-    });
-    child = spawn(process.execPath, [join(import.meta.dir, '../service/main.ts')], {
-      env: { ...process.env, OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: token, PLANNER_DATA_DIR: join(root, 'data'), PLANNER_GOOGLE_API_BASE: fake.base },
-      stdio: ['ignore', 'ignore', 'inherit'],
-    });
-    base = `http://127.0.0.1:${port}`;
-    for (let attempt = 0; attempt < 150; attempt++) {
-      try {
-        if ((await fetch(`${base}/health`, { headers: { Authorization: `Bearer ${token}` } })).ok) break;
-      } catch {
-        // Not listening yet.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  });
-
-  afterAll(async () => {
-    child?.kill();
-    await fake?.close();
-    if (root) rmSync(root, { recursive: true, force: true });
-  });
-
-  test("an account's labels: Gmail's own the panel lists (Inbox first), then the user's; categories and chats left out", async () => {
-    const { status, body } = await call('GET', `/google/mail/labels?account=${encodeURIComponent(ME)}`);
-    expect(status).toBe(200);
-    expect(body.labels.map((label: { name: string }) => label.name)).toEqual(['Inbox', 'Starred', 'Important', 'Unread', 'Sent', 'Drafts', 'Spam', 'Trash', 'In progress']);
-  });
-
-  test("a thread: its messages oldest first, with their text, and the labels it has; one Gmail doesn't have is 404", async () => {
-    const { status, body } = await call('GET', `/google/mail/thread?account=${encodeURIComponent(ME)}&thread=ta`);
-    expect(status).toBe(200);
-    expect(body.thread.messages.map((message: { from: string; text: string; unread: boolean }) => [message.from, message.text, message.unread])).toEqual([['Ann Lee <ann@example.com>', 'Hi,\nthe first draft.', false], ['Bo <bo@example.com>', 'Looks good', true]]);
-    expect(body.thread.labelIds.sort()).toEqual(['INBOX', 'UNREAD']);
-    expect((await call('GET', `/google/mail/thread?account=${encodeURIComponent(ME)}&thread=nothing`)).status).toBe(404);
-    expect((await call('GET', `/google/mail/thread?account=${encodeURIComponent(ME)}&thread=bad%20id`)).status).toBe(400);
-  });
-
-  test('the actions happen in Gmail: archive, a label by name, read and unread, the trash; the list follows', async () => {
-    const act = (thread: string, actions: unknown[], account = ME) => call('POST', '/google/mail/act', { account, thread, actions });
-    expect((await act('ta', [{ kind: 'markRead' }, { kind: 'addLabel', label: 'In progress' }, { kind: 'archive' }])).status).toBe(200);
-    expect(labelsOf('a2')!.sort()).toEqual(['Label_7']);
-    const inbox = await call('GET', `/google/mail?account=${encodeURIComponent(ME)}&q=${encodeURIComponent('in:inbox')}`);
-    expect(inbox.body.messages.map((message: { subject: string }) => message.subject)).toEqual(['Lunch?']);
-    const labelled = await call('GET', `/google/mail?account=${encodeURIComponent(ME)}&q=${encodeURIComponent('label:in-progress')}`);
-    expect(labelled.body.messages.length).toBe(2);
-    expect((await act('ta', [{ kind: 'markUnread' }, { kind: 'removeLabel', label: 'In progress' }])).status).toBe(200);
-    expect(labelsOf('a1')!.sort()).toEqual(['UNREAD']);
-    expect((await act('tb', [{ kind: 'trash' }])).status).toBe(200);
-    expect(labelsOf('b1')).toEqual(['UNREAD', 'TRASH']);
-    expect((await call('GET', `/google/mail?account=${encodeURIComponent(ME)}&q=${encodeURIComponent('in:inbox')}`)).body.messages).toEqual([]);
-    expect((await call('GET', `/google/mail?account=${encodeURIComponent(ME)}&q=${encodeURIComponent('Lunch in:anywhere')}`)).body.messages.length).toBe(1);
-    // A label Gmail doesn't have is refused before anything changes; so are malformed actions.
-    const missing = await act('ta', [{ kind: 'archive' }, { kind: 'addLabel', label: 'Waiting' }]);
-    expect([missing.status, missing.body.error]).toEqual([400, `Gmail has no label "Waiting" in ${ME}: make it in Gmail first`]);
-    expect((await act('ta', [{ kind: 'delete' }])).status).toBe(400);
-    expect((await act('ta', [])).status).toBe(400);
-  });
-
-  test('an account that has not allowed Gmail actions is told how (403), and nothing changes', async () => {
-    const before = JSON.stringify(fake.world.mail);
-    const refused = await call('POST', '/google/mail/act', { account: OTHER, thread: 'ta', actions: [{ kind: 'archive' }] });
-    expect([refused.status, refused.body.reason]).toEqual([403, 'not-allowed']);
-    expect(JSON.stringify(fake.world.mail)).toBe(before);
-  });
-
-  test('Google Contacts: people of the contacts and those emailed, once each, by name or address; an account without Contacts is told how', async () => {
-    const found = await call('GET', `/google/contacts?account=${encodeURIComponent(ME)}&q=ann`);
-    expect(found.status).toBe(200);
-    expect(found.body.contacts).toEqual([{ name: 'Ann Lee', email: 'ann@example.com' }, { name: 'Annika', email: 'annika@example.org' }]);
-    // Google's cache is warmed with an empty search first, once per account.
-    expect(fake.requests.filter((request) => request.path === '/v1/people:searchContacts').map((request) => request.query.query)).toEqual(['', 'ann']);
-    const refused = await call('GET', `/google/contacts?account=${encodeURIComponent(OTHER)}&q=ann`);
-    expect([refused.status, refused.body.reason]).toEqual([403, 'not-allowed']);
-    expect((await call('GET', `/google/contacts?account=${encodeURIComponent(ME)}&q=`)).status).toBe(400);
-  });
-
-  test("access Google took back: the list says to connect the account again (the panel's Re-add Gmail account)", async () => {
-    fake.world.revoked = true;
-    try {
-      const refused = await call('GET', `/google/mail?account=${encodeURIComponent(OTHER)}&q=in%3Ainbox`);
-      expect([refused.status, refused.body.error]).toEqual([401, `Google no longer accepts the Planner's access to ${OTHER}; connect it again`]);
-    } finally {
-      fake.world.revoked = false;
-    }
-  });
-
-  test('POST /meetings/sync runs the meeting import at once (nothing to do while it is set to Show prompt)', async () => {
-    const { status, body } = await call('POST', '/meetings/sync');
-    expect([status, body]).toEqual([200, { added: 0, moved: 0, removed: 0, completed: 0, errors: [] }]);
+    // The account searched goes away while its search is on its way: the panel moves to the other one, with nothing
+    // loading, so it searches that one.
+    relay.held.length = 0;
+    relay.hold(firstOf((request) => request.path.startsWith('/google/mail?')));
+    void window.google.searchMail('in:inbox');
+    await until(() => relay.held.length === 1);
+    await planner.call('DELETE', `/google/accounts/${encodeURIComponent(ME)}`);
+    await window.google.checkStatus();
+    relay.held[0]!.release();
+    await until(() => !window.google.getView().mailLoading);
+    expect([window.google.getView().mailAccount, window.google.getView().mail, window.google.getView().mailLoading]).toEqual([OTHER, [], false]);
   });
 });

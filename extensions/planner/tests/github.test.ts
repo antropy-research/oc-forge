@@ -1,386 +1,354 @@
+// GitHub as Sunsama's GitHub integration has it, end to end: the Planner's service with the real gh signed in to the
+// fake GitHub (tests/e2e/fakeGithub.mjs, on a socket), and Planner windows made of the panel's own stores (the browser
+// journey tests/e2e/sunsama.mjs shows the same panel on screen). The GitHub scenarios skip where gh is not installed.
+// The last scenario is Sunsama's "Add via URL" (a pasted Linear issue, Linear connected, is in tests/linear.test.ts).
 import { describe, expect, test } from 'bun:test';
-import { GitHubStore } from '../panel/lib/github.ts';
-import { GitHubSource, LISTS, LIST_QUERY, NODES_QUERY, RESOURCE_QUERY, diagnose, listQuery, parseNodes, pickPull, type Runner } from '../service/github.ts';
-import { githubSource, githubStatus, isGitHubItem, parseGitHubUrl, planGitHubSync, repoOfSearch, shortKey, taskFromGitHub, withRepo, type GitHubItem } from '../src/domain/github.ts';
-import { applyEvents, foldEvents } from '../src/domain/reducer.ts';
-import type { EventBody, PlannerEvent } from '../src/domain/events.ts';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { addParsedTask } from '../panel/lib/addTask.ts';
+import { keptRead, readAndKeep } from '../panel/lib/githubActivity.ts';
+import { addDays, instantAt } from '../src/domain/dates.ts';
+import { taskFromGitHub, withRepo } from '../src/domain/github.ts';
+import { gmailUrl } from '../src/domain/google.ts';
+import { parseQuickAdd } from '../src/domain/quickAdd.ts';
+import type { Task } from '../src/domain/types.ts';
+import { fakeIssue } from './e2e/fakeGithub.mjs';
+import { VIEWER, assignedIssues, firstOf, itemOf, notesOf, reviewRequests, slowRelay, startKeepingTimers } from './support/github.ts';
+import { ME, PRINTED_MESSAGE, THREADS, mailWorld } from './support/gmail.ts';
+import { realGh, startPlanner, until, usePlanner, type PlannerWindow } from './support/planner.ts';
 
-const node = (patch: Record<string, unknown> = {}) => ({
-  __typename: 'Issue', id: 'I_1', number: 42, title: 'Crash on start', url: 'https://github.com/acme/app/issues/42', state: 'OPEN', updatedAt: '2026-10-24T10:00:00Z', repository: { nameWithOwner: 'acme/app' }, ...patch,
-});
-const item = (patch: Partial<GitHubItem> = {}): GitHubItem => ({ ...parseNodes([node()])[0]!, ...patch });
+const ZONE = 'America/Los_Angeles';
+const REPO = 'harness-org/planner-pr-demo';
+const planner = usePlanner({ zone: ZONE, github: true, google: mailWorld(ZONE) });
+const withGh = test.skipIf(!realGh);
+if (!realGh) console.warn('tests/github.test.ts: gh is not installed here, so its GitHub scenarios are skipped');
 
-describe('gh', () => {
-  test('missing CLI and logged-out CLI are told apart, with how to sign in and where', async () => {
-    const missing: Runner = async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }); };
-    expect(await new GitHubSource(missing, () => null).status()).toEqual({ available: false, login: null, message: 'The GitHub CLI (gh) is not installed where OpenChamber runs. Install it there, then sign in with `gh auth login`.', reason: 'missing', container: null });
-    // gh 2.103.2 in the dev container, never signed in.
-    const loggedOut: Runner = async () => { throw Object.assign(new Error('Command failed: gh api user --jq .login'), { code: 4, stderr: 'To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n' }); };
-    const signedOut = await new GitHubSource(loggedOut, () => '7fd513237c0c').status();
-    expect(signedOut).toMatchObject({ available: false, reason: 'signed-out', container: '7fd513237c0c' });
-    expect(signedOut.message).toContain('gh auth login');
-    expect(diagnose(Object.assign(new Error('HTTP 401: Bad credentials (https://api.github.com/user)'), { code: 1 })).reason).toBe('signed-out');
-    expect(diagnose(Object.assign(new Error('rate limited'), { code: 1, stderr: 'API rate limit exceeded' }))).toEqual({ reason: null, message: 'API rate limit exceeded rate limited' });
-    expect(await new GitHubSource(async () => 'octo\n', () => 'abc').status()).toEqual({ available: true, login: 'octo', message: null, reason: null, container: null });
-  });
-  test('lists and node reads pass the right arguments', async () => {
-    const calls: string[][] = [];
-    const runner: Runner = async (args) => {
-      calls.push(args);
-      if (args[1] === 'user') return 'qihang-zhang\n';
-      return JSON.stringify(args.some((arg) => arg.startsWith('ids[]')) ? { data: { nodes: [node({ state: 'CLOSED' }), null] } } : { data: { search: { nodes: [node(), node({ __typename: 'PullRequest', id: 'PR_1', number: 7, isDraft: true, url: 'https://github.com/acme/app/pull/7' })] } } });
-    };
-    const source = new GitHubSource(runner);
-    expect(await source.status()).toEqual({ available: true, login: 'qihang-zhang', message: null, reason: null, container: null });
-    const review = await source.list('review');
-    expect(calls[1]).toContain(`q=${LISTS.review}`);
-    expect(review.items.map((entry) => [entry.kind, entry.key, entry.draft])).toEqual([['issue', 'acme/app#42', false], ['pull', 'acme/app#7', true]]);
-    // No pageInfo: one page, nothing after it.
-    expect([review.total, review.next]).toEqual([2, null]);
-    const linked = await source.items(['I_1', 'PR_1']);
-    expect(calls[2]).toEqual(['api', 'graphql', '-f', `query=${NODES_QUERY}`, '-f', 'ids[]=I_1', '-f', 'ids[]=PR_1']);
-    expect(linked.map((entry) => entry.state)).toEqual(['CLOSED']);
-    expect(await source.items([])).toEqual([]);
-  });
-});
+const shown = (window: PlannerWindow) => {
+  const view = window.github.getView();
+  return { count: view.items.length, first: view.items[0]?.key, last: view.items.at(-1)?.key, next: view.next !== null, loading: view.loading, loadingMore: view.loadingMore, error: view.error };
+};
+const asked = (operation: string) => planner.github!.requests.filter((request) => request.operation === operation);
+const settled = (window: PlannerWindow) => until(() => !window.github.getView().loading && !window.github.getView().loadingMore);
+const taskOf = (window: PlannerWindow, sourceId: string): Task | undefined => Object.values(window.client.getView().state.tasks).find((task) => task.source?.id === sourceId && !task.deletedAt);
+/** Tasks linked to GitHub by the scenarios before, deleted, so each scenario's linked items are its own. */
+const forgetGitHubTasks = async () => {
+  const linked = Object.values((await planner.state()).tasks).filter((task) => task.source?.kind === 'github' && !task.deletedAt);
+  if (linked.length) await planner.commands(...linked.map((task) => ({ type: 'task.deleted' as const, taskId: task.id })));
+};
 
-describe("the panel's Repository choice (round 12, Sunsama's most relevant repositories)", () => {
-  test("a repository chosen is the search's repo: term, first; All repositories takes it off; typing one chooses it", () => {
-    expect(repoOfSearch('crash repo:acme/app label:bug')).toBe('acme/app');
-    expect(repoOfSearch('crash')).toBeNull();
-    expect(repoOfSearch('repo:acme')).toBeNull();
-    expect(withRepo('crash label:bug', 'acme/app')).toBe('repo:acme/app crash label:bug');
-    expect(withRepo('repo:acme/old crash', 'acme/app')).toBe('repo:acme/app crash');
-    expect(withRepo('repo:acme/app crash', null)).toBe('crash');
-    expect(withRepo('', 'acme/app')).toBe('repo:acme/app');
-  });
-});
-
-describe('mapping and sync', () => {
-  test('state looks and keys', () => {
-    expect(githubStatus(item())).toMatchObject({ name: 'Open', type: 'open' });
-    expect(githubStatus(item({ draft: true }))).toMatchObject({ name: 'Draft', type: 'open' });
-    expect(githubStatus(item({ state: 'MERGED' }))).toMatchObject({ name: 'Merged', type: 'completed' });
-    expect(githubStatus(item({ state: 'CLOSED' }))).toMatchObject({ name: 'Closed', type: 'completed' });
-    expect(shortKey('acme/app#42')).toBe('app#42');
-    expect(isGitHubItem(item())).toBe(true);
-    expect(isGitHubItem({ ...item(), url: 'javascript:alert(1)' })).toBe(false);
-  });
-  test('a merged PR updates its task; a renamed task keeps its title', () => {
-    let clock = Date.parse('2026-10-24T16:00:00Z');
-    const ev = (body: EventBody): PlannerEvent => ({ v: 1, id: `e${(clock += 1000)}`, at: new Date(clock).toISOString(), ...body }) as PlannerEvent;
-    const pr = item({ id: 'PR_1', kind: 'pull', key: 'acme/app#7', title: 'Add retries', url: 'https://github.com/acme/app/pull/7' });
-    let state = foldEvents([ev({ type: 'task.created', task: taskFromGitHub(pr, 't', { kind: 'day', date: '2026-10-24' }, 1) })]);
-    expect(state.tasks.t!.source).toEqual(githubSource(pr));
-    const merged = { ...pr, state: 'MERGED', title: 'Add retries to sync' };
-    const bodies = planGitHubSync(state, new Map([['PR_1', merged]]));
-    expect(bodies).toEqual([{ type: 'task.sourceSynced', taskId: 't', source: githubSource(merged), title: 'Add retries to sync' }]);
-    state = applyEvents(state, [ev({ type: 'task.updated', taskId: 't', patch: { title: 'Review retries PR' } })]);
-    expect(planGitHubSync(state, new Map([['PR_1', merged]]))).toEqual([{ type: 'task.sourceSynced', taskId: 't', source: githubSource(merged) }]);
-  });
-});
-
-describe('pull requests from agent branches', () => {
-  const pull = (patch: Record<string, unknown> = {}) => ({ number: 12, url: 'https://github.com/acme/app/pull/12', state: 'OPEN', isDraft: false, title: 'Write tests', updatedAt: '2026-10-25T10:00:00Z', ...patch });
-  test('an open pull request first, then a merged one, then the latest', () => {
-    expect(pickPull([])).toBeNull();
-    expect(pickPull([pull({ number: 3, url: 'https://github.com/acme/app/pull/3', state: 'CLOSED' }), pull({ number: 4, url: 'https://github.com/acme/app/pull/4', state: 'MERGED' })])).toMatchObject({ number: 4, state: 'merged', repo: 'acme/app' });
-    expect(pickPull([pull({ state: 'MERGED' }), pull({ number: 13, url: 'https://github.com/acme/app/pull/13', isDraft: true })])).toEqual({ number: 13, url: 'https://github.com/acme/app/pull/13', state: 'open', draft: true, title: 'Write tests', repo: 'acme/app' });
-    // Anything that is not a GitHub pull request URL is dropped.
-    expect(pickPull([pull({ url: 'https://evil.example/acme/app/pull/12' })])).toBeNull();
-  });
-  test('asked with gh in the first checkout that exists, for that branch only', async () => {
-    const calls: { args: string[]; cwd?: string; timeoutMs?: number }[] = [];
-    const runner: Runner = async (args, options) => {
-      calls.push({ args, cwd: options?.cwd, timeoutMs: options?.timeoutMs });
-      return JSON.stringify([pull()]);
-    };
-    const source = new GitHubSource(runner);
-    const found = await source.pullRequestFor('planner/write-tests', ['/no/such/worktree', process.cwd()]);
-    expect(found).toMatchObject({ number: 12, state: 'open' });
-    expect(calls).toEqual([{ args: ['pr', 'list', '--head', 'planner/write-tests', '--state', 'all', '--limit', '10', '--json', 'number,url,state,isDraft,title,updatedAt'], cwd: process.cwd(), timeoutMs: 8000 }]);
-    expect(await source.pullRequestFor('planner/x', ['/no/such/worktree', 'relative/dir'])).toBeNull();
-    for (const bad of ['--help', '-x', 'a..b', 'a//b', 'trailing/', 'sp ace', '']) await expect(source.pullRequestFor(bad, [process.cwd()])).rejects.toThrow('branch name is invalid');
-    expect(calls).toHaveLength(1);
-  });
-  test('a known pull request is followed by its URL, without a checkout', async () => {
-    const calls: { args: string[]; cwd?: string }[] = [];
-    const source = new GitHubSource(async (args, options) => {
-      calls.push({ args, cwd: options?.cwd });
-      return JSON.stringify(pull({ state: 'MERGED' }));
-    });
-    expect(await source.pullRequestAt('https://github.com/acme/app/pull/12')).toMatchObject({ number: 12, state: 'merged', repo: 'acme/app' });
-    expect(calls).toEqual([{ args: ['pr', 'view', 'https://github.com/acme/app/pull/12', '--json', 'number,url,state,isDraft,title,updatedAt'], cwd: undefined }]);
-    for (const bad of ['https://evil.example/acme/app/pull/12', 'https://github.com/acme/app/pull/12 --web', '--web']) await expect(source.pullRequestAt(bad)).rejects.toThrow('pull request URL is invalid');
-    expect(calls).toHaveLength(1);
-  });
-  test('gh failing everywhere is explained', async () => {
-    const loggedOut: Runner = async () => { throw Object.assign(new Error('exit 4'), { code: 4, stderr: 'To get started with GitHub CLI, please run:  gh auth login' }); };
-    await expect(new GitHubSource(loggedOut).pullRequestFor('planner/x', [process.cwd()])).rejects.toThrow('gh auth login');
-  });
-});
-
-// Review 11 (P1-3): the list was one page of 50 with no cursor, so the 51st assigned issue could not be reached, and
-// Refresh asked for the same first page again; a pasted issue URL made a task titled with the URL, linked to nothing.
-describe('every item reachable: pages, words, linked items in batches, an item by its URL', () => {
-  const page = (numbers: number[], next: string | null, total: number) => JSON.stringify({ data: { search: { issueCount: total, pageInfo: { hasNextPage: next !== null, endCursor: next }, nodes: numbers.map((number) => node({ id: `I_${number}`, number, title: `Issue ${number}`, url: `https://github.com/acme/app/issues/${number}` })) } } });
-
-  test('a page at a time: the first without a cursor, the next from the last one\'s; how many match in all', async () => {
-    const calls: string[][] = [];
-    const source = new GitHubSource(async (args) => {
-      calls.push(args);
-      return args.includes('after=Y3Vyc29yOjUw') ? page([51], null, 51) : page(Array.from({ length: 50 }, (_, n) => n + 1), 'Y3Vyc29yOjUw', 51);
-    });
-    const first = await source.list('assigned');
-    expect([first.items.length, first.total, first.next]).toEqual([50, 51, 'Y3Vyc29yOjUw']);
-    expect(calls[0]).toEqual(['api', 'graphql', '-f', `query=${LIST_QUERY}`, '-f', `q=${LISTS.assigned}`]);
-    const second = await source.list('assigned', { after: first.next });
-    expect(calls[1]).toEqual(['api', 'graphql', '-f', `query=${LIST_QUERY}`, '-f', `q=${LISTS.assigned}`, '-f', 'after=Y3Vyc29yOjUw']);
-    expect([second.items.map((item) => item.key), second.next]).toEqual([['acme/app#51'], null]);
-    expect(LIST_QUERY).toContain('pageInfo { hasNextPage endCursor }');
-    expect(LIST_QUERY).toContain('after: $after');
-  });
-
-  test('words narrow a list, in GitHub\'s search syntax, after its own qualifiers', async () => {
-    expect(listQuery('assigned', '  crash   repo:acme/app ')).toBe(`${LISTS.assigned} crash repo:acme/app`);
-    expect(listQuery('mine', '')).toBe(LISTS.mine);
-    const calls: string[][] = [];
-    await new GitHubSource(async (args) => (calls.push(args), page([], null, 0))).list('review', { text: 'retries' });
-    expect(calls[0]).toContain(`q=${LISTS.review} retries`);
-  });
-
-  test('a next page without a cursor is no next page; an answer with errors and no data is an error, not an empty list', async () => {
-    const odd = JSON.stringify({ data: { search: { issueCount: 3, pageInfo: { hasNextPage: true, endCursor: null }, nodes: [node()] } } });
-    expect((await new GitHubSource(async () => odd).list('assigned')).next).toBeNull();
-    const failing = new GitHubSource(async () => JSON.stringify({ data: null, errors: [{ message: 'API rate limit exceeded' }] }));
-    await expect(failing.list('assigned')).rejects.toThrow('API rate limit exceeded');
-  });
-
-  test('linked items are all read back, 100 a call (they used to stop at the first 100)', async () => {
-    const asked: number[] = [];
-    const source = new GitHubSource(async (args) => {
-      const ids = args.filter((arg) => arg.startsWith('ids[]=')).map((arg) => arg.slice(6));
-      asked.push(ids.length);
-      return JSON.stringify({ data: { nodes: ids.map((id) => node({ id })) } });
-    });
-    const ids = Array.from({ length: 250 }, (_, n) => `I_${n}`);
-    expect((await source.items(ids)).map((item) => item.id)).toEqual(ids);
-    expect(asked).toEqual([100, 100, 50]);
-  });
-
-  test('an issue or a pull request by its URL, as pasted (a comment\'s address too); null where GitHub has none', async () => {
-    expect(parseGitHubUrl('https://github.com/acme/app/issues/51#issuecomment-123')).toEqual({ repo: 'acme/app', number: 51, kind: 'issue', key: 'acme/app#51', url: 'https://github.com/acme/app/issues/51' });
-    expect(parseGitHubUrl(' https://github.com/acme/app/pull/7/files ')).toMatchObject({ kind: 'pull', key: 'acme/app#7', url: 'https://github.com/acme/app/pull/7' });
-    for (const other of ['https://github.com/acme/app', 'https://github.com/acme/app/issues', 'https://gitlab.com/acme/app/issues/1', 'http://github.com/acme/app/issues/1', 'see https://github.com/acme/app/issues/1']) expect(parseGitHubUrl(other)).toBeNull();
-    const calls: string[][] = [];
-    const source = new GitHubSource(async (args) => {
-      calls.push(args);
-      return args.includes('url=https://github.com/acme/app/issues/51') ? JSON.stringify({ data: { resource: node({ id: 'I_51', number: 51, title: 'Issue 51', url: 'https://github.com/acme/app/issues/51' }) } }) : JSON.stringify({ data: { resource: null } });
-    });
-    expect(await source.byUrl('https://github.com/acme/app/issues/51#issuecomment-1')).toMatchObject({ id: 'I_51', key: 'acme/app#51', title: 'Issue 51', url: 'https://github.com/acme/app/issues/51' });
-    expect(calls[0]).toEqual(['api', 'graphql', '-f', `query=${RESOURCE_QUERY}`, '-f', 'url=https://github.com/acme/app/issues/51']);
-    expect(await source.byUrl('https://github.com/acme/app/issues/52')).toBeNull();
-    const notFound = new GitHubSource(async () => JSON.stringify({ data: { resource: null }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve' }] }));
-    expect(await notFound.byUrl('https://github.com/acme/app/pull/9')).toBeNull();
-    await expect(new GitHubSource(async () => JSON.stringify({ data: null, errors: [{ type: 'FORBIDDEN', message: 'Resource not accessible by integration' }] })).byUrl('https://github.com/acme/app/pull/9')).rejects.toThrow('Resource not accessible');
-    await expect(source.byUrl('https://example.com/x')).rejects.toThrow('not a GitHub issue');
-  });
-});
-
-describe("the GitHub source's list: Load more, Refresh, words", () => {
-  const issue = (number: number): GitHubItem => ({ ...parseNodes([node({ id: `I_${number}`, number, title: `Issue ${number}`, url: `https://github.com/acme/app/issues/${number}` })])[0]! });
-  /** The service's /github/list over `count` issues, 50 a page, cursors as offsets; /github/items answers from the ids. */
-  const panel = (count: number, linked: string[] = []) => {
-    const all = Array.from({ length: count }, (_, n) => issue(n + 1));
-    const asked: string[] = [];
-    let state = foldEvents(linked.map((id, n) => ({ v: 1, id: `l${n}`, at: '2026-10-24T16:00:00.000Z', type: 'task.created', task: taskFromGitHub({ ...issue(1000 + n), id }, `t${n}`, { kind: 'day', date: '2026-10-24' }, n) }) as PlannerEvent));
-    const client = {
-      getView: () => ({ state }),
-      call: async (method: string, path: string, body?: { ids?: string[] }) => {
-        asked.push(`${method} ${path}${body?.ids ? ` ${body.ids.length}` : ''}`);
-        if (path === '/github/items') return { items: (body?.ids ?? []).map((id) => ({ ...issue(1), id })) };
-        const query = new URL(path, 'http://x').searchParams;
-        const matching = all.filter((item) => !query.get('q') || item.title.includes(query.get('q')!));
-        const from = Number(query.get('after') ?? 0);
-        return { items: matching.slice(from, from + 50), total: matching.length, next: from + 50 < matching.length ? String(from + 50) : null };
-      },
-      dispatch: async (bodies: EventBody[]) => {
-        state = applyEvents(state, bodies.map((body, n) => ({ v: 1, id: `d${asked.length}-${n}`, at: '2026-10-24T17:00:00.000Z', ...body }) as PlannerEvent));
-      },
-    } as unknown as ConstructorParameters<typeof GitHubStore>[0];
-    const store = new GitHubStore(client, 'page');
-    (store as unknown as { view: { status: unknown } }).view.status = { available: true, login: 'me', message: null };
-    return { store, asked };
-  };
-
-  test('51 assigned issues: 50 shown and "Load more" reaches the 51st; Refresh then reads both pages again, not the first alone', async () => {
-    const { store, asked } = panel(51);
-    await store.refresh();
-    expect([store.getView().items.length, store.getView().total, store.getView().next]).toEqual([50, 51, '50']);
-    await store.loadMore();
-    expect([store.getView().items.length, store.getView().items.at(-1)!.key, store.getView().next]).toEqual([51, 'acme/app#51', null]);
-    asked.length = 0;
-    await store.refresh();
-    expect(asked.filter((call) => call.startsWith('GET'))).toEqual(['GET /github/list?kind=assigned', 'GET /github/list?kind=assigned&after=50']);
-    expect([store.getView().items.length, store.getView().next]).toEqual([51, null]);
-  });
-
-  test('Refresh with more left keeps them a Load more away; words narrow the list from its first page', async () => {
-    const { store } = panel(120);
-    await store.refresh();
-    await store.loadMore();
-    await store.refresh();
-    expect([store.getView().items.length, store.getView().next, store.getView().total]).toEqual([100, '100', 120]);
-    await store.loadMore();
-    expect([store.getView().items.length, store.getView().next]).toEqual([120, null]);
-    store.setText('Issue 11');
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await store.refresh();
-    expect(store.getView().items.map((item) => item.number)).toEqual([11, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119]);
-  });
-
-  test('linked tasks are kept current in batches of 100, every one of them', async () => {
-    const { store, asked } = panel(3, Array.from({ length: 230 }, (_, n) => `L_${n}`));
-    await store.refresh();
-    expect(asked.filter((call) => call.startsWith('POST'))).toEqual(['POST /github/items 100', 'POST /github/items 100', 'POST /github/items 30']);
-  });
-});
-
-describe('a list changed while its Load more is on the way (round 12 review, P1-2)', () => {
-  const make = (repo: string, word: string, number: number, kind: GitHubItem['kind'] = 'issue'): GitHubItem => ({
-    id: `${repo}#${number}`, kind, repo, number, key: `${repo}#${number}`, title: `${word} ${number}`, url: `https://github.com/${repo}/${kind === 'pull' ? 'pull' : 'issues'}/${number}`, state: 'OPEN', draft: false, updatedAt: '2026-10-24T10:00:00Z',
-  });
-  const hundredAndOne = (repo: string, word: string, kind?: GitHubItem['kind']) => Array.from({ length: 101 }, (_, n) => make(repo, word, n + 1, kind));
-  /**
-   * The service's lists, 50 a page, cursors as offsets: assigned has 101 "beta" issues of acme/beta and 101 "alpha"
-   * ones of acme/app; review has 101 "alpha" pull requests of acme/pulls. A request `hold` picks waits until the test
-   * answers it or fails it.
-   */
-  const panel = () => {
-    const lists: Record<string, GitHubItem[]> = { assigned: [...hundredAndOne('acme/beta', 'beta'), ...hundredAndOne('acme/app', 'alpha')], review: hundredAndOne('acme/pulls', 'alpha', 'pull'), mine: [] };
-    const held: { path: string; answer: () => void; fail: (error: Error) => void }[] = [];
-    const asked: string[] = [];
-    const client = {
-      getView: () => ({ state: foldEvents([]) }),
-      call: async (_method: string, path: string) => {
-        asked.push(path);
-        if (hold(path)) await new Promise<void>((answer, fail) => held.push({ path, answer, fail }));
-        const query = new URL(path, 'http://x').searchParams;
-        const words = (query.get('q') ?? '').split(' ').filter(Boolean);
-        const matching = lists[query.get('kind')!]!.filter((item) => words.every((word) => (word.startsWith('repo:') ? item.repo === word.slice(5) : item.title.includes(word))));
-        const from = Number(query.get('after') ?? 0);
-        return { items: matching.slice(from, from + 50), total: matching.length, next: from + 50 < matching.length ? String(from + 50) : null };
-      },
-      dispatch: async () => {},
-    } as unknown as ConstructorParameters<typeof GitHubStore>[0];
-    let hold = (path: string) => path.includes('after=');
-    const store = new GitHubStore(client, 'page');
-    (store as unknown as { view: { status: unknown } }).view.status = { available: true, login: 'me', message: null };
-    return { store, held, asked, holdWhen: (next: (path: string) => boolean) => (hold = next) };
-  };
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-  const shown = (store: GitHubStore) => {
-    const view = store.getView();
-    return { count: view.items.length, first: view.items[0]?.key, last: view.items.at(-1)?.key, next: view.next, loading: view.loading, loadingMore: view.loadingMore, error: view.error };
-  };
-
-  const changes = [
-    { name: 'a new search', from: '', change: (store: GitHubStore) => store.setText('alpha'), repo: 'acme/app' },
-    { name: 'another repository', from: '', change: (store: GitHubStore) => store.setText(withRepo(store.getView().text, 'acme/app')), repo: 'acme/app' },
-    { name: 'another list kind', from: '', change: (store: GitHubStore) => store.setKind('review'), repo: 'acme/pulls' },
-    { name: 'Refresh', from: 'beta', change: (store: GitHubStore) => void store.refresh(), repo: 'acme/beta' },
-  ];
-  for (const { name, from, change, repo } of changes) {
-    for (const order of ['before', 'after'] as const) {
-      test(`${name} during Load more, its old page answering ${order} the new first page: the new list's own Load more reaches #101`, async () => {
-        const { store, held, holdWhen } = panel();
-        if (from) store.setText(from);
-        await store.refresh();
-        expect(shown(store)).toMatchObject({ count: 50, next: '50', loadingMore: false });
-        const old = store.loadMore();
-        await settle();
-        expect([store.getView().loadingMore, held.map((call) => call.path)]).toEqual([true, [`/github/list?kind=assigned${from ? `&q=${from}` : ''}&after=50`]]);
-        holdWhen(() => true);
-        change(store);
-        await settle();
-        // The new list is being read; nothing of the old one is still loading.
-        expect(shown(store)).toMatchObject({ loading: true, loadingMore: false, count: name === 'Refresh' ? 50 : 0 });
-        const [oldPage, newPage] = held;
-        if (order === 'before') {
-          oldPage!.answer();
-          await old;
-          expect(shown(store)).toMatchObject({ loading: true, loadingMore: false, count: name === 'Refresh' ? 50 : 0, next: name === 'Refresh' ? '50' : null });
-          newPage!.answer();
-          await settle();
-        } else {
-          newPage!.answer();
-          await settle();
-          oldPage!.answer();
-          await old;
-        }
-        expect(shown(store)).toEqual({ count: 50, first: `${repo}#1`, last: `${repo}#50`, next: '50', loading: false, loadingMore: false, error: null });
-        holdWhen(() => false);
-        await store.loadMore();
-        expect(shown(store)).toMatchObject({ count: 100, last: `${repo}#100`, next: '100' });
-        await store.loadMore();
-        expect(shown(store)).toMatchObject({ count: 101, last: `${repo}#101`, next: null, loadingMore: false });
-        expect(store.getView().items.every((item) => item.repo === repo)).toBe(true);
-        expect(new Set(store.getView().items.map((item) => item.id)).size).toBe(101);
-      });
-    }
-  }
-
-  test("an old Load more that fails says nothing over the new list, and leaves nothing loading", async () => {
-    const { store, held } = panel();
-    await store.refresh();
-    const old = store.loadMore();
-    await settle();
-    store.setText('alpha');
-    await settle();
-    held[0]!.fail(new Error('gh: HTTP 502'));
-    await old;
-    expect(shown(store)).toEqual({ count: 50, first: 'acme/app#1', last: 'acme/app#50', next: '50', loading: false, loadingMore: false, error: null });
-  });
-
-  test('Load more waits while the list is read again, then goes on from the new read', async () => {
-    const { store, held, asked, holdWhen } = panel();
-    await store.refresh();
-    holdWhen(() => true);
-    const reading = store.refresh();
-    await settle();
-    asked.length = 0;
-    await store.loadMore();
-    expect([asked, store.getView().loadingMore]).toEqual([[], false]);
-    holdWhen(() => false);
-    held[0]!.answer();
-    await reading;
-    await store.loadMore();
-    expect(shown(store)).toMatchObject({ count: 100, last: 'acme/beta#100', next: '100' });
-  });
-
-  test('the five-minute refresh leaves a Load more under way alone', async () => {
-    const { store, held, asked } = panel();
-    const timers: (() => void)[] = [];
-    const real = { setInterval: globalThis.setInterval, document: (globalThis as { document?: unknown }).document };
-    globalThis.setInterval = ((fn: () => void) => timers.push(fn)) as unknown as typeof setInterval;
-    (globalThis as { document?: unknown }).document = { hidden: false };
+describe('GitHub, through gh', () => {
+  test('without gh, or with gh signed out, the GitHub source says which and how to sign in; nothing is read, a pasted GitHub address stays a link, and runs say why their pull requests are not looked up', async () => {
+    const noGh = (process.env.PATH ?? '').split(':').filter((dir) => dir && !existsSync(join(dir, 'gh')) && !existsSync(join(dir, 'opencode'))).join(':');
+    const [missing, signedOut] = await Promise.all([startPlanner({ zone: ZONE, env: { PATH: noGh } }), startPlanner({ zone: ZONE })]);
     try {
-      (store as unknown as { checkStatus: () => Promise<void> }).checkStatus = () => store.refresh();
-      await store.start();
-      const more = store.loadMore();
-      await settle();
-      asked.length = 0;
-      timers[0]!();
-      expect(asked).toEqual([]);
-      held[0]!.answer();
-      await more;
-      expect(shown(store)).toMatchObject({ count: 100, next: '100', loadingMore: false });
-      timers[0]!();
-      await settle();
-      expect(asked).toEqual(['/github/list?kind=assigned', '/github/list?kind=assigned&after=50']);
+      const without = await missing.window();
+      await without.github.checkStatus();
+      expect(without.github.getView().status).toMatchObject({ available: false, reason: 'missing' });
+      expect(without.github.getView().status?.message).toContain('not installed');
+
+      const window = await signedOut.window();
+      const notes = notesOf(window);
+      await window.github.checkStatus();
+      expect(window.github.getView().status).toMatchObject({ available: false, reason: 'signed-out' });
+      expect(window.github.getView().status?.message).toContain('gh auth login');
+      expect(window.github.getView().items).toEqual([]);
+
+      const today = window.client.getView().today;
+      await addParsedTask(window, parseQuickAdd('https://github.com/acme/app/pull/7', today), { kind: 'day', date: today }, 'bottom', today);
+      expect(Object.values(window.client.getView().state.tasks).map((task) => task.source)).toMatchObject([{ kind: 'link', url: 'https://github.com/acme/app/pull/7' }]);
+      expect(notes.at(-1)).toContain('GitHub (gh) is not signed in');
+
+      await window.client.dispatch([
+        { type: 'task.created', task: { id: 'gh-run-task', title: 'Write tests', placement: { kind: 'day', date: today }, position: 1 } },
+        { type: 'run.started', run: { id: 'gh-run', taskId: 'gh-run-task', sessionId: 'ses_gh', projectId: null, directory: signedOut.home, worktree: { directory: signedOut.home, branch: 'planner/write-tests' }, title: 'Write tests' } },
+      ]);
+      await window.agents.refreshPullRequests();
+      expect(window.agents.getView().prError).toContain('gh auth login');
     } finally {
-      globalThis.setInterval = real.setInterval;
-      (globalThis as { document?: unknown }).document = real.document;
+      await Promise.all([missing.stop(), signedOut.stop()]);
     }
+  });
+
+  withGh('assigned issues come 50 a page: Load more and Refresh reach every one, words and a repository narrow the list, and one plans as a task linked to it (review 11, P1-3)', async () => {
+    const world = planner.github!.world;
+    world.issues = [fakeIssue('harness-org/tools', 1, { title: 'Tools issue', assignees: [VIEWER], updatedAt: '2026-10-29T00:00:00Z' }), ...assignedIssues(REPO, 'Planner issue', 120), fakeIssue(REPO, 999, { title: 'Not mine', assignees: ['someone-else'] })];
+    world.pulls = [];
+    const window = await planner.window();
+    await window.github.checkStatus();
+    expect(window.github.getView().status).toMatchObject({ available: true, login: VIEWER });
+    expect([shown(window).count, window.github.getView().total, shown(window).next]).toEqual([50, 121, true]);
+    await window.github.loadMore();
+    expect(shown(window)).toMatchObject({ count: 100, last: `${REPO}#99`, next: true });
+
+    // Refresh reads both pages again, from the first, not the first alone; the rest stays a Load more away.
+    planner.github!.requests.length = 0;
+    await window.github.refresh();
+    expect(asked('query PlannerGitHubList').map((request) => Boolean(request.variables?.after))).toEqual([false, true]);
+    expect(shown(window)).toMatchObject({ count: 100, next: true });
+    await window.github.loadMore();
+    expect(shown(window)).toMatchObject({ count: 121, last: `${REPO}#120`, next: false });
+    expect(new Set(window.github.getView().items.map((item) => item.id)).size).toBe(121);
+
+    // Words narrow it, in GitHub's search after the list's own qualifiers.
+    window.github.setText('issue 51');
+    await settled(window);
+    expect(window.github.getView().items.map((item) => item.key)).toEqual([`${REPO}#51`]);
+    expect(String(asked('query PlannerGitHubList').at(-1)!.variables?.q)).toMatch(/assignee:@me .*issue 51$/);
+
+    // The repositories the viewer works in, the latest first; one chosen narrows the list; read again only after ten minutes.
+    await window.github.loadRepos();
+    expect(window.github.getView().repos).toEqual(['harness-org/tools', REPO]);
+    window.github.setText(withRepo(window.github.getView().text, 'harness-org/tools'));
+    await settled(window);
+    expect([window.github.getView().items.map((item) => item.key), String(asked('query PlannerGitHubList').at(-1)!.variables?.q)]).toEqual([[], expect.stringContaining('repo:harness-org/tools issue 51')]);
+    window.github.setText(withRepo('', 'harness-org/tools'));
+    await settled(window);
+    expect(window.github.getView().items.map((item) => item.key)).toEqual(['harness-org/tools#1']);
+    await (await planner.window()).github.loadRepos();
+    expect(asked('query PlannerGitHubRepos')).toHaveLength(1);
+
+    // The 51st, planned: a task with its real id, title and address.
+    window.github.setText('issue 51');
+    await settled(window);
+    const today = window.client.getView().today;
+    await window.github.plan(window.github.getView().items[0]!, { kind: 'day', date: today });
+    const issue = world.issues.find((item) => item.repo === REPO && item.number === 51)!;
+    expect(taskOf(window, issue.id)).toMatchObject({ title: 'Planner issue 51', placement: { kind: 'day', date: today }, source: { kind: 'github', key: `${REPO}#51`, url: issue.url } });
+  });
+
+  withGh('linked tasks follow GitHub, 100 a gh call and every one of them; one whose issue is gone leaves the rest read; a merged pull request updates its task, and a task renamed here keeps its title', async () => {
+    const world = planner.github!.world;
+    const linked = assignedIssues('harness-org/linked', 'Linked', 230).map((issue) => ({ ...issue, assignees: [] }));
+    world.issues = [...linked];
+    world.pulls = reviewRequests(REPO, 'Add retries', 1);
+    await forgetGitHubTasks();
+    const window = await planner.window();
+    const today = window.client.getView().today;
+    await planner.commands(...linked.map((issue, n) => ({ type: 'task.created' as const, task: taskFromGitHub(itemOf(issue), `linked-${n}`, { kind: 'backlog', bucket: 'someday' }, 1000 + n) })));
+    await window.client.refresh();
+    world.issues[229]!.title = 'Linked 230, renamed on GitHub';
+    world.issues.splice(228, 1);
+    planner.github!.requests.length = 0;
+    await window.github.checkStatus();
+    // gh exits 1 on the batch with the issue gone; what it printed is still read.
+    expect(asked('query PlannerGitHubNodes').map((request) => (request.variables?.ids as string[]).length)).toEqual([100, 100, 30]);
+    expect([taskOf(window, linked[229]!.id)?.title, taskOf(window, linked[228]!.id)?.title, taskOf(window, linked[0]!.id)?.title, window.github.getView().error]).toEqual(['Linked 230, renamed on GitHub', 'Linked 229', 'Linked 1', null]);
+
+    window.github.setKind('review');
+    await settled(window);
+    await window.github.plan(window.github.getView().items[0]!, { kind: 'day', date: today });
+    const pull = world.pulls[0]!;
+    expect(taskOf(window, pull.id)).toMatchObject({ title: 'Add retries 1', source: { kind: 'github', status: { name: 'Open', type: 'open' } } });
+    Object.assign(pull, { state: 'MERGED', mergedAt: new Date().toISOString(), title: 'Add retries to sync' });
+    await window.github.refresh();
+    expect(taskOf(window, pull.id)).toMatchObject({ title: 'Add retries to sync', source: { title: 'Add retries to sync', status: { name: 'Merged', type: 'completed' } } });
+    await window.client.dispatch([{ type: 'task.updated', taskId: taskOf(window, pull.id)!.id, patch: { title: 'Review the retries' } }]);
+    pull.title = 'Add retries to sync, with backoff';
+    await window.github.refresh();
+    expect(taskOf(window, pull.id)).toMatchObject({ title: 'Review the retries', source: { title: 'Add retries to sync, with backoff' } });
+    await forgetGitHubTasks();
+  });
+});
+
+// Round 12's review (P1-2): a search changed while Load more was on its way left the list "Loading…" for good.
+describe('a GitHub list changed while its Load more is on its way (round 12, P1-2)', () => {
+  const lists = () => {
+    const world = planner.github!.world;
+    world.issues = [...assignedIssues('acme/beta', 'beta', 101), ...assignedIssues('acme/app', 'alpha', 101)];
+    world.pulls = reviewRequests('acme/pulls', 'alpha', 101);
+  };
+  const listPage = (request: { path: string }) => request.path.startsWith('/github/list');
+
+  withGh("a new search, another repository, another list kind or Refresh: the old page, answering before or after the new list's first, never joins it, nothing is left loading, and the new list's Load more reaches its #101", async () => {
+    lists();
+    const changes = [
+      { name: 'a new search', from: '', change: (window: PlannerWindow) => window.github.setText('alpha'), repo: 'acme/app', order: 'before' },
+      { name: 'another repository', from: '', change: (window: PlannerWindow) => window.github.setText(withRepo('', 'acme/app')), repo: 'acme/app', order: 'after' },
+      { name: 'another list kind', from: '', change: (window: PlannerWindow) => window.github.setKind('review'), repo: 'acme/pulls', order: 'after' },
+      { name: 'Refresh', from: 'beta', change: (window: PlannerWindow) => void window.github.refresh(), repo: 'acme/beta', order: 'before' },
+    ];
+    for (const { name, from, change, repo, order } of changes) {
+      const window = await planner.window();
+      const relay = slowRelay(window);
+      if (from) window.github.setText(from);
+      await window.github.checkStatus();
+      expect(shown(window)).toMatchObject({ count: 50, next: true, loadingMore: false });
+      relay.hold((request) => listPage(request) && request.path.includes('after='));
+      const old = window.github.loadMore();
+      await until(() => relay.held.length === 1);
+      expect(window.github.getView().loadingMore).toBe(true);
+      relay.hold(listPage);
+      change(window);
+      await until(() => relay.held.length === 2);
+      expect({ name, ...shown(window) }).toMatchObject({ name, loading: true, loadingMore: false, count: name === 'Refresh' ? 50 : 0 });
+      const [oldPage, newPage] = relay.held;
+      if (order === 'before') {
+        oldPage!.release();
+        await old;
+        expect({ name, ...shown(window) }).toMatchObject({ name, loading: true, loadingMore: false, count: name === 'Refresh' ? 50 : 0 });
+        newPage!.release();
+      } else {
+        newPage!.release();
+        await settled(window);
+        oldPage!.release();
+        await old;
+      }
+      await settled(window);
+      expect({ name, ...shown(window) }).toEqual({ name, count: 50, first: `${repo}#1`, last: `${repo}#50`, next: true, loading: false, loadingMore: false, error: null });
+      relay.hold(() => false);
+      await window.github.loadMore();
+      await window.github.loadMore();
+      expect({ name, ...shown(window) }).toMatchObject({ name, count: 101, last: `${repo}#101`, next: false, loadingMore: false });
+      expect(window.github.getView().items.every((item) => item.repo === repo)).toBe(true);
+      expect(new Set(window.github.getView().items.map((item) => item.id)).size).toBe(101);
+    }
+  });
+
+  withGh('an old Load more that fails says nothing over the new list; Load more waits while the list is read again; the five-minute refresh leaves a Load more under way alone', async () => {
+    lists();
+    const window = await planner.window();
+    const relay = slowRelay(window);
+    await window.github.checkStatus();
+    relay.hold((request) => listPage(request) && request.path.includes('after='));
+    const old = window.github.loadMore();
+    await until(() => relay.held.length === 1);
+    window.github.setText('alpha');
+    await settled(window);
+    relay.held[0]!.fail(502, 'gh: HTTP 502');
+    await old;
+    expect(shown(window)).toEqual({ count: 50, first: 'acme/app#1', last: 'acme/app#50', next: true, loading: false, loadingMore: false, error: null });
+
+    relay.hold(listPage);
+    const reading = window.github.refresh();
+    await until(() => relay.held.length === 2);
+    const before = relay.asked.length;
+    await window.github.loadMore();
+    expect([relay.asked.length - before, window.github.getView().loadingMore]).toEqual([0, false]);
+    relay.held[1]!.release();
+    await reading;
+    relay.hold(() => false);
+    await window.github.loadMore();
+    expect(shown(window)).toMatchObject({ count: 100, last: 'acme/app#100', next: true });
+
+    const timed = await planner.window();
+    const timedRelay = slowRelay(timed);
+    const [everyFiveMinutes] = await startKeepingTimers(() => timed.github.start());
+    timedRelay.hold((request) => listPage(request) && request.path.includes('after='));
+    const more = timed.github.loadMore();
+    await until(() => timedRelay.held.length === 1);
+    const quiet = timedRelay.asked.length;
+    everyFiveMinutes!();
+    expect(timedRelay.asked.length).toBe(quiet);
+    timedRelay.held[0]!.release();
+    await more;
+    timedRelay.hold(() => false);
+    everyFiveMinutes!();
+    await settled(timed);
+    expect(timedRelay.asked.slice(quiet).filter((request) => request.includes('/github/list')).map((request) => request.includes('after='))).toEqual([false, true]);
+    expect(shown(timed)).toMatchObject({ count: 100, loadingMore: false });
+  });
+});
+
+describe("the day's GitHub work in Daily Highlights", () => {
+  withGh("pull requests opened, reviewed and merged, comments past a page, discussions and their comments: all of the day and nothing else, through gh; past ten more pages a source is named as cut; a read asked for later is the one kept; only https links are saved", async () => {
+    const day = '2026-10-20';
+    const [from, to] = [instantAt(day, 0, ZONE), instantAt(addDays(day, 1), 0, ZONE)];
+    const at = (hours: number) => new Date(Date.parse(from) + hours * 3_600_000).toISOString();
+    const url = (path: string) => `https://github.com/${REPO}/${path}`;
+    const pull = (number: number, extra: object) => ({ id: `PR_day_${number}`, number, repo: REPO, url: url(`pull/${number}`), title: `Day pull ${number}`, body: '', headRefName: `day-${number}`, baseRefName: 'main', headOid: 'x', isDraft: false, state: 'OPEN' as const, createdAt: at(-48), updatedAt: at(1), ...extra });
+    const review = (number: number, id: string, state: 'APPROVED' | 'CHANGES_REQUESTED', hours: number) => ({ id, author: VIEWER, state, submittedAt: at(hours), url: url(`pull/${number}#${id}`) });
+    const comment = (id: string, created: number, updated = created, on = url('issues/1')) => ({ id, author: VIEWER, on, url: `${on}#${id}`, createdAt: at(created), updatedAt: at(updated) });
+    const discussion = (id: string, number: number, hours: number) => ({ id, number, repo: REPO, title: id, url: url(`discussions/${number}`), author: VIEWER, createdAt: at(hours) });
+    const world = planner.github!.world;
+    // Mine opened; Ann's reviewed twice; mine merged by Ann; Bo's merged by me, found through my review the day before; Bo's merged by Ann.
+    world.pulls = [pull(101, { createdAt: at(2) }), pull(102, { author: 'ann', reviews: [review(102, 'RV_1', 'CHANGES_REQUESTED', 3), review(102, 'RV_2', 'APPROVED', 5)] }), pull(103, { state: 'MERGED', mergedAt: at(4), mergedBy: 'ann' }), pull(104, { author: 'bo', state: 'MERGED', mergedAt: at(6), mergedBy: VIEWER, reviews: [review(104, 'RV_3', 'APPROVED', -30)] }), pull(105, { author: 'bo', state: 'MERGED', mergedAt: at(6), mergedBy: 'ann' })];
+    // Comments past a page, one of yesterday updated today, one of last week, one on a pull request; a discussion of the
+    // day and an older one, a comment on it from each day.
+    world.issues = [fakeIssue(REPO, 1)];
+    world.issueComments = [...Array.from({ length: 55 }, (_, n) => comment(`IC_${n}`, 8 + n / 60)), comment('IC_yesterday', -20, 2), comment('IC_old', -200), comment('IC_pr', 9.5, 9.5, url('pull/102'))];
+    world.discussions = [discussion('DS_1', 7, 10), discussion('DS_0', 6, -100)];
+    world.discussionComments = [-90, 11].map((hours, n) => ({ id: `DCM_${n}`, discussionId: 'DS_0', author: VIEWER, url: url(`discussions/6#${n}`), createdAt: at(hours) }));
+    const window = await planner.window();
+    planner.github!.requests.length = 0;
+
+    const read = await readAndKeep(window.client, `${day}|${ZONE}`, from, to);
+    expect(read.login).toBe(VIEWER);
+    expect(read.items.filter((item) => item.kind !== 'commented').map((item) => item.id)).toEqual(['opened:PR_day_101', 'merged:PR_day_103', 'merged:PR_day_104', 'reviewed:RV_2', 'reviewed:RV_1', 'discussion:DS_1', 'discussionComment:DCM_1']);
+    const comments = read.items.filter((item) => item.kind === 'commented');
+    expect([comments.length, comments[0]!.id, comments[0]!.target.type, comments.some((item) => /yesterday|old/.test(item.id)), read.cut]).toEqual([56, 'commented:IC_pr', 'pull', false, []]);
+    expect(planner.github!.requests.map((request) => request.operation).filter((operation) => operation?.startsWith('query PlannerGitHubActivity'))).toEqual(['query PlannerGitHubActivity', 'query PlannerGitHubActivityComments']);
+
+    // 600 comments of the day: the first page and ten more are read, and the rest is GitHub's to show.
+    world.issueComments = Array.from({ length: 600 }, (_, n) => comment(`MC_${n}`, 1 + n / 100));
+    const cut = await readAndKeep(window.client, `${day}|cut`, from, to);
+    expect([cut.items.filter((item) => item.kind === 'commented').length, cut.cut]).toEqual([550, ['commented']]);
+
+    // Read twice at once (a Refresh): the read asked for last is the one kept for going back to the day, whichever answers last.
+    world.issueComments = [];
+    const relay = slowRelay(window);
+    relay.hold(firstOf((request) => request.path.startsWith('/github/activity')));
+    const first = readAndKeep(window.client, `${day}|${ZONE}`, from, to);
+    await until(() => relay.held.length === 1);
+    await relay.held[0]!.answered;
+    world.discussions.push(discussion('DS_2', 8, 12));
+    await readAndKeep(window.client, `${day}|${ZONE}`, from, to);
+    relay.held[0]!.release();
+    expect((await first).items.some((item) => item.id === 'discussion:DS_2')).toBe(false);
+    expect(keptRead(`${day}|${ZONE}`)?.items.some((item) => item.id === 'discussion:DS_2')).toBe(true);
+
+    // A highlight included from GitHub keeps an https link only.
+    const highlight = (url: string) => planner.call('POST', '/commands', { commands: [{ cmd: `hl${url.length}`, type: 'ritual.saved', ritual: 'highlights', date: day, fields: { items: [{ id: 'h1', text: 'Merged pull request', taskId: null, starred: true, url, ref: 'github:merged:PR_day_103' }] } }] });
+    expect((await highlight(url('pull/103'))).status).toBe(200);
+    for (const link of ['javascript:alert(1)', `http://github.com/${REPO}/pull/103`]) expect((await highlight(link)).body.error).toBe('a highlight is invalid');
+  });
+});
+
+// Sunsama's "Add via URL": an address pasted alone as a new task's title. Review 11 found a pasted GitHub issue URL made
+// a task titled with the URL, linked to nothing.
+describe('a URL pasted as a new task', () => {
+  test('a GitHub issue or pull request, a Gmail message or a Calendar event becomes a task linked to it; one that cannot be found, or a Linear issue with Linear not connected, becomes a link task and the Planner says why; any other page is a link task', async () => {
+    const world = planner.github!.world;
+    world.issues = [fakeIssue('acme/app', 51, { title: 'Issue 51' })];
+    world.pulls = reviewRequests('acme/app', 'Retries', 7).slice(6);
+    await forgetGitHubTasks();
+    const window = await planner.window();
+    const notes = notesOf(window);
+    await window.google.checkStatus();
+    if (realGh) await window.github.checkStatus();
+    const today = window.client.getView().today;
+    const add = async (text: string): Promise<Task> => {
+      const before = new Set(Object.keys(window.client.getView().state.tasks));
+      await addParsedTask(window, parseQuickAdd(text, today), { kind: 'day', date: today }, 'bottom', today);
+      return Object.values(window.client.getView().state.tasks).find((task) => !before.has(task.id))!;
+    };
+
+    if (realGh) {
+      expect(await add('https://github.com/acme/app/issues/51#issuecomment-9 ~30m')).toMatchObject({ title: 'Issue 51', plannedMinutes: 30, source: { kind: 'github', id: world.issues[0]!.id, key: 'acme/app#51', url: 'https://github.com/acme/app/issues/51' } });
+      expect(asked('query PlannerGitHubResource').at(-1)!.variables).toEqual({ url: 'https://github.com/acme/app/issues/51' });
+      expect(await add('https://github.com/acme/app/pull/7/files')).toMatchObject({ title: 'Retries 7', source: { kind: 'github', id: world.pulls[0]!.id } });
+      expect(await add('https://github.com/acme/app/issues/404')).toMatchObject({ title: 'github.com › acme › app › issues › 404', source: { kind: 'link' } });
+      expect(notes.at(-1)).toBe("acme/app#404 was not found on GitHub, or this gh can't see it; added the link as a task");
+    }
+
+    // A thread's address, as the Planner links one: its latest message; a printed message by its own id, in the
+    // account Gmail has it, not the one the address names; one in none of them; Gmail's own links, which no app can read.
+    expect(await add(gmailUrl(ME, THREADS.numbers))).toMatchObject({ title: 'Re: Quarterly numbers', source: { kind: 'email', id: '18b2f3c4d5e6f702', account: ME } });
+    expect(await add(`https://mail.google.com/mail/u/someone%40example.com/?ik=abc&view=pt&search=all&permthid=thread-f%3A${PRINTED_MESSAGE}&simpl=msg-f%3A${PRINTED_MESSAGE}`)).toMatchObject({ title: 'Lunch?', source: { kind: 'email', account: ME } });
+    expect(await add('https://mail.google.com/mail/u/0/#inbox/18b2f3c4d5e6f7ff')).toMatchObject({ source: { kind: 'link' } });
+    expect(notes.at(-1)).toBe("Couldn't find this message in Gmail (This message is in none of your Gmail accounts); added the link as a task");
+    const resolves = planner.google!.requests.filter((request) => request.path.startsWith('/gmail/')).length;
+    expect(await add('https://mail.google.com/mail/u/0/#inbox/FMfcgzQgLjNPlfJCVRfnNkPGkLhWClCW')).toMatchObject({ source: { kind: 'link', key: 'mail.google.com' } });
+    expect([notes.at(-1), planner.google!.requests.filter((request) => request.path.startsWith('/gmail/')).length]).toEqual([expect.stringContaining("Gmail's own links can't be read by other apps"), resolves]);
+
+    // A Calendar event, as "Add to tasks" adds it: on its day, its length planned.
+    const eid = Buffer.from(`planning ${ME}`).toString('base64').replace(/=+$/, '');
+    expect(await add(`https://calendar.google.com/calendar/event?eid=${eid}`)).toMatchObject({ title: 'Quarter planning', plannedMinutes: 60, placement: { kind: 'day', date: today }, source: { kind: 'event' } });
+
+    expect(await add('https://linear.app/harness/issue/HAR-1/x')).toMatchObject({ source: { kind: 'link', url: 'https://linear.app/harness/issue/HAR-1/x' } });
+    expect(notes.at(-1)).toContain('Linear is not connected');
+
+    expect(await add('http://intranet.example.com/wiki/Runbook ~15m')).toMatchObject({ title: 'intranet.example.com › wiki › Runbook', plannedMinutes: 15, source: { kind: 'link', url: 'http://intranet.example.com/wiki/Runbook' } });
+    const plain = await add('Fix the crash');
+    expect([plain.title, plain.source ?? null]).toEqual(['Fix the crash', null]);
   });
 });
