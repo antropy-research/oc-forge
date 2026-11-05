@@ -6590,7 +6590,7 @@ var nextNotificationAt = (all, now, given) => all.find((item) => Date.parse(item
 
 // service/taskNotifications.ts
 var KEEP_MS = 3 * 24 * 60 * 60000;
-var LEASE_MS = 20000;
+var LEASE_MS = 5000;
 var ACK_LIMITS = { keys: 200, key: 300 };
 
 class TaskNotifications {
@@ -6657,7 +6657,9 @@ class TaskNotifications {
     for (const item of fresh)
       this.lent.set(item.key, now + LEASE_MS);
     const next = nextNotificationAt(all, now, keys);
-    return { notifications: fresh, next, nextIn: next ? Date.parse(next) - now : null, errors: [...due.errors, ...deadlines.errors] };
+    const loans = all.filter((item) => Date.parse(item.at) <= now && !given.has(item.key) && !fresh.includes(item) && this.lent.has(item.key)).map((item) => this.lent.get(item.key) - now);
+    const nextIn = Math.min(next ? Date.parse(next) - now : Number.POSITIVE_INFINITY, ...loans);
+    return { notifications: fresh, next, nextIn: Number.isFinite(nextIn) ? nextIn : null, errors: [...due.errors, ...deadlines.errors] };
   }
   async load() {
     if (this.given)

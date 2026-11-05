@@ -192,7 +192,10 @@ describe('the service gives each notification once', () => {
     // The Work Status card took it, then went (the right panel opened) before showing it.
     expect((await service.take()).notifications.map((one) => one.taskId)).toEqual(['dated']);
     at.now += LEASE_MS - 1000;
-    expect((await service.take()).notifications).toEqual([]);
+    // Another surface asking meanwhile gets none, and is told to ask again when the loan ends.
+    const meanwhile = await service.take();
+    expect(meanwhile.notifications).toEqual([]);
+    expect(meanwhile.nextIn).toBe(1000);
     at.now += 2000;
     const again = await service.take();
     expect(again.notifications.map((one) => one.taskId)).toEqual(['dated']);

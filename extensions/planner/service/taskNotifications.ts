@@ -5,12 +5,13 @@
 // takes some says when it has shown them (`ack`); until then they are lent to
 // it for LEASE_MS and nobody else gets them, and one never shown (its frame
 // went: the Work Status card hides while the right panel is open) comes to the
-// next surface that asks. What was shown is kept a few days beside the data
-// (never in its synced repository), so a reload or a restart does not give one
-// again; one missed while no Planner surface was open comes when one opens,
-// the same day. One that comes while a
-// task with Do not disturb is on waits until that task ends, past midnight too
-// (a task that runs to midnight holds the last ones of its day until then).
+// next surface that asks, which is told to ask again when the loan ends. What
+// was shown is kept a few days beside the data (never in its synced
+// repository), so a reload or a restart does not give one again; one missed
+// while no Planner surface was open comes when one opens, the same day. One
+// that comes while a task with Do not disturb is on waits until that task
+// ends, past midnight too (a task that runs to midnight holds the last ones of
+// its day until then).
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { DateKey, PlannerState } from '../src/domain/types.ts';
@@ -22,8 +23,11 @@ import type { GoogleTaskItem } from '../src/domain/google.ts';
 
 /** How long a given notification is remembered: past its day, whatever the zone. */
 const KEEP_MS = 3 * 24 * 60 * 60_000;
-/** How long the surface that took a notification has to show it, before another may. */
-export const LEASE_MS = 20_000;
+/**
+ * How long the surface that took a notification has to show it, before another may: a live frame shows it and says
+ * so within milliseconds. Another surface that asks meanwhile is told to ask again when the loan ends (`nextIn`).
+ */
+export const LEASE_MS = 5000;
 /** At most this many acknowledged at once, each a key of at most this many characters. */
 export const ACK_LIMITS = { keys: 200, key: 300 } as const;
 
@@ -109,7 +113,11 @@ export class TaskNotifications {
     const fresh = dueNotifications(all, now, keys);
     for (const item of fresh) this.lent.set(item.key, now + LEASE_MS);
     const next = nextNotificationAt(all, now, keys);
-    return { notifications: fresh, next, nextIn: next ? Date.parse(next) - now : null, errors: [...due.errors, ...deadlines.errors] };
+    // Due ones lent to another surface come back when its loan ends, unless it shows them: ask again then.
+    const loans = all.filter((item) => Date.parse(item.at) <= now && !given.has(item.key) && !fresh.includes(item) && this.lent.has(item.key))
+      .map((item) => this.lent.get(item.key)! - now);
+    const nextIn = Math.min(next ? Date.parse(next) - now : Number.POSITIVE_INFINITY, ...loans);
+    return { notifications: fresh, next, nextIn: Number.isFinite(nextIn) ? nextIn : null, errors: [...due.errors, ...deadlines.errors] };
   }
 
   private async load(): Promise<Map<string, number>> {
