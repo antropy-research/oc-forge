@@ -2,7 +2,7 @@
 // Cmd+click rule (a Cmd/Ctrl+click or a middle click on a page, a task or a chat
 // opens it in a new browser tab; a plain click goes there in place), its
 // shortcut rule (OpenChamber's own navigation keys reach OpenChamber while the
-// Planner has focus; the Planner keeps its own), and the Planner as the window's
+// Planner has focus; the Planner keeps its own), and the Planner as OpenChamber's
 // right panel: a deep link opens it, and it stays through a switch of chat. Runs against the `adapted`
 // instance of the scratch stack the adapters' own check uses, on ports and in a
 // folder of its own:
@@ -136,7 +136,8 @@ try {
       await target.goto(url);
       const shown = await until(async () => (await plannerFrame(target).locator('.app').count()) > 0 || (await target.getByText('This panel failed to load.').count()) > 0, 90_000);
       if (shown && (await plannerFrame(target).locator('.app').count()) > 0) {
-        await openPlannerPanel(target);
+        // The deep link's place, not Home.
+        await openPlannerPanel(target, { home: false });
         return Boolean(await until(() => plannerFrame(target).locator('#planner-nav').isVisible(), 30_000));
       }
     }
@@ -144,7 +145,8 @@ try {
   };
 
   // ── 1. A deep link opens the Planner's panel on its place ──
-  await openPlanner(page, `${base}/?extension=${PLANNER}&route=${encodeURIComponent('/calendar')}`);
+  // On a chat: the Planner is a right panel, which opens in a chat's folder (a link alone shows a new chat, no project).
+  await openPlanner(page, `${base}/?session=${chatId}&extension=${PLANNER}&route=${encodeURIComponent('/calendar')}`);
   let frame = plannerFrame(page);
   const onCalendar = await until(async () => (await activeNav(frame)).trim() === 'Calendar', 30_000);
   check('a deep link (?extension=oc-forge-planner&route=/calendar) opens the Planner on Calendar', onCalendar, await activeNav(frame));

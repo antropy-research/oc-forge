@@ -32,8 +32,15 @@ export const useForge = (): OcForgeClient | null => {
   return forge;
 };
 
-/** The Planner's page on a place, as an absolute URL; null where the host has no deep links. */
-export const placeUrl = (place: PlannerPlace): string | null => resolved?.links.pageUrl(routeOf(place)) ?? null;
+/**
+ * The Planner on a place, as an absolute URL; null where the host has no deep links. With the chat it was clicked
+ * from (OpenChamber's own `?session=`): the Planner is a right panel, which needs that chat's folder to open in, and a
+ * new tab opened on the link alone shows a new chat with no project.
+ */
+export const placeUrl = (place: PlannerPlace, sessionId?: string | null): string | null => {
+  const url = resolved?.links.pageUrl(routeOf(place));
+  return url && sessionId ? `${url}&session=${encodeURIComponent(sessionId)}` : url ?? null;
+};
 
 /** A chat's URL; null where the host has no deep links. */
 export const chatUrl = (sessionId: string): string | null => resolved?.links.sessionUrl(sessionId) ?? null;

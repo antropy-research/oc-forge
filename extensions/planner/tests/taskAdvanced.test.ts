@@ -210,6 +210,8 @@ describe('Do not disturb and declining meetings (work and school accounts)', () 
       // 9 AM passed with no date-only task; Deep work's own came at 2pm; Call the bank waits for 3pm.
       expect(during.notifications.map((one) => one.taskId)).toEqual(['gt1']);
       expect(during.next).toBe(at(15 * 60));
+      // The surface showed it.
+      await service.ack(during.notifications.map((one) => one.key));
       now.at = Date.parse(at(15 * 60)) + 1000;
       expect((await service.take()).notifications.map((one) => [one.taskId, one.held])).toEqual([['call', true]]);
     } finally {
@@ -228,8 +230,11 @@ describe('Do not disturb and declining meetings (work and school accounts)', () 
       const service = new TaskNotifications(join(dir, 'given.json'), () => state, reads, () => now.at);
       const before = await service.take();
       expect([before.notifications.map((one) => one.taskId), before.next]).toEqual([['late'], at(0, addDays(TODAY, 1))]);
+      await service.ack(before.notifications.map((one) => one.key));
       now.at = Date.parse(at(5, addDays(TODAY, 1)));
-      expect((await service.take()).notifications.map((one) => [one.taskId, one.held, one.at])).toEqual([['call', true, at(0, addDays(TODAY, 1))]]);
+      const after = await service.take();
+      expect(after.notifications.map((one) => [one.taskId, one.held, one.at])).toEqual([['call', true, at(0, addDays(TODAY, 1))]]);
+      await service.ack(after.notifications.map((one) => one.key));
       expect(asked.at(-1)).toEqual([TODAY, addDays(TODAY, 1)]);
       expect((await service.take()).notifications).toEqual([]);
     } finally {

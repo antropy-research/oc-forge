@@ -18,7 +18,7 @@
 // Usage (node >= 22, run on the host, from any checkout of this repository):
 //   import { startHarness } from './harness.mjs';
 //   const h = await startHarness({ out: '/tmp/opencode/<you>' });   // worktree: this checkout
-//   await h.openPlanner();               // returns the Planner FrameLocator, also h.frame
+//   await h.openPlanner();               // returns the Planner FrameLocator, also h.frame (on h.start: the harness's chat)
 //   await h.nav('Calendar').click();     // left navigation of the Planner page
 //   await h.shot('calendar');            // <out>/calendar.png
 //   await h.call('GET', '/state');       // talk to your private service directly
@@ -230,6 +230,14 @@ export async function startHarness({
   });
   const login = await context.request.post(`${base}/auth/session`, { data: { password } });
   if (login.status() !== 200) throw new Error(`login failed: ${login.status()}`);
+  // The windows sit on a chat of the harness's own: the Planner is OpenChamber's right panel, which opens in a chat's
+  // folder, and a new-session draft with no project has none (a second window sometimes started on one). In the
+  // harness project, deleted at close; without that project, the app's own start.
+  const anchorFolder = '/home/node/projects/planner-demo-a';
+  const anchor = await context.request.post(`${base}/api/session?directory=${encodeURIComponent(anchorFolder)}`, { data: { title: `harness-planner ${randomBytes(4).toString('hex')}`, location: { directory: anchorFolder } } })
+    .then((response) => (response.ok() ? response.json() : null)).catch(() => null);
+  const anchorId = (anchor?.data ?? anchor)?.id ?? null;
+  const start = anchorId ? `${base}/?session=${encodeURIComponent(anchorId)}` : `${base}/`;
 
   /**
    * The host's answer to a request a route forwards. A connection the host closed as the request went out
@@ -344,7 +352,7 @@ export async function startHarness({
 
   const frame = page.frameLocator(PLANNER_FRAME);
   const openPlanner = async () => {
-    await page.goto(`${base}/`, { waitUntil: 'load' });
+    await page.goto(start, { waitUntil: 'load' });
     await openPlannerPanel(page);
     await frame.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 30_000 });
     return frame;
@@ -367,8 +375,9 @@ export async function startHarness({
     // A route callback still forwarding a request (route.fetch) fails once its page is gone; without this its
     // rejection is unhandled and ends the journey before it reports.
     await context.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
+    if (anchorId) await context.request.delete(`${base}/api/session/${encodeURIComponent(anchorId)}?directory=${encodeURIComponent(anchorFolder)}`).catch(() => {});
     await browser.close().catch(() => {});
     child.kill('SIGTERM');
   };
-  return { base, page, context, browser, frame, openPlanner, nav, shot, call, linearWorld, linearCalls, serviceCalls, github, problems, serviceLog, home, close };
+  return { base, start, page, context, browser, frame, openPlanner, nav, shot, call, linearWorld, linearCalls, serviceCalls, github, problems, serviceLog, home, close };
 }

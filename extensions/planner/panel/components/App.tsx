@@ -33,11 +33,16 @@ import { autoTimebox } from '../lib/autoSchedule.ts';
 import { startTaskNotifications } from '../lib/notifications.ts';
 import { parseRoute, routeOf } from '../lib/deepLink.ts';
 import { openInNewTab, placeUrl, plannerKeeps, useForge, watchNewTabClicks } from '../lib/forge.ts';
+import { followPanel, trackPanelShown } from '../lib/follow.ts';
+import { readPlace, savePlace } from '../lib/place.ts';
 
 export const App = ({ surface }: { surface: string }) => {
   const { client, host, linear, agents, github, google } = usePlanner();
   // The rail panel draws the whole Planner, as a page does.
   const full = isFullSurface(surface);
+  // A new frame starts on the page the Planner was on (this browser's storage), unless a deep link names a place.
+  const [placeRead, setPlaceRead] = useState(!full);
+  const linked = useRef(false);
   const view = useView();
   const [route, setRoute] = useState<Route>('home');
   // A narrow page folds the menu into a rail; it opens over the page and closes on a pick.
@@ -56,8 +61,13 @@ export const App = ({ surface }: { surface: string }) => {
   // oc-forge's host APIs (null on a stock OpenChamber): a Cmd/Ctrl+click or a middle click on a page, a task or an
   // issue opens it on the Planner's page in a new browser tab, as on a link; a plain click goes there here.
   const forge = useForge();
+  // The chat on screen: a new tab opens on it, the Planner beside it.
+  const session = useRef<string | null>(null);
+  useEffect(() => host.onSession((snapshot) => {
+    session.current = snapshot?.id ?? null;
+  }), [host]);
   const go = (next: Route) => {
-    if (openInNewTab(placeUrl({ page: next }), (url) => host.openUrl(url))) return;
+    if (openInNewTab(placeUrl({ page: next }, session.current), (url) => host.openUrl(url))) return;
     setRoute(next);
     setNavOpen(false);
   };
@@ -67,7 +77,7 @@ export const App = ({ surface }: { surface: string }) => {
       // From the Work Status section's Today, a task opens on the Planner's Today.
       const page = full ? route : 'today';
       const place = patch.openIssue ? { page, openIssue: patch.openIssue } : { page, openTaskId: patch.openTaskId };
-      if (openInNewTab(placeUrl(place), (url) => host.openUrl(url))) return;
+      if (openInNewTab(placeUrl(place, session.current), (url) => host.openUrl(url))) return;
     }
     setUiState((current) => ({ ...current, ...patch }));
   };
@@ -79,6 +89,7 @@ export const App = ({ surface }: { surface: string }) => {
     const apply = (value: string | null) => {
       const place = parseRoute(value);
       if (place) {
+        linked.current = true;
         setRoute(place.page);
         setUiState((current) => ({ ...current, openTaskId: place.openTaskId ?? null, openIssue: place.openIssue ?? null }));
       }
@@ -92,6 +103,26 @@ export const App = ({ surface }: { surface: string }) => {
     if (!forge || surface !== 'page' || !linkApplied) return;
     void forge.links.setRoute(routeOf({ page: route, openTaskId: ui.openTaskId, openIssue: ui.openIssue })).catch(() => {});
   }, [forge, surface, linkApplied, route, ui.openTaskId, ui.openIssue?.id, ui.openIssue?.workspaceId]);
+  useEffect(() => {
+    if (!full) return;
+    let live = true;
+    void readPlace(host).then((place) => {
+      if (!live) return;
+      if (place && !linked.current) setRoute(place.page);
+      setPlaceRead(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [host, full]);
+  useEffect(() => {
+    if (!full || !placeRead) return;
+    const timer = setTimeout(() => savePlace(host, { page: route }), 300);
+    return () => clearTimeout(timer);
+  }, [host, full, placeRead, route]);
+  // One Planner for the window: the rail panel says when it is on screen, and the Work Status section, which stays
+  // through chat switches, shows the panel in the folder of the next chat (lib/follow.ts).
+  useEffect(() => (surface === 'panel' ? trackPanelShown(host) : surface === 'status' ? followPanel(host) : undefined), [host, surface]);
   // OpenChamber's own navigation keys (tabs, surfaces, chats, sidebar, its palette) go to OpenChamber while the
   // Planner has focus, not to Chrome; the Planner keeps what it uses itself (plannerKeeps).
   const routeNow = useRef(route);
@@ -196,7 +227,7 @@ export const App = ({ surface }: { surface: string }) => {
     return () => document.removeEventListener('keydown', onKey);
   });
 
-  if (!view.loaded) return surface === 'status' ? null : <ServiceGate />;
+  if (!view.loaded || !placeRead) return surface === 'status' ? null : <ServiceGate />;
   if (surface === 'status') {
     return (
       <UiContext.Provider value={{ ui, setUi }}>

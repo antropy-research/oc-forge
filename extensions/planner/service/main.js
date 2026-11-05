@@ -6590,6 +6590,8 @@ var nextNotificationAt = (all, now, given) => all.find((item) => Date.parse(item
 
 // service/taskNotifications.ts
 var KEEP_MS = 3 * 24 * 60 * 60000;
+var LEASE_MS = 20000;
+var ACK_LIMITS = { keys: 200, key: 300 };
 
 class TaskNotifications {
   file;
@@ -6597,6 +6599,7 @@ class TaskNotifications {
   reads;
   now;
   given = null;
+  lent = new Map;
   queue = Promise.resolve();
   constructor(file, state, reads, now = Date.now) {
     this.file = file;
@@ -6606,6 +6609,24 @@ class TaskNotifications {
   }
   take() {
     const next = this.queue.then(() => this.takeNow());
+    this.queue = next.catch(() => {});
+    return next;
+  }
+  ack(keys) {
+    const next = this.queue.then(async () => {
+      const given = await this.load();
+      const now = this.now();
+      let changed = false;
+      for (const key of keys) {
+        this.lent.delete(key);
+        if (!given.has(key)) {
+          given.set(key, now);
+          changed = true;
+        }
+      }
+      if (changed)
+        await this.save(given, now);
+    });
     this.queue = next.catch(() => {});
     return next;
   }
@@ -6628,13 +6649,13 @@ class TaskNotifications {
     const all = [...held, ...quietNotifications(taskNotifications(due.items, deadlines.items, kept, today, zone), windows)].sort((a, b) => a.at.localeCompare(b.at) || a.key.localeCompare(b.key));
     const given = await this.load();
     const now = this.now();
-    const keys = new Set(given.keys());
+    for (const [key, until] of this.lent)
+      if (until <= now)
+        this.lent.delete(key);
+    const keys = new Set([...given.keys(), ...this.lent.keys()]);
     const fresh = dueNotifications(all, now, keys);
-    if (fresh.length) {
-      for (const item of fresh)
-        given.set(item.key, now);
-      await this.save(given, now);
-    }
+    for (const item of fresh)
+      this.lent.set(item.key, now + LEASE_MS);
     const next = nextNotificationAt(all, now, keys);
     return { notifications: fresh, next, nextIn: next ? Date.parse(next) - now : null, errors: [...due.errors, ...deadlines.errors] };
   }
@@ -7944,6 +7965,15 @@ var googleRoute = async (req, url) => {
   }
   if (path === "/google/tasks/notifications" && req.method === "POST") {
     return ok(await taskNotifications2.take());
+  }
+  if (path === "/google/tasks/notifications/ack" && req.method === "POST") {
+    const body = await readJson(req);
+    const keys = Array.isArray(body.keys) ? body.keys : null;
+    if (!keys || keys.length > ACK_LIMITS.keys || !keys.every((key) => typeof key === "string" && key.length > 0 && key.length <= ACK_LIMITS.key)) {
+      return { status: 400, body: { error: `keys is a list of at most ${ACK_LIMITS.keys} notification keys` } };
+    }
+    await taskNotifications2.ack(keys);
+    return ok({ acknowledged: keys.length });
   }
   if (path === "/google/tasks/decline" && req.method === "POST") {
     return ok(await decliner.run());

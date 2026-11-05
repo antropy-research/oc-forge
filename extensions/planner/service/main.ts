@@ -19,7 +19,7 @@ import { GMAIL_ACTIONS, type GmailAction } from '../src/domain/types.ts';
 import { GoogleData } from './googleData.ts';
 import { GoogleCalendars, GoogleDueTasks, GoogleTimeboxes } from './googleTimeboxes.ts';
 import { googleWriteRoute } from './googleRoutes.ts';
-import { TaskNotifications } from './taskNotifications.ts';
+import { ACK_LIMITS, TaskNotifications } from './taskNotifications.ts';
 import { GoogleSeries } from './googleSeries.ts';
 import { MeetingDecliner } from './googleDecline.ts';
 import { GOOGLE_TASKS_CALENDAR, dueTaskEvent } from '../src/domain/google.ts';
@@ -195,8 +195,17 @@ const googleRoute = async (req: http.IncomingMessage, url: URL): Promise<{ statu
     return ok({ tasks: pendingTasks(read.items, today), today, from, to, errors: read.errors });
   }
   if (path === '/google/tasks/notifications' && req.method === 'POST') {
-    // The task notifications come by now that no Planner surface has had yet; each is given once.
+    // The task notifications come by now that no Planner surface has had yet, lent to the asker until it says it showed them.
     return ok(await taskNotifications.take());
+  }
+  if (path === '/google/tasks/notifications/ack' && req.method === 'POST') {
+    const body = (await readJson(req)) as { keys?: unknown };
+    const keys = Array.isArray(body.keys) ? body.keys : null;
+    if (!keys || keys.length > ACK_LIMITS.keys || !keys.every((key): key is string => typeof key === 'string' && key.length > 0 && key.length <= ACK_LIMITS.key)) {
+      return { status: 400, body: { error: `keys is a list of at most ${ACK_LIMITS.keys} notification keys` } };
+    }
+    await taskNotifications.ack(keys);
+    return ok({ acknowledged: keys.length });
   }
   if (path === '/google/tasks/decline' && req.method === 'POST') {
     // "Automatically decline meetings" now, after a task's change: the meetings it declined, and where it carries on (`more`).

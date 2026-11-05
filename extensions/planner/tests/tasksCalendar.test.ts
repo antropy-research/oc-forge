@@ -19,7 +19,7 @@ import { EventStore } from '../service/store.ts';
 import { Planner } from '../service/planner.ts';
 import type { TimeboxEvent } from '../service/googleData.ts';
 import { GoogleTimeboxes, sessionVisibility } from '../service/googleTimeboxes.ts';
-import { TaskNotifications, type NotificationReads } from '../service/taskNotifications.ts';
+import { LEASE_MS, TaskNotifications, type NotificationReads } from '../service/taskNotifications.ts';
 import { validateCommand, type EventBody, type PlannerEvent } from '../src/domain/events.ts';
 import { applyEvents } from '../src/domain/reducer.ts';
 import { addDays, instantAt, todayIn, zonedDateMinutes } from '../src/domain/dates.ts';
@@ -164,7 +164,7 @@ describe('the service gives each notification once', () => {
   };
   const zoned = (state: PlannerState) => applyEvents(state, [ev({ type: 'settings.updated', patch: { timezone: ZONE } })]);
 
-  test('at its time, to one asker; never again, after a restart too; the next one is said', async () => {
+  test('at its time, to one asker; never again once shown, after a restart too; the next one is said', async () => {
     const at = { now: Date.parse(instantAt(TODAY, 14 * 60 - 5, ZONE)) };
     const state = zoned(stateWith(keep('timed', { time: 14 * 60 })));
     const { file, make } = setup(state, [item({ id: 'timed', title: 'Timed' }), item({ id: 'dated', title: 'Dated' })], at);
@@ -174,12 +174,33 @@ describe('the service gives each notification once', () => {
     expect(first.notifications.map((one) => one.taskId)).toEqual(['dated']);
     expect(first.next).toBe(instantAt(TODAY, 14 * 60, ZONE));
     expect((await service.take()).notifications).toEqual([]);
+    await service.ack(first.notifications.map((one) => one.key));
     at.now += 5 * 60_000;
     // Two surfaces ask at once: one of them gets it.
     const [a, b] = await Promise.all([service.take(), service.take()]);
     expect([...a.notifications, ...b.notifications].map((one) => one.taskId)).toEqual(['timed']);
+    await service.ack([...a.notifications, ...b.notifications].map((one) => one.key));
     expect(Object.keys(JSON.parse(readFileSync(file, 'utf8')).given)).toHaveLength(2);
     // A restarted service read what was given.
+    expect((await make().take()).notifications).toEqual([]);
+  });
+
+  test('lent to the surface that took it until it says it showed it; never shown (its frame went), it comes to the next', async () => {
+    const at = { now: Date.parse(instantAt(TODAY, 15 * 60, ZONE)) };
+    const { file, make } = setup(zoned(emptyState()), [item({ id: 'dated', title: 'Dated' })], at);
+    const service = make();
+    // The Work Status card took it, then went (the right panel opened) before showing it.
+    expect((await service.take()).notifications.map((one) => one.taskId)).toEqual(['dated']);
+    at.now += LEASE_MS - 1000;
+    expect((await service.take()).notifications).toEqual([]);
+    at.now += 2000;
+    const again = await service.take();
+    expect(again.notifications.map((one) => one.taskId)).toEqual(['dated']);
+    // This one showed it: never again, and kept for a restart.
+    await service.ack(again.notifications.map((one) => one.key));
+    at.now += LEASE_MS * 2;
+    expect((await service.take()).notifications).toEqual([]);
+    expect(Object.keys(JSON.parse(readFileSync(file, 'utf8')).given)).toHaveLength(1);
     expect((await make().take()).notifications).toEqual([]);
   });
 
@@ -456,6 +477,9 @@ describe('the routes, against a fake Google', () => {
     expect(first.status).toBe(200);
     expect(kinds(first)).toEqual([['day', 't-call'], ['deadline', 't-stamps'], ['time', 't-report']]);
     expect((await call('POST', '/google/tasks/notifications')).body.notifications).toEqual([]);
+    // The surface showed them and says so; anything else is refused.
+    expect((await call('POST', '/google/tasks/notifications/ack', { keys: first.body.notifications.map((one: { key: string }) => one.key) })).body).toEqual({ acknowledged: 3 });
+    expect((await call('POST', '/google/tasks/notifications/ack', { keys: 'all' })).status).toBe(400);
     // Times set now: one later today is next; one gone by already never comes.
     const later = minutesNow() + 60;
     expect((await commands({ type: 'gtask.kept', account, listId: 'L1', taskId: 't-overdue', patch: { time: later } }, { type: 'gtask.kept', account, listId: 'L1', taskId: 't-call', patch: { time: minutesNow() - 5 } })).status).toBe(200);

@@ -57,7 +57,7 @@ try {
   other.on('pageerror', (error) => h.problems.push(`second window pageerror: ${error.message}`));
   const second = other.frameLocator(PLANNER_FRAME);
   const openSecond = async () => {
-    await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+    await other.goto(h.start, { waitUntil: 'load' });
     const home = second.getByRole('heading', { name: 'Home' });
     await openPlannerPanel(other);
     await home.waitFor({ timeout: 30_000 });

@@ -1,6 +1,6 @@
 {
   "name": "@oc-forge/openchamber-planner",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "private": true,
   "type": "module",
   "description": "Sunsama-style daily planning inside OpenChamber.",
@@ -78,9 +78,7 @@
   },
   "ocForge": {
     "apiVersion": 1,
-    "modals": true,
-    "globalPanel": true,
-    "autostart": true
+    "modals": true
   },
   "scripts": {
     "check": "tsc -p .",

@@ -4,7 +4,9 @@
 // the service for the ones come by now, at the next one's time, soon after a
 // change here and at least every 30 seconds, and shows each as an OpenChamber
 // notification that stays until it is dismissed, as Google Calendar's alerts
-// do. The service gives each one once, to whichever surface asks first.
+// do. The service gives each one once, to whichever surface asks first, and
+// lends it until that surface says it showed it: a frame that goes before
+// (the Work Status card hides while the right panel opens) loses none.
 import type { HostClient } from '@openchamber/sdk';
 import { notificationMessage, type TaskNotification } from '../../src/domain/gtaskNotify.ts';
 import type { PlannerClient } from './client.ts';
@@ -27,10 +29,16 @@ export const startTaskNotifications = (host: HostClient, client: PlannerClient, 
     if (timer) clearTimeout(timer);
     timer = stopped ? null : setTimeout(() => void ask(), Math.max(250, ms));
   };
-  const show = async (items: readonly TaskNotification[]) => {
-    for (const item of items.slice(0, SHOWN_AT_ONCE)) await host.toast({ kind: 'info', message: notificationMessage(item), persistent: true }).catch(() => {});
+  /** Shows them; true when OpenChamber took every one. */
+  const show = async (items: readonly TaskNotification[]): Promise<boolean> => {
+    let shown = true;
+    const toast = (message: string) => host.toast({ kind: 'info', message, persistent: true }).catch(() => {
+      shown = false;
+    });
+    for (const item of items.slice(0, SHOWN_AT_ONCE)) await toast(notificationMessage(item));
     const more = items.length - SHOWN_AT_ONCE;
-    if (more > 0) await host.toast({ kind: 'info', message: `${more} more task notification${more === 1 ? '' : 's'} today: see the Planner's calendar`, persistent: true }).catch(() => {});
+    if (more > 0) await toast(`${more} more task notification${more === 1 ? '' : 's'} today: see the Planner's calendar`);
+    return shown;
   };
   const ask = async () => {
     // A hidden window shows nothing: the ones due wait for it (or for another window) to be shown.
@@ -42,7 +50,10 @@ export const startTaskNotifications = (host: HostClient, client: PlannerClient, 
     try {
       const answer = await client.call<{ notifications?: TaskNotification[]; nextIn?: number | null }>('POST', '/google/tasks/notifications');
       nextIn = typeof answer.nextIn === 'number' ? answer.nextIn - (Date.now() - asked) : null;
-      if (answer.notifications?.length) await show(answer.notifications);
+      // Shown: given for good. Not shown, or never said, they come to the next surface that asks once the loan ends.
+      if (answer.notifications?.length && await show(answer.notifications)) {
+        await client.call('POST', '/google/tasks/notifications/ack', { keys: answer.notifications.map((item) => item.key) }).catch(() => {});
+      }
     } catch {
       // The service is starting, or Google is out of reach: ask again in a minute.
     } finally {

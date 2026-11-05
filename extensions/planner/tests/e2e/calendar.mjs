@@ -1629,7 +1629,7 @@ try {
     const g = other.frameLocator(PLANNER_FRAME);
     /** The second window on the Tasks view, opened as the harness opens the first. */
     const openOther = async () => {
-      await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+      await other.goto(h.start, { waitUntil: 'load' });
       const home = g.getByRole('heading', { name: 'Home' });
       await openPlannerPanel(other);
       await home.waitFor({ timeout: 30_000 });
@@ -1805,7 +1805,7 @@ try {
     };
     /** The second window opened (or reloaded) as the harness opens the first, on the week with tomorrow in it. */
     const openOther = async () => {
-      await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+      await other.goto(h.start, { waitUntil: 'load' });
       const home = g.getByRole('heading', { name: 'Home' });
       await openPlannerPanel(other);
       await home.waitFor({ timeout: 30_000 });
@@ -2051,7 +2051,7 @@ try {
     const gLane = (date) => g.locator(`.day-lane[data-date="${date}"]`);
     /** The second window opened (or reloaded) on one of the Planner's pages, as the harness opens the first. */
     const openOther = async (pageName = 'Calendar') => {
-      await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+      await other.goto(h.start, { waitUntil: 'load' });
       const home = g.getByRole('heading', { name: 'Home' });
       await openPlannerPanel(other);
       await home.waitFor({ timeout: 30_000 });
@@ -2357,7 +2357,7 @@ try {
         const theirs = `${title} from the first window`;
         const mine = `${title} from the second window`;
         const task = await newTask(title, { due: today });
-        await other.goto(`${new URL(page.url()).origin}/`, { waitUntil: 'load' });
+        await other.goto(h.start, { waitUntil: 'load' });
         const home = g.getByRole('heading', { name: 'Home' });
         await openPlannerPanel(other);
         await home.waitFor({ timeout: 30_000 });
