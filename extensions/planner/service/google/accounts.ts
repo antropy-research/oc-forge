@@ -20,7 +20,7 @@ export type GoogleFeature = (typeof GOOGLE_FEATURES)[number];
  * What each feature asks Google for; the least that does the job. Drive: the names, types and addresses of the
  * user's files, to find one to attach to a task (never their contents).
  */
-export const FEATURE_SCOPES: Record<GoogleFeature, readonly string[]> = {
+const FEATURE_SCOPES: Record<GoogleFeature, readonly string[]> = {
   calendar: ['https://www.googleapis.com/auth/calendar.calendarlist.readonly', 'https://www.googleapis.com/auth/calendar.events'],
   tasks: ['https://www.googleapis.com/auth/tasks'],
   mail: ['https://www.googleapis.com/auth/gmail.readonly'],
@@ -32,8 +32,8 @@ export const FEATURE_SCOPES: Record<GoogleFeature, readonly string[]> = {
 };
 const IDENTITY_SCOPES = ['openid', 'email'];
 
-export const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
-export const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 /** Who an account is (its work or school domain), for one connected before the Planner kept that. */
 const USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
@@ -63,7 +63,7 @@ interface StoredClient {
 }
 
 /** What the panel may see of an account: everything but its token. */
-export interface GoogleAccountInfo {
+interface GoogleAccountInfo {
   email: string;
   /** The features Google granted every scope for. */
   features: GoogleFeature[];
@@ -72,7 +72,7 @@ export interface GoogleAccountInfo {
   workspace: boolean;
 }
 
-export interface GoogleStatus {
+interface GoogleStatus {
   /** The OAuth client's id; its secret never leaves the service. */
   client: { id: string } | null;
   accounts: GoogleAccountInfo[];
@@ -86,6 +86,9 @@ export class GoogleError extends Error {
     super(message);
   }
 }
+
+/** Google no longer has it (404). */
+export const isGone = (error: unknown): boolean => error instanceof GoogleError && error.status === 404;
 
 export type Fetcher = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<{ status: number; text(): Promise<string> }>;
 
@@ -102,10 +105,10 @@ export const testFetcher = (base: string | undefined): Fetcher | null => {
 const defaultFetcher: Fetcher = testFetcher(process.env.PLANNER_GOOGLE_API_BASE) ?? (fetch as unknown as Fetcher);
 
 /** Start a callback listener for one sign-in; it answers each request with the page `onRequest` returns. */
-export type Listen = (onRequest: (url: URL) => Promise<string>) => Promise<{ port: number; close(): void }>;
+type Listen = (onRequest: (url: URL) => Promise<string>) => Promise<{ port: number; close(): void }>;
 
 /** A listener on a free loopback port. */
-export const loopbackListen: Listen = (onRequest) =>
+const loopbackListen: Listen = (onRequest) =>
   new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -125,10 +128,7 @@ const page = (title: string, text: string): string =>
   `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font:15px system-ui;margin:3em;max-width:36em"><h1 style="font-size:20px">${title}</h1><p>${text}</p>`;
 
 /** The features whose scopes Google granted, all of them. */
-export const featuresOf = (scopes: readonly string[]): GoogleFeature[] => GOOGLE_FEATURES.filter((feature) => FEATURE_SCOPES[feature].every((scope) => scopes.includes(scope)));
-
-/** The email in an ID token's payload; the token came straight from Google over TLS, so it is not verified again. */
-export const emailFromIdToken = (idToken: string | undefined): string | null => identityFromIdToken(idToken)?.email ?? null;
+const featuresOf = (scopes: readonly string[]): GoogleFeature[] => GOOGLE_FEATURES.filter((feature) => FEATURE_SCOPES[feature].every((scope) => scopes.includes(scope)));
 
 /** A Google Workspace domain as Google gives it (`hd`), or null for none. */
 const domainOf = (value: unknown): string | null => (typeof value === 'string' && /^[a-z0-9.-]{1,253}$/i.test(value) ? value.toLowerCase() : null);
@@ -137,7 +137,7 @@ const domainOf = (value: unknown): string | null => (typeof value === 'string' &
  * Who an ID token says the account is: its email, and the Google Workspace domain of a work or school account
  * (Google's `hd` claim; a personal account has none).
  */
-export const identityFromIdToken = (idToken: string | undefined): { email: string; domain: string | null } | null => {
+const identityFromIdToken = (idToken: string | undefined): { email: string; domain: string | null } | null => {
   const payload = idToken?.split('.')[1];
   if (!payload) return null;
   try {
@@ -168,7 +168,7 @@ const googleMessage = (body: string, status: number): string => {
  * meaning; 410 is Google's answer for an event deleted a while ago; the rest
  * is Google's trouble.
  */
-export const googleStatus = (status: number): number => {
+const googleStatus = (status: number): number => {
   if (status === 404 || status === 410) return 404;
   if (status === 400 || status === 403 || status === 409) return status;
   if (status === 412) return 409;

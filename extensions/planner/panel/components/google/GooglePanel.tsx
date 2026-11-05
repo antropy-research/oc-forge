@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../../src/domain/core/types.ts';
-import { addDays, clockLabel, monthDay, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
-import { taskForGoogleTask, taskForMail, type GoogleTaskItem, type MailItem } from '../../../src/domain/google/google.ts';
+import { addDays, monthDay } from '../../../src/domain/core/dates.ts';
+import { taskForGoogleTask, type GoogleTaskItem } from '../../../src/domain/google/google.ts';
 import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
 import type { GoogleDrag } from '../../lib/google/store.ts';
@@ -10,8 +10,8 @@ import { PlanActions } from '../plan/PlanActions.tsx';
 import { TasksView } from './TasksView.tsx';
 import { CalendarOverlays } from '../calendar/Overlays.tsx';
 import { GmailItems, GmailTaskSection } from './GmailPanel.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const dragStart = (event: DragEvent, drag: GoogleDrag) => {
   event.dataTransfer?.setData(GOOGLE_DRAG_TYPE, JSON.stringify(drag));

@@ -7,7 +7,7 @@ import { isRunAssignee } from './assignees.ts';
 const SOURCE_LABELS: Record<TaskSourceRef['kind'], string> = { linear: 'Linear issue', github: 'GitHub', gtask: 'Google task', email: 'Email in Gmail', link: 'Link', event: 'Google Calendar event' };
 import type { EventBody, SeenPullRequest } from '../core/events.ts';
 
-export type SessionActivity = 'unknown' | 'idle' | 'running' | 'retrying' | 'waiting-permission' | 'waiting-question';
+type SessionActivity = 'unknown' | 'idle' | 'running' | 'retrying' | 'waiting-permission' | 'waiting-question';
 
 /** What OpenChamber currently says about a session. */
 export interface LiveSession {
@@ -190,7 +190,7 @@ export const assignPrompt = (state: PlannerState, taskId: string, branch: string
  * What the service needs to look a run's pull request up with gh: by its URL
  * once one is known, else by the run's branch in the first directory that exists.
  */
-export interface PullRequestLookup {
+interface PullRequestLookup {
   runId: string;
   branch: string | null;
   directories: string[];

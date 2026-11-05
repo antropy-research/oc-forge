@@ -5,6 +5,7 @@ import { parseRRule } from '../google/rrule.ts';
 import { linearDisplayProblem } from '../linear/display.ts';
 import { isAgentPreset, isRunAssignee } from '../agents/assignees.ts';
 import { EVENT_NO_SUBTASKS, isEventTask } from '../plan/merge.ts';
+import { isRecord } from './values.ts';
 
 export interface NewTask {
   id: string;
@@ -26,12 +27,12 @@ export interface NewTask {
   completedOn?: DateKey | null;
 }
 
-export type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title' | 'wantsPr' | 'assignee'>;
+type NewRun = Pick<TaskRun, 'id' | 'taskId' | 'sessionId' | 'projectId' | 'directory' | 'worktree' | 'title' | 'wantsPr' | 'assignee'>;
 
 /** A pull request as gh shows it; the log adds when the Planner saw it. */
 export type SeenPullRequest = Omit<RunPullRequest, 'seenAt'>;
 
-export const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'source'] as const;
+const PATCH_FIELDS = ['title', 'notes', 'plannedMinutes', 'priority', 'dueDate', 'channelId', 'folderId', 'objectiveId', 'source'] as const;
 export type TaskPatch = Partial<Pick<Task, (typeof PATCH_FIELDS)[number]>>;
 
 /**
@@ -48,8 +49,8 @@ export const SUBTASKS_ONE_BY_ONE = 'Subtasks are changed one at a time now: relo
 /** What the service says when a subtask a command changes was changed elsewhere since (409, with `SubtaskConflict`). */
 export const SUBTASK_CHANGED = 'This subtask was changed in another window since';
 
-export type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
-export type ChannelPatch = Partial<Pick<Channel, 'name' | 'color' | 'context'>>;
+type NewChannel = Pick<Channel, 'id' | 'name' | 'color' | 'context'>;
+type ChannelPatch = Partial<Pick<Channel, 'name' | 'color' | 'context'>>;
 
 export interface RolledTask {
   taskId: string;
@@ -132,7 +133,7 @@ export type GoogleTaskKeptPatch = Partial<
 /** "Automatically decline meetings" as it is set: since when it is on is the Planner's to keep. */
 export type DeclineInput = Omit<TaskDecline, 'since'> & { since?: string };
 
-export type EventType = EventBody['type'];
+type EventType = EventBody['type'];
 
 /** What a client sends: an event body plus its own command id for retry-safe delivery. */
 export type Command = EventBody & { cmd: string };
@@ -141,19 +142,18 @@ export type Command = EventBody & { cmd: string };
 export type PlannerEvent = EventBody & { v: 1; id: string; at: string; cmd?: string };
 
 /** Event types only the service may write. */
-export const SERVICE_ONLY_TYPES: ReadonlySet<EventType> = new Set(['tasks.rolledOver', 'tasks.recurred']);
+const SERVICE_ONLY_TYPES: ReadonlySet<EventType> = new Set(['tasks.rolledOver', 'tasks.recurred']);
 
 const TITLE_MAX = 500;
 // serviceRequest bodies are capped at 64 000 characters; leave room for JSON escaping.
 const NOTES_MAX = 40_000;
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 const isMinutes = (value: unknown): boolean => value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 24 * 60 * 7);
 const isTitle = (value: unknown): boolean => typeof value === 'string' && value.trim().length > 0 && value.length <= TITLE_MAX;
 const BUCKET_IDS = new Set<string>(BACKLOG_BUCKETS.map((bucket) => bucket.id));
 
-export const isPlacement = (value: unknown): value is Placement => {
+const isPlacement = (value: unknown): value is Placement => {
   if (!isRecord(value)) return false;
   if (value.kind === 'day') return isDateKey(value.date);
   if (value.kind === 'backlog') return typeof value.bucket === 'string' && BUCKET_IDS.has(value.bucket);
@@ -161,7 +161,7 @@ export const isPlacement = (value: unknown): value is Placement => {
 };
 
 /** A task has at most this many subtasks. */
-export const SUBTASKS_MAX = 200;
+const SUBTASKS_MAX = 200;
 
 const isSubtask = (item: unknown): item is Subtask =>
   isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === 'boolean' &&
@@ -413,7 +413,7 @@ const validateSettingsPatch = (patch: unknown): string | null => {
 };
 
 /** The parts of state a command is checked against. */
-export interface CommandContext {
+interface CommandContext {
   tasks: Record<string, Task>;
   channels: Record<string, Channel>;
   entries: Record<string, { id: string }>;

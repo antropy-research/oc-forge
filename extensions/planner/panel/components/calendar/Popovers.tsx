@@ -22,9 +22,9 @@ import { anchorOf, calendarUi, eventDetail, popoverKind, removeEvent, respond, t
 import { plannedLabel } from '../github/GitHubPanel.tsx';
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
-import { answerClass, eventColor, eventLabel, inkOn, isTaskEvent, taskClass, taskEventLabel } from './items.ts';
+import { answerClass, eventColor, eventLabel, inkOn, isTaskEvent, taskClass, taskEventLabel } from '../../lib/calendar/items.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const close = () => calendarUi.open(null);
 
 /** Text with its web addresses as links that open in the browser. */
@@ -35,7 +35,7 @@ export const Linked = ({ text }: { text: string }) => {
 };
 
 /** "Monday, October 26 ⋅ 2 – 3pm", as the popover's second line. */
-export const whenText = (event: CalendarEvent, zone: string): string => {
+const whenText = (event: CalendarEvent, zone: string): string => {
   const span = eventSpan(event, zone);
   if (event.allDay) return span.first === span.last ? longDay(span.first) : `${longDay(span.first)} – ${longDay(span.last)}`;
   const start = zonedDateMinutes(event.start, zone);

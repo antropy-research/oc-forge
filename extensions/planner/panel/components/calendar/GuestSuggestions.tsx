@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { useGoogle, usePlanner } from '../../lib/core/context.ts';
 
-export interface ContactSuggestions {
+interface ContactSuggestions {
   listId: string;
   account: string | null;
   contacts: { name: string; email: string }[];

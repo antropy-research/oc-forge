@@ -950,7 +950,7 @@ describe('two windows, one series (review 8, review 9)', () => {
   test('two windows edit one upcoming task: what each changed is kept, the same field the last; deleted alone, an edit from a window still showing it is refused; a new rule from a window that never saw two edits keeps the one still on its schedule', async () => {
     const a = await openWindow(planner);
     const listId = await newList(a, 'Pairs');
-    const pair = await daily(planner, a, listId, 'Pair');
+    await daily(planner, a, listId, 'Pair');
     const b = await openWindow(planner);
     const shownA = await upcomingOn(a, day(2), 'Pair');
     const shownB = await upcomingOn(b, day(2), 'Pair');

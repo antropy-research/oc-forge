@@ -7,7 +7,6 @@
 import {
   LINEAR_COMPLETED,
   LINEAR_GROUPS,
-  LINEAR_ORDERS,
   LINEAR_PROPERTIES,
   type LinearCompletedWindow,
   type LinearDisplayPrefs,
@@ -17,6 +16,7 @@ import {
   type Settings,
 } from '../core/types.ts';
 import type { IssueInput, LinearIssue, LinearProject, LinearState } from './linear.ts';
+import { isRecord } from '../core/values.ts';
 
 /** A GraphQL input object (IssueFilter, ProjectFilter), as JSON. */
 export type GraphFilter = { [key: string]: unknown };
@@ -33,7 +33,7 @@ export interface IssueDisplay extends LinearDisplayPrefs {
   showTriage: boolean;
 }
 
-export const DEFAULT_DISPLAY_PREFS: LinearDisplayPrefs = {
+const DEFAULT_DISPLAY_PREFS: LinearDisplayPrefs = {
   subGroupBy: 'none',
   orderReverse: false,
   showCompleted: 'none',
@@ -93,9 +93,8 @@ export const PROPERTY_LABELS: Record<LinearProperty, string> = {
 
 export const PRIORITY_NAMES: Record<number, string> = { 0: 'No priority', 1: 'Urgent', 2: 'High', 3: 'Medium', 4: 'Low' };
 /** No priority sorts after Low, as in Linear. */
-export const priorityRank = (priority: number): number => (priority >= 1 && priority <= 4 ? priority : 5);
+const priorityRank = (priority: number): number => (priority >= 1 && priority <= 4 ? priority : 5);
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const oneOf = <T extends string>(list: readonly T[], value: unknown): value is T => typeof value === 'string' && (list as readonly string[]).includes(value);
 
 /** Why a stored `linearDisplay` setting is not valid, or null. */
@@ -203,7 +202,7 @@ const FIELD_PROPERTIES: [keyof ViewPrefs, LinearProperty][] = [
 ];
 
 /** Linear's completed-issues choice ("all", "week", "3months", "none"…); null when it is not one. */
-export const completedWindow = (value: string | null | undefined): LinearCompletedWindow | null => {
+const completedWindow = (value: string | null | undefined): LinearCompletedWindow | null => {
   const key = squash(value);
   if (!key) return null;
   if ((LINEAR_COMPLETED as readonly string[]).includes(key)) return key as LinearCompletedWindow;
@@ -316,7 +315,7 @@ export interface IssueGroup {
 }
 
 /** A status column or group: one workflow state, or same-named states of several teams. */
-export interface StateGroup {
+interface StateGroup {
   key: string;
   name: string;
   type: string;
@@ -336,7 +335,7 @@ const stateKey = (state: Pick<LinearState, 'name' | 'type'>): string => `${state
  * The status groups of the given states, merged by name and type across teams:
  * a board in workflow order, a list closest to done first.
  */
-export const stateGroups = (states: readonly LinearState[], layout: 'list' | 'board'): StateGroup[] => {
+const stateGroups = (states: readonly LinearState[], layout: 'list' | 'board'): StateGroup[] => {
   const groups = new Map<string, StateGroup>();
   for (const state of states) {
     const key = stateKey(state);
@@ -352,7 +351,7 @@ export const stateGroups = (states: readonly LinearState[], layout: 'list' | 'bo
   return [...groups.values()].sort((a, b) => typeRank(order, a.type) - typeRank(order, b.type) || within(a, b) || a.name.localeCompare(b.name));
 };
 
-export interface GroupContext {
+interface GroupContext {
   layout: 'list' | 'board';
   /** Workflow states of the teams shown, for status groups with no issue in them yet. */
   states?: readonly LinearState[];
@@ -517,7 +516,7 @@ export interface ProjectDisplay {
   showCompleted: LinearCompletedWindow;
 }
 
-export const DEFAULT_PROJECT_DISPLAY: ProjectDisplay = { groupBy: 'status', orderBy: 'priority', showCompleted: 'none' };
+const DEFAULT_PROJECT_DISPLAY: ProjectDisplay = { groupBy: 'status', orderBy: 'priority', showCompleted: 'none' };
 
 const PROJECT_GROUPINGS: Record<string, ProjectGroupBy> = { status: 'status', lead: 'lead', health: 'health', priority: 'priority', nogrouping: 'none', none: 'none' };
 const PROJECT_ORDERINGS: Record<string, ProjectOrderBy> = {
@@ -563,7 +562,7 @@ export const projectDisplayFilter = (display: Pick<ProjectDisplay, 'showComplete
 };
 
 /** Project status groups, the active ones first. */
-export const PROJECT_STATUSES = [
+const PROJECT_STATUSES = [
   { type: 'started', label: 'In progress' },
   { type: 'planned', label: 'Planned' },
   { type: 'paused', label: 'Paused' },
@@ -574,7 +573,7 @@ export const PROJECT_STATUSES = [
 
 export const HEALTH_LABELS: Record<string, string> = { onTrack: 'On track', atRisk: 'At risk', offTrack: 'Off track' };
 
-export const sortProjects = (projects: readonly LinearProject[], by: ProjectOrderBy): LinearProject[] => {
+const sortProjects = (projects: readonly LinearProject[], by: ProjectOrderBy): LinearProject[] => {
   const statusRank = (project: LinearProject) => {
     const index = PROJECT_STATUSES.findIndex((status) => status.type === project.status.type);
     return index < 0 ? PROJECT_STATUSES.length : index;
@@ -602,7 +601,7 @@ export const sortProjects = (projects: readonly LinearProject[], by: ProjectOrde
   });
 };
 
-export interface ProjectGroup {
+interface ProjectGroup {
   key: string;
   label: string;
   projects: LinearProject[];

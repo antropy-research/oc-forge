@@ -12,7 +12,7 @@ import { describeRecurrence } from './rrule.ts';
 import { byTitle, completedItems, dateGroups, deadlineSections, dueChip, openRows } from './tasks.ts';
 
 /** Google Tasks' "Sort by", as a list is sorted when it prints; 'shown': in the order given, as Starred shows them. */
-export type ListSort = 'mine' | 'date' | 'deadline' | 'starred' | 'title' | 'shown';
+type ListSort = 'mine' | 'date' | 'deadline' | 'starred' | 'title' | 'shown';
 
 /** One task as it prints. */
 export interface PrintedTask {
@@ -52,7 +52,7 @@ export interface PrintedList {
   partial: boolean;
 }
 
-export interface ListToPrint {
+interface ListToPrint {
   title: string;
   account: string | null;
   items: readonly GoogleTaskItem[];

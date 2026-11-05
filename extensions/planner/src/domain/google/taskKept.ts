@@ -11,8 +11,8 @@
 // rest: nothing kept here is written into a task's title or details.
 import type { CalendarEvent } from '../calendar/ics.ts';
 import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState, type TaskAttachment, type TaskVisibility } from '../core/types.ts';
-import { addDays, daysBetween, instantAt, monthDay, weekday, weekdayName } from '../core/dates.ts';
-import { addMonths, compactClock, compactRange, daysInMonth } from '../calendar/views.ts';
+import { addDays, daysBetween, daysInMonth, instantAt, monthDay, weekday, weekdayName } from '../core/dates.ts';
+import { addMonths, compactClock, compactRange } from '../calendar/views.ts';
 import { formatRRule, parseRRule, untilDate, WEEKDAY_CODES, type RRule } from './rrule.ts';
 import { GOOGLE_TASKS_CALENDAR, type GoogleTaskItem } from './google.ts';
 import type { DeclineInput, EventBody, GoogleTaskKeptPatch } from '../core/events.ts';
@@ -141,7 +141,7 @@ const stepRule = (rule: RRule, date: DateKey): DateKey | null => {
 };
 
 /** The date of the occurrence after the `index`th one (on `date`), or null when the rule ends there. */
-export const nextRepeatDate = (line: string, date: DateKey, index: number): DateKey | null => {
+const nextRepeatDate = (line: string, date: DateKey, index: number): DateKey | null => {
   const rule = parseRRule(line);
   if (!rule) return null;
   if (rule.count !== null && index >= rule.count) return null;
@@ -264,7 +264,7 @@ export const withExceptions = (repeat: Repeat, exceptions: Exceptions | undefine
  * `on` that `rule` makes from its `index`th occurrence there. A new rule or
  * start drops the rest, as they are no occurrence of it any more.
  */
-export const exceptionsOnSchedule = (exceptions: Exceptions | undefined, rule: string, on: DateKey, index: number): Exceptions | undefined => {
+const exceptionsOnSchedule = (exceptions: Exceptions | undefined, rule: string, on: DateKey, index: number): Exceptions | undefined => {
   const dates = Object.keys(exceptions ?? {}).filter((date) => date > on).sort();
   if (!exceptions || !dates.length) return undefined;
   const out: Exceptions = {};
@@ -336,7 +336,7 @@ export const firstSightOfSeries = (state: Pick<PlannerState, 'googleTasks'>, ite
 };
 
 /** An occurrence of a repeating task to make: after `item` (completed or deleted), on `date`, from `template`. */
-export interface NextOccurrence {
+interface NextOccurrence {
   item: GoogleTaskItem;
   kept: GoogleTaskKept;
   /** What it is made from; null when the series has no date to count from. */
@@ -536,7 +536,7 @@ export const seriesNextIn = (state: Pick<PlannerState, 'googleTasks'>, items: re
  * UNTIL. Unchanged when it makes nothing from `from` on anyway: its UNTIL or
  * its COUNT (stepped from `on`, the `index`th occurrence) ends it sooner.
  */
-export const ruleEndingBefore = (line: string, from: DateKey, on?: DateKey, index = 1): string => {
+const ruleEndingBefore = (line: string, from: DateKey, on?: DateKey, index = 1): string => {
   const rule = parseRRule(line);
   if (!rule) return line;
   const last = addDays(from, -1);

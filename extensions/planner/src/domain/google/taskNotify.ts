@@ -13,9 +13,9 @@ import type { GoogleTaskItem } from './google.ts';
 import { keptFor, keptTimeLabel, upcomingTasks, upcomingValues } from './taskKept.ts';
 
 /** When a task without a time, and a deadline, notify: 9 AM local time, as Google Calendar does. */
-export const TASK_NOTIFY_MINUTES = 9 * 60;
+const TASK_NOTIFY_MINUTES = 9 * 60;
 
-export type TaskNotificationKind = 'time' | 'day' | 'deadline';
+type TaskNotificationKind = 'time' | 'day' | 'deadline';
 
 export interface TaskNotification {
   /** Which notification it is (kind, task or occurrence, date and time), so it comes once. */

@@ -62,7 +62,7 @@ export const completedItems = (items: readonly GoogleTaskItem[]): GoogleTaskItem
   items.filter((item) => item.completed).sort((a, b) => (b.completedAt ?? b.updated).localeCompare(a.completedAt ?? a.updated) || byPosition(a, b));
 
 /** One heading of Google Tasks' "Sort by date": tasks before today, each later day, or no date. */
-export interface DateGroup {
+interface DateGroup {
   kind: 'past' | 'day' | 'none';
   date: string | null;
   items: GoogleTaskItem[];

@@ -94,10 +94,6 @@ export const channelByName = (state: PlannerState, name: string) => {
   return liveChannels(state).find((channel) => channel.name.toLowerCase() === lower) ?? null;
 };
 
-/** Planned minutes of the day's tasks that are still open. */
-export const remainingTotal = (tasks: readonly Task[]): number =>
-  tasks.reduce((sum, task) => sum + (task.completedAt ? 0 : task.plannedMinutes ?? 0), 0);
-
 /** A position at the top or bottom of a placement. */
 export const edgePosition = (state: PlannerState, placement: Placement, edge: 'top' | 'bottom'): number => {
   const list = tasksIn(state, placement);

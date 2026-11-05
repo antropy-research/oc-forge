@@ -6,7 +6,7 @@ import { compactClock } from '../../../src/domain/calendar/views.ts';
 import type { GoogleCalendarInfo, GoogleTaskList } from '../../../src/domain/google/google.ts';
 import type { CalendarPrefs } from '../../lib/calendar/calendarUi.ts';
 
-export const STEP = 15;
+const STEP = 15;
 
 /** Start times of a day, every 15 minutes. */
 export const startChoices = (): { value: number; label: string }[] => Array.from({ length: 96 }, (_, index) => ({ value: index * STEP, label: compactClock(index * STEP) }));
@@ -20,7 +20,7 @@ export const endChoices = (start: number): { value: number; label: string }[] =>
   return out;
 };
 
-export interface WritableCalendar extends GoogleCalendarInfo {
+interface WritableCalendar extends GoogleCalendarInfo {
   key: string;
   /** Its subscription in the Planner, when it is shown. */
   subscription: CalendarSubscription | null;

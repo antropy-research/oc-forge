@@ -29,7 +29,7 @@ export const pendingTasks = (items: readonly GoogleTaskItem[], today: DateKey): 
 };
 
 /** "1 pending task", "3 pending tasks". */
-export const pendingTitle = (count: number): string => `${count} pending task${count === 1 ? '' : 's'}`;
+const pendingTitle = (count: number): string => `${count} pending task${count === 1 ? '' : 's'}`;
 
 /** The entry in today's all-day section that opens the list; null when nothing is pending. */
 export const pendingEvent = (pending: readonly GoogleTaskItem[], today: DateKey, zone: string): CalendarEvent | null =>

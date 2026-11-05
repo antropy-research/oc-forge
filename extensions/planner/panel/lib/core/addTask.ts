@@ -7,7 +7,6 @@
 // and the Planner says why. `>` merges it into an open task as a subtask.
 import type { QuickAdd } from '../../../src/domain/plan/quickAdd.ts';
 import { linkTitle, pastedUrl, type PastedUrl } from '../../../src/domain/plan/pastedUrl.ts';
-import { zonedDateMinutes } from '../../../src/domain/core/dates.ts';
 import type { EventBody } from '../../../src/domain/core/events.ts';
 import type { MailItem } from '../../../src/domain/google/google.ts';
 import type { DateKey, Placement, TaskSourceRef } from '../../../src/domain/core/types.ts';
@@ -25,6 +24,7 @@ import { instantAt } from '../../../src/domain/core/dates.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
 import type { GoogleEventDetail } from '../../../src/domain/google/google.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 /** An event's details as the calendar feed has the event: its times as instants, its Google reference, free or busy. */
 const feedEvent = (detail: GoogleEventDetail, zone: string): CalendarEvent | null => {
@@ -57,14 +57,13 @@ const feedEvent = (detail: GoogleEventDetail, zone: string): CalendarEvent | nul
 };
 
 /** What a pasted URL is looked up in. */
-export interface AddSources {
+interface AddSources {
   client: PlannerClient;
   linear: LinearStore;
   github: GitHubStore;
   google: GoogleStore;
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** What Enter does with a URL pasted alone as the title, said under the field before it is pressed (as Sunsama suggests the import). */
 export const urlHint = (title: string): string | null => {

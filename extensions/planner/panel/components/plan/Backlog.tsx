@@ -8,7 +8,7 @@ import { BraindumpModal } from '../assistant/Braindump.tsx';
 import { ChannelFilter } from './ChannelFilter.tsx';
 import { TaskList } from './TaskList.tsx';
 
-export interface BacklogFilter {
+interface BacklogFilter {
   search: string;
   /** A folder id, 'none' for tasks outside folders, or null for every task. */
   folderId: string | null;

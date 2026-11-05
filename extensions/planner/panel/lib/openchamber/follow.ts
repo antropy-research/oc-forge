@@ -21,32 +21,32 @@
 import type { HostClient, JsonValue } from '@openchamber/sdk';
 
 /** The rail panel's surface (`contributes.panel.id`). */
-export const PANEL_SURFACE = 'plugin:oc-forge-planner';
+const PANEL_SURFACE = 'plugin:oc-forge-planner';
 /** One key per panel frame: `planner.panel.beat.<frame>`. */
-export const BEAT_PREFIX = 'planner.panel.beat.';
+const BEAT_PREFIX = 'planner.panel.beat.';
 const HIDDEN_KEY = 'planner.panel.hidden';
 const DEVICE = { scope: 'device' } as const;
 /** How often a panel on screen says so. */
-export const BEAT_MS = 500;
+const BEAT_MS = 500;
 /** A panel silent this long is not on screen any more: its frame went or hid, or its window went to the background. */
-export const STOPPED_MS = 1500;
+const STOPPED_MS = 1500;
 /**
  * A panel on screen this recently was open when the chat changed. The Work Status section starts only once the next
  * folder's card shows, and loads, a few seconds after the switch; a panel the user hid says so first.
  */
-export const FOLLOW_MS = 15_000;
+const FOLLOW_MS = 15_000;
 /** How many times the Work Status section looks again for a panel that still says it is on screen. */
 const LOOKS = 4;
 /** What a panel said this long ago is of no use: whoever reads it deletes it. */
-export const STALE_MS = 60_000;
+const STALE_MS = 60_000;
 /** Hidden this long with no change of folder: the user closed it, or showed something else in its zone. */
-export const HIDDEN_MS = 700;
+const HIDDEN_MS = 700;
 /**
  * The Work Status section's first look, this long after it learns its folder: OpenChamber brings the section back as
  * the panel closes, and the panel says the user hid it only HIDDEN_MS later; looking before, the section would follow
  * an older panel (one a chat switch took away a few seconds ago) back into the panel the user just closed.
  */
-export const FIRST_LOOK_MS = HIDDEN_MS + 500;
+const FIRST_LOOK_MS = HIDDEN_MS + 500;
 /**
  * After a change of folder the panel says nothing for this long: the folder is the new one before OpenChamber has
  * hidden it (a zone closed there, or one without the Planner), and saying so then would put the panel in the folder it
@@ -58,28 +58,28 @@ const SETTLE_MS = 600;
  * inert), sliding it behind the Work Status column, half in view (0.51 at 1440 px); an open one shows all of it.
  * Another surface in the zone hides the pane (`display: none`): nothing in view.
  */
-export const ON_SCREEN_RATIO = 0.9;
+const ON_SCREEN_RATIO = 0.9;
 
 /** `away`: its window went to the background. */
-export type PanelBeat = { at: number; directory: string | null; away?: true };
-export type PanelHidden = { at: number };
+type PanelBeat = { at: number; directory: string | null; away?: true };
+type PanelHidden = { at: number };
 
 const isTime = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0;
 
-export const readBeat = (value: unknown): PanelBeat | null => {
+const readBeat = (value: unknown): PanelBeat | null => {
   if (typeof value !== 'object' || value === null) return null;
   const { at, directory, away } = value as { at?: unknown; directory?: unknown; away?: unknown };
   if (!isTime(at)) return null;
   return { at, directory: typeof directory === 'string' ? directory : null, ...(away === true ? { away: true as const } : {}) };
 };
 
-export const readHidden = (value: unknown): PanelHidden | null => {
+const readHidden = (value: unknown): PanelHidden | null => {
   if (typeof value !== 'object' || value === null) return null;
   const { at } = value as { at?: unknown };
   return isTime(at) ? { at } : null;
 };
 
-export type FollowAnswer = { follow: true } | { follow: false; againIn: number | null };
+type FollowAnswer = { follow: true } | { follow: false; againIn: number | null };
 
 /**
  * Whether the Work Status section in `directory` shows the Planner's panel. A panel on screen in another folder within
@@ -87,7 +87,7 @@ export type FollowAnswer = { follow: true } | { follow: false; againIn: number |
  * them has been silent STOPPED_MS. Ones still saying so are on screen somewhere: look again when the first of them
  * would have stopped (`againIn`); one that keeps saying so is another window's.
  */
-export const decide = (beats: readonly PanelBeat[], hidden: PanelHidden | null, directory: string, now: number): FollowAnswer => {
+const decide = (beats: readonly PanelBeat[], hidden: PanelHidden | null, directory: string, now: number): FollowAnswer => {
   const open = beats.filter((beat) => !beat.away && beat.directory !== directory && beat.at >= now - FOLLOW_MS && beat.at <= now + BEAT_MS && !(hidden && hidden.at > beat.at));
   if (!open.length) return { follow: false, againIn: null };
   if (open.some((beat) => now - beat.at >= STOPPED_MS)) return { follow: true };
@@ -99,7 +99,7 @@ const save = (host: HostClient, key: string, value: JsonValue): void => {
 };
 
 /** Every panel's last word, by key; ones STALE_MS old (or unreadable) are deleted as they are read. */
-export const readBeats = async (host: HostClient, now = Date.now()): Promise<PanelBeat[]> => {
+const readBeats = async (host: HostClient, now = Date.now()): Promise<PanelBeat[]> => {
   const keys = await host.storage.keys(DEVICE).catch(() => [] as string[]);
   const read = await Promise.all(keys.filter((key) => key.startsWith(BEAT_PREFIX)).map(async (key) => {
     const beat = readBeat(await host.storage.get(key, DEVICE).catch(() => undefined));

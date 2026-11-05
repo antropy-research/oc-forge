@@ -11,6 +11,7 @@ import type { CalendarMode } from '../../../src/domain/calendar/views.ts';
 import type { DateKey } from '../../../src/domain/core/types.ts';
 import { instantAt, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
 import type { PlannerClient } from '../core/client.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 /** Where a popover points: the clicked thing's box. */
 export interface Anchor {
@@ -24,7 +25,7 @@ export const anchorOf = (element: Element): Anchor => boxAnchor(element.getBound
 
 export const boxAnchor = (box: DOMRect): Anchor => ({ x: box.left, y: box.top, width: box.width, height: box.height });
 
-export type CalendarPopover =
+type CalendarPopover =
   | { kind: 'event'; event: CalendarEvent; anchor: Anchor }
   | { kind: 'task'; event: CalendarEvent; anchor: Anchor }
   /** An upcoming occurrence of a repeating Google task: its series. */
@@ -303,10 +304,9 @@ export const askSend = async (action: 'invite' | 'update' | 'cancel'): Promise<'
   return choice === 'all' || choice === 'none' ? choice : null;
 };
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** New times for an event: instants, or days for an all-day one (the end day not included, as Google has it). */
-export type EventTimes = { allDay: false; start: string; end: string } | { allDay: true; startDate: DateKey; endDate: DateKey };
+type EventTimes = { allDay: false; start: string; end: string } | { allDay: true; startDate: DateKey; endDate: DateKey };
 
 /**
  * Move or resize a Google event as its new times say, after asking which

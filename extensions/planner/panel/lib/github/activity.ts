@@ -6,12 +6,13 @@ import { ACTIVITY_SOURCES, type ActivityPage, type ActivitySource, type GitHubAc
 import { addDays, instantAt } from '../../../src/domain/core/dates.ts';
 import type { DateKey } from '../../../src/domain/core/types.ts';
 import type { PlannerClient } from '../core/client.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 /** Pages of one source read after its first; past them GitHub has the rest. */
-export const MAX_ACTIVITY_PAGES = 10;
+const MAX_ACTIVITY_PAGES = 10;
 const KEEP_MS = 5 * 60_000;
 
-export interface ActivityRead {
+interface ActivityRead {
   login: string;
   items: GitHubActivity[];
   /** Sources with more left than the Planner read. */
@@ -20,13 +21,12 @@ export interface ActivityRead {
   totals: ActivityPage['totals'];
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const path = (from: string, to: string, page?: { source: ActivitySource; after: string }): string =>
   `/github/activity?${new URLSearchParams({ from, to, ...(page ? { source: page.source, after: page.after } : {}) })}`;
 
 /** The day [from, to): every source to its end, or to its bound of pages. */
-export const readGitHubActivity = async (client: Pick<PlannerClient, 'call'>, from: string, to: string): Promise<ActivityRead> => {
+const readGitHubActivity = async (client: Pick<PlannerClient, 'call'>, from: string, to: string): Promise<ActivityRead> => {
   const first = await client.call<ActivityPage>('GET', path(from, to));
   const items = [...first.items];
   const totals = { ...first.totals };
@@ -66,7 +66,7 @@ export const keptRead = (key: string): ActivityRead | null => {
   return entry && Date.now() - entry.at < KEEP_MS ? entry.read : null;
 };
 
-export interface ActivityState {
+interface ActivityState {
   loading: boolean;
   read: ActivityRead | null;
   error: string | null;

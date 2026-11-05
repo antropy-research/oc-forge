@@ -31,7 +31,7 @@ export interface FormValues {
 }
 
 /** A form's fields, one each: `time` is a time and its end together, as Google Calendar sets them. */
-export const FORM_FIELDS = ['title', 'notes', 'due', 'time', 'deadline', 'rule', 'busy', 'visibility', 'color', 'attachments', 'doNotDisturb', 'decline', 'starred', 'listId'] as const;
+const FORM_FIELDS = ['title', 'notes', 'due', 'time', 'deadline', 'rule', 'busy', 'visibility', 'color', 'attachments', 'doNotDisturb', 'decline', 'starred', 'listId'] as const;
 export type FormField = (typeof FORM_FIELDS)[number];
 
 /** A series' own settings, as Google Calendar keeps one for all its tasks: changing one is for all of them. */
@@ -70,7 +70,7 @@ export const formValuesOf = (item: Pick<GoogleTaskItem, 'title' | 'notes' | 'due
 };
 
 /** Whether a field has the same value in both: a time with its end, attachments by their files, declining by its mode and message (not since when). */
-export const sameFormValue = (field: FormField, a: FormValues, b: FormValues): boolean => {
+const sameFormValue = (field: FormField, a: FormValues, b: FormValues): boolean => {
   if (field === 'time') return a.time === b.time && a.duration === b.duration;
   if (field === 'attachments') return a.attachments.map((file) => file.id).join('\n') === b.attachments.map((file) => file.id).join('\n');
   if (field === 'decline') return (a.decline?.mode ?? null) === (b.decline?.mode ?? null) && (a.decline?.message ?? null) === (b.decline?.message ?? null);

@@ -5,12 +5,12 @@ import { addDays, daysBetween, monthDay, startOfWeek, weekday, weekdayName } fro
 import { edgePosition } from '../core/selectors.ts';
 
 /** How far ahead instances are created, so upcoming days show them. */
-export const RECURRENCE_HORIZON_DAYS = 7;
+const RECURRENCE_HORIZON_DAYS = 7;
 
 const parts = (date: DateKey): [number, number, number] => date.split('-').map(Number) as [number, number, number];
 const daysInMonth = (year: number, month: number): number => new Date(Date.UTC(year, month, 0)).getUTCDate();
 
-export const occursOn = (rule: RecurrenceRule, startDate: DateKey, date: DateKey): boolean => {
+const occursOn = (rule: RecurrenceRule, startDate: DateKey, date: DateKey): boolean => {
   if (date < startDate) return false;
   const interval = Math.max(1, rule.interval || 1);
   switch (rule.freq) {

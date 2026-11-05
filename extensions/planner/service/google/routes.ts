@@ -18,8 +18,9 @@ import type { MadeTask, OccurrenceValues, SeriesSide } from '../../src/domain/go
 import type { GoogleTaskException, GoogleTaskKept } from '../../src/domain/core/types.ts';
 import type { GoogleData, SendUpdates } from './data.ts';
 import type { GoogleSeries, OccurrenceEdit, SeriesUndo } from './series.ts';
+import { isRecord } from '../../src/domain/core/values.ts';
 
-export interface GoogleRouteContext {
+interface GoogleRouteContext {
   data: GoogleData;
   /** Repeating tasks' series, one change of a series at a time for every window. */
   series: GoogleSeries;
@@ -42,7 +43,6 @@ const bad = (error: string) => ({ status: 400, body: { error } });
 const sendOf = (value: unknown): SendUpdates => (value === 'all' ? 'all' : 'none');
 const scopeOf = (value: unknown): EditScope | null => (value === undefined ? 'this' : EDIT_SCOPES.includes(value as EditScope) ? (value as EditScope) : null);
 const RESPONSES: readonly string[] = ['accepted', 'declined', 'tentative'];
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isDay = (value: unknown): value is string => typeof value === 'string' && isDateKey(value);
 const isMinutes = (value: unknown, low: number, high: number): boolean => value === null || (Number.isInteger(value) && (value as number) >= low && (value as number) <= high);
 /** An occurrence as a window showed it, or as its form left it. */
@@ -204,7 +204,7 @@ export const googleWriteRoute = async (req: http.IncomingMessage, url: URL, ctx:
     if (!isRecord(input.own) || Object.keys(input.own).some((key) => !OWN_FIELDS.includes(key))) return bad(`own may only carry ${OWN_FIELDS.join(', ')}`);
     if (!isSeriesSide(input.before) || !isSeriesSide(input.after)) return bad('before and after (rule, template and due) are required');
     try {
-      await ctx.series.edit(input.account, input.listId, input.taskId, input.seriesId, input.own, input.before, input.after);
+      await ctx.series.edit(input.account, input.taskId, input.seriesId, input.own, input.before, input.after);
       return ok({ changed: true, ...ctx.snapshot() });
     } finally {
       ctx.changed('tasks');

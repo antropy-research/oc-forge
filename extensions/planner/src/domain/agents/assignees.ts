@@ -51,7 +51,7 @@ export const isAgentName = (value: unknown): value is string => typeof value ===
 export const isModelRef = (value: unknown): value is string => typeof value === 'string' && MODEL_REF.test(value);
 export const isAssigneeId = (value: unknown): value is string => typeof value === 'string' && ASSIGNEE_ID.test(value);
 // Shown in chats and menus and written into a command's description: one line of ordinary text.
-export const isPresetName = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= 60 && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(value);
+const isPresetName = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= 60 && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(value);
 
 export const isAgentPreset = (value: unknown): value is AgentPreset => {
   const preset = value as Partial<AgentPreset> | null;
@@ -136,7 +136,7 @@ export const matchesQuery = (option: Pick<AssigneeOption, 'name' | 'agent' | 'mo
  * arguments, so a zero-width space goes between every `!` and backtick: the
  * text reads the same and nothing runs.
  */
-export const neutralizeShell = (text: string): string => text.replace(/!`/g, '!\u200b`');
+const neutralizeShell = (text: string): string => text.replace(/!`/g, '!\u200b`');
 
 /**
  * The first message that starts a chat as `assignee`: OpenChamber sends a

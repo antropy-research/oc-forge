@@ -15,8 +15,8 @@ import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
 import { addEvent, askScope, askSend, calendarUi, eventDetail, moveEventToCalendar, updateEvent, useCalendarUi, type EditorTarget } from '../../lib/calendar/calendarUi.ts';
 import { Icon } from './Icon.tsx';
 import { calendarKey, defaultCalendar, endChoices, startChoices, writableCalendars } from './form.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 interface Guest {
   email: string;

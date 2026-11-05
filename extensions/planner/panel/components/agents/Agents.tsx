@@ -10,7 +10,7 @@ import { assignBranch, type WorkspaceChoice } from '../../lib/agents/store.ts';
 import { AssignButton, AssigneePicker, Avatar, toAssignee, usePickResult } from './AssigneePicker.tsx';
 
 /** An assignee as a small chip: avatar and name, the model in its title. */
-export const AssigneeChip = ({ assignee }: { assignee: RunAssignee }) => (
+const AssigneeChip = ({ assignee }: { assignee: RunAssignee }) => (
   <span class="assignee-chip" title={`${assignee.name}: ${assignee.agent}${assignee.model ? ` · ${assignee.model}` : ", the agent's model"}`}>
     <Avatar name={assignee.name} id={assignee.id} small />
     <span>{assignee.name}</span>

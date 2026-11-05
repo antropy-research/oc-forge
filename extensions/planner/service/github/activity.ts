@@ -19,7 +19,7 @@ import { activitySearches, type ActivityPage, type ActivitySource, type GitHubAc
 export type GraphQL = (args: string[]) => Promise<string>;
 
 /** Items of one source a page: GitHub's search gives up to 100, 50 keeps one gh call short. */
-export const ACTIVITY_PAGE_SIZE = 50;
+const ACTIVITY_PAGE_SIZE = 50;
 
 const PAGE_INFO = 'pageInfo { hasNextPage endCursor }';
 const BOTH_WAYS = 'pageInfo { hasNextPage endCursor hasPreviousPage startCursor }';
@@ -31,7 +31,7 @@ const DISCUSSION_COMMENT = 'id url createdAt discussion { id number title url re
 const N = ACTIVITY_PAGE_SIZE;
 const search = (alias: string, variable: string) => `${alias}: search(query: $${variable}, type: ISSUE, first: ${N}) { issueCount ${PAGE_INFO} nodes { ${PR} } }`;
 
-export const ACTIVITY_QUERY = `query PlannerGitHubActivity($opened: String!, $merged: String!, $mergedReviewed: String!, $mergedInvolved: String!, $from: DateTime!, $to: DateTime!) {
+const ACTIVITY_QUERY = `query PlannerGitHubActivity($opened: String!, $merged: String!, $mergedReviewed: String!, $mergedInvolved: String!, $from: DateTime!, $to: DateTime!) {
   viewer {
     login
     contributionsCollection(from: $from, to: $to) { pullRequestReviewContributions(first: ${N}) { ${PAGE_INFO} nodes { ${REVIEW} } } }
@@ -45,13 +45,13 @@ export const ACTIVITY_QUERY = `query PlannerGitHubActivity($opened: String!, $me
   ${search('mergedInvolved', 'mergedInvolved')}
 }`;
 
-export const ACTIVITY_SEARCH_QUERY = `query PlannerGitHubActivitySearch($q: String!, $after: String) { viewer { login } search(query: $q, type: ISSUE, first: ${N}, after: $after) { issueCount ${PAGE_INFO} nodes { ${PR} } } }`;
-export const ACTIVITY_REVIEWS_QUERY = `query PlannerGitHubActivityReviews($from: DateTime!, $to: DateTime!, $after: String) { viewer { login contributionsCollection(from: $from, to: $to) { pullRequestReviewContributions(first: ${N}, after: $after) { ${PAGE_INFO} nodes { ${REVIEW} } } } } }`;
-export const ACTIVITY_COMMENTS_QUERY = `query PlannerGitHubActivityComments($after: String) { viewer { login issueComments(first: ${N}, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${COMMENT} } } } }`;
-export const ACTIVITY_DISCUSSIONS_QUERY = `query PlannerGitHubActivityDiscussions($after: String) { viewer { login repositoryDiscussions(first: ${N}, after: $after, orderBy: { field: CREATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${DISCUSSION} } } } }`;
+const ACTIVITY_SEARCH_QUERY = `query PlannerGitHubActivitySearch($q: String!, $after: String) { viewer { login } search(query: $q, type: ISSUE, first: ${N}, after: $after) { issueCount ${PAGE_INFO} nodes { ${PR} } } }`;
+const ACTIVITY_REVIEWS_QUERY = `query PlannerGitHubActivityReviews($from: DateTime!, $to: DateTime!, $after: String) { viewer { login contributionsCollection(from: $from, to: $to) { pullRequestReviewContributions(first: ${N}, after: $after) { ${PAGE_INFO} nodes { ${REVIEW} } } } } }`;
+const ACTIVITY_COMMENTS_QUERY = `query PlannerGitHubActivityComments($after: String) { viewer { login issueComments(first: ${N}, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${COMMENT} } } } }`;
+const ACTIVITY_DISCUSSIONS_QUERY = `query PlannerGitHubActivityDiscussions($after: String) { viewer { login repositoryDiscussions(first: ${N}, after: $after, orderBy: { field: CREATED_AT, direction: DESC }) { ${PAGE_INFO} nodes { ${DISCUSSION} } } } }`;
 /** Discussion comments read from the end (`back:`), or from the start once they turn out newest first (`on:`). */
-export const ACTIVITY_DISCUSSION_COMMENTS_BACK_QUERY = `query PlannerGitHubActivityDiscussionCommentsBack($cursor: String) { viewer { login repositoryDiscussionComments(last: ${N}, before: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
-export const ACTIVITY_DISCUSSION_COMMENTS_ON_QUERY = `query PlannerGitHubActivityDiscussionCommentsOn($cursor: String) { viewer { login repositoryDiscussionComments(first: ${N}, after: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
+const ACTIVITY_DISCUSSION_COMMENTS_BACK_QUERY = `query PlannerGitHubActivityDiscussionCommentsBack($cursor: String) { viewer { login repositoryDiscussionComments(last: ${N}, before: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
+const ACTIVITY_DISCUSSION_COMMENTS_ON_QUERY = `query PlannerGitHubActivityDiscussionCommentsOn($cursor: String) { viewer { login repositoryDiscussionComments(first: ${N}, after: $cursor) { ${BOTH_WAYS} nodes { ${DISCUSSION_COMMENT} } } } }`;
 
 interface RawTarget {
   id?: string;

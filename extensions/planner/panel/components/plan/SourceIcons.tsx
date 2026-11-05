@@ -46,14 +46,14 @@ export const TasksIcon = () => (
 );
 
 // Google Calendar's: its blue calendar.
-export const GoogleCalendarIcon = () => (
+const GoogleCalendarIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#1a73e8" stroke-width="1.9" stroke-linecap="round">
     <rect x="3.5" y="5" width="17" height="15.5" rx="2.5" />
     <path d="M3.5 10h17M8 3v4M16 3v4" />
     <path d="M9.5 14.5h5" />
   </svg>
 );
-export const LinkIcon = () => (
+const LinkIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
     <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
     <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />

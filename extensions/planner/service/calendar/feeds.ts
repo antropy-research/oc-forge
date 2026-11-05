@@ -9,7 +9,7 @@ const TTL_MS = 10 * 60_000;
 const TIMEOUT_MS = 15_000;
 const MAX_CHARS = 10_000_000;
 
-export interface FeedResult {
+interface FeedResult {
   events: CalendarEvent[];
   errors: { calendarId: string; message: string }[];
 }

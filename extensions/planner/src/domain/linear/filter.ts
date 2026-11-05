@@ -168,7 +168,7 @@ export const describeNode = (node: LinearFilterNode): string => {
 };
 
 /** The relative due dates Linear's due date filter offers. */
-export const DUE_CHOICES: FilterValue[] = [
+const DUE_CHOICES: FilterValue[] = [
   { value: 'overdue', label: 'Overdue' },
   { value: 'today', label: 'Due today' },
   { value: 'thisWeek', label: 'Due this week' },
@@ -177,7 +177,7 @@ export const DUE_CHOICES: FilterValue[] = [
 ];
 
 /** The relative times the created, updated and completed dates offer; Linear takes them as ISO durations before now. */
-export const SINCE_CHOICES: FilterValue[] = [
+const SINCE_CHOICES: FilterValue[] = [
   { value: '-P1D', label: '1 day ago' },
   { value: '-P1W', label: '1 week ago' },
   { value: '-P2W', label: '2 weeks ago' },
@@ -188,7 +188,7 @@ export const SINCE_CHOICES: FilterValue[] = [
 ];
 
 /** Linear's relation filters, as one property whose values an issue has or not. */
-export const RELATION_CHOICES: FilterValue[] = [
+const RELATION_CHOICES: FilterValue[] = [
   { value: 'blocked', label: 'Blocked by' },
   { value: 'blocking', label: 'Blocking' },
   { value: 'related', label: 'Related' },
@@ -198,7 +198,6 @@ export const RELATION_CHOICES: FilterValue[] = [
 ];
 
 const DATED = /^\d{4}-\d{2}-\d{2}$/;
-const isDateField = (field: LinearFilterField): field is 'created' | 'updated' | 'completed' => field === 'created' || field === 'updated' || field === 'completed';
 
 /** A changed operator keeps the values that still make sense: a date for before/after, a choice for is, one number for at least/most. */
 export const withOperator = (rule: LinearFilterRule, op: FilterOp): LinearFilterRule => {
@@ -281,7 +280,7 @@ const RELATION_FILTERS: Record<string, readonly [GraphFilter, GraphFilter]> = {
 const DATE_KEYS = { created: 'createdAt', updated: 'updatedAt', completed: 'completedAt' } as const;
 
 /** One rule as an IssueFilter; null for rules Linear does not filter on (the workspace) or without values. */
-export const compileRule = (rule: LinearFilterRule, context: FilterContext): GraphFilter | null => {
+const compileRule = (rule: LinearFilterRule, context: FilterContext): GraphFilter | null => {
   const values = rule.values.map((item) => item.value);
   if (values.length === 0) return null;
   switch (rule.field) {
@@ -362,7 +361,7 @@ export const compileRule = (rule: LinearFilterRule, context: FilterContext): Gra
 };
 
 /** A rule or a group as an IssueFilter; a group keeps its and/or even around one filter, so it reads back as a group. */
-export const compileNode = (node: LinearFilterNode, context: FilterContext): GraphFilter | null => {
+const compileNode = (node: LinearFilterNode, context: FilterContext): GraphFilter | null => {
   if (isRawFilter(node)) return node.raw;
   if (isFilterRule(node)) return compileRule(node, context);
   const parts = node.items.map((item) => compileNode(item, context)).filter((part): part is GraphFilter => Boolean(part));
@@ -586,7 +585,7 @@ export interface FilterOption extends FilterValue {
   priority?: number;
 }
 
-export interface OptionScope {
+interface OptionScope {
   /** The teams the list is about (a team's view, a project's teams); empty for the whole workspace. */
   teamIds?: readonly string[];
   workspaceNames?: ReadonlyMap<string, string>;
@@ -705,14 +704,6 @@ export const toggleRuleValue = (rule: LinearFilterRule, option: FilterValue): Li
   const on = rule.values.some((item) => item.value === option.value);
   const values = on ? rule.values.filter((item) => item.value !== option.value) : isSingleValued(rule.op) ? [value] : [...rule.values, value];
   return values.length ? { ...rule, values } : null;
-};
-
-/** Top-level filters after ticking or unticking `option` of `field`, in that property's rule (one per property, as Linear's bar keeps). */
-export const toggleValue = <T extends LinearFilterNode>(rules: readonly T[], field: LinearFilterField, option: FilterValue): (T | LinearFilterRule)[] => {
-  const index = rules.findIndex((rule) => isFilterRule(rule) && rule.field === field);
-  if (index < 0) return [...rules, { field, op: defaultOperator(field), values: [{ value: option.value, label: option.label, ...(option.color ? { color: option.color } : {}) }] }];
-  const next = toggleRuleValue(rules[index] as LinearFilterRule, option);
-  return next ? rules.map((item, at) => (at === index ? next : item)) : rules.filter((_, at) => at !== index);
 };
 
 // ── Editing a tree of filters ──────────────────────────────────────────────
@@ -1128,7 +1119,7 @@ const words = (key: string): string => RAW_WORDS[key] ?? key.replace(/([a-z])([A
 const phrase = (path: readonly string[], rest: string): string => `${path.map(words).join(' ')} ${rest}`.trim().replace(/^./, (letter) => letter.toUpperCase());
 
 /** A filter the Planner cannot edit, in words where it can tell ("Status type is not completed, canceled"). */
-export const describeRaw = (filter: unknown): string => {
+const describeRaw = (filter: unknown): string => {
   const path: string[] = [];
   let node: unknown = filter;
   for (;;) {

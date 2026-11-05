@@ -10,7 +10,7 @@ import { addDays, instantAt, todayIn } from '../../src/domain/core/dates.ts';
 import { newId } from '../../src/domain/core/ids.ts';
 import type { EventBody } from '../../src/domain/core/events.ts';
 
-export interface MeetingRun {
+interface MeetingRun {
   added: number;
   moved: number;
   removed: number;

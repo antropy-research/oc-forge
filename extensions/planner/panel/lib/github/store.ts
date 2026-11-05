@@ -9,6 +9,7 @@ import { edgePosition } from '../../../src/domain/core/selectors.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import type { Placement } from '../../../src/domain/core/types.ts';
 import type { PlannerClient } from '../core/client.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 export type GitHubListKind = 'assigned' | 'review' | 'mine';
 
@@ -56,7 +57,6 @@ const appendItems = (shown: readonly GitHubItem[], more: readonly GitHubItem[]):
 };
 
 const REFRESH_MS = 5 * 60_000;
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export class GitHubStore {
   private view: GitHubView = { status: null, kind: 'assigned', items: [], loading: false, error: null, total: 0, next: null, text: '', loadingMore: false, repos: null };

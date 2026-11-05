@@ -2,10 +2,10 @@
 // offers for a day, a custom rule, the sentence Google shows for a rule, and
 // the changes a series needs when it is split or moved to another day.
 import type { DateKey } from '../core/types.ts';
-import { addDays, daysBetween, instantAt, isDateKey, monthDay, weekday, weekdayName, zonedDateMinutes } from '../core/dates.ts';
+import { addDays, daysBetween, daysInMonth, instantAt, isDateKey, monthDay, weekday, weekdayName, zonedDateMinutes } from '../core/dates.ts';
 
 export const WEEKDAY_CODES = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'] as const;
-export type Frequency = 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY';
+type Frequency = 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY';
 const FREQUENCIES: readonly string[] = ['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'];
 const KNOWN = new Set(['FREQ', 'INTERVAL', 'BYDAY', 'BYMONTHDAY', 'BYMONTH', 'COUNT', 'UNTIL']);
 
@@ -81,13 +81,9 @@ export const splitRecurrence = (lines: readonly string[]): { rule: RRule | null;
   return { rule: parseRRule(rules[0]!), line: rules[0]!, rest };
 };
 
-const daysInMonth = (date: DateKey): number => {
-  const [y, m] = date.split('-').map(Number);
-  return new Date(Date.UTC(y!, m!, 0)).getUTCDate();
-};
 
 /** Which of its weekday in the month a day is (1–5), and whether it is the last one. */
-export const weekdayOrdinal = (date: DateKey): { nth: number; last: boolean } => {
+const weekdayOrdinal = (date: DateKey): { nth: number; last: boolean } => {
   const day = Number(date.slice(8));
   return { nth: Math.ceil(day / 7), last: day + 7 > daysInMonth(date) };
 };
@@ -99,7 +95,7 @@ const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', '
 /** `Dec 31, 2026` */
 export const shortDate = (date: DateKey): string => `${SHORT_MONTHS[Number(date.slice(5, 7)) - 1]} ${Number(date.slice(8))}, ${date.slice(0, 4)}`;
 
-export interface RecurrencePreset {
+interface RecurrencePreset {
   id: string;
   label: string;
   /** The RRULE line; null for "Does not repeat". */
@@ -202,7 +198,7 @@ export const untilBefore = (occurrence: { dateTime?: string; date?: string }): s
 };
 
 /** UNTIL for a series that ends on `date` (that day's occurrences included). */
-export const untilOn = (date: DateKey, allDay: boolean, zone: string): string =>
+const untilOn = (date: DateKey, allDay: boolean, zone: string): string =>
   allDay ? date.replace(/-/g, '') : utcStamp(Date.parse(instantAt(addDays(date, 1), 0, zone)) - 1000);
 
 const shiftCode = (code: string, days: number): string | null => {

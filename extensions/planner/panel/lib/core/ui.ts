@@ -3,6 +3,9 @@ import { createContext } from 'preact';
 import { useContext } from 'preact/hooks';
 import type { Channel, Task } from '../../../src/domain/core/types.ts';
 
+/** The Planner's pages, as its menu lists them. */
+export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'github' | 'google' | 'agents' | 'archive' | 'stats' | 'settings';
+
 export interface UiState {
   /** Task shown in the detail modal. */
   openTaskId: string | null;
@@ -20,7 +23,7 @@ export interface UiState {
   agentForm: 'assign' | 'send' | null;
 }
 
-export interface UiContextValue {
+interface UiContextValue {
   ui: UiState;
   setUi: (patch: Partial<UiState>) => void;
 }

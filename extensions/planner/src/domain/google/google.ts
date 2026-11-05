@@ -4,6 +4,7 @@ import type { CalendarEvent } from '../calendar/ics.ts';
 import { googleTaskKey, type DateKey, type Placement, type PlannerState, type Subtask, type Task, type TaskSourceRef } from '../core/types.ts';
 import { GOOGLE_NOTES_MAX, type EventBody, type NewTask, type PlannerEvent } from '../core/events.ts';
 import { addDays, instantAt, isDateKey } from '../core/dates.ts';
+import { isRecord } from '../core/values.ts';
 
 /** A calendar of a connected account, as Google lists it. */
 export interface GoogleCalendarInfo {
@@ -166,7 +167,7 @@ const meetLink = (event: RawGoogleEvent): string | null => {
 };
 
 /** Where an event lives and what this account may do with it there. */
-export interface EventSource {
+interface EventSource {
   account: string;
   calendarId: string;
   /** The account's role on the calendar (owner, writer, reader, freeBusyReader). */
@@ -176,14 +177,14 @@ export interface EventSource {
 const writableRole = (role: string | undefined): boolean => role === 'owner' || role === 'writer';
 
 /** Whether this copy of an event may be moved and changed, as Google Calendar decides it. */
-export const eventEditable = (event: RawGoogleEvent, accessRole: string | undefined): boolean => {
+const eventEditable = (event: RawGoogleEvent, accessRole: string | undefined): boolean => {
   if (!writableRole(accessRole) || event.locked || event.privateCopy) return false;
   if (event.eventType && !['default', 'focusTime', 'outOfOffice'].includes(event.eventType)) return false;
   // Google leaves `self` out when it is false: someone else's invitation is only answered.
   return !event.organizer || event.organizer.self === true || Boolean(event.guestsCanModify);
 };
 
-export const eventRef = (event: RawGoogleEvent & { id: string }, source: EventSource): GoogleEventRef => {
+const eventRef = (event: RawGoogleEvent & { id: string }, source: EventSource): GoogleEventRef => {
   const self = event.attendees?.find((attendee) => attendee.self);
   return {
     account: source.account,
@@ -224,7 +225,7 @@ export const googleEvent = (event: RawGoogleEvent, calendarId: string, zone: str
 };
 
 /** A guest of an event, as the details show them. */
-export interface GoogleAttendee {
+interface GoogleAttendee {
   email: string;
   name: string;
   response: GoogleResponse;
@@ -469,7 +470,7 @@ export interface GoogleTaskWrite {
   patch: { title?: string; notes?: string; due?: DateKey | null };
 }
 
-export interface GoogleMerge {
+interface GoogleMerge {
   /** Fields the Planner task takes from Google. */
   planner: { title?: string; notes?: string; dueDate?: DateKey | null };
   /** Fields Google takes from the Planner task. */
@@ -490,7 +491,7 @@ const agreed = (source: TaskSourceRef, field: SyncedField): string | null | unde
  * field (`editedAt`); an unchanged field is left alone. A link made before
  * the base was kept counts as changed on both sides, so the newer side wins.
  */
-export const mergeGoogleTask = (task: Task, item: GoogleTaskItem, editedAt: (field: SyncedField) => string | null): GoogleMerge => {
+const mergeGoogleTask = (task: Task, item: GoogleTaskItem, editedAt: (field: SyncedField) => string | null): GoogleMerge => {
   const merge: GoogleMerge = { planner: {}, google: {}, conflicts: [] };
   const source = task.source?.kind === 'gtask' ? task.source : null;
   for (const field of SYNCED) {
@@ -530,7 +531,7 @@ export const plannerEditTimes = (events: readonly PlannerEvent[]): Partial<Recor
   return times;
 };
 
-export interface GoogleSyncOptions {
+interface GoogleSyncOptions {
   today: DateKey;
   /** Complete the task when its Google task is completed. */
   importCompletion: boolean;
@@ -538,7 +539,7 @@ export interface GoogleSyncOptions {
   editedAt?: (taskId: string, field: SyncedField) => string | null;
 }
 
-export interface GoogleSyncPlan {
+interface GoogleSyncPlan {
   /** Events for the Planner: links that follow their Google task (a new list, title, details, date, state), and completions. */
   bodies: EventBody[];
   /** Planner changes Google has not seen yet. */
@@ -594,7 +595,6 @@ export const findMovedTask = (source: TaskSourceRef, candidates: readonly Google
 
 // ── Drag payloads ────────────────────────────────────────────────────────────
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
 
 export const isGoogleTaskItem = (value: unknown): value is GoogleTaskItem =>
   isRecord(value) && typeof value.account === 'string' && typeof value.listId === 'string' && typeof value.id === 'string' && typeof value.title === 'string' &&

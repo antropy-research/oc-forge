@@ -71,7 +71,7 @@ const FIELD_ICONS: Record<LinearFilterField, string> = {
 };
 
 /** An option's icon, as Linear draws it. */
-export const optionIcon = (option: FilterOption) => {
+const optionIcon = (option: FilterOption) => {
   switch (option.kind) {
     case 'state':
       return <StatusIcon type={option.type ?? ''} color={option.color ?? 'var(--oc-muted)'} />;

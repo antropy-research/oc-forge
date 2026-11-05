@@ -28,7 +28,7 @@ export const objectiveByText = (state: PlannerState, weekStart: DateKey, text: s
 export const completedOnDay = (state: PlannerState, date: DateKey): Task[] =>
   Object.values(state.tasks).filter((task) => task.completedOn === date && !task.deletedAt).sort((a, b) => (a.completedAt ?? '').localeCompare(b.completedAt ?? ''));
 
-export interface ChannelTime {
+interface ChannelTime {
   channelId: string | null;
   minutes: number;
 }

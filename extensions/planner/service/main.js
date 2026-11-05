@@ -156,6 +156,10 @@ var instantAt = (date, minutes, timeZone) => {
   guess = local - offsetAt(guess, timeZone);
   return new Date(guess).toISOString();
 };
+var daysInMonth = (key) => {
+  const [year, month] = key.split("-").map(Number);
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+};
 
 // src/domain/core/selectors.ts
 var POSITION_STEP = 1024;
@@ -982,10 +986,6 @@ var splitRecurrence = (lines) => {
     return { rule: null, line: rules[0] ?? null, rest };
   return { rule: parseRRule(rules[0]), line: rules[0], rest };
 };
-var daysInMonth = (date) => {
-  const [y, m] = date.split("-").map(Number);
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
-};
 var weekdayOrdinal = (date) => {
   const day = Number(date.slice(8));
   return { nth: Math.ceil(day / 7), last: day + 7 > daysInMonth(date) };
@@ -1055,8 +1055,11 @@ var shiftRule = (rule, from, to) => {
   }
 };
 
-// src/domain/linear/display.ts
+// src/domain/core/values.ts
+var messageOf = (error) => error instanceof Error ? error.message : String(error);
 var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+// src/domain/linear/display.ts
 var oneOf = (list, value) => typeof value === "string" && list.includes(value);
 var linearDisplayProblem = (value) => {
   if (!isRecord(value))
@@ -1124,13 +1127,12 @@ var SUBTASK_CHANGED = "This subtask was changed in another window since";
 var SERVICE_ONLY_TYPES = new Set(["tasks.rolledOver", "tasks.recurred"]);
 var TITLE_MAX = 500;
 var NOTES_MAX = 40000;
-var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
 var isMinutes = (value) => value === null || typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 24 * 60 * 7;
 var isTitle = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= TITLE_MAX;
 var BUCKET_IDS = new Set(BACKLOG_BUCKETS.map((bucket) => bucket.id));
 var isPlacement = (value) => {
-  if (!isRecord2(value))
+  if (!isRecord(value))
     return false;
   if (value.kind === "day")
     return isDateKey(value.date);
@@ -1139,20 +1141,20 @@ var isPlacement = (value) => {
   return false;
 };
 var SUBTASKS_MAX = 200;
-var isSubtask = (item) => isRecord2(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean" && (item.notes === undefined || typeof item.notes === "string" && item.notes.length <= NOTES_MAX) && (item.plannedMinutes === undefined || item.plannedMinutes === null || Number.isInteger(item.plannedMinutes) && item.plannedMinutes >= 0 && item.plannedMinutes <= 24 * 60) && (item.source === undefined || isSource(item.source));
+var isSubtask = (item) => isRecord(item) && isId(item.id) && isTitle(item.title) && typeof item.done === "boolean" && (item.notes === undefined || typeof item.notes === "string" && item.notes.length <= NOTES_MAX) && (item.plannedMinutes === undefined || item.plannedMinutes === null || Number.isInteger(item.plannedMinutes) && item.plannedMinutes >= 0 && item.plannedMinutes <= 24 * 60) && (item.source === undefined || isSource(item.source));
 var isSubtasks = (value) => Array.isArray(value) && value.length <= SUBTASKS_MAX && value.every(isSubtask);
 var subtaskPatchProblem = (patch) => {
-  if (!isRecord2(patch) || !Object.keys(patch).length)
+  if (!isRecord(patch) || !Object.keys(patch).length)
     return "patch must set a field of the subtask";
   const unknown = Object.keys(patch).find((key) => !SUBTASK_PATCH_FIELDS.includes(key));
   if (unknown)
     return `unknown field ${unknown}`;
   return isSubtask({ id: "patch", title: "patch", done: false, ...patch }) ? null : "subtask patch is invalid";
 };
-var isSeen = (value, fields) => value === undefined || isRecord2(value) && Object.entries(value).every(([key, item]) => fields.includes(key) && (key === "done" ? typeof item === "boolean" : isShortText(item, TITLE_MAX)));
-var isGmailAction = (value) => isRecord2(value) && GMAIL_ACTIONS.includes(value.kind) && (value.kind === "addLabel" || value.kind === "removeLabel" ? isShortText(value.label, 225) && value.label.trim().length > 0 : value.label === undefined);
+var isSeen = (value, fields) => value === undefined || isRecord(value) && Object.entries(value).every(([key, item]) => fields.includes(key) && (key === "done" ? typeof item === "boolean" : isShortText(item, TITLE_MAX)));
+var isGmailAction = (value) => isRecord(value) && GMAIL_ACTIONS.includes(value.kind) && (value.kind === "addLabel" || value.kind === "removeLabel" ? isShortText(value.label, 225) && value.label.trim().length > 0 : value.label === undefined);
 var isShortText = (value, max) => typeof value === "string" && value.length <= max;
-var isSource = (value) => isRecord2(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && (value.kind === "link" ? /^https?:\/\// : /^https:\/\//).test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord2(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due)) && (value.event === undefined || isRecord2(value.event) && isShortText(value.event.calendarId, 2000) && isInstant(value.event.start) && isInstant(value.event.end) && typeof value.event.allDay === "boolean" && typeof value.event.invitees === "boolean" && (value.event.auto === undefined || typeof value.event.auto === "boolean"));
+var isSource = (value) => isRecord(value) && typeof value.kind === "string" && Object.hasOwn(SOURCE_NAMES, value.kind) && isShortText(value.id, 200) && value.id.length > 0 && isShortText(value.key, 100) && isShortText(value.url, 2000) && (value.kind === "link" ? /^https?:\/\// : /^https:\/\//).test(value.url) && (value.title === undefined || isShortText(value.title, TITLE_MAX)) && (value.teamId === undefined || isShortText(value.teamId, 200)) && (value.status === undefined || isRecord(value.status) && isShortText(value.status.name, 100) && isShortText(value.status.type, 40) && isShortText(value.status.color, 40)) && (value.mirrors === undefined || Array.isArray(value.mirrors) && value.mirrors.length <= 10 && value.mirrors.every((key) => isShortText(key, 200))) && (value.workspaceId === undefined || isShortText(value.workspaceId, 200) && value.workspaceId.length > 0) && (value.branch === undefined || isShortText(value.branch, 200)) && (value.account === undefined || typeof value.account === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value.account)) && (value.listId === undefined || isShortText(value.listId, 200) && value.listId.length > 0) && (value.notes === undefined || isShortText(value.notes, GOOGLE_NOTES_MAX)) && (value.due === undefined || value.due === null || isDateKey(value.due)) && (value.event === undefined || isRecord(value.event) && isShortText(value.event.calendarId, 2000) && isInstant(value.event.start) && isInstant(value.event.end) && typeof value.event.allDay === "boolean" && typeof value.event.invitees === "boolean" && (value.event.auto === undefined || typeof value.event.auto === "boolean"));
 var GOOGLE_NOTES_MAX = 8192;
 var isGoogleTaskId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
 var GTASK_TEMPLATE_FIELDS = ["title", "notes", "time", "duration", "deadline", "start", "busy", "visibility", "color", "doNotDisturb", "decline", "attachments"];
@@ -1163,7 +1165,7 @@ var attachmentsProblem = (value) => {
   if (!Array.isArray(value) || value.length > ATTACHMENTS_MAX)
     return `attachments are at most ${ATTACHMENTS_MAX} Drive files`;
   for (const file of value) {
-    if (!isRecord2(file) || typeof file.id !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(file.id))
+    if (!isRecord(file) || typeof file.id !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(file.id))
       return "an attachment needs Drive's id for the file";
     if (typeof file.title !== "string" || !file.title.trim() || file.title.length > 500)
       return "an attachment's name is 1-500 characters";
@@ -1177,7 +1179,7 @@ var attachmentsProblem = (value) => {
   return new Set(value.map((file) => file.id)).size === value.length ? null : "a file is attached once";
 };
 var declineProblem = (value) => {
-  if (!isRecord2(value))
+  if (!isRecord(value))
     return "decline is an object, or null";
   if (value.mode !== "all" && value.mode !== "new")
     return "decline mode is all or new";
@@ -1188,7 +1190,7 @@ var declineProblem = (value) => {
   return Object.keys(value).some((field) => !["mode", "message", "since"].includes(field)) ? "decline has an unknown field" : null;
 };
 var validateGtaskTemplate = (value) => {
-  if (!isRecord2(value))
+  if (!isRecord(value))
     return "repeat template must be an object";
   if (typeof value.title !== "string" || value.title.length > 1024)
     return "template title must be text, at most 1024 characters";
@@ -1218,7 +1220,7 @@ var validateGtaskTemplate = (value) => {
 var GTASK_EXCEPTION_FIELDS = ["skip", "title", "notes", "date", "time", "duration", "deadline", "attachments"];
 var GTASK_EXCEPTIONS_MAX = 200;
 var validateGtaskException = (value) => {
-  if (!isRecord2(value))
+  if (!isRecord(value))
     return "an occurrence change must be an object";
   const fields = Object.keys(value);
   if (!fields.length)
@@ -1243,7 +1245,7 @@ var validateGtaskException = (value) => {
   return files ? `an occurrence's ${files}` : null;
 };
 var validateKeptPatch = (patch) => {
-  if (!isRecord2(patch))
+  if (!isRecord(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
     if (key === "time" && !(value === null || Number.isInteger(value) && value >= 0 && value < 24 * 60))
@@ -1265,7 +1267,7 @@ var validateKeptPatch = (patch) => {
     } else if (key === "repeat") {
       if (value === null)
         continue;
-      if (!isRecord2(value) || typeof value.rule !== "string" || value.rule.length > 500 || !parseRRule(value.rule))
+      if (!isRecord(value) || typeof value.rule !== "string" || value.rule.length > 500 || !parseRRule(value.rule))
         return "repeat needs an RRULE";
       if (!isId(value.seriesId))
         return "repeat needs a series id";
@@ -1281,7 +1283,7 @@ var validateKeptPatch = (patch) => {
           return error;
       }
       if (value.exceptions !== undefined) {
-        if (!isRecord2(value.exceptions) || Object.keys(value.exceptions).length > GTASK_EXCEPTIONS_MAX)
+        if (!isRecord(value.exceptions) || Object.keys(value.exceptions).length > GTASK_EXCEPTIONS_MAX)
           return `repeat exceptions must be at most ${GTASK_EXCEPTIONS_MAX} occurrences by date`;
         for (const [date, change] of Object.entries(value.exceptions)) {
           if (!isDateKey(date))
@@ -1303,7 +1305,7 @@ var isPriority = (value) => value === null || typeof value === "string" && PRIOR
 var isColor = (value) => typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
 var isChannelName = (value) => typeof value === "string" && /^[\p{L}\p{N}_-]{1,40}$/u.test(value);
 var validatePatch = (patch, channels, objectives, folders) => {
-  if (!isRecord2(patch))
+  if (!isRecord(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
     if (key === "title" && !isTitle(value))
@@ -1332,7 +1334,7 @@ var validatePatch = (patch, channels, objectives, folders) => {
   return null;
 };
 var validateChannelPatch = (patch) => {
-  if (!isRecord2(patch))
+  if (!isRecord(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
     if (key === "name" && !isChannelName(value))
@@ -1347,12 +1349,12 @@ var validateChannelPatch = (patch) => {
   return null;
 };
 var isGoogleAccount = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
-var isGoogleCalendarRef = (value) => isRecord2(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && value.calendarId.length > 0;
+var isGoogleCalendarRef = (value) => isRecord(value) && isGoogleAccount(value.account) && isShortText(value.calendarId, 1024) && value.calendarId.length > 0;
 var isGoogleEventLink = (value) => isGoogleCalendarRef(value) && isShortText(value.eventId, 1024) && value.eventId.length > 0;
 var isTaskListKey = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}\n[^\n]{1,1024}$/.test(value);
 var TASK_LISTS_MAX = 500;
 var validateSettingsPatch = (patch) => {
-  if (!isRecord2(patch))
+  if (!isRecord(patch))
     return "patch must be an object";
   for (const [key, value] of Object.entries(patch)) {
     if (key === "timezone" && !isValidTimeZone(value))
@@ -1389,7 +1391,7 @@ var validateSettingsPatch = (patch) => {
       return `${key} must be 1-180`;
     else if (key === "googleTimebox" && !(value === null || isGoogleCalendarRef(value)))
       return "googleTimebox must be a Google account and calendar, or null";
-    else if (key === "channelTimebox" && !(isRecord2(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([channel, target]) => isId(channel) && isGoogleCalendarRef(target))))
+    else if (key === "channelTimebox" && !(isRecord(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([channel, target]) => isId(channel) && isGoogleCalendarRef(target))))
       return "channelTimebox must map channel ids to a Google account and calendar";
     else if (key === "googleTasksOnComplete" && !["ask", "complete", "nothing"].includes(value))
       return "googleTasksOnComplete must be ask, complete or nothing";
@@ -1397,7 +1399,7 @@ var validateSettingsPatch = (patch) => {
       return `${key} must be true or false`;
     else if (key === "googleCalendarsIntroduced" && !(Array.isArray(value) && value.length <= 50 && value.every((email) => typeof email === "string" && email.length <= 254 && email.includes("@"))))
       return "googleCalendarsIntroduced must be at most 50 email addresses";
-    else if (key === "googleTaskListColors" && !(isRecord2(value) && Object.keys(value).length <= TASK_LISTS_MAX && Object.entries(value).every(([list, color]) => isTaskListKey(list) && isColor(color))))
+    else if (key === "googleTaskListColors" && !(isRecord(value) && Object.keys(value).length <= TASK_LISTS_MAX && Object.entries(value).every(([list, color]) => isTaskListKey(list) && isColor(color))))
       return `googleTaskListColors must be at most ${TASK_LISTS_MAX} task lists, each a #rrggbb color`;
     else if ((key === "googleTaskListsHidden" || key === "googleTaskListOrder") && !(Array.isArray(value) && value.length <= TASK_LISTS_MAX && value.every(isTaskListKey) && new Set(value).size === value.length))
       return `${key} must be at most ${TASK_LISTS_MAX} task lists, once each`;
@@ -1419,7 +1421,7 @@ var validateSettingsPatch = (patch) => {
       return `meetingExclusions must be some of ${MEETING_EXCLUSIONS.join(", ")}`;
     else if (key === "meetingAutoComplete" && !["always", "never", "invitees"].includes(value))
       return "meetingAutoComplete must be always, never or invitees";
-    else if (key === "meetingChannels" && !(isRecord2(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([calendar, channel]) => calendar.length > 0 && calendar.length <= 2000 && isId(channel))))
+    else if (key === "meetingChannels" && !(isRecord(value) && Object.keys(value).length <= 200 && Object.entries(value).every(([calendar, channel]) => calendar.length > 0 && calendar.length <= 2000 && isId(channel))))
       return "meetingChannels must map calendar ids to channel ids";
     else if (!["timezone", "workloadMinutes", "archiveAfterRollovers", "weekStartsOn", "plannedAsActual", "workdayStart", "workdayEnd", "linearOnComplete", "linearOnPlan", "linearImportCompletion", "linearLayout", "linearGroupBy", "linearOrderBy", "suggestFromHistory", "pomodoroMinutes", "breakMinutes", "googleTimebox", "googleTasksOnComplete", "googleTasksImportCompletion", "googleTasksDueFromPlan", "googleTasksOnCalendar", "googleTaskNotifications", "googleCalendarsIntroduced", "googleTaskListColors", "googleTaskListsHidden", "googleTaskListOrder", "gmailOnImport", "gmailOnComplete", "gmailImportPrompt", "gmailCompletePrompt", "emailClient", "linearImportPrompt", "meetingImport", "meetingCalendars", "meetingExclusions", "meetingAutoComplete", "meetingChannels", "channelTimebox"].includes(key))
       return `unknown setting ${key}`;
@@ -1427,9 +1429,9 @@ var validateSettingsPatch = (patch) => {
   return null;
 };
 var isFolderName = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 60;
-var isSessionRef = (value) => value === null || isRecord2(value) && isShortText(value.sessionId, 200) && value.sessionId.length > 0 && isShortText(value.title, 500) && (value.directory === null || isShortText(value.directory, 1024));
+var isSessionRef = (value) => value === null || isRecord(value) && isShortText(value.sessionId, 200) && value.sessionId.length > 0 && isShortText(value.title, 500) && (value.directory === null || isShortText(value.directory, 1024));
 var isRunShape = (value) => {
-  if (!isRecord2(value) || !isId(value.id))
+  if (!isRecord(value) || !isId(value.id))
     return "run needs an id";
   if (!(isShortText(value.sessionId, 200) && value.sessionId.length > 0))
     return "run needs a session";
@@ -1437,7 +1439,7 @@ var isRunShape = (value) => {
     return "projectId is invalid";
   if (!(value.directory === null || isShortText(value.directory, 1024)))
     return "directory is invalid";
-  if (!(value.worktree === null || isRecord2(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))
+  if (!(value.worktree === null || isRecord(value.worktree) && isShortText(value.worktree.directory, 1024) && (value.worktree.branch === null || isShortText(value.worktree.branch, 200))))
     return "worktree is invalid";
   if (value.wantsPr !== undefined && typeof value.wantsPr !== "boolean")
     return "wantsPr must be true or false";
@@ -1446,9 +1448,9 @@ var isRunShape = (value) => {
   return isShortText(value.title, TITLE_MAX) ? null : "title is invalid";
 };
 var PULL_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/\d{1,9}$/;
-var isPullRequest = (value) => isRecord2(value) && Number.isInteger(value.number) && value.number > 0 && typeof value.url === "string" && PULL_URL.test(value.url) && ["open", "closed", "merged"].includes(value.state) && typeof value.draft === "boolean" && isShortText(value.title, TITLE_MAX) && typeof value.repo === "string" && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
+var isPullRequest = (value) => isRecord(value) && Number.isInteger(value.number) && value.number > 0 && typeof value.url === "string" && PULL_URL.test(value.url) && ["open", "closed", "merged"].includes(value.state) && typeof value.draft === "boolean" && isShortText(value.title, TITLE_MAX) && typeof value.repo === "string" && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.repo);
 var isRule = (value) => {
-  if (!isRecord2(value))
+  if (!isRecord(value))
     return false;
   if (!["daily", "weekly", "monthly", "yearly"].includes(value.freq))
     return false;
@@ -1461,7 +1463,7 @@ var isRule = (value) => {
   return true;
 };
 var validateTemplate = (template, channels, partial) => {
-  if (!isRecord2(template))
+  if (!isRecord(template))
     return "template must be an object";
   const has = (key) => (key in template);
   if ((has("title") || !partial) && !isTitle(template.title))
@@ -1487,7 +1489,7 @@ var RITUAL_FIELDS = {
   weeklyReview: ["completedAt", "journal"]
 };
 var validateRitualFields = (ritual, fields) => {
-  if (!isRecord2(fields))
+  if (!isRecord(fields))
     return "fields must be an object";
   for (const [key, value] of Object.entries(fields)) {
     if (!RITUAL_FIELDS[ritual].includes(key))
@@ -1502,7 +1504,7 @@ var validateRitualFields = (ritual, fields) => {
       if (!Array.isArray(value) || value.length > 100)
         return "items must be a list of at most 100";
       for (const item of value) {
-        if (!isRecord2(item) || !isId(item.id) || !(typeof item.text === "string" && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== "boolean" || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === "boolean"))
+        if (!isRecord(item) || !isId(item.id) || !(typeof item.text === "string" && item.text.trim() && item.text.length <= 1000) || typeof item.starred !== "boolean" || !(item.taskId === null || isId(item.taskId)) || !(item.hidden === undefined || typeof item.hidden === "boolean"))
           return "a highlight is invalid";
         if (!(item.url === undefined || typeof item.url === "string" && item.url.length <= 2000 && /^https:\/\/\S+$/.test(item.url)) || !(item.ref === undefined || typeof item.ref === "string" && item.ref.length > 0 && item.ref.length <= 300))
           return "a highlight is invalid";
@@ -1522,7 +1524,7 @@ var validateSpan = (start, end) => {
   return span >= 5 * 60000 && span <= MAX_ENTRY_MS ? null : "a working session lasts between 5 minutes and 24 hours";
 };
 var validateCommand = (command, context) => {
-  if (!isRecord2(command))
+  if (!isRecord(command))
     return "command must be an object";
   if (!isId(command.cmd))
     return "command needs a cmd id";
@@ -1535,7 +1537,7 @@ var validateCommand = (command, context) => {
   switch (type) {
     case "task.created": {
       const task = command.task;
-      if (!isRecord2(task) || !isId(task.id))
+      if (!isRecord(task) || !isId(task.id))
         return "task needs an id";
       if (tasks[task.id])
         return "task id already exists";
@@ -1623,7 +1625,7 @@ var validateCommand = (command, context) => {
       return null;
     case "time.logged": {
       const entry = command.entry;
-      if (!isRecord2(entry) || !isId(entry.id))
+      if (!isRecord(entry) || !isId(entry.id))
         return "entry needs an id";
       if (context.entries[entry.id])
         return "entry id already exists";
@@ -1638,7 +1640,7 @@ var validateCommand = (command, context) => {
       return isId(command.entryId) && context.entries[command.entryId] ? null : "unknown entry";
     case "block.created": {
       const block = command.block;
-      if (!isRecord2(block) || !isId(block.id))
+      if (!isRecord(block) || !isId(block.id))
         return "block needs an id";
       if (context.blocks[block.id])
         return "block id already exists";
@@ -1658,7 +1660,7 @@ var validateCommand = (command, context) => {
       return command.google === null || isGoogleEventLink(command.google) ? null : "google must be an account, calendar and event, or null";
     case "calendar.added": {
       const calendar = command.calendar;
-      if (!isRecord2(calendar) || !isId(calendar.id))
+      if (!isRecord(calendar) || !isId(calendar.id))
         return "calendar needs an id";
       if (context.calendars[calendar.id])
         return "calendar id already exists";
@@ -1674,7 +1676,7 @@ var validateCommand = (command, context) => {
       if (!(isId(command.calendarId) && context.calendars[command.calendarId]))
         return "unknown calendar";
       const patch = command.patch;
-      if (!isRecord2(patch))
+      if (!isRecord(patch))
         return "patch must be an object";
       for (const [key, value] of Object.entries(patch)) {
         if (key === "name" && !(typeof value === "string" && value.trim() && value.length <= 80))
@@ -1692,7 +1694,7 @@ var validateCommand = (command, context) => {
       return isId(command.calendarId) && context.calendars[command.calendarId] ? null : "unknown calendar";
     case "objective.created": {
       const objective = command.objective;
-      if (!isRecord2(objective) || !isId(objective.id))
+      if (!isRecord(objective) || !isId(objective.id))
         return "objective needs an id";
       if (context.objectives[objective.id])
         return "objective id already exists";
@@ -1706,7 +1708,7 @@ var validateCommand = (command, context) => {
       if (!(isId(command.objectiveId) && context.objectives[command.objectiveId]))
         return "unknown objective";
       const patch = command.patch;
-      if (!isRecord2(patch))
+      if (!isRecord(patch))
         return "patch must be an object";
       for (const [key, value] of Object.entries(patch)) {
         if (key === "title" && !(typeof value === "string" && value.trim() && value.length <= 200))
@@ -1723,7 +1725,7 @@ var validateCommand = (command, context) => {
       return isId(command.objectiveId) && context.objectives[command.objectiveId] ? null : "unknown objective";
     case "series.created": {
       const series = command.series;
-      if (!isRecord2(series) || !isId(series.id))
+      if (!isRecord(series) || !isId(series.id))
         return "series needs an id";
       if (context.series[series.id])
         return "series id already exists";
@@ -1741,7 +1743,7 @@ var validateCommand = (command, context) => {
       if (!(isId(command.seriesId) && context.series[command.seriesId]))
         return "unknown series";
       const patch = command.patch;
-      if (!isRecord2(patch))
+      if (!isRecord(patch))
         return "patch must be an object";
       if (patch.rule !== undefined && !isRule(patch.rule))
         return "rule is invalid";
@@ -1755,7 +1757,7 @@ var validateCommand = (command, context) => {
       return isDateKey(command.from) ? null : "from must be a date";
     case "folder.created": {
       const folder = command.folder;
-      if (!isRecord2(folder) || !isId(folder.id))
+      if (!isRecord(folder) || !isId(folder.id))
         return "folder needs an id";
       if (context.folders[folder.id])
         return "folder id already exists";
@@ -1805,7 +1807,7 @@ var validateCommand = (command, context) => {
       return validateRitualFields(command.ritual, command.fields);
     case "channel.created": {
       const channel = command.channel;
-      if (!isRecord2(channel) || !isId(channel.id))
+      if (!isRecord(channel) || !isId(channel.id))
         return "channel needs an id";
       if (channels[channel.id])
         return "channel id already exists";
@@ -3822,6 +3824,7 @@ class GoogleError extends Error {
     this.status = status;
   }
 }
+var isGone = (error) => error instanceof GoogleError && error.status === 404;
 var testFetcher = (base) => {
   if (!base || !/^http:\/\/127\.0\.0\.1:\d{2,5}\/$/.test(base))
     return null;
@@ -4746,11 +4749,10 @@ var gmailUrl = (account, threadId) => `https://mail.google.com/mail/u/${encodeUR
 
 // src/domain/google/events.ts
 var EDIT_SCOPES = ["this", "following", "all"];
-var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isText = (value, max) => typeof value === "string" && value.length <= max;
 var isEmailAddress = (value) => typeof value === "string" && value.length <= 254 && /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/.test(value);
 var timeKind = (time) => {
-  if (!isRecord3(time))
+  if (!isRecord(time))
     return null;
   if (time.date !== undefined)
     return isDateKey(time.date) && time.dateTime === undefined ? "date" : null;
@@ -4762,7 +4764,7 @@ var timeKind = (time) => {
 };
 var startMs = (time) => time.date ? Date.parse(`${time.date}T00:00:00Z`) : Date.parse(time.dateTime ?? "");
 var checkEventInput = (input, creating) => {
-  if (!isRecord3(input))
+  if (!isRecord(input))
     return "event must be an object";
   const allowed = new Set(["summary", "description", "location", "start", "end", "recurrence", "attendees", "reminders", "colorId", "transparency", "visibility", "meet"]);
   for (const key of Object.keys(input))
@@ -4794,17 +4796,17 @@ var checkEventInput = (input, creating) => {
   if (input.attendees !== undefined) {
     if (!Array.isArray(input.attendees) || input.attendees.length > 200)
       return "at most 200 guests";
-    if (!input.attendees.every((guest) => isRecord3(guest) && isEmailAddress(guest.email) && (guest.optional === undefined || typeof guest.optional === "boolean")))
+    if (!input.attendees.every((guest) => isRecord(guest) && isEmailAddress(guest.email) && (guest.optional === undefined || typeof guest.optional === "boolean")))
       return "a guest is not an email address";
   }
   if (input.reminders !== undefined) {
     const reminders = input.reminders;
-    if (!isRecord3(reminders) || typeof reminders.useDefault !== "boolean")
+    if (!isRecord(reminders) || typeof reminders.useDefault !== "boolean")
       return "reminders must say whether to use the calendar default";
     const overrides = reminders.overrides ?? [];
     if (!Array.isArray(overrides) || overrides.length > 5)
       return "at most 5 notifications";
-    if (!overrides.every((item) => isRecord3(item) && (item.method === "popup" || item.method === "email") && Number.isInteger(item.minutes) && item.minutes >= 0 && item.minutes <= 40320))
+    if (!overrides.every((item) => isRecord(item) && (item.method === "popup" || item.method === "email") && Number.isInteger(item.minutes) && item.minutes >= 0 && item.minutes <= 40320))
       return "a notification must be 0 to 40320 minutes before";
   }
   if (input.colorId !== undefined && input.colorId !== null && !(typeof input.colorId === "string" && EVENT_COLORS[input.colorId]))
@@ -5013,15 +5015,11 @@ var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "A
 var SHORT = MONTHS.map((month) => month.slice(0, 3));
 var parts2 = (key) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
 var keyOf2 = (year, month, day) => `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-var daysInMonth4 = (key) => {
-  const { year, month } = parts2(key);
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
-};
 var addMonths = (key, n) => {
   const { year, month, day } = parts2(key);
   const index = year * 12 + (month - 1) + n;
   const first = keyOf2(Math.floor(index / 12), index % 12 + 1, 1);
-  return keyOf2(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth4(first)));
+  return keyOf2(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth(first)));
 };
 
 // src/domain/google/taskKept.ts
@@ -5034,7 +5032,7 @@ var nthWeekday = (monthKey, code) => {
   const nth = Number(match[1] ?? "1");
   const day = WEEKDAY_CODES.indexOf(match[2]);
   const first = `${monthKey.slice(0, 8)}01`;
-  const length = daysInMonth4(first);
+  const length = daysInMonth(first);
   const offset = (day - weekday(first) + 7) % 7;
   const dates = Array.from({ length: 5 }, (_, index) => 1 + offset + index * 7).filter((value) => value <= length);
   const chosen = nth > 0 ? dates[nth - 1] : dates[dates.length + nth];
@@ -5064,7 +5062,7 @@ var stepRule = (rule, date) => {
           candidate = nthWeekday(month, rule.byDay[0]);
         else {
           const wanted = rule.byMonthDay[0] ?? Number(date.slice(8));
-          const length = daysInMonth4(month);
+          const length = daysInMonth(month);
           const day = wanted < 0 ? length + wanted + 1 : wanted;
           candidate = day >= 1 && day <= length ? `${month.slice(0, 8)}${String(day).padStart(2, "0")}` : null;
         }
@@ -5078,7 +5076,7 @@ var stepRule = (rule, date) => {
         const month = rule.byMonth[0] ?? Number(date.slice(5, 7));
         const day = rule.byMonthDay[0] ?? Number(date.slice(8));
         const first = `${year}-${String(month).padStart(2, "0")}-01`;
-        if (day >= 1 && day <= daysInMonth4(first))
+        if (day >= 1 && day <= daysInMonth(first))
           return `${first.slice(0, 8)}${String(day).padStart(2, "0")}`;
       }
       return null;
@@ -5494,7 +5492,6 @@ var mapLimited = async (items, limit, fn) => {
   }));
   return results;
 };
-var isGone = (error) => error instanceof GoogleError && error.status === 404;
 var color = (value) => value && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : "#4285f4";
 var dueDate = (due) => due && isDateKey(due.slice(0, 10)) ? due.slice(0, 10) : null;
 var toTaskItem = (raw, account, listId) => {
@@ -5984,8 +5981,6 @@ var timeboxTarget = (state, taskId) => {
 };
 var calendarKey = (account, calendarId) => `${account}
 ${calendarId}`;
-var messageOf = (error) => error instanceof Error ? error.message : String(error);
-var isGone2 = (error) => error instanceof GoogleError && error.status === 404;
 var sessionVisibility = (state, taskId) => {
   const source = state.tasks[taskId]?.source;
   if (source?.kind !== "gtask" || !source.account)
@@ -6259,7 +6254,7 @@ class GoogleTimeboxes {
     try {
       eventId = await this.data.putTimebox(target.account, target.calendarId, timebox, link?.eventId ?? null);
     } catch (error) {
-      if (!(link && isGone2(error)))
+      if (!(link && isGone(error)))
         throw error;
       eventId = await this.data.putTimebox(target.account, target.calendarId, timebox, null);
     }
@@ -6304,20 +6299,19 @@ var bad = (error) => ({ status: 400, body: { error } });
 var sendOf = (value) => value === "all" ? "all" : "none";
 var scopeOf = (value) => value === undefined ? "this" : EDIT_SCOPES.includes(value) ? value : null;
 var RESPONSES2 = ["accepted", "declined", "tentative"];
-var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isDay = (value) => typeof value === "string" && isDateKey(value);
 var isMinutes2 = (value, low, high) => value === null || Number.isInteger(value) && value >= low && value <= high;
-var isOccurrence = (value) => isRecord4(value) && typeof value.title === "string" && value.title.length <= 1024 && typeof value.notes === "string" && value.notes.length <= GOOGLE_NOTES_MAX && isDay(value.due) && isMinutes2(value.time, 0, 24 * 60 - 1) && isMinutes2(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline)) && (value.attachments === undefined || isFiles(value.attachments));
-var isFiles = (value) => Array.isArray(value) && value.length <= ATTACHMENTS_MAX && value.every((file) => isRecord4(file) && typeof file.id === "string");
-var isKeptEntry = (value) => isRecord4(value) && isEmail(value.account) && isId2(value.listId) && isId2(value.taskId) && typeof value.updatedAt === "string" && (value.repeat === null || isRecord4(value.repeat));
-var isMade = (value) => isRecord4(value) && isId2(value.listId) && isId2(value.id) && typeof value.title === "string" && typeof value.notes === "string" && (value.due === null || isDay(value.due)) && typeof value.updatedAt === "string";
-var isSeriesSide = (value) => isRecord4(value) && (value.rule === null || typeof value.rule === "string" && value.rule.length <= 500) && (value.due === null || isDay(value.due)) && isRecord4(value.template) && typeof value.template.title === "string" && typeof value.template.notes === "string" && isDay(value.template.start);
+var isOccurrence = (value) => isRecord(value) && typeof value.title === "string" && value.title.length <= 1024 && typeof value.notes === "string" && value.notes.length <= GOOGLE_NOTES_MAX && isDay(value.due) && isMinutes2(value.time, 0, 24 * 60 - 1) && isMinutes2(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline)) && (value.attachments === undefined || isFiles(value.attachments));
+var isFiles = (value) => Array.isArray(value) && value.length <= ATTACHMENTS_MAX && value.every((file) => isRecord(file) && typeof file.id === "string");
+var isKeptEntry = (value) => isRecord(value) && isEmail(value.account) && isId2(value.listId) && isId2(value.taskId) && typeof value.updatedAt === "string" && (value.repeat === null || isRecord(value.repeat));
+var isMade = (value) => isRecord(value) && isId2(value.listId) && isId2(value.id) && typeof value.title === "string" && typeof value.notes === "string" && (value.due === null || isDay(value.due)) && typeof value.updatedAt === "string";
+var isSeriesSide = (value) => isRecord(value) && (value.rule === null || typeof value.rule === "string" && value.rule.length <= 500) && (value.due === null || isDay(value.due)) && isRecord(value.template) && typeof value.template.title === "string" && typeof value.template.notes === "string" && isDay(value.template.start);
 var OWN_FIELDS = ["time", "duration", "deadline", "starred", "busy", "visibility", "color", "attachments", "doNotDisturb", "decline"];
 var occurrenceEditOf = (input) => {
   if (input.skip === true)
     return { skip: true };
   if ("restore" in input)
-    return input.restore === null || isRecord4(input.restore) ? { restore: input.restore } : null;
+    return input.restore === null || isRecord(input.restore) ? { restore: input.restore } : null;
   return isOccurrence(input.before) && isOccurrence(input.after) ? { before: input.before, after: input.after } : null;
 };
 var googleWriteRoute = async (req, url, ctx) => {
@@ -6467,12 +6461,12 @@ var googleWriteRoute = async (req, url, ctx) => {
     const input = await body();
     if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.taskId) || !isId2(input.seriesId))
       return bad("account, listId, taskId and seriesId are required");
-    if (!isRecord4(input.own) || Object.keys(input.own).some((key) => !OWN_FIELDS.includes(key)))
+    if (!isRecord(input.own) || Object.keys(input.own).some((key) => !OWN_FIELDS.includes(key)))
       return bad(`own may only carry ${OWN_FIELDS.join(", ")}`);
     if (!isSeriesSide(input.before) || !isSeriesSide(input.after))
       return bad("before and after (rule, template and due) are required");
     try {
-      await ctx.series.edit(input.account, input.listId, input.taskId, input.seriesId, input.own, input.before, input.after);
+      await ctx.series.edit(input.account, input.taskId, input.seriesId, input.own, input.before, input.after);
       return ok({ changed: true, ...ctx.snapshot() });
     } finally {
       ctx.changed("tasks");
@@ -6485,7 +6479,7 @@ var googleWriteRoute = async (req, url, ctx) => {
     let undo;
     if (input.kind === "one" && isKeptEntry(input.task) && (input.made === null || isMade(input.made)))
       undo = { kind: "one", task: input.task, made: input.made };
-    else if (input.kind === "cut" && (input.from === null || isDay(input.from)) && Array.isArray(input.deleted) && input.deleted.length <= 5000 && input.deleted.every((task) => isRecord4(task) && isId2(task.listId) && isId2(task.id)) && Array.isArray(input.before) && input.before.length <= 5000 && input.before.every(isKeptEntry)) {
+    else if (input.kind === "cut" && (input.from === null || isDay(input.from)) && Array.isArray(input.deleted) && input.deleted.length <= 5000 && input.deleted.every((task) => isRecord(task) && isId2(task.listId) && isId2(task.id)) && Array.isArray(input.before) && input.before.length <= 5000 && input.before.every(isKeptEntry)) {
       undo = { kind: "cut", from: input.from, deleted: input.deleted, before: input.before };
     } else
       return bad("kind one (task, made) or cut (from, deleted, before) is required");
@@ -6713,8 +6707,6 @@ var keptPatch = (entry) => ({
   doNotDisturb: Boolean(entry.doNotDisturb),
   decline: entry.decline ?? null
 });
-var messageOf2 = (error) => error instanceof Error ? error.message : String(error);
-var isGone3 = (error) => error instanceof GoogleError && error.status === 404;
 var DONE_IN_ANSWER_MS = 5000;
 var SERIES_GONE = "Google Tasks no longer has this series";
 var OCCURRENCE_GONE = "This task is no longer in its series";
@@ -6805,7 +6797,7 @@ class GoogleSeries {
     for (let round = 0;; round++) {
       const now = plan();
       if (now.kind !== "make") {
-        await this.data.deleteTask(account, made.listId, made.id).catch((error) => this.options.log?.(`Google Tasks kept a next task no series wants: ${messageOf2(error)}`));
+        await this.data.deleteTask(account, made.listId, made.id).catch((error) => this.options.log?.(`Google Tasks kept a next task no series wants: ${messageOf(error)}`));
         if (now.kind === "linked")
           return linked(now.id);
         return now.kind === "ends" ? end(now.completed) : { task: null, made: false };
@@ -6898,7 +6890,7 @@ class GoogleSeries {
     if (Object.keys(patch).length || Object.keys(fix).length)
       this.write([{ type: "gtask.kept", account, listId, taskId, patch: Object.keys(patch).length ? patch : { time: real.time } }]);
   }
-  edit(account, listId, taskId, seriesId, own, before, after) {
+  edit(account, taskId, seriesId, own, before, after) {
     return this.one(account, seriesId, async () => {
       const planned = seriesEdit(this.planner.state, account, seriesId, taskId, own, before, after);
       if (!planned)
@@ -6913,7 +6905,7 @@ class GoogleSeries {
           if (!there || there.completed || !Object.keys(fix).length)
             continue;
           await this.data.updateTask(account, write.listId, write.taskId, fix).catch((error) => {
-            if (!isGone3(error))
+            if (!isGone(error))
               throw error;
           });
           this.options.onWrite?.();
@@ -7006,7 +6998,7 @@ class GoogleSeries {
         back.add(task.id);
       } catch (error) {
         failed += 1;
-        this.options.log?.(`Google Tasks did not undelete a task of a series: ${messageOf2(error)}`);
+        this.options.log?.(`Google Tasks did not undelete a task of a series: ${messageOf(error)}`);
       }
     }
     if (back.size)
@@ -7063,8 +7055,8 @@ class GoogleSeries {
     try {
       await this.data.deleteTask(account, listId, made.id);
     } catch (error) {
-      if (!isGone3(error)) {
-        this.options.log?.(`Google Tasks kept a next task Undo took back: ${messageOf2(error)}`);
+      if (!isGone(error)) {
+        this.options.log?.(`Google Tasks kept a next task Undo took back: ${messageOf(error)}`);
         return false;
       }
     }
@@ -7082,7 +7074,7 @@ class GoogleSeries {
       try {
         await this.data.deleteTask(account, tasks[done].listId, tasks[done].taskId);
       } catch (error) {
-        failed.push(messageOf2(error));
+        failed.push(messageOf(error));
       }
     }
     if (done)
@@ -7129,7 +7121,6 @@ var CARRY_ON_MS = 5000;
 var KEEP_MS2 = 30 * 24 * 60 * 60000;
 var PAGES_MAX = 4;
 var BUDGET_MS = 5000;
-var messageOf3 = (error) => error instanceof Error ? error.message : String(error);
 
 class MeetingDecliner {
   file;
@@ -7177,7 +7168,7 @@ class MeetingDecliner {
           this.options.log?.(`declining meetings: ${pass.errors.join("; ")}`);
         for (const left of pass.more)
           this.options.log?.(`declining meetings: ${left.account}'s meetings from ${left.from} on come in the next pass`);
-      }, (error) => this.options.log?.(`declining meetings: ${messageOf3(error)}`));
+      }, (error) => this.options.log?.(`declining meetings: ${messageOf(error)}`));
     }, ms);
     this.timer.unref?.();
   }
@@ -7281,7 +7272,7 @@ ${entry.listId}`;
           continue;
         }
         this.cursors.delete(account);
-        errors.push(`${account}: ${messageOf3(error)}`);
+        errors.push(`${account}: ${messageOf(error)}`);
         return null;
       }
       pages++;
@@ -7304,7 +7295,7 @@ ${invitation.id}`;
           out.push(entry);
         } catch (error) {
           this.failed.add(key);
-          errors.push(`"${invitation.summary}": ${messageOf3(error)}`);
+          errors.push(`"${invitation.summary}": ${messageOf(error)}`);
         }
       }
       if (!page.next) {
@@ -7636,7 +7627,7 @@ var MODELS_WAIT_MS = 3000;
 var LISTED_WAIT_MS = 6000;
 var LISTED_POLL_MS = 300;
 var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-var messageOf4 = (error) => {
+var opencodeError = (error) => {
   const failure = error;
   if (failure.code === "ENOENT")
     return "The OpenCode CLI (opencode) is not on the PATH where OpenChamber runs.";
@@ -7694,7 +7685,7 @@ class OpenCodeInfo {
       const details = running ? await this.api(`/api/model?${locationQuery(cwd ?? homedir())}`).then(parseModelDetails).catch(() => new Map) : new Map;
       this.models = { at: this.now(), list: ids.map((id) => ({ id, name: details.get(id)?.name ?? null, variants: details.get(id)?.variants ?? [] })), error: ids.length ? null : "OpenCode lists no models; connect a provider in OpenChamber." };
     } catch (error) {
-      this.models = { at: this.now(), list: this.models?.list ?? [], error: messageOf4(error) };
+      this.models = { at: this.now(), list: this.models?.list ?? [], error: opencodeError(error) };
     }
   }
   async liveAgents(directory) {

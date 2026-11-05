@@ -23,7 +23,7 @@ export const Progress = ({ value }: { value: number }) => {
   );
 };
 
-export const ProjectRow = ({ project, from }: { project: LinearProject; from?: OpenProject['from'] }) => {
+const ProjectRow = ({ project, from }: { project: LinearProject; from?: OpenProject['from'] }) => {
   const { linear } = usePlanner();
   const lv = useLinear();
   const workspace = workspaceLabel(lv, project.workspaceId);
@@ -111,7 +111,7 @@ export const ProjectCollection = () => {
   );
 };
 
-export const ProjectOverview = ({ detail }: { detail: LinearProjectDetail }) => {
+const ProjectOverview = ({ detail }: { detail: LinearProjectDetail }) => {
   const { host } = usePlanner();
   const milestones = [...detail.projectMilestones.nodes].sort((a, b) => a.sortOrder - b.sortOrder);
   const update = detail.lastUpdate;

@@ -3,7 +3,7 @@
 // automations (what is done to the email when it becomes a task, and when the task is completed, or a prompt to
 // choose), the panel's labels (one at a time, more with Cmd/Ctrl) and filters (archived, spam and trash, already
 // imported), and the email client a message opens in (Gmail, or Superhuman).
-import { GMAIL_ACTIONS, type GmailAction, type GmailActionKind, type Settings, type TaskSourceRef } from '../core/types.ts';
+import { type GmailAction, type GmailActionKind, type Settings, type TaskSourceRef } from '../core/types.ts';
 
 /** Sunsama's names for them. */
 export const GMAIL_ACTION_LABELS: Record<GmailActionKind, string> = {
@@ -24,7 +24,7 @@ export const gmailActionText = (action: GmailAction): string => (action.label ? 
 export const gmailActionKey = (action: GmailAction): string => `${action.kind}${action.label ? `:${action.label.toLowerCase()}` : ''}`;
 
 /** Gmail's own labels, by the names Gmail shows (and that automations name). */
-export const SYSTEM_LABELS: Record<string, string> = { inbox: 'INBOX', starred: 'STARRED', important: 'IMPORTANT', unread: 'UNREAD', spam: 'SPAM', trash: 'TRASH', sent: 'SENT', drafts: 'DRAFT' };
+const SYSTEM_LABELS: Record<string, string> = { inbox: 'INBOX', starred: 'STARRED', important: 'IMPORTANT', unread: 'UNREAD', spam: 'SPAM', trash: 'TRASH', sent: 'SENT', drafts: 'DRAFT' };
 
 export interface GmailLabel {
   id: string;
@@ -66,8 +66,6 @@ export const gmailChanges = (actions: readonly GmailAction[], labels: readonly G
   }
   return { add: [...add], remove: [...remove], trash, missing };
 };
-
-export const isGmailActionKind = (value: unknown): value is GmailActionKind => (GMAIL_ACTIONS as readonly unknown[]).includes(value);
 
 /** The panel's view of Gmail: the labels shown (all must match, as Sunsama's), the filters, and words to search for. */
 export interface MailFilter {

@@ -8,7 +8,7 @@ import { compactRange, longDay, scheduleDays, shortDay, weekdayShort } from '../
 import { usePlanner, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
 import { anchorOf, calendarUi, popoverKind, searchEvents, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
-import { answerClass, calendarItems, deadlinePassed, eventColor, eventLabel, isTaskEvent, itemKey, plannedTask, taskClass, taskEventLabel } from './items.ts';
+import { answerClass, calendarItems, deadlinePassed, eventColor, eventLabel, isTaskEvent, itemKey, plannedTask, taskClass, taskEventLabel } from '../../lib/calendar/items.ts';
 import { Icon } from './Icon.tsx';
 
 const range = (start: string, end: string, zone: string, day: DateKey): string => {

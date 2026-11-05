@@ -9,7 +9,7 @@ import { addParsedTask, urlHint } from '../../lib/core/addTask.ts';
 import { LinearUrlStatus, useLinearUrlStatus } from '../linear/LinearUrlStatus.tsx';
 import { MergeChip } from '../plan/AddTask.tsx';
 import { useUi } from '../../lib/core/ui.ts';
-import type { Route } from './Shell.tsx';
+import type { Route } from '../../lib/core/ui.ts';
 
 interface Item {
   id: string;

@@ -11,7 +11,7 @@ export interface SyncStatus {
 }
 
 /** A git remote we are willing to hand to `git`: https, ssh, scp-style, file, or an absolute path. Never an option. */
-export const isRemoteUrl = (url: string): boolean => {
+const isRemoteUrl = (url: string): boolean => {
   if (!url || url.length > 500 || /\s/.test(url) || url.startsWith('-')) return false;
   return /^(https|ssh|git|file):\/\/\S+$/i.test(url) || /^[\w.-]+@[\w.-]+:[\w.~/-]+$/.test(url) || /^\/[^\0]+$/.test(url);
 };

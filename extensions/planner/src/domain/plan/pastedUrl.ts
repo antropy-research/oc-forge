@@ -24,7 +24,7 @@ const hexOf = (decimal: string): string => BigInt(decimal).toString(16);
  * view, `#inbox/<16 hex>` or `?th=`, and a printed or "Show original" message's `thread-f:` / `msg-f:` ids); the
  * account in it (`authuser`), when it says.
  */
-export const parseGmailUrl = (text: string): Extract<PastedUrl, { kind: 'gmail' }> | null => {
+const parseGmailUrl = (text: string): Extract<PastedUrl, { kind: 'gmail' }> | null => {
   let url: URL;
   try {
     url = new URL(text.trim());
@@ -63,7 +63,7 @@ const CALENDAR_SUFFIXES: readonly [string, string][] = [
  * A Google Calendar event's address (`…/calendar/event?eid=…`, `…/r/eventedit/<eid>`): its `eid` is the event's id
  * and its calendar's, base64 encoded; null for any other page.
  */
-export const parseCalendarUrl = (text: string): Extract<PastedUrl, { kind: 'gcal' }> | null => {
+const parseCalendarUrl = (text: string): Extract<PastedUrl, { kind: 'gcal' }> | null => {
   let url: URL;
   try {
     url = new URL(text.trim());

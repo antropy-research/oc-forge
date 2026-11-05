@@ -57,7 +57,7 @@ const monthDayToDate = (month: number, day: number, today: DateKey): DateKey | n
 };
 
 /** `today`, `tomorrow`, `fri`, `nextweek`, `2026-10-30`, `10/30`, `oct30`, `backlog`, `someday` … */
-export const parseWhen = (raw: string, today: DateKey, weekStartsOn: 0 | 1 = 1): Placement | null => {
+const parseWhen = (raw: string, today: DateKey, weekStartsOn: 0 | 1 = 1): Placement | null => {
   const text = raw.trim().toLowerCase();
   if (text in BUCKET_WORDS) return { kind: 'backlog', bucket: BUCKET_WORDS[text]! };
   const day = (date: DateKey): Placement => ({ kind: 'day', date });

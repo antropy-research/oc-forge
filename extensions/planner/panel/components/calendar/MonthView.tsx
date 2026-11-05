@@ -4,7 +4,7 @@
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
 import type { DateKey, Placement } from '../../../src/domain/core/types.ts';
-import { addDays, daysBetween, instantAt, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { addDays, daysBetween, instantAt, isWeekend, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
 import { eventSpan, fitRow, layoutRow, longDay, monthWeeks, weekdayShort, type RowItem } from '../../../src/domain/calendar/views.ts';
 import { isGoogleTaskItem } from '../../../src/domain/google/google.ts';
 import { isGitHubItem } from '../../../src/domain/github/github.ts';
@@ -13,15 +13,14 @@ import { edgePosition } from '../../../src/domain/core/selectors.ts';
 import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
 import { anchorOf, calendarUi, changeEventTimes, popoverKind, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
-import { answerClass, calendarItems, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_BLOCK_TYPE, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, itemKey, plannedTask, startLabel, taskClass, taskEventLabel, type CalItem } from './items.ts';
+import { answerClass, calendarItems, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_BLOCK_TYPE, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, itemKey, plannedTask, startLabel, taskClass, taskEventLabel, type CalItem } from '../../lib/calendar/items.ts';
 import { Icon } from './Icon.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const DATE_ROW = 26;
 const LINE = 21;
-const isWeekend = (date: DateKey): boolean => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay());
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export const MonthView = ({ anchor, events, onDay }: { anchor: DateKey; events: CalendarEvent[]; onDay: (date: DateKey) => void }) => {
   const { client, google, linear, github } = usePlanner();

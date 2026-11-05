@@ -8,7 +8,7 @@ import { addDays } from '../../../src/domain/core/dates.ts';
 import type { DateKey } from '../../../src/domain/core/types.ts';
 import { useView } from './context.ts';
 
-export interface DayTargets {
+interface DayTargets {
   /** The days on screen, in order. */
   days: DateKey[];
   /** Where a click on the first quick action plans an item. */

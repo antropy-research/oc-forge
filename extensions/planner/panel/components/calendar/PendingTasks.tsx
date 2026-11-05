@@ -20,8 +20,8 @@ import { undoAction } from '../../lib/google/store.ts';
 import { pendingStore, usePendingTasks } from '../../lib/google/pendingTasks.ts';
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const close = () => calendarUi.open(null);
 const keyOf = (item: GoogleTaskItem): string => `${item.account}\n${item.id}`;
 

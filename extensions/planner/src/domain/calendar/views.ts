@@ -2,7 +2,7 @@
 // show, their titles, how the arrows step, and where events go in a month row
 // (bars in the first free line, then "N more") and in the schedule list.
 import type { DateKey } from '../core/types.ts';
-import { addDays, daysBetween, startOfWeek, weekday, zonedDateMinutes } from '../core/dates.ts';
+import { addDays, daysBetween, daysInMonth, isWeekend, startOfWeek, weekday, zonedDateMinutes } from '../core/dates.ts';
 
 export type CalendarMode = 'day' | 'week' | 'month' | 'year' | 'schedule';
 export const CALENDAR_MODES: readonly CalendarMode[] = ['day', 'week', 'month', 'year', 'schedule'];
@@ -16,10 +16,6 @@ const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Frida
 const parts = (key: DateKey) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
 const keyOf = (year: number, month: number, day: number): DateKey => `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
-export const daysInMonth = (key: DateKey): number => {
-  const { year, month } = parts(key);
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
-};
 
 export const monthStart = (key: DateKey): DateKey => `${key.slice(0, 8)}01`;
 
@@ -40,7 +36,6 @@ export const monthWeeks = (anchor: DateKey, weekStartsOn: 0 | 1): DateKey[][] =>
   return weeks;
 };
 
-const isWeekend = (key: DateKey): boolean => weekday(key) === 0 || weekday(key) === 6;
 
 /** The days a view shows around `anchor`; without weekends, Saturdays and Sundays are left out of Week and Month. */
 export const viewDays = (mode: CalendarMode, anchor: DateKey, weekStartsOn: 0 | 1, weekends = true): DateKey[] => {
@@ -133,7 +128,7 @@ export const blockText = (heightPx: number, lineHeightPx: number): { inline: boo
 };
 
 /** The local days an event covers, first and last included. */
-export interface Span {
+interface Span {
   first: DateKey;
   last: DateKey;
 }
@@ -156,7 +151,7 @@ export interface RowItem<T> {
   startMs: number;
 }
 
-export interface RowPlacement<T> {
+interface RowPlacement<T> {
   item: T;
   /** First and last column in the row. */
   col: number;

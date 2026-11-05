@@ -8,9 +8,9 @@ import { pendingEvent } from '../../../src/domain/google/taskPending.ts';
 import { useGoogle, usePlanner, useView } from '../core/context.ts';
 import { calendarUi, useCalendarUi, withPending } from './calendarUi.ts';
 import { usePendingTasks } from '../google/pendingTasks.ts';
-import { inHiddenList } from '../../components/calendar/items.ts';
+import { inHiddenList } from './items.ts';
 
-export interface CalendarFeedState {
+interface CalendarFeedState {
   events: CalendarEvent[];
   /** Google tasks read for a deadline in the range (their date may be outside it, or none). */
   deadlineTasks?: GoogleTaskItem[];

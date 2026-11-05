@@ -15,7 +15,7 @@ import { readActivity, readActivityPage } from './activity.ts';
 import type { SeenPullRequest } from '../../src/domain/core/events.ts';
 
 /** Runs gh; `cwd` picks the repository for commands that infer it from a checkout. */
-export type Runner = (args: string[], options?: { cwd?: string; timeoutMs?: number }) => Promise<string>;
+type Runner = (args: string[], options?: { cwd?: string; timeoutMs?: number }) => Promise<string>;
 
 /**
  * The host gives up on a service request after 20 seconds and then restarts
@@ -27,7 +27,7 @@ const GH_TIMEOUT_MS = 15_000;
  * Runs `gh` with the service's environment (PATH and HOME come from the host). A failure keeps what gh printed: `gh
  * api graphql` exits 1 when GitHub's answer has errors, and still prints the answer, data and all.
  */
-export const ghRunner: Runner = (args, options) =>
+const ghRunner: Runner = (args, options) =>
   new Promise((resolve, reject) => {
     execFile('gh', args, { timeout: options?.timeoutMs ?? GH_TIMEOUT_MS, maxBuffer: 8_000_000, ...(options?.cwd ? { cwd: options.cwd } : {}) }, (error, stdout, stderr) => {
       if (error) reject(Object.assign(new Error(`${error.message}\n${stderr}`), { code: (error as NodeJS.ErrnoException).code, stderr: String(stderr), stdout: String(stdout) }));
@@ -40,7 +40,7 @@ const ITEM_FIELDS = `__typename
   ... on PullRequest { id number title url state isDraft updatedAt repository { nameWithOwner } }`;
 
 /** Items a list page has; GitHub's search gives up to 100 a page, 50 keeps one gh call short. */
-export const PAGE_SIZE = 50;
+const PAGE_SIZE = 50;
 /** GitHub's search returns at most this many results of one search, however many match: words narrow it. */
 export const SEARCH_MAX = 1000;
 /** Node ids GitHub reads in one `nodes(ids:)` call. */
@@ -50,12 +50,12 @@ export const NODES_MAX = 100;
  * The repositories the viewer contributes to (their own, and others they committed, opened issues or pull requests,
  * or reviewed in), the most recently pushed first: Sunsama surfaces "the most relevant repositories" this way.
  */
-export const REPOS_QUERY = `query PlannerGitHubRepos { viewer { repositoriesContributedTo(first: 25, includeUserRepositories: true, orderBy: { field: PUSHED_AT, direction: DESC }, contributionTypes: [COMMIT, ISSUE, PULL_REQUEST, PULL_REQUEST_REVIEW, REPOSITORY]) { nodes { nameWithOwner } } } }`;
+const REPOS_QUERY = `query PlannerGitHubRepos { viewer { repositoriesContributedTo(first: 25, includeUserRepositories: true, orderBy: { field: PUSHED_AT, direction: DESC }, contributionTypes: [COMMIT, ISSUE, PULL_REQUEST, PULL_REQUEST_REVIEW, REPOSITORY]) { nodes { nameWithOwner } } } }`;
 
-export const LIST_QUERY = `query PlannerGitHubList($q: String!, $after: String) { search(query: $q, type: ISSUE, first: ${PAGE_SIZE}, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ${ITEM_FIELDS} } } }`;
-export const NODES_QUERY = `query PlannerGitHubNodes($ids: [ID!]!) { nodes(ids: $ids) { ${ITEM_FIELDS} } }`;
+const LIST_QUERY = `query PlannerGitHubList($q: String!, $after: String) { search(query: $q, type: ISSUE, first: ${PAGE_SIZE}, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ${ITEM_FIELDS} } } }`;
+const NODES_QUERY = `query PlannerGitHubNodes($ids: [ID!]!) { nodes(ids: $ids) { ${ITEM_FIELDS} } }`;
 /** An issue or a pull request by its address on github.com. */
-export const RESOURCE_QUERY = `query PlannerGitHubResource($url: URI!) { resource(url: $url) { ${ITEM_FIELDS} } }`;
+const RESOURCE_QUERY = `query PlannerGitHubResource($url: URI!) { resource(url: $url) { ${ITEM_FIELDS} } }`;
 
 export const LISTS = {
   assigned: 'is:open is:issue assignee:@me archived:false sort:updated-desc',
@@ -66,7 +66,7 @@ export const LISTS = {
 export type ListKind = keyof typeof LISTS;
 
 /** A list's search: its own qualifiers, then the words that narrow it (GitHub's search syntax: text, repo:owner/name, label:…). */
-export const listQuery = (kind: ListKind, text = ''): string => {
+const listQuery = (kind: ListKind, text = ''): string => {
   const words = text.replace(/\s+/g, ' ').trim();
   return words ? `${LISTS[kind]} ${words}` : LISTS[kind];
 };
@@ -97,7 +97,7 @@ interface RawNode {
   repository?: { nameWithOwner?: string };
 }
 
-export const parseNodes = (nodes: readonly (RawNode | null)[]): GitHubItem[] =>
+const parseNodes = (nodes: readonly (RawNode | null)[]): GitHubItem[] =>
   nodes.flatMap((node): GitHubItem[] => {
     if (!node?.id || !node.number || !node.title || !node.url || !node.repository?.nameWithOwner) return [];
     const kind = node.__typename === 'PullRequest' ? 'pull' : 'issue';
@@ -140,7 +140,7 @@ const PULL_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]
 const BRANCH = /^(?![-/.])(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._/-]{1,200}(?<![/.])$/;
 
 /** The pull request to show for a branch: an open one, else a merged one, else the latest. */
-export const pickPull = (pulls: readonly RawPull[]): SeenPullRequest | null => {
+const pickPull = (pulls: readonly RawPull[]): SeenPullRequest | null => {
   const rank = { open: 0, merged: 1, closed: 2 } as const;
   const parsed = pulls.flatMap((pull) => {
     const match = PULL_URL.exec(pull.url ?? '');
@@ -152,7 +152,7 @@ export const pickPull = (pulls: readonly RawPull[]): SeenPullRequest | null => {
 };
 
 /** gh's failure, in words the user can act on, and whether it is a missing or signed-out gh. */
-export const diagnose = (error: unknown): { reason: 'missing' | 'signed-out' | null; message: string } => {
+const diagnose = (error: unknown): { reason: 'missing' | 'signed-out' | null; message: string } => {
   const failure = error as { code?: string; stderr?: string; message?: string };
   if (failure.code === 'ENOENT') return { reason: 'missing', message: 'The GitHub CLI (gh) is not installed where OpenChamber runs. Install it there, then sign in with `gh auth login`.' };
   const text = `${failure.stderr ?? ''} ${failure.message ?? ''}`;
@@ -165,7 +165,7 @@ export const diagnose = (error: unknown): { reason: 'missing' | 'signed-out' | n
 const explain = (error: unknown): string => diagnose(error).message;
 
 /** The container this service runs in, by the id `docker exec` takes (its hostname), or null on a plain machine. */
-export const containerId = (): string | null => {
+const containerId = (): string | null => {
   if (!existsSync('/.dockerenv') && !existsSync('/run/.containerenv')) return null;
   const name = hostname();
   return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : null;

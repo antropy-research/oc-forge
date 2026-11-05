@@ -99,7 +99,7 @@ const dragStart = (issue: LinearIssue) => (event: DragEvent) => {
 };
 
 /** One issue on one line, as in Linear's lists. */
-export const LinearRow = ({ issue, properties, workspace }: { issue: LinearIssue; properties: readonly LinearProperty[]; workspace: string | null }) => {
+const LinearRow = ({ issue, properties, workspace }: { issue: LinearIssue; properties: readonly LinearProperty[]; workspace: string | null }) => {
   const lv = useLinear();
   const open = useOpen();
   return (

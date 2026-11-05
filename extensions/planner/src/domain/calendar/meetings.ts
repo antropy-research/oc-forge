@@ -28,7 +28,7 @@ export const eventKey = (event: Pick<CalendarEvent, 'google'>): string | null =>
 const DAY_MS = 86_400_000;
 
 /** Which exclusion leaves an event out, or null when it qualifies. Declined meetings never do. */
-export const excludedBy = (event: CalendarEvent, exclusions: readonly MeetingExclusion[]): MeetingExclusion | 'declined' | null => {
+const excludedBy = (event: CalendarEvent, exclusions: readonly MeetingExclusion[]): MeetingExclusion | 'declined' | null => {
   const response = event.google?.response ?? null;
   if (response === 'declined') return 'declined';
   if (exclusions.includes('noAttendees') && !event.google?.guests) return 'noAttendees';
@@ -55,7 +55,7 @@ const subscriptionOf = (state: PlannerState, event: CalendarEvent): CalendarSubs
 export const taskForEvent = (state: PlannerState, key: string): Task | null => Object.values(state.tasks).find((task) => task.source?.kind === 'event' && task.source.id === key) ?? null;
 
 /** The source a task added from an event keeps: its key, the event's address and times, whether others are invited. */
-export const eventSource = (event: CalendarEvent, auto: boolean): TaskSourceRef | null => {
+const eventSource = (event: CalendarEvent, auto: boolean): TaskSourceRef | null => {
   const key = eventKey(event);
   if (!key || !event.google || key.length > 200) return null;
   return {
@@ -70,7 +70,7 @@ export const eventSource = (event: CalendarEvent, auto: boolean): TaskSourceRef 
 };
 
 /** The day an event is on, where the user is. */
-export const eventDay = (event: Pick<CalendarEvent, 'start' | 'allDay'>, zone: string): DateKey => zonedDateMinutes(event.start, zone).date;
+const eventDay = (event: Pick<CalendarEvent, 'start' | 'allDay'>, zone: string): DateKey => zonedDateMinutes(event.start, zone).date;
 
 /** An event task's start, for placing meetings in time order. */
 const startOf = (task: Task): number | null => (task.source?.kind === 'event' && task.source.event ? Date.parse(task.source.event.start) : null);
@@ -79,7 +79,7 @@ const startOf = (task: Task): number | null => (task.source?.kind === 'event' &&
  * Where a meeting goes in its day's list: before the first meeting that starts after it, else after the day's last
  * meeting, else at the top of the day (meetings in time order, as Sunsama's import sorts them).
  */
-export const meetingPosition = (state: PlannerState, date: DateKey, start: number): number => {
+const meetingPosition = (state: PlannerState, date: DateKey, start: number): number => {
   const list = tasksForDay(state, date).filter((task) => !task.deletedAt);
   const later = list.findIndex((task) => (startOf(task) ?? -Infinity) > start);
   if (later >= 0) {

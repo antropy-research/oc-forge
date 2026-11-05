@@ -1,8 +1,8 @@
 // Pieces the Linear page and the side panels share.
 import { usePlanner } from '../../lib/core/context.ts';
 import type { LinearView } from '../../lib/linear/store.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-export const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** Nothing to read: OpenChamber is not connected and no workspace was added with a key. */
 export const needsConnect = (lv: LinearView): boolean => lv.connected === false && lv.workspaces.length === 0;

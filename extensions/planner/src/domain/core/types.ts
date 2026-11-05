@@ -266,7 +266,7 @@ export interface TimeEntry {
 }
 
 /** The one running task timer. */
-export interface TimerState {
+interface TimerState {
   taskId: string;
   startedAt: string;
 }

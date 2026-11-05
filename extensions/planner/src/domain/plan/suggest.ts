@@ -7,7 +7,7 @@ const STOP_WORDS = new Set(['the', 'a', 'an', 'to', 'for', 'of', 'and', 'or', 'i
 const CJK = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u;
 
 /** Words of a title: Latin words of two or more letters, CJK runs as character bigrams. */
-export const titleTokens = (title: string): Set<string> => {
+const titleTokens = (title: string): Set<string> => {
   const tokens = new Set<string>();
   for (const word of title.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
     if (CJK.test(word)) {
@@ -33,7 +33,7 @@ const median = (values: number[]): number => {
   return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 };
 
-export interface Suggestion {
+interface Suggestion {
   minutes: number | null;
   channelId: string | null;
   /** How many similar tasks it came from. */

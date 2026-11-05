@@ -16,8 +16,8 @@ import { addEvent, calendarUi, useCalendarUi, type Draft } from '../../lib/calen
 import { Icon } from './Icon.tsx';
 import { Popover } from './Popover.tsx';
 import { defaultCalendar, defaultList, endChoices, listKeyOf, startChoices, writableCalendars } from './form.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export const QuickCreate = ({ draft }: { draft: Draft }) => {
   const { client, google, host } = usePlanner();

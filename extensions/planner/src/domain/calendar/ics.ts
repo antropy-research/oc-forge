@@ -6,7 +6,7 @@ import type { DateKey } from '../core/types.ts';
 import { addDays, daysBetween, instantAt, isDateKey, isValidTimeZone, startOfWeek, weekday } from '../core/dates.ts';
 
 /** A DTSTART-like value: local date and minute of day in `zone`, or UTC, or a whole day. */
-export interface IcsTime {
+interface IcsTime {
   date: DateKey;
   minutes: number;
   /** IANA zone; null for floating time (read in the user's zone). */
@@ -86,7 +86,7 @@ const resolveZone = (tzid: string | undefined): string | null => {
   return isValidTimeZone(tail) ? tail : null;
 };
 
-export const parseIcsTime = (value: string, params: Record<string, string> = {}): IcsTime | null => {
+const parseIcsTime = (value: string, params: Record<string, string> = {}): IcsTime | null => {
   const text = value.trim();
   const date = /^(\d{4})(\d{2})(\d{2})$/.exec(text);
   if (date || params.VALUE === 'DATE') {
@@ -104,7 +104,7 @@ export const parseIcsTime = (value: string, params: Record<string, string> = {})
 };
 
 /** `PT1H30M`, `P1D`, `P2W` → milliseconds. */
-export const parseDurationIcs = (value: string): number | null => {
+const parseDurationIcs = (value: string): number | null => {
   const match = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(value.trim());
   if (!match) return null;
   const [, sign, w, d, h, m, s] = match;
@@ -215,7 +215,7 @@ export const parseIcs = (text: string): VEvent[] => {
 };
 
 /** The instant of an IcsTime; floating and all-day values are read in `userZone`. */
-export const icsInstant = (time: IcsTime, userZone: string): number =>
+const icsInstant = (time: IcsTime, userZone: string): number =>
   Date.parse(instantAt(time.date, time.allDay ? 0 : time.minutes, time.allDay ? userZone : time.zone ?? userZone));
 
 const WEEKDAY_CODES: Record<string, number> = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };

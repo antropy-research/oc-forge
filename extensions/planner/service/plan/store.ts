@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { PlannerEvent } from '../../src/domain/core/events.ts';
 import { sortEvents } from '../../src/domain/core/reducer.ts';
 
-export interface EventStoreOptions {
+interface EventStoreOptions {
   dir: string;
   /** Keep history in git when the binary is available (default true). */
   git?: boolean;

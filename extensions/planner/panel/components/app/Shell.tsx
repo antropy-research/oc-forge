@@ -1,13 +1,12 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { newId } from '../../../src/domain/core/ids.ts';
-import { useUi } from '../../lib/core/ui.ts';
+import { useUi, type Route } from '../../lib/core/ui.ts';
 import { actualMinutes, archivedTasks, tasksForDay } from '../../../src/domain/core/selectors.ts';
 import { useAgents, usePlanner, useView } from '../../lib/core/context.ts';
 import type { ServiceProblem } from '../../lib/core/client.ts';
 import { formatClock, useNow } from '../../lib/core/time.ts';
 
-export type Route = 'home' | 'today' | 'calendar' | 'focus' | 'planning' | 'shutdown' | 'highlights' | 'weeklyPlanning' | 'weeklyReview' | 'backlog' | 'linear' | 'github' | 'google' | 'agents' | 'archive' | 'stats' | 'settings';
 
 const NavItem = ({ route, current, onRoute, children, badge }: { route: Route; current: Route; onRoute: (route: Route) => void; children: ComponentChildren; badge?: number }) => (
   <button class={`nav-item${route === current ? ' is-active' : ''}`} aria-current={route === current ? 'page' : undefined} onClick={() => onRoute(route)}>
@@ -41,7 +40,7 @@ const TimerBar = ({ onRoute }: { onRoute: (route: Route) => void }) => {
  * sidebars in a narrow window: OpenChamber's own sidebar open in a 1024 px window leaves the
  * Planner page about 700 px.
  */
-export const NARROW_QUERY = '(max-width: 900px)';
+const NARROW_QUERY = '(max-width: 900px)';
 
 /** Whether the Planner page is that narrow, following the window as it changes. */
 export const useNarrow = (query: string = NARROW_QUERY): boolean => {

@@ -27,11 +27,11 @@ const KEEP_MS = 3 * 24 * 60 * 60_000;
  * How long the surface that took a notification has to show it, before another may: a live frame shows it and says
  * so within milliseconds. Another surface that asks meanwhile is told to ask again when the loan ends (`nextIn`).
  */
-export const LEASE_MS = 5000;
+const LEASE_MS = 5000;
 /** At most this many acknowledged at once, each a key of at most this many characters. */
 export const ACK_LIMITS = { keys: 200, key: 300 } as const;
 
-export interface NotificationReads {
+interface NotificationReads {
   /** The accounts that have Google Tasks. */
   accounts(): Promise<string[]>;
   /** Tasks due between two days (inclusive) in those accounts, completed ones too. */
@@ -40,7 +40,7 @@ export interface NotificationReads {
   byIds(groups: readonly { account: string; listId: string; ids: string[] }[]): Promise<{ items: GoogleTaskItem[]; errors: string[] }>;
 }
 
-export interface TakenNotifications {
+interface TakenNotifications {
   notifications: TaskNotification[];
   /** When the next one comes today; null when none is left (or they are off). */
   next: string | null;

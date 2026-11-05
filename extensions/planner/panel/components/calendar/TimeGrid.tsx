@@ -18,7 +18,7 @@ import { useNow } from '../../lib/core/time.ts';
 import { useCalendarEvents } from '../../lib/calendar/events.ts';
 import { completeWithUndo } from '../../lib/google/store.ts';
 import { anchorOf, boxAnchor, calendarUi, changeEventTimes, popoverKind, useCalendarUi, type Anchor } from '../../lib/calendar/calendarUi.ts';
-import { answerClass, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, plannedTask, taskClass, taskEventLabel } from './items.ts';
+import { answerClass, deadlineOf, deadlinePassed, eventColor, eventLabel, GCAL_EVENT_TYPE, GCAL_TASK_TYPE, inkOn, isMovableTask, isTaskEvent, plannedTask, taskClass, taskEventLabel } from '../../lib/calendar/items.ts';
 import { CalendarOverlays } from './Overlays.tsx';
 import { Icon } from './Icon.tsx';
 

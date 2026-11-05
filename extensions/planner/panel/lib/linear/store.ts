@@ -109,6 +109,7 @@ import { edgePosition } from '../../../src/domain/core/selectors.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import { DEFAULT_SETTINGS, type LinearDisplayPrefs, type Placement, type PlannerState, type Settings, type Subtask, type Task, type TaskSourceRef } from '../../../src/domain/core/types.ts';
 import type { Origin, PlannerClient } from '../core/client.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 /** What an issue list shows: issues of mine, a saved view, a project's issues, or a search. */
 export type LinearSource =
@@ -123,11 +124,11 @@ export type LinearSource =
 export type ListId = 'page' | 'side';
 
 /** The Linear page's sections: issue lists, all projects, or the issues already in the plan. */
-export type LinearMode = 'issues' | 'projects' | 'planned';
+type LinearMode = 'issues' | 'projects' | 'planned';
 
 /** A question to ask before changing an issue in Linear. */
 /** Sunsama's "Show prompt to update status in Linear": after completing, planning (the Planner's) or importing an issue. */
-export interface LinearPrompt {
+interface LinearPrompt {
   kind: 'complete' | 'start' | 'import';
   taskId: string;
   /** The issue it names; asked about several, the first one's key and how many more. */
@@ -154,7 +155,7 @@ export interface IssueRef {
   workspaceId: string | null;
 }
 
-export interface WorkspaceView extends LinearWorkspace {
+interface WorkspaceView extends LinearWorkspace {
   /** Why the last request there failed, until one succeeds. */
   error: string | null;
 }
@@ -238,7 +239,7 @@ export interface LinearView {
 }
 
 /** Where the Linear page was, kept on this device so it opens there again. */
-export interface LinearLocation {
+interface LinearLocation {
   mode: LinearMode;
   source: LinearSource;
   scope: string;
@@ -261,7 +262,6 @@ const CATALOG_MS = 10 * 60_000;
 const LOCATION_KEY = 'linear.location';
 const STATE_WORDS: Record<string, string> = { completed: 'Done', started: 'In Progress', unstarted: 'Todo', backlog: 'Backlog', triage: 'Triage' };
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const emptyList = (source: LinearSource = { kind: 'assigned' }): IssueList => ({
   source,

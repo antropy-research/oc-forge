@@ -56,7 +56,7 @@ const scalar = (raw: string): Scalar => {
  * is all an agent file needs here; nested keys and block scalars are skipped.
  * A file without frontmatter has none (OpenCode still reads it as an agent).
  */
-export const parseFrontmatter = (text: string): Record<string, Scalar> => {
+const parseFrontmatter = (text: string): Record<string, Scalar> => {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   const data: Record<string, Scalar> = {};
   if (!match) return data;
@@ -69,7 +69,7 @@ export const parseFrontmatter = (text: string): Record<string, Scalar> => {
 };
 
 /** JSON with comments and trailing commas, as `opencode.jsonc` allows. */
-export const parseJsonc = (text: string): unknown => {
+const parseJsonc = (text: string): unknown => {
   let out = '';
   let inString = false;
   for (let index = 0; index < text.length; index++) {
@@ -171,7 +171,7 @@ const markdownFiles = (dir: string, recursive: boolean, budget: { left: number }
  * overriding earlier ones. Subagents, hidden and disabled agents are left out:
  * a chat cannot start as one.
  */
-export const discoverAgents = (configDir: string, projectDir?: string | null): { agents: DiscoveredAgent[]; defaultAgent: string | null } => {
+const discoverAgents = (configDir: string, projectDir?: string | null): { agents: DiscoveredAgent[]; defaultAgent: string | null } => {
   const agents = new Map<string, AgentEntry>(Object.entries(BUILT_IN).map(([name, entry]) => [name, { ...entry, model: null, color: null, source: 'built-in' as const }]));
   let defaultAgent: string | null = null;
   const budget = { left: MAX_FILES };
@@ -254,7 +254,7 @@ const orderAgents = (agents: DiscoveredAgent[]): DiscoveredAgent[] => {
 };
 
 /** `opencode models` prints one `provider/model` a line. */
-export const parseModels = (out: string): string[] => [...new Set(out.split(/\r?\n/).map((line) => line.trim()).filter((line) => isModelRef(line) && !line.includes('#')))].sort((a, b) => a.localeCompare(b));
+const parseModels = (out: string): string[] => [...new Set(out.split(/\r?\n/).map((line) => line.trim()).filter((line) => isModelRef(line) && !line.includes('#')))].sort((a, b) => a.localeCompare(b));
 
 const dataOf = (json: unknown): unknown[] => {
   const data = (json as { data?: unknown } | null)?.data;
@@ -262,7 +262,7 @@ const dataOf = (json: unknown): unknown[] => {
 };
 
 /** Display names and variants from the running server's `GET /api/model`. */
-export const parseModelDetails = (json: unknown): Map<string, { name: string | null; variants: string[] }> => {
+const parseModelDetails = (json: unknown): Map<string, { name: string | null; variants: string[] }> => {
   const details = new Map<string, { name: string | null; variants: string[] }>();
   for (const item of dataOf(json)) {
     const model = item as { id?: unknown; providerID?: unknown; name?: unknown; variants?: unknown };
@@ -281,7 +281,7 @@ export const parseModelDetails = (json: unknown): Map<string, { name: string | n
 };
 
 /** The running server's agents (`GET /api/agent`), the ones a chat can start as. */
-export const parseLiveAgents = (json: unknown): DiscoveredAgent[] =>
+const parseLiveAgents = (json: unknown): DiscoveredAgent[] =>
   dataOf(json).flatMap((item): DiscoveredAgent[] => {
     const agent = item as { id?: unknown; name?: unknown; mode?: unknown; hidden?: unknown; description?: unknown; color?: unknown; model?: unknown };
     if (!isAgentName(agent.id) || agent.mode === 'subagent' || agent.hidden === true) return [];
@@ -298,16 +298,16 @@ export const parseLiveAgents = (json: unknown): DiscoveredAgent[] =>
   });
 
 /** Command names from the running server's `GET /api/command`. */
-export const parseCommandNames = (json: unknown): string[] =>
+const parseCommandNames = (json: unknown): string[] =>
   dataOf(json).flatMap((item) => {
     const name = (item as { name?: unknown } | null)?.name;
     return typeof name === 'string' ? [name] : [];
   });
 
 /** Runs the `opencode` CLI; `cwd` is the folder OpenCode answers for. */
-export type OpenCodeRunner = (args: string[], options?: { cwd?: string; timeoutMs?: number }) => Promise<string>;
+type OpenCodeRunner = (args: string[], options?: { cwd?: string; timeoutMs?: number }) => Promise<string>;
 
-export const opencodeRunner: OpenCodeRunner = (args, options) =>
+const opencodeRunner: OpenCodeRunner = (args, options) =>
   new Promise((resolve, reject) => {
     execFile('opencode', args, { timeout: options?.timeoutMs ?? 10_000, maxBuffer: 16_000_000, ...(options?.cwd ? { cwd: options.cwd } : {}), env: { ...process.env, NO_COLOR: '1' } }, (error, stdout, stderr) => {
       if (error) reject(Object.assign(new Error(`${error.message}\n${stderr}`), { code: (error as NodeJS.ErrnoException).code, stderr: String(stderr) }));
@@ -324,7 +324,8 @@ const LISTED_WAIT_MS = 6_000;
 const LISTED_POLL_MS = 300;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const messageOf = (error: unknown): string => {
+/** What the OpenCode CLI said when it failed, in one line (or that it is not there). */
+const opencodeError = (error: unknown): string => {
   const failure = error as { code?: string; stderr?: string; message?: string };
   if (failure.code === 'ENOENT') return 'The OpenCode CLI (opencode) is not on the PATH where OpenChamber runs.';
   return `${failure.stderr || failure.message || String(error)}`.trim().split('\n')[0]!.slice(0, 300);
@@ -387,7 +388,7 @@ export class OpenCodeInfo {
       const details = running ? await this.api(`/api/model?${locationQuery(cwd ?? homedir())}`).then(parseModelDetails).catch(() => new Map()) : new Map();
       this.models = { at: this.now(), list: ids.map((id) => ({ id, name: details.get(id)?.name ?? null, variants: details.get(id)?.variants ?? [] })), error: ids.length ? null : 'OpenCode lists no models; connect a provider in OpenChamber.' };
     } catch (error) {
-      this.models = { at: this.now(), list: this.models?.list ?? [], error: messageOf(error) };
+      this.models = { at: this.now(), list: this.models?.list ?? [], error: opencodeError(error) };
     }
   }
 
@@ -425,7 +426,7 @@ export class OpenCodeInfo {
 }
 
 /** Agents from the config files, checked against the running server when it can be asked. */
-export const mergeAgents = (fromConfig: readonly DiscoveredAgent[], live: readonly DiscoveredAgent[] | null): DiscoveredAgent[] => {
+const mergeAgents = (fromConfig: readonly DiscoveredAgent[], live: readonly DiscoveredAgent[] | null): DiscoveredAgent[] => {
   if (!live) return [...fromConfig];
   const known = new Map(fromConfig.map((agent) => [agent.name, agent]));
   // The server is the truth for which agents exist; the files say where they come from.
@@ -520,7 +521,7 @@ export class CommandFiles {
   }
 }
 
-export interface AgentDeps {
+interface AgentDeps {
   configDir: string;
   info: OpenCodeInfo;
   commands: CommandFiles;
@@ -530,7 +531,7 @@ export interface AgentDeps {
 const isDirectory = (value: unknown): value is string => typeof value === 'string' && value.length <= 1024 && isAbsolute(value);
 
 /** The catalog for the assignee picker and Settings → Agents. */
-export const agentCatalog = async (deps: Pick<AgentDeps, 'configDir' | 'info'>, directory: string | null, refresh: boolean): Promise<AgentCatalog> => {
+const agentCatalog = async (deps: Pick<AgentDeps, 'configDir' | 'info'>, directory: string | null, refresh: boolean): Promise<AgentCatalog> => {
   const fromConfig = discoverAgents(deps.configDir, directory);
   const [live, models] = await Promise.all([deps.info.liveAgents(directory ?? homedir()), deps.info.modelList(directory, refresh)]);
   return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...(models.pending ? { modelsPending: true } : {}), configDir: deps.configDir };

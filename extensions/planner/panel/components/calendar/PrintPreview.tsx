@@ -32,13 +32,13 @@ import { useCalendarEvents } from '../../lib/calendar/events.ts';
 import { eventDetail, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
 import { useForge } from '../../lib/openchamber/forge.ts';
 import { PRINT_NEEDS_HOST, canPrint, clearPrintable, printNow, setPrintable } from '../../lib/openchamber/print.ts';
-import { calendarItems, eventColor, isTaskEvent } from './items.ts';
+import { calendarItems, eventColor, isTaskEvent } from '../../lib/calendar/items.ts';
 
 /** The longest print range: a year of days, so a printout stays one the browser can lay out. */
-export const PRINT_DAYS_MAX = 366;
+const PRINT_DAYS_MAX = 366;
 
 /** One thing on the calendar, as it prints. */
-export interface PrintedItem {
+interface PrintedItem {
   key: string;
   /** With a task's mark: "☐ Send the report", "⚑ Report", "↻ Standup". */
   title: string;
@@ -179,7 +179,7 @@ const SchedulePage = ({ page, byDay, options }: { page: PrintPage; byDay: Readon
 };
 
 /** The printout: a page per day, week or month (Schedule: one run, broken between days), in the options' size, orientation and colors. */
-export const CalendarSheet = ({ pages, layout, byDay, options, zoneLabel }: { pages: PrintPage[]; layout: PrintLayout; byDay: ReadonlyMap<DateKey, PrintedItem[]>; options: PrintOptions; zoneLabel: string }) => {
+const CalendarSheet = ({ pages, layout, byDay, options, zoneLabel }: { pages: PrintPage[]; layout: PrintLayout; byDay: ReadonlyMap<DateKey, PrintedItem[]>; options: PrintOptions; zoneLabel: string }) => {
   const scale = PRINT_FONT_SIZES.find((size) => size.id === options.fontSize)?.scale ?? 1;
   const orientation = pageOrientation(options.orientation, layout);
   return (

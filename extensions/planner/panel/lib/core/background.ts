@@ -15,7 +15,7 @@ const NOTES_MAX = 40_000;
 const TITLE_MAX = 120;
 
 /** A task title from a message: its first meaningful line, without Markdown markers. */
-export const titleFromMessage = (text: string): string => {
+const titleFromMessage = (text: string): string => {
   const line = text
     .split('\n')
     .map((part) => part.replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, '').replace(/[*_`]+/g, '').trim())

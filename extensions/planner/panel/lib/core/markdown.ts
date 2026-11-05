@@ -11,7 +11,7 @@ export type MdInline =
   | { kind: 'image'; href: string | null; alt: string }
   | { kind: 'br' };
 
-export interface MdItem {
+interface MdItem {
   /** A checklist item's state; null for a plain item. */
   checked: boolean | null;
   /** Checklist items count in document order, for toggling. */
@@ -28,14 +28,14 @@ export type MdBlock =
   | { kind: 'table'; align: ('left' | 'center' | 'right' | null)[]; header: MdInline[][]; rows: MdInline[][][] }
   | { kind: 'hr' };
 
-export interface MdDocument {
+interface MdDocument {
   blocks: MdBlock[];
   /** Checklist items found. */
   tasks: number;
 }
 
 /** Links the panel may open: web pages and mail. */
-export const safeHref = (href: string | null | undefined): string | null => {
+const safeHref = (href: string | null | undefined): string | null => {
   const value = (href ?? '').trim();
   return /^(https?:\/\/|mailto:)/i.test(value) ? value : null;
 };
@@ -43,7 +43,7 @@ export const safeHref = (href: string | null | undefined): string | null => {
 const NAMED: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 
 /** Decode the character references Markdown text may hold (&amp;, &#169;, &#x2014;). */
-export const decodeEntities = (text: string): string =>
+const decodeEntities = (text: string): string =>
   text.replace(/&(#[xX][0-9a-fA-F]{1,6}|#\d{1,7}|[A-Za-z]{2,8});/g, (match, name: string) => {
     if (name[0] !== '#') return NAMED[name.toLowerCase()] ?? match;
     const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
@@ -168,7 +168,7 @@ const FENCE = /^(?:[ \t]*>)*[ \t]{0,3}(`{3,}|~{3,})/;
 const TASK = /^((?:[ \t]*>)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[)([ xX])(\](?=[ \t]))/;
 
 /** Checklist lines outside fenced code, as `[line, checked]`, in document order. */
-export const taskLines = (text: string): { line: number; checked: boolean }[] => {
+const taskLines = (text: string): { line: number; checked: boolean }[] => {
   const out: { line: number; checked: boolean }[] = [];
   let fence: string | null = null;
   text.split('\n').forEach((line, index) => {

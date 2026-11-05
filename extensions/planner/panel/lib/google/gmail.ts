@@ -8,9 +8,10 @@ import type { GmailAction, PlannerState, Subtask, Task, TaskSourceRef } from '..
 import { mergedDone, mergedImports, subtasksChangedIn, wasMerged } from '../../../src/domain/plan/merge.ts';
 import type { Origin, PlannerClient } from '../core/client.ts';
 import type { GoogleStore } from './store.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 /** An email the automations act on: its account, its thread, and what it is called. */
-export interface GmailMail {
+interface GmailMail {
   account: string;
   thread: string;
   subject: string;
@@ -21,7 +22,7 @@ export interface GmailMail {
  * the task's own email and the emails merged into it, once for all of them (`subject` names the first, and how many
  * more).
  */
-export interface GmailPrompt {
+interface GmailPrompt {
   when: 'import' | 'complete';
   taskId: string;
   mails: GmailMail[];
@@ -30,7 +31,7 @@ export interface GmailPrompt {
   actions: GmailAction[];
 }
 
-export interface ThreadState {
+interface ThreadState {
   loading: boolean;
   thread: MailThread | null;
   error: string | null;
@@ -48,11 +49,10 @@ export interface GmailView {
   filter: MailFilter;
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 export const threadKey = (account: string, thread: string): string => `${account}|${thread}`;
 
 /** An email's account and thread, by its link (a task's, or a merged subtask's), when it has both. */
-export const mailOfSource = (source: TaskSourceRef | null | undefined): GmailMail | null => {
+const mailOfSource = (source: TaskSourceRef | null | undefined): GmailMail | null => {
   if (source?.kind !== 'email' || !source.account) return null;
   const thread = threadIdOf(source);
   return thread ? { account: source.account, thread, subject: source.title ?? 'the email' } : null;
@@ -66,7 +66,7 @@ export const mailOf = (task: Pick<Task, 'source'> | undefined): GmailMail | null
  * (checking one off ran its completion automations, or the question about them, then), as Sunsama keeps merged items
  * integrated: completing the task is checking off the ones still open.
  */
-export const mailsCompletedWith = (task: Pick<Task, 'source' | 'subtasks'> | undefined): GmailMail[] => [
+const mailsCompletedWith = (task: Pick<Task, 'source' | 'subtasks'> | undefined): GmailMail[] => [
   ...(mailOf(task) ? [mailOf(task)!] : []),
   ...(task?.subtasks ?? []).flatMap((subtask) => (subtask.done ? [] : (mailOfSource(subtask.source) ?? []))),
 ];

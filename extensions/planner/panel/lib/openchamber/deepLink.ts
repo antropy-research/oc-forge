@@ -5,9 +5,9 @@
 //   /calendar                          the Calendar page
 //   /today?task=<task id>              Today, with that task's details open
 //   /linear?issue=<id>&workspace=<id>  Linear, with that issue in the editor
-import type { Route } from '../../components/app/Shell.tsx';
+import type { Route } from '../core/ui.ts';
 
-export const ROUTES: readonly Route[] = [
+const ROUTES: readonly Route[] = [
   'home',
   'today',
   'calendar',

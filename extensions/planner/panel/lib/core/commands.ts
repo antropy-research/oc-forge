@@ -7,17 +7,7 @@ import { newId } from '../../../src/domain/core/ids.ts';
 import { CHANNEL_COLORS, type DateKey, type Placement, type PlannerState } from '../../../src/domain/core/types.ts';
 import { objectiveByText, weekStartOf } from '../../../src/domain/plan/rituals.ts';
 
-/** The channel id for `name`, creating the channel in the same batch when it is new. */
-export const ensureChannel = (state: PlannerState, name: string, bodies: EventBody[]): string => {
-  const existing = channelByName(state, name);
-  if (existing) return existing.id;
-  const id = newId();
-  const color = CHANNEL_COLORS[liveChannels(state).length % CHANNEL_COLORS.length]!;
-  bodies.push({ type: 'channel.created', channel: { id, name, color, context: 'work' } });
-  return id;
-};
-
-export interface CreateOptions {
+interface CreateOptions {
   edge?: 'top' | 'bottom';
   today?: DateKey;
   folderId?: string | null;

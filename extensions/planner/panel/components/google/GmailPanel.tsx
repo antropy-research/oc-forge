@@ -15,15 +15,15 @@ import { useUi } from '../../lib/core/ui.ts';
 import { plannedLabel } from '../github/GitHubPanel.tsx';
 import { PlanActions } from '../plan/PlanActions.tsx';
 import { ExternalLink } from '../common/ExternalLink.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const dragStart = (event: DragEvent, drag: GoogleDrag) => {
   event.dataTransfer?.setData(GOOGLE_DRAG_TYPE, JSON.stringify(drag));
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copyMove';
 };
 
-export const senderName = (from: string): string => /^\s*"?([^"<]+?)"?\s*</.exec(from)?.[1]?.trim() || from.replace(/[<>]/g, '').trim();
+const senderName = (from: string): string => /^\s*"?([^"<]+?)"?\s*</.exec(from)?.[1]?.trim() || from.replace(/[<>]/g, '').trim();
 
 /** Gmail's own labels, for an account whose labels can't be read. */
 const FALLBACK_LABELS: GmailLabel[] = ['Inbox', 'Starred', 'Important', 'Unread'].map((name) => ({ id: name.toUpperCase(), name, type: 'system' }));

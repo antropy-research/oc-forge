@@ -11,7 +11,7 @@ let resolved: OcForgeClient | null = null;
 let pending: Promise<OcForgeClient | null> | null = null;
 
 /** The host's oc-forge client, once; null on a stock OpenChamber. */
-export const forgeClient = (): Promise<OcForgeClient | null> =>
+const forgeClient = (): Promise<OcForgeClient | null> =>
   (pending ??= connectOcForge()
     .then((client) => (resolved = client))
     .catch(() => null));
@@ -52,7 +52,7 @@ export const chatUrl = (sessionId: string): string | null => resolved?.links.ses
 let newTabClick: MouseEvent | null = null;
 
 /** Whether the click being handled asks for a new tab (Cmd/Ctrl, or the middle button). */
-export const wantsNewTab = (): boolean => newTabClick !== null;
+const wantsNewTab = (): boolean => newTabClick !== null;
 
 /**
  * Watch clicks for the new-tab intent, once per document. A real link (`a[href]`)

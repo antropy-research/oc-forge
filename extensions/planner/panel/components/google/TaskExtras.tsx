@@ -12,8 +12,8 @@ import { shortDay } from '../../../src/domain/calendar/views.ts';
 import { useGoogle, usePlanner } from '../../lib/core/context.ts';
 import { Icon } from '../calendar/Icon.tsx';
 import { SignInPending } from '../settings/Settings.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** Google Calendar's color menu for a task: its list's color, or one of Google's colors. */
 export const TaskColorMenu = ({ color, listColor, disabled, note, onChange }: { color: string | null; listColor: string; disabled?: boolean; note?: string; onChange: (color: string | null) => void }) => {

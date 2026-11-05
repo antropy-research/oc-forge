@@ -34,20 +34,21 @@ import {
 import { GTASK_EXCEPTIONS_MAX, type GoogleTaskKeptPatch } from '../../src/domain/core/events.ts';
 import { newId } from '../../src/domain/core/ids.ts';
 import type { DateKey, GoogleTaskException, GoogleTaskKept, PlannerState } from '../../src/domain/core/types.ts';
-import { GoogleError } from './accounts.ts';
+import { GoogleError, isGone } from './accounts.ts';
 import type { GoogleData } from './data.ts';
 import type { ExecuteResult } from '../plan/planner.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 /** The Planner, as far as a series needs it. */
-export interface SeriesPlanner {
+interface SeriesPlanner {
   readonly state: PlannerState;
   execute(commands: readonly unknown[]): ExecuteResult;
 }
 
-export type SeriesData = Pick<GoogleData, 'allTasks' | 'createTask' | 'deleteTask' | 'updateTask' | 'locateTasks'>;
+type SeriesData = Pick<GoogleData, 'allTasks' | 'createTask' | 'deleteTask' | 'updateTask' | 'locateTasks'>;
 
 /** What a window knows of a task it asks for the next occurrence of: done, and its date (for a series kept before its dates were). */
-export interface NextHint {
+interface NextHint {
   completed?: boolean;
   due?: DateKey | null;
 }
@@ -79,13 +80,11 @@ const keptPatch = (entry: GoogleTaskKept): GoogleTaskKeptPatch => ({
   decline: entry.decline ?? null,
 });
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const isGone = (error: unknown): boolean => error instanceof GoogleError && error.status === 404;
 /** How long a series' deletion goes on deleting its completed tasks before it answers (the host waits 20 s); the rest follow. */
 const DONE_IN_ANSWER_MS = 5000;
-export const SERIES_GONE = 'Google Tasks no longer has this series';
-export const OCCURRENCE_GONE = 'This task is no longer in its series';
-export const OCCURRENCE_DONE = 'This task was completed meanwhile';
+const SERIES_GONE = 'Google Tasks no longer has this series';
+const OCCURRENCE_GONE = 'This task is no longer in its series';
+const OCCURRENCE_DONE = 'This task was completed meanwhile';
 
 type Repeat = NonNullable<GoogleTaskKept['repeat']>;
 /** Where a series goes after a task, by the plan as it is now. */
@@ -301,7 +300,7 @@ export class GoogleSeries {
    * as it is now (`seriesEdit`), and its other open tasks, a next one made
    * meanwhile among them, take its new title and details in Google too.
    */
-  edit(account: string, listId: string, taskId: string, seriesId: string, own: GoogleTaskKeptPatch, before: SeriesSide, after: SeriesSide): Promise<void> {
+  edit(account: string, taskId: string, seriesId: string, own: GoogleTaskKeptPatch, before: SeriesSide, after: SeriesSide): Promise<void> {
     return this.one(account, seriesId, async () => {
       const planned = seriesEdit(this.planner.state, account, seriesId, taskId, own, before, after);
       if (!planned) throw new GoogleError(404, SERIES_GONE);

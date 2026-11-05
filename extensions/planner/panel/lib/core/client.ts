@@ -10,8 +10,9 @@ import type { GoogleTaskItem } from '../../../src/domain/google/google.ts';
 import { todayIn } from '../../../src/domain/core/dates.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import { DEFAULT_SETTINGS, emptyState, type DateKey, type PlannerState } from '../../../src/domain/core/types.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-export interface StorageInfo {
+interface StorageInfo {
   dir: string;
   git: boolean;
   lastCommitAt: string | null;
@@ -49,7 +50,7 @@ export interface ClientView {
   undoLabel: string | null;
 }
 
-export interface DispatchOptions {
+interface DispatchOptions {
   /**
    * Offer Undo for this batch with this label (e.g. "Task deleted"). The
    * service keeps what takes it back and undoes it only while nobody has
@@ -94,7 +95,6 @@ const problemOf = (error: unknown): ServiceProblem => {
   return 'unavailable';
 };
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** The service's 409 for a batch meeting a subtask changed elsewhere since: what it is now, and the plan as it is. */
 class SubtaskConflictError extends Error {

@@ -20,9 +20,10 @@ import type { PlannerEvent } from '../../src/domain/core/events.ts';
 import { addDays, todayIn } from '../../src/domain/core/dates.ts';
 import type { GoogleResponse, GoogleTaskItem } from '../../src/domain/google/google.ts';
 import { meetingsToDecline, taskWindows, type DeclinedMeeting, type Invitation, type TaskWindow } from '../../src/domain/google/taskAdvanced.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 /** How far ahead a task's meetings are declined: its times in the next two weeks; a later one's once it comes within them. */
-export const DECLINE_AHEAD_DAYS = 14;
+const DECLINE_AHEAD_DAYS = 14;
 const EVERY_MS = 5 * 60_000;
 const AFTER_CHANGE_MS = 1500;
 /** A pass that stopped at a bound is followed this soon by one that carries on. */
@@ -36,26 +37,26 @@ const PAGES_MAX = 4;
  */
 const BUDGET_MS = 5000;
 
-export interface DeclineReads {
+interface DeclineReads {
   /** The work or school accounts with Google Calendar and Google Tasks. */
   accounts(): Promise<string[]>;
   /** Tasks by account, list and id, as Google has them now. */
   byIds(groups: readonly { account: string; listId: string; ids: string[] }[]): Promise<{ items: GoogleTaskItem[]; errors: string[] }>;
 }
 
-export interface DeclineCalendar {
+interface DeclineCalendar {
   /** One page of the events on the account's own calendar between two instants, in the order they start. */
   invitationPage(account: string, timeMin: string, timeMax: string, pageToken?: string): Promise<{ items: Invitation[]; next: string | null }>;
   respond(account: string, calendarId: string, eventId: string, response: GoogleResponse, scope: 'this' | 'all', comment?: string): Promise<number>;
 }
 
 /** Where a pass stopped at one of its bounds, for an account: the meetings from `from` on are still to be looked at. */
-export interface DeclineProgress {
+interface DeclineProgress {
   account: string;
   from: string;
 }
 
-export interface DeclinePass {
+interface DeclinePass {
   declined: DeclinedMeeting[];
   errors: string[];
   /** The accounts whose meetings this pass did not get through: the next pass, a few seconds later, carries on. */
@@ -72,7 +73,6 @@ interface Cursor {
   from: string;
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export class MeetingDecliner {
   private queue: Promise<unknown> = Promise.resolve();

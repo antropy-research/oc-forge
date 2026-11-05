@@ -131,3 +131,12 @@ export const formatMinutes = (minutes: number | null | undefined): string => {
   const total = Math.max(0, Math.round(minutes));
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 };
+
+/** How many days the month of `key` has. */
+export const daysInMonth = (key: DateKey): number => {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(Date.UTC(year!, month!, 0)).getUTCDate();
+};
+
+/** Saturday or Sunday. */
+export const isWeekend = (key: DateKey): boolean => weekday(key) === 0 || weekday(key) === 6;

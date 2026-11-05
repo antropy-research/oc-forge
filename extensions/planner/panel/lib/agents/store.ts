@@ -8,6 +8,7 @@ import type { SeenPullRequest } from '../../../src/domain/core/events.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import type { PlannerState, RunAssignee, TaskRun } from '../../../src/domain/core/types.ts';
 import type { PlannerClient } from '../core/client.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 export const PANEL_ID = 'oc-forge-planner';
 /** The host allows 32 subscriptions per frame; projects and their sessions share them. */
@@ -29,7 +30,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export type WorkspaceChoice = { kind: 'project' } | { kind: 'new'; branch: string } | { kind: 'existing'; directory: string };
 
-export interface DispatchChoice {
+interface DispatchChoice {
   projectId: string;
   workspace: WorkspaceChoice;
   prompt: string;
@@ -59,7 +60,6 @@ export interface AgentView {
   catalogError: string | null;
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const toLive = (record: GuestSessionRecord): LiveSession => ({
   id: record.id,
@@ -76,7 +76,7 @@ const toLive = (record: GuestSessionRecord): LiveSession => ({
 });
 
 /** A branch name from a task title; non-Latin titles fall back to the task id. */
-export const branchFor = (title: string, taskId: string): string => {
+const branchFor = (title: string, taskId: string): string => {
   const slug = title.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
   return `planner/${slug.length >= 3 ? slug : `task-${taskId.slice(-6)}`}`;
 };

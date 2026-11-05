@@ -8,22 +8,23 @@ import type { EventBody } from '../../src/domain/core/events.ts';
 import { googleTaskKey, type CalendarSubscription, type DateKey, type GoogleEventLink, type PlannerState, type TaskVisibility } from '../../src/domain/core/types.ts';
 import type { GoogleTaskItem } from '../../src/domain/google/google.ts';
 import { newId } from '../../src/domain/core/ids.ts';
-import { GoogleError } from './accounts.ts';
+import { isGone } from './accounts.ts';
 import type { GoogleData, TimeboxEvent } from './data.ts';
 import type { ExecuteResult, PersistListener } from '../plan/planner.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 /**
  * The calendar a task's new working sessions are written to: its channel's (Sunsama's "Timeboxing Channel", which
  * overrides the default), else "Default for tasks"; null keeps them in the Planner.
  */
-export const timeboxTarget = (state: PlannerState, taskId: string): { account: string; calendarId: string } | null => {
+const timeboxTarget = (state: PlannerState, taskId: string): { account: string; calendarId: string } | null => {
   const channelId = state.tasks[taskId]?.channelId;
   const channel = channelId && !state.channels[channelId]?.deletedAt ? state.settings.channelTimebox[channelId] : undefined;
   return channel ?? state.settings.googleTimebox;
 };
 
 /** A working session's event, as read from its calendar. */
-export interface SessionEvent {
+interface SessionEvent {
   blockId: string;
   eventId: string;
   start: string;
@@ -31,15 +32,13 @@ export interface SessionEvent {
 }
 
 /** What one Google calendar held between two instants, and when it was read. */
-export interface CalendarRead {
+interface CalendarRead {
   sessions: SessionEvent[];
   readAt: number;
 }
 
 export const calendarKey = (account: string, calendarId: string): string => `${account}\n${calendarId}`;
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-const isGone = (error: unknown): boolean => error instanceof GoogleError && error.status === 404;
 
 /**
  * The visibility a task's sessions are written with: that of the Google task
@@ -47,7 +46,7 @@ const isGone = (error: unknown): boolean => error instanceof GoogleError && erro
  * the sessions are where Google Calendar shows others that task's time;
  * undefined for a task that plans no Google task.
  */
-export const sessionVisibility = (state: PlannerState, taskId: string): TaskVisibility | undefined => {
+const sessionVisibility = (state: PlannerState, taskId: string): TaskVisibility | undefined => {
   const source = state.tasks[taskId]?.source;
   if (source?.kind !== 'gtask' || !source.account) return undefined;
   return state.googleTasks?.[googleTaskKey(source.account, source.id)]?.visibility ?? 'default';
@@ -202,14 +201,14 @@ export class GoogleDueTasks {
 }
 
 /** The Planner, as far as the sessions need it. */
-export interface TimeboxPlanner {
+interface TimeboxPlanner {
   readonly state: PlannerState;
   readonly reloadedAt: number;
   onPersist(listener: PersistListener): () => void;
   execute(commands: readonly unknown[]): ExecuteResult;
 }
 
-export type TimeboxData = Pick<GoogleData, 'putTimebox' | 'deleteTimebox' | 'event'>;
+type TimeboxData = Pick<GoogleData, 'putTimebox' | 'deleteTimebox' | 'event'>;
 
 export class GoogleTimeboxes {
   private readonly queues = new Map<string, Promise<void>>();

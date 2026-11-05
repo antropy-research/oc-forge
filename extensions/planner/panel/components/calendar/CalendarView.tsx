@@ -20,11 +20,11 @@ import { ScheduleView, SearchResults } from './ScheduleView.tsx';
 import { YearView } from './YearView.tsx';
 import { CalendarOverlays } from './Overlays.tsx';
 import { Icon } from './Icon.tsx';
-import { isTaskEvent } from './items.ts';
+import { isTaskEvent } from '../../lib/calendar/items.ts';
 import { PrintPreview } from './PrintPreview.tsx';
 
 /** Today's tasks that have no working session today yet. */
-export const UnscheduledToday = () => {
+const UnscheduledToday = () => {
   const view = useView();
   const { ui } = useUi();
   const zone = view.state.settings.timezone ?? 'UTC';

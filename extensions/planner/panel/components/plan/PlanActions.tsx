@@ -11,7 +11,7 @@ export const shortDay = (date: DateKey, today: DateKey): string =>
   date === today ? 'Today' : date === addDays(today, 1) ? 'Tmrw' : `${weekdayName(date).slice(0, 3)} ${Number(date.slice(8, 10))}`;
 
 /** How a label names the day: "today", "tomorrow", "on Wednesday, October 28". */
-export const dayPhrase = (date: DateKey, today: DateKey): string =>
+const dayPhrase = (date: DateKey, today: DateKey): string =>
   date === today ? 'today' : date === addDays(today, 1) ? 'tomorrow' : `on ${weekdayName(date)}, ${monthDay(date)}`;
 
 const menuDay = (date: DateKey, today: DateKey): string =>

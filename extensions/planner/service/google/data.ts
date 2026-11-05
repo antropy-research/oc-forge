@@ -25,7 +25,7 @@ import { isDateKey } from '../../src/domain/core/dates.ts';
 import { driveQuery, type DriveFile, type Invitation } from '../../src/domain/google/taskAdvanced.ts';
 import { newId } from '../../src/domain/core/ids.ts';
 import type { DateKey, TaskVisibility } from '../../src/domain/core/types.ts';
-import { GoogleError, type GoogleAccounts } from './accounts.ts';
+import { type GoogleAccounts, GoogleError, isGone } from './accounts.ts';
 
 const CALENDAR = 'https://www.googleapis.com/calendar/v3';
 const TASKS = 'https://tasks.googleapis.com/tasks/v1';
@@ -56,7 +56,6 @@ const mapLimited = async <T, R>(items: readonly T[], limit: number, fn: (item: T
   return results;
 };
 
-const isGone = (error: unknown): boolean => error instanceof GoogleError && error.status === 404;
 
 const color = (value: string | undefined): string => (value && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : '#4285f4');
 
@@ -81,7 +80,7 @@ interface RawTask {
 /** Google keeps a task's due date as midnight UTC of that day. */
 const dueDate = (due: string | undefined): DateKey | null => (due && isDateKey(due.slice(0, 10)) ? due.slice(0, 10) : null);
 
-export const toTaskItem = (raw: RawTask, account: string, listId: string): GoogleTaskItem | null => {
+const toTaskItem = (raw: RawTask, account: string, listId: string): GoogleTaskItem | null => {
   if (!raw.id || raw.deleted) return null;
   return {
     account,
@@ -122,7 +121,7 @@ interface RawMessage {
 const plain = (text: string): string =>
   text.replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code))).replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
-export const toMailItem = (raw: RawMessage, account: string): MailItem | null => {
+const toMailItem = (raw: RawMessage, account: string): MailItem | null => {
   if (!raw.id || !raw.threadId) return null;
   const header = (name: string) => raw.payload?.headers?.find((item) => item.name?.toLowerCase() === name)?.value ?? '';
   const internal = Number(raw.internalDate);

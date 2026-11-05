@@ -7,7 +7,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { ALL_DOCUMENTS, MUTATION_INPUT_KEYS, WHOAMI_QUERY, readGraphql } from '../../src/domain/linear/linear.ts';
 
-export const LINEAR_API = 'https://api.linear.app/graphql';
+const LINEAR_API = 'https://api.linear.app/graphql';
 const TIMEOUT_MS = 20_000;
 const MAX_WORKSPACES = 20;
 const ALLOWED = new Set(ALL_DOCUMENTS);
@@ -22,7 +22,7 @@ interface StoredWorkspace {
 }
 
 /** What the panel may see of a workspace: everything but the key. */
-export interface WorkspaceInfo {
+interface WorkspaceInfo {
   id: string;
   name: string;
   urlKey: string;
@@ -37,7 +37,7 @@ export type Fetcher = (url: string, init: { method: 'POST'; headers: Record<stri
  * PLANNER_LINEAR_API_BASE=http://127.0.0.1:<port>/ takes every request to Linear's API there, path kept. Only a
  * loopback address is taken.
  */
-export const linearTestFetcher = (base: string | undefined): Fetcher | null => {
+const linearTestFetcher = (base: string | undefined): Fetcher | null => {
   if (!base || !/^http:\/\/127\.0\.0\.1:\d{2,5}\/$/.test(base)) return null;
   return (url, init) => fetch(url.replace(/^https:\/\/api\.linear\.app\//, base), init);
 };

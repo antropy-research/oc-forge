@@ -8,9 +8,9 @@ import { useGoogle, useLinear, usePlanner, useView } from '../../lib/core/contex
 import type { GoogleFeature } from '../../lib/google/store.ts';
 import type { GoogleCalendarInfo } from '../../../src/domain/google/google.ts';
 import { AgentSettings } from './AgentSettings.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const zones = (current: string | null): string[] => {
   const all = (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];

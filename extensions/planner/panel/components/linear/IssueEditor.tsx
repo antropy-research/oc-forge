@@ -26,8 +26,8 @@ import type { IssueRef } from '../../lib/linear/store.ts';
 import { Markdown, MarkdownEditor } from '../common/Markdown.tsx';
 import { Avatar, CycleIcon, Dot, Kbd, PriorityIcon, ProjectIcon, StatusIcon } from './icons.tsx';
 import { Picker, type PickerOption } from './Picker.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const textOf = (issue: LinearIssueDetail): IssueText => ({ title: issue.title, description: issue.description ?? '' });
 

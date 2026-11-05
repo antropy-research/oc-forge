@@ -18,7 +18,7 @@ export type ExecuteResult = { ok: true; applied: number } | { ok: false; error: 
  * window's follow-ups), refused because something it would put back was
  * changed since (`changed`: what), or no longer possible (`gone`).
  */
-export type UndoResult = { ok: true; applied: number; commands: Command[] } | { ok: false; reason: 'changed'; changed: string[] } | { ok: false; reason: 'gone' };
+type UndoResult = { ok: true; applied: number; commands: Command[] } | { ok: false; reason: 'changed'; changed: string[] } | { ok: false; reason: 'gone' };
 
 /** How long, and how many, Undos are kept: a window offers one for eight seconds. */
 const UNDO_KEEP_MS = 60_000;

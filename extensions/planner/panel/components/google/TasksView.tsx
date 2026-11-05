@@ -16,7 +16,6 @@ import { DECLINE_MESSAGE_MAX, type DeclineInput } from '../../../src/domain/core
 import { DEFAULT_DECLINE_MESSAGE, colorName, moveList, orderedLists, taskListColor, taskListKey, taskOrigins } from '../../../src/domain/google/taskAdvanced.ts';
 import { TaskAttachments, TaskColorMenu } from './TaskExtras.tsx';
 import { addDays, isDateKey } from '../../../src/domain/core/dates.ts';
-import { shortDay, weekdayShort } from '../../../src/domain/calendar/views.ts';
 import { describeRecurrence } from '../../../src/domain/google/rrule.ts';
 import { taskForGoogleTask, type GoogleTaskItem, type GoogleTaskList } from '../../../src/domain/google/google.ts';
 import { KEPT_HINT, TASKS_API_REFERENCE, VISIBILITY_LABELS, keptFor, keptTimeLabel, starredKept, taskRepeatPresets, visibilityOf } from '../../../src/domain/google/taskKept.ts';
@@ -35,6 +34,7 @@ import { forgeNow, useForge } from '../../lib/openchamber/forge.ts';
 import { PRINT_NEEDS_HOST, canPrint, clearPrintable, printNow, printShown, setPrintable } from '../../lib/openchamber/print.ts';
 import { printedList, type PrintedList } from '../../../src/domain/google/taskPrint.ts';
 import { endChoices, startChoices } from '../calendar/form.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 /** A task row dragged within or between lists: account, list and task ids. */
 const ROW_DRAG_TYPE = 'application/x-planner-gtask-row';
@@ -44,12 +44,11 @@ const LIST_DRAG_TYPE = 'application/x-planner-gtask-list';
 let draggedRow: string | null = null;
 const REFRESH_MS = 2 * 60_000;
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export { dueChip };
 
 /** What the Planner keeps for Google tasks, and why it is kept here: Google's reference, opened in the browser. */
-export const KeptHint = () => {
+const KeptHint = () => {
   const { host } = usePlanner();
   return (
     <p class="hint gt-kept-hint">
@@ -107,22 +106,22 @@ const placed = (place: MenuPlace | null) =>
     : undefined;
 
 /** Why a task without a time has no availability or visibility to set, as Google Calendar has it. */
-export const UNTIMED_ADVANCED = 'A task without a time is free and private, as in Google Calendar: give it a time to set these';
+const UNTIMED_ADVANCED = 'A task without a time is free and private, as in Google Calendar: give it a time to set these';
 /** What a task's availability and visibility do here, and what they cannot do in Google. */
-export const ADVANCED_NOTE =
+const ADVANCED_NOTE =
   'Busy: the Planner plans other work around it (auto-schedule, playlist times). Visibility goes to the working sessions the Planner writes to Google Calendar for it; Google Calendar itself shows others no task the Planner times, as it gets no time for it and keeps a task without one private';
 /** What a task's color does here. */
-export const COLOR_NOTE = "Color: the task's on the Planner's calendar, over its list's (Google Calendar gets no color for a task from other apps)";
+const COLOR_NOTE = "Color: the task's on the Planner's calendar, over its list's (Google Calendar gets no color for a task from other apps)";
 /** What Do not disturb does here, and what a web app can't mute. */
-export const DND_NOTE =
+const DND_NOTE =
   "Mutes the Planner's own task notifications during this task: they come when it ends. Google Chat, other apps and OpenChamber's own notifications aren't muted: the Planner can't reach them";
 /** What "Automatically decline meetings" does here. */
-export const DECLINE_NOTE =
+const DECLINE_NOTE =
   'The Planner answers the invitations on your calendar that overlap this task "Declined", with this message to the organizer, as Google Calendar does: its times in the next two weeks, and a later time once it comes within them';
 /** Google Calendar's own words for declining when a task is Free. */
-export const DECLINE_FREE = 'Unavailable for "Free" time entries';
+const DECLINE_FREE = 'Unavailable for "Free" time entries';
 /** Why a personal account's task has no Do not disturb or declining. */
-export const WORKSPACE_ONLY = 'Do not disturb and Automatically decline meetings are for work and school accounts, as in Google Calendar';
+const WORKSPACE_ONLY = 'Do not disturb and Automatically decline meetings are for work and school accounts, as in Google Calendar';
 
 /**
  * Title, details, Drive attachments, date and time (or all day), deadline,
@@ -669,7 +668,7 @@ export const repeatBlock = (item: GoogleTaskItem, items: readonly GoogleTaskItem
   item.assigned ? SHARED_NO_REPEAT : item.parent ? SUBTASK_NO_REPEAT : items.some((other) => other.parent === item.id) ? SUBTASKS_NO_REPEAT : null;
 
 /** Google Tasks' keyboard shortcuts, as its help lists them ("⌘" on a Mac, "Ctrl" elsewhere), with what each does here. */
-export const TASK_SHORTCUTS: readonly { keys: string; action: string; note?: string }[] = [
+const TASK_SHORTCUTS: readonly { keys: string; action: string; note?: string }[] = [
   { keys: 'Enter', action: "Create a task; in a task's title, Add below; on a selected task, open it" },
   { keys: 'Space', action: 'Mark a task as complete' },
   { keys: 'Ctrl/⌘ + ]', action: 'Indent task' },
@@ -826,7 +825,7 @@ const SORTS: readonly { id: SortBy; label: string }[] = [
 ];
 
 /** One list, as a Google Tasks column: "Add a task", its tasks and subtasks, "Completed". */
-const ListColumn = ({ list, lists, several, printTarget, onFocus }: { list: GoogleTaskList; lists: GoogleTaskList[]; several: boolean; printTarget: boolean; onFocus: () => void }) => {
+const ListColumn = ({ list, several, printTarget, onFocus }: { list: GoogleTaskList; several: boolean; printTarget: boolean; onFocus: () => void }) => {
   const { google, client } = usePlanner();
   const forge = useForge();
   const gv = useGoogle();
@@ -1620,7 +1619,7 @@ export const TasksView = () => {
         {selected === 'starred' ? (
           <StarredColumn lists={lists} />
         ) : (
-          shown.map((list) => <ListColumn key={listKey(list.account, list.id)} list={list} lists={lists} several={several} printTarget={printKey === listKey(list.account, list.id)} onFocus={() => setFocusedList(listKey(list.account, list.id))} />)
+          shown.map((list) => <ListColumn key={listKey(list.account, list.id)} list={list} several={several} printTarget={printKey === listKey(list.account, list.id)} onFocus={() => setFocusedList(listKey(list.account, list.id))} />)
         )}
         {selected !== 'starred' && !shown.length && <p class="hint tasks-hint">{gv.lists.length ? 'Tick a list to show it here.' : 'No task lists yet: create one.'}</p>}
       </div>

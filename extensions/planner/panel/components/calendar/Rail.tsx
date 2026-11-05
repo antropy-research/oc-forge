@@ -10,14 +10,14 @@ import { addMonths, longDay, monthStart, monthWeeks } from '../../../src/domain/
 import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
 import { anchorOf, calendarUi, useCalendarUi } from '../../lib/calendar/calendarUi.ts';
 import { Icon } from './Icon.tsx';
-import { GOOGLE_TASKS_COLOR } from './items.ts';
+import { GOOGLE_TASKS_COLOR } from '../../lib/calendar/items.ts';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const PALETTE = ['#d50000', '#e67c73', '#f4511e', '#f6bf26', '#33b679', '#0b8043', '#039be5', '#3f51b5', '#7986cb', '#8e24aa', '#616161', '#795548'];
 
 /** The small month in the rail: today ringed, the days on screen shaded; a click goes to that day. */
-export const MiniMonth = ({ anchor, shown, onPick }: { anchor: DateKey; shown: readonly DateKey[]; onPick: (date: DateKey) => void }) => {
+const MiniMonth = ({ anchor, shown, onPick }: { anchor: DateKey; shown: readonly DateKey[]; onPick: (date: DateKey) => void }) => {
   const view = useView();
   const weekStartsOn = view.state.settings.weekStartsOn;
   const [month, setMonth] = useState(monthStart(anchor));
@@ -96,7 +96,7 @@ const CalendarRow = ({ name, color, checked, onToggle, onOnly, onColor, note, ne
 };
 
 /** "My calendars" (the account's own, and Tasks) and "Other calendars" (shared, subscribed and ICS feeds). */
-export const CalendarList = () => {
+const CalendarList = () => {
   const { client, google } = usePlanner();
   const view = useView();
   const gv = useGoogle();

@@ -109,7 +109,7 @@ export interface LinearComment {
 }
 
 /** One change in an issue's history, as its activity shows it. */
-export interface LinearHistoryEntry {
+interface LinearHistoryEntry {
   id: string;
   createdAt: string;
   actor: { id: string; name: string } | null;
@@ -135,7 +135,7 @@ export interface LinearHistoryEntry {
   updatedDescription: boolean | null;
 }
 
-export interface LinearSubIssue {
+interface LinearSubIssue {
   id: string;
   identifier: string;
   title: string;
@@ -144,7 +144,7 @@ export interface LinearSubIssue {
   assignee: { id: string; name: string } | null;
 }
 
-export interface LinearAttachment {
+interface LinearAttachment {
   id: string;
   title: string;
   subtitle: string | null;
@@ -214,7 +214,7 @@ export interface IssueInput {
   estimate?: number | null;
 }
 
-export const ISSUE_INPUT_KEYS: readonly (keyof IssueInput)[] = ['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds', 'projectId', 'cycleId', 'estimate'];
+const ISSUE_INPUT_KEYS: readonly (keyof IssueInput)[] = ['title', 'description', 'stateId', 'priority', 'assigneeId', 'dueDate', 'addedLabelIds', 'removedLabelIds', 'projectId', 'cycleId', 'estimate'];
 
 export interface LinearProjectDetail extends LinearProject {
   content: string | null;
@@ -241,9 +241,6 @@ const PROJECT_FIELDS = `id name url color icon description progress health prior
     status { id name type color }
     lead { id name }
     teams(first: 10) { nodes { id key name } }`;
-
-/** Issue lists are read 100 at a time, newest change first, until Linear says there are no more. */
-export const ISSUE_PAGE_SIZE = 100;
 
 /** Issues assigned to me; `filter` adds the display's and the temporary filters. */
 export const ASSIGNED_QUERY = `query PlannerAssigned($after: String, $filter: IssueFilter) {
@@ -558,7 +555,7 @@ export const MUTATION_INPUT_KEYS: ReadonlyMap<string, readonly string[]> = new M
 const FROM_LINEAR_PRIORITY: Record<number, Priority | null> = { 0: null, 1: 'urgent', 2: 'high', 3: 'medium', 4: 'low' };
 const TO_LINEAR_PRIORITY: Record<Priority, number> = { urgent: 1, high: 2, medium: 3, low: 4 };
 
-export const priorityFromLinear = (value: number): Priority | null => FROM_LINEAR_PRIORITY[value] ?? null;
+const priorityFromLinear = (value: number): Priority | null => FROM_LINEAR_PRIORITY[value] ?? null;
 export const priorityToLinear = (value: Priority | null): number => (value ? TO_LINEAR_PRIORITY[value] : 0);
 
 export const isClosedType = (type: string | undefined): boolean => type === 'completed' || type === 'canceled';
@@ -621,9 +618,6 @@ export const linkedTask = (state: PlannerState, issueId: string, mirrors: readon
 const openLinked = (state: PlannerState): Task[] =>
   Object.values(state.tasks).filter((task) => task.source?.kind === 'linear' && !task.deletedAt && !task.archivedAt && !task.completedAt);
 
-/** Issues behind open linked tasks; completed tasks keep the state they last saw. */
-export const linkedIssueIds = (state: PlannerState): string[] => [...new Set(openLinked(state).map((task) => task.source!.id))];
-
 /**
  * The same, by workspace. Links made before workspaces belong to `fallback`
  * (OpenChamber's own connection); without one they are left out.
@@ -644,7 +638,7 @@ export const linkedIssueIdsByWorkspace = (state: PlannerState, fallback: string 
 export const stateOfType = (states: readonly LinearState[], type: string): LinearState | null =>
   [...states].filter((state) => state.type === type).sort((a, b) => (a.position ?? 0) - (b.position ?? 0))[0] ?? null;
 
-export interface SyncOptions {
+interface SyncOptions {
   today: DateKey;
   /** Complete the task when its issue is completed or canceled in Linear. */
   importCompletion: boolean;
@@ -712,9 +706,6 @@ export const readGraphql = <T>(body: string): T => {
   if (!parsed.data) throw new Error('Linear returned no data');
   return parsed.data;
 };
-
-/** Linear's priority names, by its numbers (0 none, 1 urgent … 4 low). */
-export const PRIORITY_LABELS: Record<number, string> = PRIORITY_NAMES;
 
 // ── Saved views ──────────────────────────────────────────────────────────────
 
@@ -785,7 +776,7 @@ export const favoritesOf = (nodes: readonly LinearFavoriteNode[], workspaceId: s
       return [];
     });
 
-export interface ViewGroup {
+interface ViewGroup {
   key: string;
   label: string;
   views: LinearSavedView[];

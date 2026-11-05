@@ -5,16 +5,16 @@
 // and for Schedule the descriptions and your response), and what each page
 // of the printout holds.
 import type { DateKey } from '../core/types.ts';
-import { addDays, weekday } from '../core/dates.ts';
-import { SCHEDULE_DAYS, addMonths, daysInMonth, longDay, monthStart, monthWeeks, rangeTitle, type CalendarMode } from './views.ts';
+import { addDays, daysInMonth, isWeekend, weekday } from '../core/dates.ts';
+import { SCHEDULE_DAYS, addMonths, longDay, monthStart, monthWeeks, rangeTitle, type CalendarMode } from './views.ts';
 
 /** The print preview's View: Auto prints as the calendar shows (a year, month by month). */
-export type PrintView = 'auto' | 'day' | 'week' | 'month' | 'schedule';
+type PrintView = 'auto' | 'day' | 'week' | 'month' | 'schedule';
 export type PrintLayout = Exclude<PrintView, 'auto'>;
-export type PrintFontSize = 'smallest' | 'smaller' | 'small' | 'normal' | 'big' | 'bigger' | 'biggest';
-export type PrintOrientation = 'auto' | 'portrait' | 'landscape';
+type PrintFontSize = 'smallest' | 'smaller' | 'small' | 'normal' | 'big' | 'bigger' | 'biggest';
+type PrintOrientation = 'auto' | 'portrait' | 'landscape';
 /** Color & style: Full color (my answer shows as Google draws it), Outline, or Black and white. */
-export type PrintColor = 'full' | 'outline' | 'bw';
+type PrintColor = 'full' | 'outline' | 'bw';
 
 export interface PrintOptions {
   /** The print range, both days included. */
@@ -60,13 +60,12 @@ export const PRINT_COLORS: readonly { id: PrintColor; label: string }[] = [
 ];
 
 const lastOfMonth = (date: DateKey): DateKey => `${date.slice(0, 8)}${String(daysInMonth(date)).padStart(2, '0')}`;
-const isWeekend = (date: DateKey): boolean => weekday(date) === 0 || weekday(date) === 6;
 
 /**
  * The print range the preview opens with: the range the calendar shows (a month view prints its month, not the
  * other months' days around it; a year its twelve months).
  */
-export const printRange = (mode: CalendarMode, anchor: DateKey, days: readonly DateKey[]): { from: DateKey; to: DateKey } => {
+const printRange = (mode: CalendarMode, anchor: DateKey, days: readonly DateKey[]): { from: DateKey; to: DateKey } => {
   if (mode === 'month') return { from: monthStart(anchor), to: lastOfMonth(anchor) };
   if (mode === 'year') return { from: `${anchor.slice(0, 4)}-01-01`, to: `${anchor.slice(0, 4)}-12-31` };
   if (mode === 'schedule') return { from: anchor, to: addDays(anchor, SCHEDULE_DAYS - 1) };

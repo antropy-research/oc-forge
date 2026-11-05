@@ -8,7 +8,7 @@ import type { GitHubStore, GitHubView } from '../github/store.ts';
 import type { GoogleStore, GoogleView } from '../google/store.ts';
 import type { GmailStore, GmailView } from '../google/gmail.ts';
 
-export interface PlannerContextValue {
+interface PlannerContextValue {
   client: PlannerClient;
   host: HostClient;
   linear: LinearStore;

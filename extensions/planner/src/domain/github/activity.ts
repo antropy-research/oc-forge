@@ -4,8 +4,8 @@
 // (service/github/github.ts `activity`): pull requests opened, reviewed and merged, comments on issues and pull requests,
 // discussions started and commented on.
 
-export const ACTIVITY_KINDS = ['opened', 'reviewed', 'merged', 'commented', 'discussion', 'discussionComment'] as const;
-export type GitHubActivityKind = (typeof ACTIVITY_KINDS)[number];
+const ACTIVITY_KINDS = ['opened', 'reviewed', 'merged', 'commented', 'discussion', 'discussionComment'] as const;
+type GitHubActivityKind = (typeof ACTIVITY_KINDS)[number];
 
 /** What the service reads, one GitHub read each (a page at a time): a search, or one of the user's own lists. */
 export const ACTIVITY_SOURCES = ['opened', 'merged', 'mergedReviewed', 'mergedInvolved', 'reviewed', 'commented', 'discussions', 'discussionComments'] as const;
@@ -137,10 +137,10 @@ export const activityText = (group: ActivityGroup): string => {
 };
 
 /** An instant as GitHub's search takes one (`2026-10-29T07:00:00+00:00`), to the second. */
-export const searchInstant = (iso: string): string => `${new Date(iso).toISOString().slice(0, 19)}+00:00`;
+const searchInstant = (iso: string): string => `${new Date(iso).toISOString().slice(0, 19)}+00:00`;
 
 /** A day as a search range: from its start to the second before the next day starts (GitHub's `..` includes both ends). */
-export const searchRange = (from: string, to: string): string => `${searchInstant(from)}..${searchInstant(new Date(Date.parse(to) - 1000).toISOString())}`;
+const searchRange = (from: string, to: string): string => `${searchInstant(from)}..${searchInstant(new Date(Date.parse(to) - 1000).toISOString())}`;
 
 /** The searches the service sends for the day, with the user as `@me` (GitHub's issue search takes it). */
 export const activitySearches = (from: string, to: string): Record<'opened' | 'merged' | 'mergedReviewed' | 'mergedInvolved', string> => {

@@ -233,7 +233,7 @@ export interface Invitation {
  * Planner declined before (`declined`) and that was answered again since is
  * left as answered: the user took it back.
  */
-export const invitationsToDecline = (window: TaskWindow, events: readonly Invitation[], declined: ReadonlySet<string> = new Set()): Invitation[] => {
+const invitationsToDecline = (window: TaskWindow, events: readonly Invitation[], declined: ReadonlySet<string> = new Set()): Invitation[] => {
   const decline = window.decline;
   if (!decline) return [];
   const [start, end] = [Date.parse(window.start), Date.parse(window.end)];

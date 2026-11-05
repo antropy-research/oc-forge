@@ -2,7 +2,7 @@
 // opens from (a day column, the sources panel) does not cut it off.
 import { useLayoutEffect, useState } from 'preact/hooks';
 
-export interface Place {
+interface Place {
   top: number;
   left: number;
   /** Set when the popover fits on neither side: it gets the larger side and scrolls. */
@@ -17,7 +17,7 @@ const GAP = 4;
  * below it, else above it, else on the roomier side at that side's height. It
  * never covers its anchor.
  */
-export const placeBeside = (anchor: { top: number; bottom: number; left: number; right: number }, width: number, height: number, view: { width: number; height: number }, align: 'left' | 'right'): Place => {
+const placeBeside = (anchor: { top: number; bottom: number; left: number; right: number }, width: number, height: number, view: { width: number; height: number }, align: 'left' | 'right'): Place => {
   const left = Math.max(MARGIN, Math.min(align === 'left' ? anchor.left : anchor.right - width, view.width - width - MARGIN));
   const below = view.height - anchor.bottom - GAP - MARGIN;
   const above = anchor.top - GAP - MARGIN;

@@ -6,7 +6,7 @@ import type { GoogleAccounts } from './accounts.ts';
 const PEOPLE = 'https://people.googleapis.com/v1';
 const enc = encodeURIComponent;
 
-export interface Contact {
+interface Contact {
   name: string;
   email: string;
 }

@@ -37,7 +37,7 @@ interface InlineInputProps {
   onCancel: () => void;
 }
 
-export const InlineInput = ({ value, className, onCommit, onCancel }: InlineInputProps) => {
+const InlineInput = ({ value, className, onCommit, onCancel }: InlineInputProps) => {
   const ref = useRef<HTMLInputElement>(null);
   const done = useRef(false);
   useEffect(() => {

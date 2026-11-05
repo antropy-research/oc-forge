@@ -8,11 +8,12 @@ import { LINEAR_DRAG_TYPE, usePlanner, useLinear, useView } from '../../lib/core
 import { useUi } from '../../lib/core/ui.ts';
 import { displayOf, type LinearSource, type LinearTeam } from '../../lib/linear/store.ts';
 import { useDayTargets } from '../../lib/core/dayTargets.ts';
-import { ConnectLinear, LinearErrors, messageOf, needsConnect, workspaceLabel, workspaceNames } from './common.tsx';
+import { ConnectLinear, LinearErrors, needsConnect, workspaceLabel, workspaceNames } from './common.tsx';
 import { FilterBar } from './FilterBar.tsx';
 import { BOARD_DRAG_TYPE } from './IssueCollection.tsx';
 import { PlanActions } from '../plan/PlanActions.tsx';
 import { AssignButton } from '../agents/AssigneePicker.tsx';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 export { ConnectLinear } from './common.tsx';
 export { LinearPage } from './LinearPage.tsx';

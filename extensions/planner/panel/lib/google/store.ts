@@ -3,55 +3,20 @@
 // tasks, and writing completion and due dates back to Google Tasks the way the
 // Linear integration writes back to Linear (ask, do, or not).
 import type { HostClient } from '@openchamber/sdk';
-import { GOOGLE_NOTES_MAX, GTASK_EXCEPTIONS_MAX, type Command, type DeclineInput, type EventBody, type GoogleTaskKeptPatch } from '../../../src/domain/core/events.ts';
-import {
-  findMovedTask,
-  followMergedGoogleTask,
-  GONE_STATUS,
-  gtaskSource,
-  isGoogleTaskItem,
-  isMailItem,
-  linkedGoogleTasks,
-  planGoogleTaskSync,
-  plannerEditTimes,
-  TASK_GONE,
-  taskForGoogleTask,
-  taskForMail,
-  taskFromGoogleTask,
-  taskFromMail,
-  type GoogleCalendarInfo,
-  type GoogleTaskItem,
-  type GoogleTaskList,
-  type GoogleTaskWrite,
-  type MailItem,
-  type SyncedField,
-} from '../../../src/domain/google/google.ts';
-import {
-  dueOccurrences,
-  firstSightOfSeries,
-  keptFor,
-  nextOccurrence,
-  scheduledOn,
-  seriesCut,
-  seriesTemplate,
-  templateOf,
-  upcomingValues,
-  type MadeTask,
-  type OccurrenceValues,
-  type SeriesSide,
-  type UpcomingTask,
-} from '../../../src/domain/google/taskKept.ts';
+import { GOOGLE_NOTES_MAX, type Command, type DeclineInput, type EventBody, type GoogleTaskKeptPatch } from '../../../src/domain/core/events.ts';
+import { findMovedTask, followMergedGoogleTask, GONE_STATUS, gtaskSource, isGoogleTaskItem, isMailItem, linkedGoogleTasks, planGoogleTaskSync, plannerEditTimes, TASK_GONE, taskForGoogleTask, taskForMail, taskFromGoogleTask, taskFromMail, type GoogleCalendarInfo, type GoogleTaskItem, type GoogleTaskList, type GoogleTaskWrite, type MailItem, type SyncedField } from '../../../src/domain/google/google.ts';
+import { dueOccurrences, firstSightOfSeries, keptFor, nextOccurrence, scheduledOn, seriesCut, seriesTemplate, templateOf, upcomingValues, type MadeTask, type OccurrenceValues, type SeriesSide, type UpcomingTask } from '../../../src/domain/google/taskKept.ts';
 import { SERIES_FIELDS, formChanges, formConflicts, formValuesOf, occurrenceNow, occurrenceOf, seriesShown, withOccurrence, type FormField, type FormValues } from '../../../src/domain/google/taskForm.ts';
 import { edgePosition } from '../../../src/domain/core/selectors.ts';
 import { mergedDone, mergedReopened, subtaskChange, subtasksChangedIn } from '../../../src/domain/plan/merge.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
-import { addDays } from '../../../src/domain/core/dates.ts';
 import { longDay } from '../../../src/domain/calendar/views.ts';
-import { applyMove, positionBetween, type MoveTarget } from '../../../src/domain/google/tasks.ts';
-import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, GoogleTaskTemplate, Placement, PlannerState, Subtask, Task, TaskAttachment, TaskSourceRef, TaskVisibility } from '../../../src/domain/core/types.ts';
+import { applyMove, type MoveTarget } from '../../../src/domain/google/tasks.ts';
+import type { CalendarSubscription, DateKey, GoogleTaskException, GoogleTaskKept, Placement, PlannerState, Subtask, Task, TaskAttachment, TaskSourceRef, TaskVisibility } from '../../../src/domain/core/types.ts';
 import { declineCarriesOn, type DeclinedMeeting, type DriveFile } from '../../../src/domain/google/taskAdvanced.ts';
 import type { Origin, PlannerClient, Snapshot } from '../core/client.ts';
 import { calendarUi } from '../calendar/calendarUi.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 
 /**
  * What a Google task's form sets: Google's own fields, and what the Planner keeps for it; Busy, a visibility, Do not
@@ -81,7 +46,7 @@ export interface TaskFields {
 }
 
 /** The form's values its fields give, `base`'s where they leave one out (as it is), with the form's rules (`formValuesOf`). */
-export const formValuesOfFields = (fields: TaskFields, base: FormValues, extra: { starred?: boolean; listId?: string } = {}): FormValues => {
+const formValuesOfFields = (fields: TaskFields, base: FormValues, extra: { starred?: boolean; listId?: string } = {}): FormValues => {
   const timed = fields.kept.time !== null;
   const busy = timed && (fields.kept.busy ?? base.busy);
   return {
@@ -141,14 +106,14 @@ export class FreshnessError extends Error {
  * what it shows (`series`: Edit → All tasks, its template on the open task's
  * date; else the task as it is).
  */
-export interface SaveExtra {
+interface SaveExtra {
   starred?: boolean;
   listId?: string;
   shows?: 'task' | 'series';
 }
 
 /** A form's save against the task as it is now (`GoogleStore.formCheck`). */
-export interface FormCheck {
+interface FormCheck {
   /** The task as Google has it now, and what is kept for it. */
   item: GoogleTaskItem;
   kept: GoogleTaskKept | null;
@@ -187,7 +152,7 @@ export const DELETE_CHOICES: { id: DeleteScope; label: string }[] = [
 
 export type GoogleFeature = 'calendar' | 'tasks' | 'mail' | 'drive' | 'mailActions' | 'contacts';
 
-export interface GoogleAccountView {
+interface GoogleAccountView {
   email: string;
   features: GoogleFeature[];
   addedAt: string;
@@ -195,7 +160,7 @@ export interface GoogleAccountView {
   workspace?: boolean;
 }
 
-export interface GoogleStatusView {
+interface GoogleStatusView {
   client: { id: string } | null;
   accounts: GoogleAccountView[];
   /** Why the last working session could not be written to Google Calendar. */
@@ -204,14 +169,14 @@ export interface GoogleStatusView {
 
 export type SignInResult = { status: 'pending' } | { status: 'connected'; email: string; features: GoogleFeature[] } | { status: 'failed'; message: string };
 
-export interface SignInView {
+interface SignInView {
   id: string;
   authUrl: string;
   redirectUri: string;
   result: SignInResult;
 }
 
-export const MAIL_SEARCHES = [
+const MAIL_SEARCHES = [
   { label: 'Inbox', query: 'in:inbox' },
   { label: 'Unread', query: 'in:inbox is:unread' },
   { label: 'Starred', query: 'is:starred' },
@@ -246,7 +211,7 @@ export interface GoogleView {
   board: Record<string, TaskBoardList>;
 }
 
-export interface TaskBoardList {
+interface TaskBoardList {
   items: GoogleTaskItem[];
   loading: boolean;
   error: string | null;
@@ -268,7 +233,6 @@ const SYNC_IDS = 50;
 const doneThere = (source: TaskSourceRef | null | undefined): boolean => source?.status?.type === 'completed';
 const SIGN_IN_POLL_MS = 1500;
 const SIGN_IN_MAX_MS = 10 * 60_000;
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** What Google Tasks' Undo does, once: what to say then, and (`note`) anything that stayed as it is. */
 type UndoEntry = () => Promise<{ done: string; note: string | null }>;
@@ -293,7 +257,7 @@ export const undoAction = (google: Pick<GoogleStore, 'undoLast'>, notify: (messa
 };
 
 /** Where a Google calendar opens on the web; the Planner reads it through the account, not from here. */
-export const calendarWebUrl = (calendarId: string): string => `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(calendarId)}`;
+const calendarWebUrl = (calendarId: string): string => `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(calendarId)}`;
 
 export class GoogleStore {
   private view: GoogleView = {

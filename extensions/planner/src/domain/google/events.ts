@@ -7,6 +7,7 @@ import type { DateKey } from '../core/types.ts';
 import { addDays, daysBetween, instantAt, isDateKey, isValidTimeZone, zonedDateMinutes } from '../core/dates.ts';
 import { formatRRule, shiftRule, splitRecurrence, untilBefore } from './rrule.ts';
 import { EVENT_COLORS, type GoogleResponse, type GoogleTime, type RawAttendee, type RawGoogleEvent } from './google.ts';
+import { isRecord } from '../core/values.ts';
 
 export type EditScope = 'this' | 'following' | 'all';
 export const EDIT_SCOPES: readonly EditScope[] = ['this', 'following', 'all'];
@@ -30,7 +31,6 @@ export interface EventInput {
   meet?: boolean;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isText = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max;
 export const isEmailAddress = (value: unknown): value is string => typeof value === 'string' && value.length <= 254 && /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/.test(value);
 

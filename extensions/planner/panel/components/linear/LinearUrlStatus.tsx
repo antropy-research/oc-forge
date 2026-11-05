@@ -5,7 +5,7 @@ import { pastedUrl } from '../../../src/domain/plan/pastedUrl.ts';
 import type { LinearIssue, LinearState } from '../../../src/domain/linear/linear.ts';
 import { usePlanner } from '../../lib/core/context.ts';
 
-export interface UrlStatus {
+interface UrlStatus {
   issue: LinearIssue | null;
   states: LinearState[];
   stateId: string;
