@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expandEvents, parseIcs, type CalendarEvent, type VEvent } from '../../src/domain/calendar/ics.ts';
 import type { CalendarSubscription, DateKey } from '../../src/domain/core/types.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 const TTL_MS = 10 * 60_000;
 const TIMEOUT_MS = 15_000;
@@ -31,7 +32,7 @@ export class CalendarFeeds {
           const events = await this.load(calendar, refresh);
           result.events.push(...expandEvents(events, calendar.id, from, to, zone));
         } catch (error) {
-          result.errors.push({ calendarId: calendar.id, message: error instanceof Error ? error.message : String(error) });
+          result.errors.push({ calendarId: calendar.id, message: messageOf(error) });
         }
       }),
     );

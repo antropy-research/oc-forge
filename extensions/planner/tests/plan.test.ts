@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { GenerateRequest } from '@openchamber/sdk';
@@ -804,6 +805,23 @@ describe('the plan on disk', () => {
 // Rubric 3, not end to end: notes from Linear, GitHub and Gmail, written by others, are drawn from this tree in the
 // browser, and no scenario without a browser reaches the drawing. That they can't run script, link anywhere but the web
 // or mail, or load an image is a security property, worth its own cases.
+describe('the service as OpenChamber runs it', () => {
+  // Found 2026-11-05: a request target no URL reads threw out of the handler and took the process down.
+  test('a request it cannot read is refused, and the service goes on', async () => {
+    const port = Number(new URL(planner.base).port);
+    const raw = (target: string) =>
+      new Promise<string>((resolve) => {
+        const socket = connect(port, '127.0.0.1', () => socket.write(`GET ${target} HTTP/1.1\r\nHost: planner\r\nAuthorization: Bearer ${planner.token}\r\nConnection: close\r\n\r\n`));
+        let text = '';
+        socket.on('data', (chunk) => (text += chunk));
+        socket.on('close', () => resolve(text));
+        socket.on('error', () => resolve(text));
+      });
+    for (const target of ['//', 'http://[::1', '//:::']) expect((await raw(target)).split('\r\n')[0]).toBe('HTTP/1.1 400 Bad Request');
+    expect((await planner.call('GET', '/health')).status).toBe(200);
+  });
+});
+
 describe('Markdown in notes is drawn from a safe tree (security)', () => {
   const inlines = (blocks: MdBlock[]): MdInline[] =>
     blocks.flatMap((block): MdInline[] => {

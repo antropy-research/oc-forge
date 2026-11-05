@@ -5,6 +5,7 @@ import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readd
 import { join } from 'node:path';
 import type { PlannerEvent } from '../../src/domain/core/events.ts';
 import { sortEvents } from '../../src/domain/core/reducer.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 interface EventStoreOptions {
   dir: string;
@@ -147,7 +148,7 @@ export class EventStore {
         void this.pack();
       }
     } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
+      const text = messageOf(error);
       if (!/nothing to commit/.test(text)) {
         this.lastError = text.slice(0, 500);
         this.log(`git commit failed: ${this.lastError}`);
@@ -248,7 +249,7 @@ export class EventStore {
       await this.git(['repack', '-d', '-q'], 120_000);
       await this.git(['-c', 'gc.autoDetach=false', 'gc', '--auto', '--quiet'], 120_000);
     } catch (error) {
-      this.log(`git pack failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+      this.log(`git pack failed: ${messageOf(error).slice(0, 300)}`);
     }
   }
 
@@ -268,7 +269,7 @@ export class EventStore {
       await this.git(['commit', '-q', '-m', 'Initialize planner data']);
       return true;
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.lastError = messageOf(error);
       this.log(`git init failed: ${this.lastError}`);
       return false;
     }

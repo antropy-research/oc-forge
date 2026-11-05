@@ -2,6 +2,7 @@
 // GitHub repository, so several machines share one plan.
 import type { EventStore } from './store.ts';
 import type { Planner } from './planner.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 export interface SyncStatus {
   remote: string | null;
@@ -98,7 +99,7 @@ export class SyncManager {
       this.lastSyncAt = new Date().toISOString();
       this.lastError = null;
     } catch (error) {
-      this.lastError = (error instanceof Error ? error.message : String(error)).split('\n').slice(0, 3).join(' ').slice(0, 400);
+      this.lastError = messageOf(error).split('\n').slice(0, 3).join(' ').slice(0, 400);
       this.log(`sync failed: ${this.lastError}`);
     }
     return { ...this.status(), syncing: false };

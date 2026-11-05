@@ -9,6 +9,7 @@ import { MEETING_SYNC_DAYS, importCalendars, planChannelFill, planMeetingComplet
 import { addDays, instantAt, todayIn } from '../../src/domain/core/dates.ts';
 import { newId } from '../../src/domain/core/ids.ts';
 import type { EventBody } from '../../src/domain/core/events.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 interface MeetingRun {
   added: number;
@@ -101,7 +102,7 @@ export class MeetingImport {
   /** Every minute the ended meetings; every five minutes auto-sync; once now. */
   start(): void {
     setInterval(() => this.complete(), COMPLETE_MS).unref?.();
-    setInterval(() => void this.run().catch((error) => this.log(`Meeting import: ${error instanceof Error ? error.message : String(error)}`)), SYNC_MS).unref?.();
+    setInterval(() => void this.run().catch((error) => this.log(`Meeting import: ${messageOf(error)}`)), SYNC_MS).unref?.();
     void this.run().catch(() => {});
   }
 }

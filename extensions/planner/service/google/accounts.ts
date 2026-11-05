@@ -12,6 +12,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 export const GOOGLE_FEATURES = ['calendar', 'tasks', 'mail', 'drive', 'mailActions', 'contacts'] as const;
 export type GoogleFeature = (typeof GOOGLE_FEATURES)[number];
@@ -220,6 +221,16 @@ export class GoogleAccounts {
     return { client: this.client ? { id: this.client.id } : null, accounts: this.accounts.map(publicInfo) };
   }
 
+  /** The addresses of the accounts that allow `feature`. */
+  async emailsWith(feature: GoogleFeature): Promise<string[]> {
+    return (await this.status()).accounts.filter((account) => account.features.includes(feature)).map((account) => account.email);
+  }
+
+  /** Whether the account `email` allows `feature` (false when there is none). */
+  async allows(email: string, feature: GoogleFeature): Promise<boolean> {
+    return (await this.status()).accounts.find((account) => account.email === email)?.features.includes(feature) ?? false;
+  }
+
   /**
    * Ask Google once whether an account connected before the Planner kept its domain is a work or school one (the
    * `hd` of its user info), as a sign-in now tells from its ID token. Unanswered, it counts as a personal account.
@@ -236,7 +247,7 @@ export class GoogleAccounts {
             await this.save();
           });
         } catch (error) {
-          this.log(`could not tell whether ${email} is a work or school account: ${error instanceof Error ? error.message : String(error)}`);
+          this.log(`could not tell whether ${email} is a work or school account: ${messageOf(error)}`);
         }
       })();
       this.identifying.set(email, pending);
@@ -363,7 +374,7 @@ export class GoogleAccounts {
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });
       } catch (error) {
-        throw new GoogleError(502, `Could not reach Google: ${error instanceof Error ? error.message : String(error)}`);
+        throw new GoogleError(502, `Could not reach Google: ${messageOf(error)}`);
       }
     };
     let response = await send(await this.accessToken(email));
@@ -398,7 +409,7 @@ export class GoogleAccounts {
       this.endSignIn(id, { status: 'connected', email: account.email, features: featuresOf(account.scopes) });
       return page('Connected', `The Planner can now use ${account.email}. You can close this tab.`);
     } catch (failure) {
-      const message = failure instanceof Error ? failure.message : String(failure);
+      const message = messageOf(failure);
       this.endSignIn(id, { status: 'failed', message });
       return page('Not connected', `${message.replace(/[<>&]/g, '')}. You can close this tab.`);
     }
@@ -455,7 +466,7 @@ export class GoogleAccounts {
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (error) {
-      throw new GoogleError(502, `Could not reach Google: ${error instanceof Error ? error.message : String(error)}`);
+      throw new GoogleError(502, `Could not reach Google: ${messageOf(error)}`);
     }
     const text = await response.text();
     if (response.status >= 400) throw new GoogleError(response.status === 400 || response.status === 401 ? 400 : 502, googleMessage(text, response.status));
@@ -466,7 +477,7 @@ export class GoogleAccounts {
     try {
       await this.fetcher(REVOKE_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token }).toString(), signal: AbortSignal.timeout(TIMEOUT_MS) });
     } catch (error) {
-      this.log(`could not revoke a Google token: ${error instanceof Error ? error.message : String(error)}`);
+      this.log(`could not revoke a Google token: ${messageOf(error)}`);
     }
   }
 

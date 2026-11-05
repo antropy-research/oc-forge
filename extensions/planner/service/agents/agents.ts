@@ -5,7 +5,6 @@
 // writes one command per assignee into OpenCode's global command folder.
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import type http from 'node:http';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import {
@@ -16,13 +15,13 @@ import {
   commandName,
   isAgentName,
   isModelRef,
-  isRunAssignee,
   presetAssignee,
   type AgentCatalog,
   type DiscoveredAgent,
   type ModelInfo,
 } from '../../src/domain/agents/assignees.ts';
 import type { AgentPreset, RunAssignee } from '../../src/domain/core/types.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 /** OpenCode's global config folder: `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`. */
 export const opencodeConfigDir = (env: NodeJS.ProcessEnv = process.env): string =>
@@ -516,49 +515,14 @@ export class CommandFiles {
       }
       this.lastPresets = key;
     } catch (error) {
-      this.log(`agent commands: ${error instanceof Error ? error.message : String(error)}`);
+      this.log(`agent commands: ${messageOf(error)}`);
     }
   }
 }
 
-interface AgentDeps {
-  configDir: string;
-  info: OpenCodeInfo;
-  commands: CommandFiles;
-  readJson: (req: http.IncomingMessage) => Promise<unknown>;
-}
-
-const isDirectory = (value: unknown): value is string => typeof value === 'string' && value.length <= 1024 && isAbsolute(value);
-
-/** The catalog for the assignee picker and Settings → Agents. */
-const agentCatalog = async (deps: Pick<AgentDeps, 'configDir' | 'info'>, directory: string | null, refresh: boolean): Promise<AgentCatalog> => {
-  const fromConfig = discoverAgents(deps.configDir, directory);
-  const [live, models] = await Promise.all([deps.info.liveAgents(directory ?? homedir()), deps.info.modelList(directory, refresh)]);
-  return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...(models.pending ? { modelsPending: true } : {}), configDir: deps.configDir };
-};
-
-/** The agent routes; null when the path is not one of them. */
-export const agentRoute = async (req: http.IncomingMessage, url: URL, deps: AgentDeps): Promise<{ status: number; body: unknown } | null> => {
-  if (url.pathname === '/agents' && req.method === 'GET') {
-    const directory = url.searchParams.get('directory');
-    if (directory !== null && !isDirectory(directory)) return { status: 400, body: { error: 'directory must be an absolute path' } };
-    return { status: 200, body: await agentCatalog(deps, directory, url.searchParams.get('refresh') === '1') };
-  }
-  if (url.pathname === '/agents/commands' && req.method === 'POST') {
-    const body = (await deps.readJson(req)) as { entries?: unknown; directory?: unknown; wait?: unknown };
-    const entries = Array.isArray(body.entries) ? body.entries : [];
-    if (entries.length > 40 || !entries.every((entry) => isRunAssignee((entry as { assignee?: unknown })?.assignee) && ['preset', 'agent'].includes((entry as { kind?: unknown }).kind as string))) {
-      return { status: 400, body: { error: 'entries must be at most 40 of { assignee, kind: preset | agent }' } };
-    }
-    if (body.directory !== undefined && body.directory !== null && !isDirectory(body.directory)) return { status: 400, body: { error: 'directory must be an absolute path' } };
-    let commands: { id: string; name: string; changed: boolean }[];
-    try {
-      commands = deps.commands.ensure(entries as { assignee: RunAssignee; kind: 'preset' | 'agent' }[]);
-    } catch (error) {
-      return { status: 409, body: { error: `Could not write the agent command in ${deps.commands.dir}: ${error instanceof Error ? error.message : String(error)}` } };
-    }
-    const listed = body.wait === true && commands.length ? await deps.info.waitListed(commands.map((command) => command.name), (body.directory as string | undefined) ?? homedir()) : null;
-    return { status: 200, body: { commands, listed, dir: deps.commands.dir } };
-  }
-  return null;
+/** The catalog for the assignee picker and Settings → Agents: the agents of OpenCode's config (`configDir`, and the project's at `directory`), checked against the running server, and the models. */
+export const agentCatalog = async (configDir: string, info: OpenCodeInfo, directory: string | null, refresh: boolean): Promise<AgentCatalog> => {
+  const fromConfig = discoverAgents(configDir, directory);
+  const [live, models] = await Promise.all([info.liveAgents(directory ?? homedir()), info.modelList(directory, refresh)]);
+  return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...(models.pending ? { modelsPending: true } : {}), configDir };
 };

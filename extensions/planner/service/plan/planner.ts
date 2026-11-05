@@ -9,6 +9,7 @@ import { todayIn } from '../../src/domain/core/dates.ts';
 import { newId } from '../../src/domain/core/ids.ts';
 import type { DateKey, PlannerState } from '../../src/domain/core/types.ts';
 import type { EventStore } from './store.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 /** `conflict`: a subtask the batch changes was changed elsewhere since (`subtaskConflict`); nothing of it was written. */
 export type ExecuteResult = { ok: true; applied: number } | { ok: false; error: string; index: number; conflict?: SubtaskConflict };
@@ -280,7 +281,7 @@ export class Planner {
         listener(events, before, this.state);
       } catch (error) {
         // A listener's trouble never undoes a write.
-        console.error(`[planner] after a write: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`[planner] after a write: ${messageOf(error)}`);
       }
     }
   }

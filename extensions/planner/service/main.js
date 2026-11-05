@@ -1,6 +1,8 @@
 // service/main.ts
-import http2 from "node:http";
-import { homedir as homedir2 } from "node:os";
+import { homedir as homedir3 } from "node:os";
+import { join as join5 } from "node:path";
+
+// service/context.ts
 import { dirname as dirname5, join as join4 } from "node:path";
 
 // service/plan/store.ts
@@ -123,6 +125,7 @@ var startOfWeek = (key, weekStartsOn) => {
   const offset = (weekday(key) - weekStartsOn + 7) % 7;
   return addDays(key, -offset);
 };
+var MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 var zonedFormatters = new Map;
 var zonedFormatter = (timeZone) => {
   let formatter = zonedFormatters.get(timeZone);
@@ -159,6 +162,15 @@ var instantAt = (date, minutes, timeZone) => {
 var daysInMonth = (key) => {
   const [year, month] = key.split("-").map(Number);
   return new Date(Date.UTC(year, month, 0)).getUTCDate();
+};
+var SHORT_MONTHS = MONTH_NAMES.map((month) => month.slice(0, 3));
+var parts = (key) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
+var keyOf = (year, month, day) => `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+var addMonths = (key, n) => {
+  const { year, month, day } = parts(key);
+  const index = year * 12 + (month - 1) + n;
+  const first = keyOf(Math.floor(index / 12), index % 12 + 1, 1);
+  return keyOf(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth(first)));
 };
 
 // src/domain/core/selectors.ts
@@ -673,6 +685,10 @@ var applyEvents = (state, events) => {
 var sortEvents = (events) => events.sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 var foldEvents = (events) => applyEvents(emptyState(), events);
 
+// src/domain/core/values.ts
+var messageOf = (error) => error instanceof Error ? error.message : String(error);
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
 // service/plan/store.ts
 var MONTH_FILE = /^\d{4}-\d{2}\.jsonl$/;
 var README = `# Planner data
@@ -803,7 +819,7 @@ ${summaries.map((line) => `- ${line}`).join(`
         this.pack();
       }
     } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
+      const text = messageOf(error);
       if (!/nothing to commit/.test(text)) {
         this.lastError = text.slice(0, 500);
         this.log(`git commit failed: ${this.lastError}`);
@@ -885,7 +901,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
       await this.git(["repack", "-d", "-q"], 120000);
       await this.git(["-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"], 120000);
     } catch (error) {
-      this.log(`git pack failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+      this.log(`git pack failed: ${messageOf(error).slice(0, 300)}`);
     }
   }
   async ensureRepo() {
@@ -906,7 +922,7 @@ ${stderr}${stdout}`)) : resolve(stdout));
       await this.git(["commit", "-q", "-m", "Initialize planner data"]);
       return true;
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.lastError = messageOf(error);
       this.log(`git init failed: ${this.lastError}`);
       return false;
     }
@@ -1054,10 +1070,6 @@ var shiftRule = (rule, from, to) => {
       };
   }
 };
-
-// src/domain/core/values.ts
-var messageOf = (error) => error instanceof Error ? error.message : String(error);
-var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
 // src/domain/linear/display.ts
 var oneOf = (list, value) => typeof value === "string" && list.includes(value);
@@ -1855,7 +1867,7 @@ var subtaskConflict = (body, context, batch = {}) => {
 
 // src/domain/plan/recurrence.ts
 var RECURRENCE_HORIZON_DAYS = 7;
-var parts = (date) => date.split("-").map(Number);
+var parts2 = (date) => date.split("-").map(Number);
 var daysInMonth2 = (year, month) => new Date(Date.UTC(year, month, 0)).getUTCDate();
 var occursOn = (rule, startDate, date) => {
   if (date < startDate)
@@ -1870,8 +1882,8 @@ var occursOn = (rule, startDate, date) => {
       return weeks % interval === 0 && days.includes(weekday(date));
     }
     case "monthly": {
-      const [sy, sm, sd] = parts(startDate);
-      const [y, m, d] = parts(date);
+      const [sy, sm, sd] = parts2(startDate);
+      const [y, m, d] = parts2(date);
       if (((y - sy) * 12 + (m - sm)) % interval !== 0)
         return false;
       const total = daysInMonth2(y, m);
@@ -1880,8 +1892,8 @@ var occursOn = (rule, startDate, date) => {
       return d === target;
     }
     case "yearly": {
-      const [sy, sm, sd] = parts(startDate);
-      const [y, m, d] = parts(date);
+      const [sy, sm, sd] = parts2(startDate);
+      const [y, m, d] = parts2(date);
       return (y - sy) % interval === 0 && m === sm && d === Math.min(sd, daysInMonth2(y, m));
     }
   }
@@ -2437,7 +2449,7 @@ class Planner {
       try {
         listener(events, before, this.state);
       } catch (error) {
-        console.error(`[planner] after a write: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`[planner] after a write: ${messageOf(error)}`);
       }
     }
   }
@@ -2445,6 +2457,107 @@ class Planner {
     const at = Math.max(this.now().getTime(), this.lastAt + 1);
     this.lastAt = at;
     return { v: 1, id: newId(at), at: new Date(at).toISOString(), ...cmd ? { cmd } : {}, ...body };
+  }
+}
+
+// service/plan/sync.ts
+var isRemoteUrl = (url) => {
+  if (!url || url.length > 500 || /\s/.test(url) || url.startsWith("-"))
+    return false;
+  return /^(https|ssh|git|file):\/\/\S+$/i.test(url) || /^[\w.-]+@[\w.-]+:[\w.~/-]+$/.test(url) || /^\/[^\0]+$/.test(url);
+};
+var AUTO_DELAY_MS = 15000;
+var PERIOD_MS = 5 * 60000;
+
+class SyncManager {
+  store;
+  planner;
+  log;
+  remote = null;
+  lastSyncAt = null;
+  lastError = null;
+  running = null;
+  lock = null;
+  timer = null;
+  constructor(store, planner, log = () => {}) {
+    this.store = store;
+    this.planner = planner;
+    this.log = log;
+  }
+  async init() {
+    this.remote = await this.store.remoteUrl();
+    if (this.remote)
+      this.schedule(5000);
+    setInterval(() => {
+      if (this.remote)
+        this.run().catch(() => {
+          return;
+        });
+    }, PERIOD_MS).unref?.();
+  }
+  status() {
+    return { remote: this.remote, lastSyncAt: this.lastSyncAt, lastError: this.lastError, syncing: this.running !== null };
+  }
+  idle() {
+    return this.lock ?? Promise.resolve();
+  }
+  schedule(delay = AUTO_DELAY_MS) {
+    if (!this.remote)
+      return;
+    if (this.timer)
+      clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.run().catch(() => {
+        return;
+      });
+    }, delay);
+    this.timer.unref?.();
+  }
+  async setRemote(url) {
+    const clean = url?.trim() || null;
+    if (clean && !isRemoteUrl(clean))
+      throw new Error("Use an https, ssh, git@host:path, file:// URL or an absolute path.");
+    await this.store.setRemote(clean);
+    this.remote = clean;
+    this.lastError = null;
+    this.lastSyncAt = null;
+    if (clean)
+      this.schedule(1000);
+    return this.status();
+  }
+  run() {
+    if (!this.remote)
+      return Promise.reject(new Error("No sync remote is set."));
+    this.running ??= this.sync().finally(() => {
+      this.running = null;
+    });
+    return this.running;
+  }
+  async sync() {
+    try {
+      await this.store.fetchRemote();
+      let release;
+      this.lock = new Promise((resolve) => {
+        release = resolve;
+      });
+      try {
+        await this.store.commitNow();
+        if (await this.store.mergeRemote())
+          this.planner.reload();
+      } finally {
+        this.lock = null;
+        release();
+      }
+      await this.store.pushRemote();
+      this.lastSyncAt = new Date().toISOString();
+      this.lastError = null;
+    } catch (error) {
+      this.lastError = messageOf(error).split(`
+`).slice(0, 3).join(" ").slice(0, 400);
+      this.log(`sync failed: ${this.lastError}`);
+    }
+    return { ...this.status(), syncing: false };
   }
 }
 
@@ -2639,7 +2752,7 @@ var icsInstant = (time, userZone) => Date.parse(instantAt(time.date, time.allDay
 var WEEKDAY_CODES2 = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
 var MAX_OCCURRENCES = 5000;
 var daysInMonth3 = (year, month) => new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-var keyOf = (year, month, day) => `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+var keyOf2 = (year, month, day) => `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 var nthWeekdayOfMonth = (year, month, day, n) => {
   const total = daysInMonth3(year, month);
   const matches = [];
@@ -2647,7 +2760,7 @@ var nthWeekdayOfMonth = (year, month, day, n) => {
     if (new Date(Date.UTC(year, month, d)).getUTCDay() === day)
       matches.push(d);
   const pick = n > 0 ? matches[n - 1] : matches[matches.length + n];
-  return pick ? keyOf(year, month, pick) : null;
+  return pick ? keyOf2(year, month, pick) : null;
 };
 var recurrenceDates = (start, rule, lastDate, userZone) => {
   const interval = Math.max(1, Number(rule.INTERVAL ?? 1) || 1);
@@ -2705,7 +2818,7 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
             } else {
               for (let d = 1;d <= daysInMonth3(year, month); d++)
                 if (new Date(Date.UTC(year, month, d)).getUTCDay() === day)
-                  candidates.push(keyOf(year, month, d));
+                  candidates.push(keyOf2(year, month, d));
             }
           }
         } else {
@@ -2713,12 +2826,12 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
             const total = daysInMonth3(year, month);
             const day = value < 0 ? total + value + 1 : value;
             if (day >= 1 && day <= total)
-              candidates.push(keyOf(year, month, day));
+              candidates.push(keyOf2(year, month, day));
           }
         }
         for (const date of [...new Set(candidates)].sort())
           take(date);
-        if (keyOf(year, month, 1) > lastDate)
+        if (keyOf2(year, month, 1) > lastDate)
           done = true;
       }
       break;
@@ -2727,8 +2840,8 @@ var recurrenceDates = (start, rule, lastDate, userZone) => {
       for (let year = startYear, guard = 0;!done && guard < MAX_OCCURRENCES; year += interval, guard++) {
         const month = startMonth - 1;
         if (startDay <= daysInMonth3(year, month))
-          take(keyOf(year, month, startDay));
-        if (keyOf(year, 0, 1) > lastDate)
+          take(keyOf2(year, month, startDay));
+        if (keyOf2(year, 0, 1) > lastDate)
           done = true;
       }
       break;
@@ -2819,7 +2932,7 @@ class CalendarFeeds {
         const events = await this.load(calendar, refresh);
         result.events.push(...expandEvents(events, calendar.id, from, to, zone));
       } catch (error) {
-        result.errors.push({ calendarId: calendar.id, message: error instanceof Error ? error.message : String(error) });
+        result.errors.push({ calendarId: calendar.id, message: messageOf(error) });
       }
     }));
     result.events.sort((a, b) => a.start.localeCompare(b.start));
@@ -2870,104 +2983,261 @@ class CalendarFeeds {
   }
 }
 
-// service/plan/sync.ts
-var isRemoteUrl = (url) => {
-  if (!url || url.length > 500 || /\s/.test(url) || url.startsWith("-"))
-    return false;
-  return /^(https|ssh|git|file):\/\/\S+$/i.test(url) || /^[\w.-]+@[\w.-]+:[\w.~/-]+$/.test(url) || /^\/[^\0]+$/.test(url);
-};
-var AUTO_DELAY_MS = 15000;
-var PERIOD_MS = 5 * 60000;
+// service/calendar/meetings.ts
+import { randomBytes } from "node:crypto";
 
-class SyncManager {
-  store;
+// src/domain/calendar/meetings.ts
+var MEETING_SYNC_DAYS = 7;
+var eventKey = (event) => event.google ? `${event.google.account}|${event.google.calendarId}|${event.google.eventId}` : null;
+var DAY_MS = 86400000;
+var excludedBy = (event, exclusions) => {
+  const response = event.google?.response ?? null;
+  if (response === "declined")
+    return "declined";
+  if (exclusions.includes("noAttendees") && !event.google?.guests)
+    return "noAttendees";
+  if (exclusions.includes("nonBlocking") && event.transparent)
+    return "nonBlocking";
+  if (exclusions.includes("oooHold") && /\b(OOO|HOLD)\b/i.test(event.title))
+    return "oooHold";
+  if (exclusions.includes("unconfirmed") && (response === "needsAction" || response === "tentative"))
+    return "unconfirmed";
+  if (exclusions.includes("multiDayAllDay") && event.allDay && Date.parse(event.end) - Date.parse(event.start) > DAY_MS + 3600000)
+    return "multiDayAllDay";
+  return null;
+};
+var importCalendars = (state, mode) => {
+  const google = Object.values(state.calendars).filter((calendar) => calendar.google);
+  const chosen = state.settings.meetingCalendars;
+  if (chosen.length)
+    return google.filter((calendar) => chosen.includes(calendar.id));
+  return mode === "suggest" ? google.filter((calendar) => calendar.visible) : [];
+};
+var subscriptionOf = (state, event) => Object.values(state.calendars).find((calendar) => calendar.google && event.google && calendar.google.account === event.google.account && calendar.google.calendarId === event.google.calendarId);
+var taskForEvent = (state, key) => Object.values(state.tasks).find((task) => task.source?.kind === "event" && task.source.id === key) ?? null;
+var eventSource = (event, auto) => {
+  const key = eventKey(event);
+  if (!key || !event.google || key.length > 200)
+    return null;
+  return {
+    kind: "event",
+    id: key,
+    key: "Google Calendar",
+    url: event.google.htmlLink || "https://calendar.google.com/calendar/r",
+    title: event.title,
+    account: event.google.account,
+    event: { calendarId: event.google.calendarId, start: event.start, end: event.end, allDay: event.allDay, invitees: event.google.guests, ...auto ? { auto: true } : {} }
+  };
+};
+var eventDay = (event, zone) => zonedDateMinutes(event.start, zone).date;
+var startOf = (task) => task.source?.kind === "event" && task.source.event ? Date.parse(task.source.event.start) : null;
+var meetingPosition = (state, date, start) => {
+  const list = tasksForDay(state, date).filter((task) => !task.deletedAt);
+  const later = list.findIndex((task) => (startOf(task) ?? -Infinity) > start);
+  if (later >= 0) {
+    const before = list[later - 1]?.position;
+    const at = list[later].position;
+    return before === undefined ? at - 1024 : (before + at) / 2;
+  }
+  const meetings = list.map((task, index) => ({ task, index })).filter(({ task }) => startOf(task) !== null);
+  const last = meetings.at(-1);
+  if (last) {
+    const next = list[last.index + 1]?.position;
+    return next === undefined ? last.task.position + 1024 : (last.task.position + next) / 2;
+  }
+  return list.length ? list[0].position - 1024 : 1024;
+};
+var meetingTask = (state, event, options) => {
+  const source = eventSource(event, options.auto);
+  if (!source)
+    return null;
+  const date = eventDay(event, options.zone);
+  const minutes = event.allDay ? null : Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000);
+  const channelId = importChannel(state, event);
+  return {
+    id: options.id,
+    title: event.title,
+    placement: { kind: "day", date },
+    position: options.position ?? meetingPosition(state, date, Date.parse(event.start)),
+    ...minutes && minutes > 0 ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {},
+    ...channelId ? { channelId } : {},
+    source
+  };
+};
+var calendarChannel = (state, calendarId) => {
+  const channelId = state.settings.meetingChannels[calendarId];
+  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
+};
+var importChannel = (state, event) => {
+  const subscription = subscriptionOf(state, event);
+  return subscription ? calendarChannel(state, subscription.id) : null;
+};
+var planChannelFill = (state, calendarIds, today, zone) => {
+  if (state.settings.meetingImport !== "autoSync")
+    return [];
+  return calendarIds.flatMap((calendarId) => {
+    const google = state.calendars[calendarId]?.google;
+    const channelId = calendarChannel(state, calendarId);
+    if (!google || !channelId || !state.settings.meetingCalendars.includes(calendarId))
+      return [];
+    return Object.values(state.tasks).flatMap((task) => {
+      const event = task.source?.kind === "event" ? task.source.event : undefined;
+      if (!event?.auto || task.channelId || task.completedAt || task.deletedAt || task.archivedAt)
+        return [];
+      if (task.source.account !== google.account || event.calendarId !== google.calendarId || eventDay(event, zone) < today)
+        return [];
+      return [{ type: "task.updated", taskId: task.id, patch: { channelId } }];
+    });
+  });
+};
+var hasTime = (state, taskId) => Object.values(state.entries).some((entry) => entry.taskId === taskId);
+var planMeetingSync = (state, events, options) => {
+  if (state.settings.meetingImport !== "autoSync")
+    return [];
+  const calendars = new Set(importCalendars(state, "autoSync").map((calendar) => calendar.id));
+  const read = options.read ?? calendars;
+  const days = new Set(Array.from({ length: options.days }, (_, index) => addDays(options.from, index)));
+  const bodies = [];
+  let working = state;
+  const qualifying = new Map;
+  for (const event of [...events].sort((a, b) => a.start.localeCompare(b.start))) {
+    const key = eventKey(event);
+    const subscription = subscriptionOf(state, event);
+    if (!key || !subscription || !calendars.has(subscription.id) || !days.has(eventDay(event, options.zone)) || excludedBy(event, state.settings.meetingExclusions))
+      continue;
+    qualifying.set(key, event);
+  }
+  const push = (body) => {
+    bodies.push(body);
+    working = applyLocally(working, body);
+  };
+  for (const [key, event] of qualifying) {
+    const task = taskForEvent(working, key);
+    if (!task) {
+      const made = meetingTask(working, event, { id: options.newId(), zone: options.zone, auto: true });
+      if (made)
+        push({ type: "task.created", task: made });
+      continue;
+    }
+    if (task.deletedAt || task.completedAt || !task.source?.event?.auto)
+      continue;
+    const date = eventDay(event, options.zone);
+    const source = eventSource(event, true);
+    const changed = task.title !== event.title || task.source.event.start !== event.start || task.source.event.end !== event.end;
+    if (task.placement.kind !== "day" || task.placement.date !== date)
+      push({ type: "task.moved", taskId: task.id, placement: { kind: "day", date }, position: meetingPosition(working, date, Date.parse(event.start)) });
+    if (changed) {
+      const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000));
+      push({ type: "task.updated", taskId: task.id, patch: { title: event.title, source, ...minutes && minutes > 0 ? { plannedMinutes: minutes } : {} } });
+    }
+  }
+  for (const task of Object.values(working.tasks)) {
+    const event = task.source?.kind === "event" ? task.source.event : undefined;
+    if (!event?.auto || task.deletedAt || task.completedAt || qualifying.has(task.source.id))
+      continue;
+    if (task.placement.kind !== "day" || !days.has(task.placement.date) || hasTime(working, task.id))
+      continue;
+    const calendar = Object.values(state.calendars).find((item) => item.google && task.source.account === item.google.account && item.google.calendarId === event.calendarId);
+    if (calendar && calendars.has(calendar.id) && !read.has(calendar.id))
+      continue;
+    push({ type: "task.deleted", taskId: task.id });
+  }
+  return bodies;
+};
+var planMeetingCompletion = (state, now, zone, mode = state.settings.meetingAutoComplete) => {
+  if (mode === "never")
+    return [];
+  return Object.values(state.tasks).flatMap((task) => {
+    const event = task.source?.kind === "event" ? task.source.event : undefined;
+    if (!event || task.completedAt || task.deletedAt || task.archivedAt || Date.parse(event.end) > now)
+      return [];
+    if (mode === "invitees" && !event.invitees)
+      return [];
+    if (state.timer?.taskId === task.id)
+      return [];
+    return [{ type: "task.completed", taskId: task.id, on: zonedDateMinutes(Math.min(Date.parse(event.end), now) - 1, zone).date }];
+  });
+};
+var applyLocally = (state, body) => applyEvents(state, [{ v: 1, id: `meeting-sync-${state.version}-${body.type}`, at: new Date().toISOString(), ...body }]);
+
+// service/calendar/meetings.ts
+var COMPLETE_MS = 60000;
+var SYNC_MS = 5 * 60000;
+
+class MeetingImport {
   planner;
+  calendars;
   log;
-  remote = null;
-  lastSyncAt = null;
-  lastError = null;
+  now;
   running = null;
-  lock = null;
-  timer = null;
-  constructor(store, planner, log = () => {}) {
-    this.store = store;
+  constructor(planner, calendars, log = () => {}, now = Date.now) {
     this.planner = planner;
+    this.calendars = calendars;
     this.log = log;
+    this.now = now;
+    planner.onPersist((_events, before, after) => {
+      const channels = after.settings.meetingChannels;
+      const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== before.settings.meetingChannels[calendarId]);
+      if (changed.length)
+        queueMicrotask(() => this.fillChannels(changed));
+    });
   }
-  async init() {
-    this.remote = await this.store.remoteUrl();
-    if (this.remote)
-      this.schedule(5000);
-    setInterval(() => {
-      if (this.remote)
-        this.run().catch(() => {
-          return;
-        });
-    }, PERIOD_MS).unref?.();
+  apply(bodies) {
+    if (!bodies.length)
+      return 0;
+    const result = this.planner.execute(bodies.map((body) => ({ cmd: `meetings-${randomBytes(8).toString("hex")}`, ...body })));
+    if (!result.ok) {
+      this.log(`Meeting import: ${result.error}`);
+      return 0;
+    }
+    return result.applied;
   }
-  status() {
-    return { remote: this.remote, lastSyncAt: this.lastSyncAt, lastError: this.lastError, syncing: this.running !== null };
+  complete(now = this.now()) {
+    const zone = this.planner.state.settings.timezone;
+    return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
   }
-  idle() {
-    return this.lock ?? Promise.resolve();
-  }
-  schedule(delay = AUTO_DELAY_MS) {
-    if (!this.remote)
-      return;
-    if (this.timer)
-      clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      this.run().catch(() => {
-        return;
-      });
-    }, delay);
-    this.timer.unref?.();
-  }
-  async setRemote(url) {
-    const clean = url?.trim() || null;
-    if (clean && !isRemoteUrl(clean))
-      throw new Error("Use an https, ssh, git@host:path, file:// URL or an absolute path.");
-    await this.store.setRemote(clean);
-    this.remote = clean;
-    this.lastError = null;
-    this.lastSyncAt = null;
-    if (clean)
-      this.schedule(1000);
-    return this.status();
+  fillChannels(calendarIds) {
+    const state = this.planner.state;
+    const zone = state.settings.timezone;
+    return zone ? this.apply(planChannelFill(state, calendarIds, todayIn(zone, new Date(this.now())), zone)) : 0;
   }
   run() {
-    if (!this.remote)
-      return Promise.reject(new Error("No sync remote is set."));
-    this.running ??= this.sync().finally(() => {
+    this.running ??= this.once().finally(() => {
       this.running = null;
     });
     return this.running;
   }
-  async sync() {
-    try {
-      await this.store.fetchRemote();
-      let release;
-      this.lock = new Promise((resolve) => {
-        release = resolve;
-      });
-      try {
-        await this.store.commitNow();
-        if (await this.store.mergeRemote())
-          this.planner.reload();
-      } finally {
-        this.lock = null;
-        release();
-      }
-      await this.store.pushRemote();
-      this.lastSyncAt = new Date().toISOString();
-      this.lastError = null;
-    } catch (error) {
-      this.lastError = (error instanceof Error ? error.message : String(error)).split(`
-`).slice(0, 3).join(" ").slice(0, 400);
-      this.log(`sync failed: ${this.lastError}`);
+  async once() {
+    const outcome = { added: 0, moved: 0, removed: 0, completed: this.complete(), errors: [] };
+    const state = this.planner.state;
+    const zone = state.settings.timezone;
+    if (!zone || state.settings.meetingImport !== "autoSync")
+      return outcome;
+    const calendars = importCalendars(state, "autoSync");
+    if (!calendars.length)
+      return outcome;
+    const today = todayIn(zone, new Date(this.now()));
+    const timeMin = instantAt(today, 0, zone);
+    const timeMax = instantAt(addDays(today, MEETING_SYNC_DAYS), 0, zone);
+    const { events, errors } = await this.calendars.read(calendars.map((calendar) => ({ ...calendar, visible: true })), [], timeMin, timeMax, zone, true);
+    outcome.errors = errors.map((error) => error.message);
+    const failed = new Set(errors.map((error) => error.calendarId));
+    const read = new Set(calendars.map((calendar) => calendar.id).filter((id) => !failed.has(id)));
+    const bodies = planMeetingSync(this.planner.state, events, { from: today, days: MEETING_SYNC_DAYS, zone, newId, read });
+    const applied = this.apply(bodies);
+    if (applied) {
+      outcome.added = bodies.filter((body) => body.type === "task.created").length;
+      outcome.moved = bodies.filter((body) => body.type === "task.moved" || body.type === "task.updated").length;
+      outcome.removed = bodies.filter((body) => body.type === "task.deleted").length;
     }
-    return { ...this.status(), syncing: false };
+    if (outcome.errors.length)
+      this.log(`Meeting import: ${outcome.errors.join("; ")}`);
+    return outcome;
+  }
+  start() {
+    setInterval(() => this.complete(), COMPLETE_MS).unref?.();
+    setInterval(() => void this.run().catch((error) => this.log(`Meeting import: ${messageOf(error)}`)), SYNC_MS).unref?.();
+    this.run().catch(() => {});
   }
 }
 
@@ -3705,7 +3975,7 @@ class LinearWorkspaces {
       try {
         data = readGraphql(answer.body);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = messageOf(error);
         throw new WorkspaceError(400, /authenticat/i.test(message) ? "Linear rejected the key" : `Linear answered: ${message}`);
       }
       const entry = { id: data.organization.id, name: data.organization.name, urlKey: data.organization.urlKey, account: data.viewer.name, key, addedAt: new Date().toISOString() };
@@ -3754,7 +4024,7 @@ class LinearWorkspaces {
         signal: AbortSignal.timeout(TIMEOUT_MS2)
       });
     } catch (error) {
-      throw new WorkspaceError(502, `Could not reach Linear: ${error instanceof Error ? error.message : String(error)}`);
+      throw new WorkspaceError(502, `Could not reach Linear: ${messageOf(error)}`);
     }
     return { status: response.status, body: await response.text() };
   }
@@ -3793,7 +4063,7 @@ class LinearWorkspaces {
 }
 
 // service/google/accounts.ts
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes as randomBytes2 } from "node:crypto";
 import { chmod as chmod2, mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
 import http from "node:http";
 import { dirname as dirname2 } from "node:path";
@@ -3912,6 +4182,12 @@ class GoogleAccounts {
       await Promise.race([Promise.all(unknown.map((account) => this.identify(account.email))), new Promise((resolve) => setTimeout(resolve, IDENTIFY_MS).unref?.())]);
     return { client: this.client ? { id: this.client.id } : null, accounts: this.accounts.map(publicInfo2) };
   }
+  async emailsWith(feature) {
+    return (await this.status()).accounts.filter((account) => account.features.includes(feature)).map((account) => account.email);
+  }
+  async allows(email, feature) {
+    return (await this.status()).accounts.find((account) => account.email === email)?.features.includes(feature) ?? false;
+  }
   identify(email) {
     let pending = this.identifying.get(email);
     if (!pending) {
@@ -3924,7 +4200,7 @@ class GoogleAccounts {
             await this.save();
           });
         } catch (error) {
-          this.log(`could not tell whether ${email} is a work or school account: ${error instanceof Error ? error.message : String(error)}`);
+          this.log(`could not tell whether ${email} is a work or school account: ${messageOf(error)}`);
         }
       })();
       this.identifying.set(email, pending);
@@ -3968,9 +4244,9 @@ class GoogleAccounts {
     if (features.length === 0)
       throw new GoogleError(400, "Choose at least one of Calendar, Tasks, Gmail and Drive");
     this.expireSignIns();
-    const id = base64url(randomBytes(12));
-    const state = base64url(randomBytes(24));
-    const verifier = base64url(randomBytes(48));
+    const id = base64url(randomBytes2(12));
+    const state = base64url(randomBytes2(24));
+    const verifier = base64url(randomBytes2(48));
     const challenge = base64url(createHash("sha256").update(verifier).digest());
     const listener = await this.listen((url) => this.callback(id, url));
     const redirectUri = `http://127.0.0.1:${listener.port}/`;
@@ -4035,7 +4311,7 @@ class GoogleAccounts {
           signal: AbortSignal.timeout(TIMEOUT_MS3)
         });
       } catch (error) {
-        throw new GoogleError(502, `Could not reach Google: ${error instanceof Error ? error.message : String(error)}`);
+        throw new GoogleError(502, `Could not reach Google: ${messageOf(error)}`);
       }
     };
     let response = await send(await this.accessToken(email));
@@ -4070,7 +4346,7 @@ class GoogleAccounts {
       this.endSignIn(id, { status: "connected", email: account.email, features: featuresOf(account.scopes) });
       return page2("Connected", `The Planner can now use ${account.email}. You can close this tab.`);
     } catch (failure) {
-      const message = failure instanceof Error ? failure.message : String(failure);
+      const message = messageOf(failure);
       this.endSignIn(id, { status: "failed", message });
       return page2("Not connected", `${message.replace(/[<>&]/g, "")}. You can close this tab.`);
     }
@@ -4132,7 +4408,7 @@ class GoogleAccounts {
         signal: AbortSignal.timeout(TIMEOUT_MS3)
       });
     } catch (error) {
-      throw new GoogleError(502, `Could not reach Google: ${error instanceof Error ? error.message : String(error)}`);
+      throw new GoogleError(502, `Could not reach Google: ${messageOf(error)}`);
     }
     const text = await response.text();
     if (response.status >= 400)
@@ -4143,7 +4419,7 @@ class GoogleAccounts {
     try {
       await this.fetcher(REVOKE_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }).toString(), signal: AbortSignal.timeout(TIMEOUT_MS3) });
     } catch (error) {
-      this.log(`could not revoke a Google token: ${error instanceof Error ? error.message : String(error)}`);
+      this.log(`could not revoke a Google token: ${messageOf(error)}`);
     }
   }
   endSignIn(id, result) {
@@ -4192,439 +4468,6 @@ class GoogleAccounts {
     const next = this.writes.then(work, work);
     this.writes = next.catch(() => {});
     return next;
-  }
-}
-
-// src/domain/google/gmail.ts
-var SYSTEM_LABELS = { inbox: "INBOX", starred: "STARRED", important: "IMPORTANT", unread: "UNREAD", spam: "SPAM", trash: "TRASH", sent: "SENT", drafts: "DRAFT" };
-var gmailChanges = (actions, labels) => {
-  const add = new Set;
-  const remove = new Set;
-  const missing = [];
-  let trash = false;
-  const idOf = (name) => SYSTEM_LABELS[name.trim().toLowerCase()] ?? labels.find((label) => label.name.toLowerCase() === name.trim().toLowerCase())?.id ?? null;
-  const put = (into, from, id) => {
-    from.delete(id);
-    into.add(id);
-  };
-  for (const action of actions) {
-    switch (action.kind) {
-      case "markRead":
-        put(remove, add, "UNREAD");
-        break;
-      case "markUnread":
-        put(add, remove, "UNREAD");
-        break;
-      case "archive":
-        put(remove, add, "INBOX");
-        break;
-      case "star":
-        put(add, remove, "STARRED");
-        break;
-      case "unstar":
-        put(remove, add, "STARRED");
-        break;
-      case "trash":
-        trash = true;
-        break;
-      case "addLabel":
-      case "removeLabel": {
-        const id = action.label ? idOf(action.label) : null;
-        if (!id)
-          missing.push(action.label ?? "");
-        else if (action.kind === "addLabel")
-          put(add, remove, id);
-        else
-          put(remove, add, id);
-        break;
-      }
-    }
-  }
-  return { add: [...add], remove: [...remove], trash, missing };
-};
-var decode = (data) => {
-  const base64 = data.replace(/-/g, "+").replace(/_/g, "/");
-  const bytes = Uint8Array.from(atob(base64 + "=".repeat((4 - base64.length % 4) % 4)), (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-};
-var htmlText = (html) => html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, "").replace(/<br\s*\/?>|<\/(p|div|li|tr|h\d)>/gi, `
-`).replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\n{3,}/g, `
-
-`).trim();
-var messageText = (part) => {
-  if (!part)
-    return "";
-  const find = (node, type) => {
-    if (node.mimeType === type && node.body?.data)
-      return decode(node.body.data);
-    for (const child of node.parts ?? []) {
-      const found = find(child, type);
-      if (found !== null)
-        return found;
-    }
-    return null;
-  };
-  const plain = find(part, "text/plain");
-  if (plain !== null)
-    return plain.replace(/\r\n/g, `
-`).trim();
-  const html = find(part, "text/html");
-  return html !== null ? htmlText(html) : "";
-};
-
-// service/google/gmail.ts
-var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
-var enc = encodeURIComponent;
-var SYSTEM_NAMES = { INBOX: "Inbox", STARRED: "Starred", IMPORTANT: "Important", UNREAD: "Unread", SENT: "Sent", DRAFT: "Drafts", SPAM: "Spam", TRASH: "Trash" };
-
-class GmailActions {
-  accounts;
-  constructor(accounts) {
-    this.accounts = accounts;
-  }
-  async labels(account) {
-    const answer = await this.accounts.request(account, "GET", `${GMAIL}/labels`);
-    const all = (answer?.labels ?? []).flatMap((label) => {
-      if (!label.id || !label.name)
-        return [];
-      if (label.type === "system")
-        return SYSTEM_NAMES[label.id] ? [{ id: label.id, name: SYSTEM_NAMES[label.id], type: "system" }] : [];
-      return [{ id: label.id, name: label.name, type: "user" }];
-    });
-    const order = Object.keys(SYSTEM_NAMES);
-    return [
-      ...all.filter((label) => label.type === "system").sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)),
-      ...all.filter((label) => label.type === "user").sort((a, b) => a.name.localeCompare(b.name))
-    ];
-  }
-  async thread(account, threadId) {
-    let raw;
-    try {
-      raw = await this.accounts.request(account, "GET", `${GMAIL}/threads/${enc(threadId)}?format=full`);
-    } catch (error) {
-      if (error instanceof GoogleError && error.status === 404)
-        return null;
-      throw error;
-    }
-    if (!raw)
-      return null;
-    const messages = (raw.messages ?? []).flatMap((message) => {
-      if (!message.id)
-        return [];
-      const header = (name) => message.payload?.headers?.find((item) => item.name?.toLowerCase() === name)?.value ?? "";
-      const internal = Number(message.internalDate);
-      const date = Number.isFinite(internal) && internal > 0 ? new Date(internal).toISOString() : header("date") ? new Date(header("date")).toISOString() : "";
-      return [{ id: message.id, from: header("from"), to: header("to"), date, subject: header("subject"), snippet: message.snippet ?? "", text: messageText(message.payload).slice(0, 20000), unread: (message.labelIds ?? []).includes("UNREAD") }];
-    });
-    const labelIds = [...new Set((raw.messages ?? []).flatMap((message) => message.labelIds ?? []))];
-    return { id: threadId, account, messages, labelIds };
-  }
-  async act(account, threadId, actions) {
-    const needsLabels = actions.some((action) => action.kind === "addLabel" || action.kind === "removeLabel");
-    const labels = needsLabels ? await this.labels(account).then((known) => known.filter((label) => label.type === "user")) : [];
-    const changes = gmailChanges(actions, labels);
-    if (changes.missing.length)
-      throw new GoogleError(400, `Gmail has no label ${changes.missing.map((name) => `"${name}"`).join(", ")} in ${account}: make it in Gmail first`);
-    let labelIds = [];
-    if (changes.add.length || changes.remove.length) {
-      const answer = await this.accounts.request(account, "POST", `${GMAIL}/threads/${enc(threadId)}/modify`, { addLabelIds: changes.add, removeLabelIds: changes.remove });
-      labelIds = [...new Set((answer?.messages ?? []).flatMap((message) => message.labelIds ?? []))];
-    }
-    if (changes.trash) {
-      const answer = await this.accounts.request(account, "POST", `${GMAIL}/threads/${enc(threadId)}/trash`);
-      labelIds = [...new Set((answer?.messages ?? []).flatMap((message) => message.labelIds ?? []))];
-    }
-    return { labelIds };
-  }
-}
-
-// service/google/contacts.ts
-var PEOPLE = "https://people.googleapis.com/v1";
-var enc2 = encodeURIComponent;
-
-class GoogleContacts {
-  accounts;
-  warmed = new Set;
-  constructor(accounts) {
-    this.accounts = accounts;
-  }
-  async search(account, query) {
-    const read = (path, words) => this.accounts.request(account, "GET", `${PEOPLE}/${path}?query=${enc2(words)}&readMask=names,emailAddresses&pageSize=10`);
-    if (!this.warmed.has(account)) {
-      await Promise.allSettled([read("people:searchContacts", ""), read("otherContacts:search", "")]);
-      this.warmed.add(account);
-    }
-    const answers = await Promise.all([read("people:searchContacts", query), read("otherContacts:search", query)]);
-    const found = new Map;
-    for (const answer of answers) {
-      for (const result of answer?.results ?? []) {
-        const name = result.person?.names?.[0]?.displayName?.trim() ?? "";
-        for (const address of result.person?.emailAddresses ?? []) {
-          const email = address.value?.trim();
-          if (email && !found.has(email.toLowerCase()))
-            found.set(email.toLowerCase(), { name: name || email, email });
-        }
-      }
-    }
-    return [...found.values()].slice(0, 10);
-  }
-}
-
-// service/calendar/meetings.ts
-import { randomBytes as randomBytes2 } from "node:crypto";
-
-// src/domain/calendar/meetings.ts
-var MEETING_SYNC_DAYS = 7;
-var eventKey = (event) => event.google ? `${event.google.account}|${event.google.calendarId}|${event.google.eventId}` : null;
-var DAY_MS = 86400000;
-var excludedBy = (event, exclusions) => {
-  const response = event.google?.response ?? null;
-  if (response === "declined")
-    return "declined";
-  if (exclusions.includes("noAttendees") && !event.google?.guests)
-    return "noAttendees";
-  if (exclusions.includes("nonBlocking") && event.transparent)
-    return "nonBlocking";
-  if (exclusions.includes("oooHold") && /\b(OOO|HOLD)\b/i.test(event.title))
-    return "oooHold";
-  if (exclusions.includes("unconfirmed") && (response === "needsAction" || response === "tentative"))
-    return "unconfirmed";
-  if (exclusions.includes("multiDayAllDay") && event.allDay && Date.parse(event.end) - Date.parse(event.start) > DAY_MS + 3600000)
-    return "multiDayAllDay";
-  return null;
-};
-var importCalendars = (state, mode) => {
-  const google = Object.values(state.calendars).filter((calendar) => calendar.google);
-  const chosen = state.settings.meetingCalendars;
-  if (chosen.length)
-    return google.filter((calendar) => chosen.includes(calendar.id));
-  return mode === "suggest" ? google.filter((calendar) => calendar.visible) : [];
-};
-var subscriptionOf = (state, event) => Object.values(state.calendars).find((calendar) => calendar.google && event.google && calendar.google.account === event.google.account && calendar.google.calendarId === event.google.calendarId);
-var taskForEvent = (state, key) => Object.values(state.tasks).find((task) => task.source?.kind === "event" && task.source.id === key) ?? null;
-var eventSource = (event, auto) => {
-  const key = eventKey(event);
-  if (!key || !event.google || key.length > 200)
-    return null;
-  return {
-    kind: "event",
-    id: key,
-    key: "Google Calendar",
-    url: event.google.htmlLink || "https://calendar.google.com/calendar/r",
-    title: event.title,
-    account: event.google.account,
-    event: { calendarId: event.google.calendarId, start: event.start, end: event.end, allDay: event.allDay, invitees: event.google.guests, ...auto ? { auto: true } : {} }
-  };
-};
-var eventDay = (event, zone) => zonedDateMinutes(event.start, zone).date;
-var startOf = (task) => task.source?.kind === "event" && task.source.event ? Date.parse(task.source.event.start) : null;
-var meetingPosition = (state, date, start) => {
-  const list = tasksForDay(state, date).filter((task) => !task.deletedAt);
-  const later = list.findIndex((task) => (startOf(task) ?? -Infinity) > start);
-  if (later >= 0) {
-    const before = list[later - 1]?.position;
-    const at = list[later].position;
-    return before === undefined ? at - 1024 : (before + at) / 2;
-  }
-  const meetings = list.map((task, index) => ({ task, index })).filter(({ task }) => startOf(task) !== null);
-  const last = meetings.at(-1);
-  if (last) {
-    const next = list[last.index + 1]?.position;
-    return next === undefined ? last.task.position + 1024 : (last.task.position + next) / 2;
-  }
-  return list.length ? list[0].position - 1024 : 1024;
-};
-var meetingTask = (state, event, options) => {
-  const source = eventSource(event, options.auto);
-  if (!source)
-    return null;
-  const date = eventDay(event, options.zone);
-  const minutes = event.allDay ? null : Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000);
-  const channelId = importChannel(state, event);
-  return {
-    id: options.id,
-    title: event.title,
-    placement: { kind: "day", date },
-    position: options.position ?? meetingPosition(state, date, Date.parse(event.start)),
-    ...minutes && minutes > 0 ? { plannedMinutes: Math.min(minutes, 24 * 60) } : {},
-    ...channelId ? { channelId } : {},
-    source
-  };
-};
-var calendarChannel = (state, calendarId) => {
-  const channelId = state.settings.meetingChannels[calendarId];
-  return channelId && state.channels[channelId] && !state.channels[channelId].deletedAt ? channelId : null;
-};
-var importChannel = (state, event) => {
-  const subscription = subscriptionOf(state, event);
-  return subscription ? calendarChannel(state, subscription.id) : null;
-};
-var planChannelFill = (state, calendarIds, today, zone) => {
-  if (state.settings.meetingImport !== "autoSync")
-    return [];
-  return calendarIds.flatMap((calendarId) => {
-    const google = state.calendars[calendarId]?.google;
-    const channelId = calendarChannel(state, calendarId);
-    if (!google || !channelId || !state.settings.meetingCalendars.includes(calendarId))
-      return [];
-    return Object.values(state.tasks).flatMap((task) => {
-      const event = task.source?.kind === "event" ? task.source.event : undefined;
-      if (!event?.auto || task.channelId || task.completedAt || task.deletedAt || task.archivedAt)
-        return [];
-      if (task.source.account !== google.account || event.calendarId !== google.calendarId || eventDay(event, zone) < today)
-        return [];
-      return [{ type: "task.updated", taskId: task.id, patch: { channelId } }];
-    });
-  });
-};
-var hasTime = (state, taskId) => Object.values(state.entries).some((entry) => entry.taskId === taskId);
-var planMeetingSync = (state, events, options) => {
-  if (state.settings.meetingImport !== "autoSync")
-    return [];
-  const calendars = new Set(importCalendars(state, "autoSync").map((calendar) => calendar.id));
-  const read = options.read ?? calendars;
-  const days = new Set(Array.from({ length: options.days }, (_, index) => addDays(options.from, index)));
-  const bodies = [];
-  let working = state;
-  const qualifying = new Map;
-  for (const event of [...events].sort((a, b) => a.start.localeCompare(b.start))) {
-    const key = eventKey(event);
-    const subscription = subscriptionOf(state, event);
-    if (!key || !subscription || !calendars.has(subscription.id) || !days.has(eventDay(event, options.zone)) || excludedBy(event, state.settings.meetingExclusions))
-      continue;
-    qualifying.set(key, event);
-  }
-  const push = (body) => {
-    bodies.push(body);
-    working = applyLocally(working, body);
-  };
-  for (const [key, event] of qualifying) {
-    const task = taskForEvent(working, key);
-    if (!task) {
-      const made = meetingTask(working, event, { id: options.newId(), zone: options.zone, auto: true });
-      if (made)
-        push({ type: "task.created", task: made });
-      continue;
-    }
-    if (task.deletedAt || task.completedAt || !task.source?.event?.auto)
-      continue;
-    const date = eventDay(event, options.zone);
-    const source = eventSource(event, true);
-    const changed = task.title !== event.title || task.source.event.start !== event.start || task.source.event.end !== event.end;
-    if (task.placement.kind !== "day" || task.placement.date !== date)
-      push({ type: "task.moved", taskId: task.id, placement: { kind: "day", date }, position: meetingPosition(working, date, Date.parse(event.start)) });
-    if (changed) {
-      const minutes = event.allDay ? null : Math.min(24 * 60, Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000));
-      push({ type: "task.updated", taskId: task.id, patch: { title: event.title, source, ...minutes && minutes > 0 ? { plannedMinutes: minutes } : {} } });
-    }
-  }
-  for (const task of Object.values(working.tasks)) {
-    const event = task.source?.kind === "event" ? task.source.event : undefined;
-    if (!event?.auto || task.deletedAt || task.completedAt || qualifying.has(task.source.id))
-      continue;
-    if (task.placement.kind !== "day" || !days.has(task.placement.date) || hasTime(working, task.id))
-      continue;
-    const calendar = Object.values(state.calendars).find((item) => item.google && task.source.account === item.google.account && item.google.calendarId === event.calendarId);
-    if (calendar && calendars.has(calendar.id) && !read.has(calendar.id))
-      continue;
-    push({ type: "task.deleted", taskId: task.id });
-  }
-  return bodies;
-};
-var planMeetingCompletion = (state, now, zone, mode = state.settings.meetingAutoComplete) => {
-  if (mode === "never")
-    return [];
-  return Object.values(state.tasks).flatMap((task) => {
-    const event = task.source?.kind === "event" ? task.source.event : undefined;
-    if (!event || task.completedAt || task.deletedAt || task.archivedAt || Date.parse(event.end) > now)
-      return [];
-    if (mode === "invitees" && !event.invitees)
-      return [];
-    if (state.timer?.taskId === task.id)
-      return [];
-    return [{ type: "task.completed", taskId: task.id, on: zonedDateMinutes(Math.min(Date.parse(event.end), now) - 1, zone).date }];
-  });
-};
-var applyLocally = (state, body) => applyEvents(state, [{ v: 1, id: `meeting-sync-${state.version}-${body.type}`, at: new Date().toISOString(), ...body }]);
-
-// service/calendar/meetings.ts
-var COMPLETE_MS = 60000;
-var SYNC_MS = 5 * 60000;
-
-class MeetingImport {
-  planner;
-  calendars;
-  log;
-  now;
-  running = null;
-  constructor(planner, calendars, log = () => {}, now = Date.now) {
-    this.planner = planner;
-    this.calendars = calendars;
-    this.log = log;
-    this.now = now;
-    planner.onPersist((_events, before, after) => {
-      const channels = after.settings.meetingChannels;
-      const changed = Object.keys(channels).filter((calendarId) => channels[calendarId] !== before.settings.meetingChannels[calendarId]);
-      if (changed.length)
-        queueMicrotask(() => this.fillChannels(changed));
-    });
-  }
-  apply(bodies) {
-    if (!bodies.length)
-      return 0;
-    const result = this.planner.execute(bodies.map((body) => ({ cmd: `meetings-${randomBytes2(8).toString("hex")}`, ...body })));
-    if (!result.ok) {
-      this.log(`Meeting import: ${result.error}`);
-      return 0;
-    }
-    return result.applied;
-  }
-  complete(now = this.now()) {
-    const zone = this.planner.state.settings.timezone;
-    return zone ? this.apply(planMeetingCompletion(this.planner.state, now, zone)) : 0;
-  }
-  fillChannels(calendarIds) {
-    const state = this.planner.state;
-    const zone = state.settings.timezone;
-    return zone ? this.apply(planChannelFill(state, calendarIds, todayIn(zone, new Date(this.now())), zone)) : 0;
-  }
-  run() {
-    this.running ??= this.once().finally(() => {
-      this.running = null;
-    });
-    return this.running;
-  }
-  async once() {
-    const outcome = { added: 0, moved: 0, removed: 0, completed: this.complete(), errors: [] };
-    const state = this.planner.state;
-    const zone = state.settings.timezone;
-    if (!zone || state.settings.meetingImport !== "autoSync")
-      return outcome;
-    const calendars = importCalendars(state, "autoSync");
-    if (!calendars.length)
-      return outcome;
-    const today = todayIn(zone, new Date(this.now()));
-    const timeMin = instantAt(today, 0, zone);
-    const timeMax = instantAt(addDays(today, MEETING_SYNC_DAYS), 0, zone);
-    const { events, errors } = await this.calendars.read(calendars.map((calendar) => ({ ...calendar, visible: true })), [], timeMin, timeMax, zone, true);
-    outcome.errors = errors.map((error) => error.message);
-    const failed = new Set(errors.map((error) => error.calendarId));
-    const read = new Set(calendars.map((calendar) => calendar.id).filter((id) => !failed.has(id)));
-    const bodies = planMeetingSync(this.planner.state, events, { from: today, days: MEETING_SYNC_DAYS, zone, newId, read });
-    const applied = this.apply(bodies);
-    if (applied) {
-      outcome.added = bodies.filter((body) => body.type === "task.created").length;
-      outcome.moved = bodies.filter((body) => body.type === "task.moved" || body.type === "task.updated").length;
-      outcome.removed = bodies.filter((body) => body.type === "task.deleted").length;
-    }
-    if (outcome.errors.length)
-      this.log(`Meeting import: ${outcome.errors.join("; ")}`);
-    return outcome;
-  }
-  start() {
-    setInterval(() => this.complete(), COMPLETE_MS).unref?.();
-    setInterval(() => void this.run().catch((error) => this.log(`Meeting import: ${error instanceof Error ? error.message : String(error)}`)), SYNC_MS).unref?.();
-    this.run().catch(() => {});
   }
 }
 
@@ -5008,18 +4851,6 @@ var planRsvp = (args) => {
     return { error: "You are not on this event's guest list" };
   const answer = (attendee) => ({ ...attendee, responseStatus: args.response, ...args.comment ? { comment: args.comment } : {} });
   return { ops: [{ method: "PATCH", eventId: target.id, body: { attendees: attendees.map((attendee) => attendee.self ? answer(attendee) : attendee) }, role: "change" }] };
-};
-
-// src/domain/calendar/views.ts
-var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-var SHORT = MONTHS.map((month) => month.slice(0, 3));
-var parts2 = (key) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
-var keyOf2 = (year, month, day) => `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-var addMonths = (key, n) => {
-  const { year, month, day } = parts2(key);
-  const index = year * 12 + (month - 1) + n;
-  const first = keyOf2(Math.floor(index / 12), index % 12 + 1, 1);
-  return keyOf2(Math.floor(index / 12), index % 12 + 1, Math.min(day, daysInMonth(first)));
 };
 
 // src/domain/google/taskKept.ts
@@ -5474,13 +5305,13 @@ var meetingsToDecline = (windows, events, declined = new Set) => events.flatMap(
 // service/google/data.ts
 var CALENDAR = "https://www.googleapis.com/calendar/v3";
 var TASKS = "https://tasks.googleapis.com/tasks/v1";
-var GMAIL2 = "https://gmail.googleapis.com/gmail/v1/users/me";
+var GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 var DRIVE = "https://www.googleapis.com/drive/v3";
 var DRIVE_PAGE = 30;
 var EVENT_FIELDS = "accessRole,nextPageToken,items(id,status,summary,location,transparency,colorId,eventType,start,end,recurringEventId,originalStartTime,attendees(email,self,organizer,resource,responseStatus),organizer(email,self),guestsCanModify,locked,privateCopy,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),extendedProperties,htmlLink)";
 var LIMITS = { calendars: 10, events: 8, lists: 5, tasks: 40, due: 20 };
 var MAIL_MAX = 25;
-var enc3 = encodeURIComponent;
+var enc = encodeURIComponent;
 var mapLimited = async (items, limit, fn) => {
   const results = new Array(items.length);
   let next = 0;
@@ -5508,7 +5339,7 @@ var toTaskItem = (raw, account, listId) => {
     ...raw.status === "completed" ? { completedAt: raw.completed ?? null } : {},
     parent: raw.parent ?? null,
     position: raw.position ?? "",
-    url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc3(raw.id)}`,
+    url: raw.webViewLink && /^https:\/\//.test(raw.webViewLink) ? raw.webViewLink : `https://tasks.google.com/task/${enc(raw.id)}`,
     updated: raw.updated ?? "",
     ...originsOf(raw)
   };
@@ -5594,7 +5425,7 @@ ${item.id}`, item.accessRole);
   async events(account, calendarId, timeMin, timeMax, zone, subscriptionId) {
     const events = [];
     const sessions = [];
-    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc3(calendarId)}/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "2500", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, LIMITS.events);
+    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events?${new URLSearchParams({ singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "2500", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, LIMITS.events);
     if (!complete)
       throw new GoogleError(502, `More than ${LIMITS.events * 2500} events in this range; the Planner reads at most that many`);
     const accessRole = typeof first?.accessRole === "string" ? first.accessRole : undefined;
@@ -5613,7 +5444,7 @@ ${calendarId}`, accessRole);
     return { events, sessions };
   }
   async searchEvents(account, calendarId, query, timeMin, timeMax, zone, subscriptionId) {
-    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc3(calendarId)}/events?${new URLSearchParams({ q: query, singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, 2);
+    const { items, complete, first } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events?${new URLSearchParams({ q: query, singleEvents: "true", orderBy: "startTime", timeMin, timeMax, maxResults: "250", fields: EVENT_FIELDS, ...token ? { pageToken: token } : {} })}`, 2);
     const accessRole = typeof first?.accessRole === "string" ? first.accessRole : this.roles.get(`${account}
 ${calendarId}`);
     const events = [];
@@ -5633,15 +5464,15 @@ ${calendarId}`);
       ...timebox.visibility ? { visibility: timebox.visibility } : {},
       extendedProperties: { private: { [PLANNER_BLOCK_KEY]: timebox.blockId, plannerTaskId: timebox.taskId } }
     };
-    const base = `${CALENDAR}/calendars/${enc3(calendarId)}/events`;
-    const data = eventId ? await this.accounts.request(account, "PATCH", `${base}/${enc3(eventId)}`, body) : await this.accounts.request(account, "POST", base, { ...body, reminders: { useDefault: false } });
+    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
+    const data = eventId ? await this.accounts.request(account, "PATCH", `${base}/${enc(eventId)}`, body) : await this.accounts.request(account, "POST", base, { ...body, reminders: { useDefault: false } });
     if (!data?.id)
       throw new Error("Google did not return the event");
     return data.id;
   }
   async deleteTimebox(account, calendarId, eventId) {
     try {
-      await this.accounts.request(account, "DELETE", `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(eventId)}`);
+      await this.accounts.request(account, "DELETE", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(eventId)}`);
     } catch (error) {
       if (!isGone(error))
         throw error;
@@ -5649,7 +5480,7 @@ ${calendarId}`);
   }
   async event(account, calendarId, eventId) {
     try {
-      const raw = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(eventId)}`);
+      const raw = await this.accounts.request(account, "GET", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(eventId)}`);
       return raw && raw.status !== "cancelled" ? raw : null;
     } catch (error) {
       if (isGone(error))
@@ -5686,7 +5517,7 @@ ${calendarId}`;
       throw new GoogleError(400, problem);
     const { body, conference } = eventBody(input, null, newId());
     const query = new URLSearchParams({ sendUpdates, ...conference ? { conferenceDataVersion: "1" } : {} });
-    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc3(calendarId)}/events?${query}`, body);
+    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc(calendarId)}/events?${query}`, body);
     if (!raw?.id)
       throw new GoogleError(502, "Google did not return the event");
     return eventDetail(raw, { account, calendarId, accessRole: await this.role(account, calendarId) }, null);
@@ -5696,7 +5527,7 @@ ${calendarId}`;
     const from = series.start?.dateTime ?? (series.start?.date ? `${series.start.date}T00:00:00Z` : null);
     if (!before || !from)
       throw new GoogleError(502, "Google did not say when this series starts");
-    const { items, complete } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(series.id)}/instances?${new URLSearchParams({ timeMin: new Date(Date.parse(from) - 1000).toISOString(), timeMax: new Date(Date.parse(before)).toISOString(), showDeleted: "true", maxResults: "2500", fields: "nextPageToken,items(id,originalStartTime)", ...token ? { pageToken: token } : {} })}`, LIMITS.events);
+    const { items, complete } = await this.pages(account, (token) => `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(series.id)}/instances?${new URLSearchParams({ timeMin: new Date(Date.parse(from) - 1000).toISOString(), timeMax: new Date(Date.parse(before)).toISOString(), showDeleted: "true", maxResults: "2500", fields: "nextPageToken,items(id,originalStartTime)", ...token ? { pageToken: token } : {} })}`, LIMITS.events);
     if (!complete)
       throw new GoogleError(502, "This series is too long to split here");
     return items.filter((item) => Date.parse(item.originalStartTime?.dateTime ?? `${item.originalStartTime?.date ?? ""}T00:00:00Z`) < Date.parse(before)).length;
@@ -5704,7 +5535,7 @@ ${calendarId}`;
   async run(account, calendarId, plan, sendUpdates) {
     if ("error" in plan)
       throw new GoogleError(400, plan.error);
-    const base = `${CALENDAR}/calendars/${enc3(calendarId)}/events`;
+    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
     const created = [];
     for (const op of plan.ops) {
       const query = new URLSearchParams({ sendUpdates, ...op.conference ? { conferenceDataVersion: "1" } : {} });
@@ -5715,10 +5546,10 @@ ${calendarId}`;
             throw new GoogleError(502, "Google did not return the new series");
           created.push(raw.id);
         } else if (op.method === "PATCH")
-          await this.accounts.request(account, "PATCH", `${base}/${enc3(op.eventId)}?${query}`, op.body);
+          await this.accounts.request(account, "PATCH", `${base}/${enc(op.eventId)}?${query}`, op.body);
         else {
           try {
-            await this.accounts.request(account, "DELETE", `${base}/${enc3(op.eventId)}?${query}`);
+            await this.accounts.request(account, "DELETE", `${base}/${enc(op.eventId)}?${query}`);
           } catch (error) {
             if (!isGone(error))
               throw error;
@@ -5726,7 +5557,7 @@ ${calendarId}`;
         }
       } catch (error) {
         for (const id of created)
-          await this.accounts.request(account, "DELETE", `${base}/${enc3(id)}?sendUpdates=none`).catch(() => {});
+          await this.accounts.request(account, "DELETE", `${base}/${enc(id)}?sendUpdates=none`).catch(() => {});
         throw error;
       }
     }
@@ -5774,9 +5605,9 @@ ${calendarId}`;
     if (!entry || Date.now() - entry.at > UNDO_MS)
       throw new GoogleError(410, "This deletion can no longer be undone");
     const { account, calendarId, resource, sendUpdates } = entry;
-    const base = `${CALENDAR}/calendars/${enc3(calendarId)}/events`;
+    const base = `${CALENDAR}/calendars/${enc(calendarId)}/events`;
     if (resource.recurringEventId) {
-      await this.accounts.request(account, "PATCH", `${base}/${enc3(resource.id)}?${new URLSearchParams({ sendUpdates })}`, { status: "confirmed" });
+      await this.accounts.request(account, "PATCH", `${base}/${enc(resource.id)}?${new URLSearchParams({ sendUpdates })}`, { status: "confirmed" });
       return;
     }
     const body = {};
@@ -5785,7 +5616,7 @@ ${calendarId}`;
         body[field] = resource[field];
     const query = new URLSearchParams({ sendUpdates, ...body.conferenceData ? { conferenceDataVersion: "1" } : {} });
     try {
-      await this.accounts.request(account, "PUT", `${base}/${enc3(resource.id)}?${query}`, { ...body, status: "confirmed" });
+      await this.accounts.request(account, "PUT", `${base}/${enc(resource.id)}?${query}`, { ...body, status: "confirmed" });
     } catch (error) {
       if (!(error instanceof GoogleError) || error.status < 400 || error.status >= 500)
         throw error;
@@ -5809,7 +5640,7 @@ ${calendarId}`;
   async moveEvent(account, calendarId, eventId, destination, sendUpdates) {
     const instance = await this.mustEvent(account, calendarId, eventId);
     const target = instance.recurringEventId ?? instance.id;
-    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc3(calendarId)}/events/${enc3(target)}/move?${new URLSearchParams({ destination, sendUpdates })}`);
+    const raw = await this.accounts.request(account, "POST", `${CALENDAR}/calendars/${enc(calendarId)}/events/${enc(target)}/move?${new URLSearchParams({ destination, sendUpdates })}`);
     if (!raw?.id)
       throw new GoogleError(502, "Google did not return the event");
     return eventDetail(raw, { account, calendarId: destination, accessRole: await this.role(account, destination) }, raw.recurrence ?? null);
@@ -5830,25 +5661,25 @@ ${calendarId}`;
     return { account, id: raw.id, title: raw.title?.trim() || title, isDefault: false };
   }
   async renameTaskList(account, listId, title) {
-    const raw = await this.accounts.request(account, "PATCH", `${TASKS}/users/@me/lists/${enc3(listId)}`, { title });
+    const raw = await this.accounts.request(account, "PATCH", `${TASKS}/users/@me/lists/${enc(listId)}`, { title });
     return { account, id: listId, title: raw?.title?.trim() || title };
   }
   async deleteTaskList(account, listId) {
     try {
-      await this.accounts.request(account, "DELETE", `${TASKS}/users/@me/lists/${enc3(listId)}`);
+      await this.accounts.request(account, "DELETE", `${TASKS}/users/@me/lists/${enc(listId)}`);
     } catch (error) {
       if (!isGone(error))
         throw error;
     }
   }
   async tasks(account, listId) {
-    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc3(listId)}/tasks?${new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
+    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(listId)}/tasks?${new URLSearchParams({ showCompleted: "false", showHidden: "false", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
     if (!complete)
       throw new GoogleError(502, `This list has more than ${LIMITS.tasks * 100} open tasks; the Planner reads at most that many`);
     return items.map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item)).sort((a, b) => a.position.localeCompare(b.position));
   }
   async allTasks(account, listId) {
-    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc3(listId)}/tasks?${new URLSearchParams({ showCompleted: "true", showHidden: "true", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
+    const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(listId)}/tasks?${new URLSearchParams({ showCompleted: "true", showHidden: "true", maxResults: "100", ...token ? { pageToken: token } : {} })}`, LIMITS.tasks);
     const tasks = items.map((raw) => toTaskItem(raw, account, listId)).filter((item) => Boolean(item));
     return { tasks: tasks.sort((a, b) => a.position.localeCompare(b.position)), complete };
   }
@@ -5856,7 +5687,7 @@ ${calendarId}`;
     const lists = await this.taskLists(account);
     const range = { showCompleted: open ? "false" : "true", showHidden: open ? "false" : "true", maxResults: "100", dueMin: `${from}T00:00:00.000Z`, dueMax: `${to}T23:59:59.999Z` };
     const perList = await mapLimited(lists, 4, async (list) => {
-      const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc3(list.id)}/tasks?${new URLSearchParams({ ...range, ...token ? { pageToken: token } : {} })}`, LIMITS.due);
+      const { items, complete } = await this.pages(account, (token) => `${TASKS}/lists/${enc(list.id)}/tasks?${new URLSearchParams({ ...range, ...token ? { pageToken: token } : {} })}`, LIMITS.due);
       if (!complete)
         throw new GoogleError(502, `"${list.title}" has more than ${LIMITS.due * 100} tasks due in these days; the Planner reads at most that many`);
       return items.map((raw) => toTaskItem(raw, account, list.id)).filter((item) => Boolean(item && item.due && item.due >= from && item.due <= to));
@@ -5866,7 +5697,7 @@ ${calendarId}`;
   async tasksById(account, listId, ids) {
     const found = await mapLimited(ids, 5, async (id) => {
       try {
-        const raw = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc3(listId)}/tasks/${enc3(id)}`);
+        const raw = await this.accounts.request(account, "GET", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`);
         return raw ? toTaskItem(raw, account, listId) : null;
       } catch (error) {
         if (isGone(error))
@@ -5903,7 +5734,7 @@ ${calendarId}`;
     if (patch.deleted === false)
       body.deleted = false;
     const write = async (list) => {
-      const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc3(list)}/tasks/${enc3(id)}`, body);
+      const raw = await this.accounts.request(account, "PATCH", `${TASKS}/lists/${enc(list)}/tasks/${enc(id)}`, body);
       return raw ? toTaskItem(raw, account, list) : null;
     };
     try {
@@ -5919,7 +5750,7 @@ ${calendarId}`;
   }
   async createTask(account, listId, task) {
     const query = new URLSearchParams({ ...task.parent ? { parent: task.parent } : {}, ...task.previous ? { previous: task.previous } : {} });
-    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc3(listId)}/tasks${query.size ? `?${query}` : ""}`, {
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks${query.size ? `?${query}` : ""}`, {
       title: task.title,
       ...task.notes ? { notes: task.notes } : {},
       ...task.due ? { due: `${task.due}T00:00:00.000Z` } : {}
@@ -5928,7 +5759,7 @@ ${calendarId}`;
   }
   async deleteTask(account, listId, id) {
     try {
-      await this.accounts.request(account, "DELETE", `${TASKS}/lists/${enc3(listId)}/tasks/${enc3(id)}`);
+      await this.accounts.request(account, "DELETE", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}`);
     } catch (error) {
       if (!isGone(error))
         throw error;
@@ -5940,19 +5771,19 @@ ${calendarId}`;
       ...target.previous ? { previous: target.previous } : {},
       ...target.destination && target.destination !== listId ? { destinationTasklist: target.destination } : {}
     });
-    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc3(listId)}/tasks/${enc3(id)}/move${query.size ? `?${query}` : ""}`);
+    const raw = await this.accounts.request(account, "POST", `${TASKS}/lists/${enc(listId)}/tasks/${enc(id)}/move${query.size ? `?${query}` : ""}`);
     return raw ? toTaskItem(raw, account, target.destination ?? listId) : null;
   }
   async mailItem(account, which) {
     const metadata = "format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date";
     try {
       if (which.message) {
-        const raw = await this.accounts.request(account, "GET", `${GMAIL2}/messages/${enc3(which.message)}?${metadata}`);
+        const raw = await this.accounts.request(account, "GET", `${GMAIL}/messages/${enc(which.message)}?${metadata}`);
         return raw ? toMailItem(raw, account) : null;
       }
       if (!which.thread)
         return null;
-      const thread = await this.accounts.request(account, "GET", `${GMAIL2}/threads/${enc3(which.thread)}?${metadata}`);
+      const thread = await this.accounts.request(account, "GET", `${GMAIL}/threads/${enc(which.thread)}?${metadata}`);
       const latest = thread?.messages?.at(-1);
       return latest ? toMailItem(latest, account) : null;
     } catch (error) {
@@ -5962,14 +5793,189 @@ ${calendarId}`;
     }
   }
   async mail(account, query, pageToken) {
-    const list = await this.accounts.request(account, "GET", `${GMAIL2}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX), ...pageToken ? { pageToken } : {} })}`);
+    const list = await this.accounts.request(account, "GET", `${GMAIL}/messages?${new URLSearchParams({ q: query, maxResults: String(MAIL_MAX), ...pageToken ? { pageToken } : {} })}`);
     const ids = (list?.messages ?? []).flatMap((message) => message.id ? [message.id] : []);
     const metadata = "format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date";
-    const messages = await mapLimited(ids, 5, (id) => this.accounts.request(account, "GET", `${GMAIL2}/messages/${enc3(id)}?${metadata}`));
+    const messages = await mapLimited(ids, 5, (id) => this.accounts.request(account, "GET", `${GMAIL}/messages/${enc(id)}?${metadata}`));
     return {
       messages: messages.map((raw) => raw ? toMailItem(raw, account) : null).filter((item) => Boolean(item)).sort((a, b) => b.date.localeCompare(a.date)),
       nextPageToken: list?.nextPageToken ?? null
     };
+  }
+}
+
+// src/domain/google/gmail.ts
+var SYSTEM_LABELS = { inbox: "INBOX", starred: "STARRED", important: "IMPORTANT", unread: "UNREAD", spam: "SPAM", trash: "TRASH", sent: "SENT", drafts: "DRAFT" };
+var gmailChanges = (actions, labels) => {
+  const add = new Set;
+  const remove = new Set;
+  const missing = [];
+  let trash = false;
+  const idOf = (name) => SYSTEM_LABELS[name.trim().toLowerCase()] ?? labels.find((label) => label.name.toLowerCase() === name.trim().toLowerCase())?.id ?? null;
+  const put = (into, from, id) => {
+    from.delete(id);
+    into.add(id);
+  };
+  for (const action of actions) {
+    switch (action.kind) {
+      case "markRead":
+        put(remove, add, "UNREAD");
+        break;
+      case "markUnread":
+        put(add, remove, "UNREAD");
+        break;
+      case "archive":
+        put(remove, add, "INBOX");
+        break;
+      case "star":
+        put(add, remove, "STARRED");
+        break;
+      case "unstar":
+        put(remove, add, "STARRED");
+        break;
+      case "trash":
+        trash = true;
+        break;
+      case "addLabel":
+      case "removeLabel": {
+        const id = action.label ? idOf(action.label) : null;
+        if (!id)
+          missing.push(action.label ?? "");
+        else if (action.kind === "addLabel")
+          put(add, remove, id);
+        else
+          put(remove, add, id);
+        break;
+      }
+    }
+  }
+  return { add: [...add], remove: [...remove], trash, missing };
+};
+var decode = (data) => {
+  const base64 = data.replace(/-/g, "+").replace(/_/g, "/");
+  const bytes = Uint8Array.from(atob(base64 + "=".repeat((4 - base64.length % 4) % 4)), (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+};
+var htmlText = (html) => html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, "").replace(/<br\s*\/?>|<\/(p|div|li|tr|h\d)>/gi, `
+`).replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\n{3,}/g, `
+
+`).trim();
+var messageText = (part) => {
+  if (!part)
+    return "";
+  const find = (node, type) => {
+    if (node.mimeType === type && node.body?.data)
+      return decode(node.body.data);
+    for (const child of node.parts ?? []) {
+      const found = find(child, type);
+      if (found !== null)
+        return found;
+    }
+    return null;
+  };
+  const plain = find(part, "text/plain");
+  if (plain !== null)
+    return plain.replace(/\r\n/g, `
+`).trim();
+  const html = find(part, "text/html");
+  return html !== null ? htmlText(html) : "";
+};
+
+// service/google/gmail.ts
+var GMAIL2 = "https://gmail.googleapis.com/gmail/v1/users/me";
+var enc2 = encodeURIComponent;
+var SYSTEM_NAMES = { INBOX: "Inbox", STARRED: "Starred", IMPORTANT: "Important", UNREAD: "Unread", SENT: "Sent", DRAFT: "Drafts", SPAM: "Spam", TRASH: "Trash" };
+
+class GmailActions {
+  accounts;
+  constructor(accounts) {
+    this.accounts = accounts;
+  }
+  async labels(account) {
+    const answer = await this.accounts.request(account, "GET", `${GMAIL2}/labels`);
+    const all = (answer?.labels ?? []).flatMap((label) => {
+      if (!label.id || !label.name)
+        return [];
+      if (label.type === "system")
+        return SYSTEM_NAMES[label.id] ? [{ id: label.id, name: SYSTEM_NAMES[label.id], type: "system" }] : [];
+      return [{ id: label.id, name: label.name, type: "user" }];
+    });
+    const order = Object.keys(SYSTEM_NAMES);
+    return [
+      ...all.filter((label) => label.type === "system").sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)),
+      ...all.filter((label) => label.type === "user").sort((a, b) => a.name.localeCompare(b.name))
+    ];
+  }
+  async thread(account, threadId) {
+    let raw;
+    try {
+      raw = await this.accounts.request(account, "GET", `${GMAIL2}/threads/${enc2(threadId)}?format=full`);
+    } catch (error) {
+      if (error instanceof GoogleError && error.status === 404)
+        return null;
+      throw error;
+    }
+    if (!raw)
+      return null;
+    const messages = (raw.messages ?? []).flatMap((message) => {
+      if (!message.id)
+        return [];
+      const header = (name) => message.payload?.headers?.find((item) => item.name?.toLowerCase() === name)?.value ?? "";
+      const internal = Number(message.internalDate);
+      const date = Number.isFinite(internal) && internal > 0 ? new Date(internal).toISOString() : header("date") ? new Date(header("date")).toISOString() : "";
+      return [{ id: message.id, from: header("from"), to: header("to"), date, subject: header("subject"), snippet: message.snippet ?? "", text: messageText(message.payload).slice(0, 20000), unread: (message.labelIds ?? []).includes("UNREAD") }];
+    });
+    const labelIds = [...new Set((raw.messages ?? []).flatMap((message) => message.labelIds ?? []))];
+    return { id: threadId, account, messages, labelIds };
+  }
+  async act(account, threadId, actions) {
+    const needsLabels = actions.some((action) => action.kind === "addLabel" || action.kind === "removeLabel");
+    const labels = needsLabels ? await this.labels(account).then((known) => known.filter((label) => label.type === "user")) : [];
+    const changes = gmailChanges(actions, labels);
+    if (changes.missing.length)
+      throw new GoogleError(400, `Gmail has no label ${changes.missing.map((name) => `"${name}"`).join(", ")} in ${account}: make it in Gmail first`);
+    let labelIds = [];
+    if (changes.add.length || changes.remove.length) {
+      const answer = await this.accounts.request(account, "POST", `${GMAIL2}/threads/${enc2(threadId)}/modify`, { addLabelIds: changes.add, removeLabelIds: changes.remove });
+      labelIds = [...new Set((answer?.messages ?? []).flatMap((message) => message.labelIds ?? []))];
+    }
+    if (changes.trash) {
+      const answer = await this.accounts.request(account, "POST", `${GMAIL2}/threads/${enc2(threadId)}/trash`);
+      labelIds = [...new Set((answer?.messages ?? []).flatMap((message) => message.labelIds ?? []))];
+    }
+    return { labelIds };
+  }
+}
+
+// service/google/contacts.ts
+var PEOPLE = "https://people.googleapis.com/v1";
+var enc3 = encodeURIComponent;
+
+class GoogleContacts {
+  accounts;
+  warmed = new Set;
+  constructor(accounts) {
+    this.accounts = accounts;
+  }
+  async search(account, query) {
+    const read = (path, words) => this.accounts.request(account, "GET", `${PEOPLE}/${path}?query=${enc3(words)}&readMask=names,emailAddresses&pageSize=10`);
+    if (!this.warmed.has(account)) {
+      await Promise.allSettled([read("people:searchContacts", ""), read("otherContacts:search", "")]);
+      this.warmed.add(account);
+    }
+    const answers = await Promise.all([read("people:searchContacts", query), read("otherContacts:search", query)]);
+    const found = new Map;
+    for (const answer of answers) {
+      for (const result of answer?.results ?? []) {
+        const name = result.person?.names?.[0]?.displayName?.trim() ?? "";
+        for (const address of result.person?.emailAddresses ?? []) {
+          const email = address.value?.trim();
+          if (email && !found.has(email.toLowerCase()))
+            found.set(email.toLowerCase(), { name: name || email, email });
+        }
+      }
+    }
+    return [...found.values()].slice(0, 10);
   }
 }
 
@@ -6289,257 +6295,6 @@ class GoogleTimeboxes {
     }
   }
 }
-
-// service/google/routes.ts
-var isEmail = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
-var isId2 = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
-var isTitle2 = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 1024;
-var ok = (body) => ({ status: 200, body });
-var bad = (error) => ({ status: 400, body: { error } });
-var sendOf = (value) => value === "all" ? "all" : "none";
-var scopeOf = (value) => value === undefined ? "this" : EDIT_SCOPES.includes(value) ? value : null;
-var RESPONSES2 = ["accepted", "declined", "tentative"];
-var isDay = (value) => typeof value === "string" && isDateKey(value);
-var isMinutes2 = (value, low, high) => value === null || Number.isInteger(value) && value >= low && value <= high;
-var isOccurrence = (value) => isRecord(value) && typeof value.title === "string" && value.title.length <= 1024 && typeof value.notes === "string" && value.notes.length <= GOOGLE_NOTES_MAX && isDay(value.due) && isMinutes2(value.time, 0, 24 * 60 - 1) && isMinutes2(value.duration, 5, 24 * 60) && (value.deadline === null || isDay(value.deadline)) && (value.attachments === undefined || isFiles(value.attachments));
-var isFiles = (value) => Array.isArray(value) && value.length <= ATTACHMENTS_MAX && value.every((file) => isRecord(file) && typeof file.id === "string");
-var isKeptEntry = (value) => isRecord(value) && isEmail(value.account) && isId2(value.listId) && isId2(value.taskId) && typeof value.updatedAt === "string" && (value.repeat === null || isRecord(value.repeat));
-var isMade = (value) => isRecord(value) && isId2(value.listId) && isId2(value.id) && typeof value.title === "string" && typeof value.notes === "string" && (value.due === null || isDay(value.due)) && typeof value.updatedAt === "string";
-var isSeriesSide = (value) => isRecord(value) && (value.rule === null || typeof value.rule === "string" && value.rule.length <= 500) && (value.due === null || isDay(value.due)) && isRecord(value.template) && typeof value.template.title === "string" && typeof value.template.notes === "string" && isDay(value.template.start);
-var OWN_FIELDS = ["time", "duration", "deadline", "starred", "busy", "visibility", "color", "attachments", "doNotDisturb", "decline"];
-var occurrenceEditOf = (input) => {
-  if (input.skip === true)
-    return { skip: true };
-  if ("restore" in input)
-    return input.restore === null || isRecord(input.restore) ? { restore: input.restore } : null;
-  return isOccurrence(input.before) && isOccurrence(input.after) ? { before: input.before, after: input.after } : null;
-};
-var googleWriteRoute = async (req, url, ctx) => {
-  const path = url.pathname;
-  const method = req.method;
-  const query = (name) => url.searchParams.get(name);
-  const body = async () => await ctx.readJson(req);
-  if (path === "/google/event" && method === "GET") {
-    const [account, calendar, id] = [query("account"), query("calendar"), query("id")];
-    if (!isEmail(account) || !isId2(calendar) || !isId2(id))
-      return bad("account, calendar and id are required");
-    return ok({ event: await ctx.data.eventDetail(account, calendar, id) });
-  }
-  if (path === "/google/events" && (method === "POST" || method === "PATCH")) {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.calendarId))
-      return bad("account and calendarId are required");
-    if (typeof input.event !== "object" || input.event === null)
-      return bad("event is required");
-    if (method === "POST") {
-      const event = await ctx.data.insertEvent(input.account, input.calendarId, input.event, sendOf(input.sendUpdates));
-      ctx.changed("calendar");
-      return ok({ event });
-    }
-    const scope = scopeOf(input.scope);
-    if (!isId2(input.eventId) || !scope)
-      return bad("eventId and a scope (this, following or all) are required");
-    try {
-      return ok({ requests: await ctx.data.updateEvent(input.account, input.calendarId, input.eventId, input.event, scope, sendOf(input.sendUpdates), ctx.zone()) });
-    } finally {
-      ctx.changed("calendar");
-    }
-  }
-  if (path === "/google/events" && method === "DELETE") {
-    const [account, calendar, id, scope] = [query("account"), query("calendar"), query("id"), scopeOf(query("scope") ?? undefined)];
-    if (!isEmail(account) || !isId2(calendar) || !isId2(id) || !scope)
-      return bad("account, calendar, id and a scope are required");
-    try {
-      return ok(await ctx.data.deleteEvent(account, calendar, id, scope, sendOf(query("sendUpdates"))));
-    } finally {
-      ctx.changed("calendar");
-    }
-  }
-  if (path === "/google/events/restore" && method === "POST") {
-    const input = await body();
-    if (!isId2(input?.token))
-      return bad("token is required");
-    try {
-      await ctx.data.restoreEvent(input.token);
-      return ok({ restored: true });
-    } finally {
-      ctx.changed("calendar");
-    }
-  }
-  if (path === "/google/events/respond" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.calendarId) || !isId2(input.eventId))
-      return bad("account, calendarId and eventId are required");
-    if (!RESPONSES2.includes(input.response))
-      return bad("response must be accepted, declined or tentative");
-    const scope = input.scope === "all" ? "all" : "this";
-    try {
-      return ok({ requests: await ctx.data.respond(input.account, input.calendarId, input.eventId, input.response, scope) });
-    } finally {
-      ctx.changed("calendar");
-    }
-  }
-  if (path === "/google/events/move" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.calendarId) || !isId2(input.eventId) || !isId2(input.destination))
-      return bad("account, calendarId, eventId and destination are required");
-    try {
-      return ok({ event: await ctx.data.moveEvent(input.account, input.calendarId, input.eventId, input.destination, sendOf(input.sendUpdates)) });
-    } finally {
-      ctx.changed("calendar");
-    }
-  }
-  if (path === "/google/tasklists" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isTitle2(input.title))
-      return bad("account and a title (at most 1024 characters) are required");
-    const list = await ctx.data.createTaskList(input.account, input.title.trim());
-    return ok({ list });
-  }
-  if (path === "/google/tasklists" && method === "PATCH") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.listId) || !isTitle2(input.title))
-      return bad("account, listId and a title are required");
-    return ok({ list: await ctx.data.renameTaskList(input.account, input.listId, input.title.trim()) });
-  }
-  if (path === "/google/tasklists" && method === "DELETE") {
-    const [account, list] = [query("account"), query("list")];
-    if (!isEmail(account) || !isId2(list))
-      return bad("account and list are required");
-    try {
-      await ctx.data.deleteTaskList(account, list);
-      return ok({ deleted: true });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/all" && method === "GET") {
-    const [account, list] = [query("account"), query("list")];
-    if (!isEmail(account) || !isId2(list))
-      return bad("account and list are required");
-    return ok(await ctx.data.allTasks(account, list));
-  }
-  if (path === "/google/tasks" && method === "DELETE") {
-    const [account, list, id] = [query("account"), query("list"), query("id")];
-    if (!isEmail(account) || !isId2(list) || !isId2(id))
-      return bad("account, list and id are required");
-    try {
-      await ctx.data.deleteTask(account, list, id);
-      return ok({ deleted: true });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/next" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
-      return bad("account, listId and id are required");
-    if (input.completed !== undefined && typeof input.completed !== "boolean" || input.due !== undefined && input.due !== null && !isDay(input.due))
-      return bad("completed must be true or false, due a date");
-    const hint = { ...input.completed !== undefined ? { completed: input.completed } : {}, ...input.due !== undefined ? { due: input.due } : {} };
-    try {
-      return ok({ ...await ctx.series.next(input.account, input.listId, input.id, hint), ...ctx.snapshot() });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/occurrence" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.seriesId) || !isDay(input.on))
-      return bad("account, seriesId and on (a date) are required");
-    const edit = occurrenceEditOf(input);
-    if (!edit)
-      return bad("skip, restore, or before and after (an occurrence each) are required");
-    try {
-      const { before } = await ctx.series.occurrence(input.account, input.seriesId, input.on, edit);
-      return ok({ changed: true, before, ...ctx.snapshot() });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/series/edit" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.taskId) || !isId2(input.seriesId))
-      return bad("account, listId, taskId and seriesId are required");
-    if (!isRecord(input.own) || Object.keys(input.own).some((key) => !OWN_FIELDS.includes(key)))
-      return bad(`own may only carry ${OWN_FIELDS.join(", ")}`);
-    if (!isSeriesSide(input.before) || !isSeriesSide(input.after))
-      return bad("before and after (rule, template and due) are required");
-    try {
-      await ctx.series.edit(input.account, input.taskId, input.seriesId, input.own, input.before, input.after);
-      return ok({ changed: true, ...ctx.snapshot() });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/series/undo" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.seriesId))
-      return bad("account and seriesId are required");
-    let undo;
-    if (input.kind === "one" && isKeptEntry(input.task) && (input.made === null || isMade(input.made)))
-      undo = { kind: "one", task: input.task, made: input.made };
-    else if (input.kind === "cut" && (input.from === null || isDay(input.from)) && Array.isArray(input.deleted) && input.deleted.length <= 5000 && input.deleted.every((task) => isRecord(task) && isId2(task.listId) && isId2(task.id)) && Array.isArray(input.before) && input.before.length <= 5000 && input.before.every(isKeptEntry)) {
-      undo = { kind: "cut", from: input.from, deleted: input.deleted, before: input.before };
-    } else
-      return bad("kind one (task, made) or cut (from, deleted, before) is required");
-    try {
-      return ok({ ...await ctx.series.undo(input.account, input.seriesId, undo), ...ctx.snapshot() });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/uncomplete" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
-      return bad("account, listId and id are required");
-    if (!(input.before === null || isKeptEntry(input.before)) || !(input.made === null || isMade(input.made)))
-      return bad("before (what was kept for it) and made (its next task) are required, or null");
-    try {
-      return ok({ ...await ctx.series.uncomplete(input.account, input.listId, input.id, { before: input.before, made: input.made }), ...ctx.snapshot() });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/gone" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
-      return bad("account, listId and id are required");
-    try {
-      await ctx.series.gone(input.account, input.listId, input.id);
-      return ok({ ...ctx.snapshot() });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/series" && method === "DELETE") {
-    const [account, series, from, task] = [query("account"), query("series"), query("from"), query("task")];
-    if (!isEmail(account) || !isId2(series))
-      return bad("account and series are required");
-    if (from !== null && !isDateKey(from) || task !== null && !isId2(task))
-      return bad("from must be a date, task a task id");
-    try {
-      return ok({ ...await ctx.series.remove(account, series, from, task), ...ctx.snapshot() });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  if (path === "/google/tasks/move" && method === "POST") {
-    const input = await body();
-    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
-      return bad("account, listId and id are required");
-    for (const key of ["parent", "previous", "destinationListId"])
-      if (input[key] !== undefined && input[key] !== null && !isId2(input[key]))
-        return bad(`${key} must be a task or list id`);
-    try {
-      const task = await ctx.data.moveTask(input.account, input.listId, input.id, { parent: input.parent ?? null, previous: input.previous ?? null, destination: input.destinationListId ?? null });
-      return ok({ task });
-    } finally {
-      ctx.changed("tasks");
-    }
-  }
-  return null;
-};
 
 // service/google/notifications.ts
 import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
@@ -7337,24 +7092,6 @@ ${item.eventId}`, item);
   }
 }
 
-// src/domain/google/taskPending.ts
-var PENDING_DAYS = 365;
-var pendingRange = (today) => ({ from: addDays(today, -PENDING_DAYS), to: addDays(today, -1) });
-var pendingTasks = (items, today) => {
-  const { from, to } = pendingRange(today);
-  const seen = new Set;
-  const out = [];
-  for (const item of items) {
-    const key = `${item.account}
-${item.id}`;
-    if (item.completed || !item.due || item.due < from || item.due > to || seen.has(key))
-      continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out.sort((a, b) => (b.due ?? "").localeCompare(a.due ?? "") || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
-};
-
 // service/agents/agents.ts
 import { execFile as execFile3 } from "node:child_process";
 import { existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync3, readdirSync as readdirSync2, renameSync, rmSync, statSync, writeFileSync as writeFileSync3 } from "node:fs";
@@ -7807,322 +7544,79 @@ ${COMMAND_MARKER} (preset)`))
       }
       this.lastPresets = key;
     } catch (error) {
-      this.log(`agent commands: ${error instanceof Error ? error.message : String(error)}`);
+      this.log(`agent commands: ${messageOf(error)}`);
     }
   }
 }
-var isDirectory = (value) => typeof value === "string" && value.length <= 1024 && isAbsolute2(value);
-var agentCatalog = async (deps, directory, refresh) => {
-  const fromConfig = discoverAgents(deps.configDir, directory);
-  const [live, models] = await Promise.all([deps.info.liveAgents(directory ?? homedir()), deps.info.modelList(directory, refresh)]);
-  return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...models.pending ? { modelsPending: true } : {}, configDir: deps.configDir };
-};
-var agentRoute = async (req, url, deps) => {
-  if (url.pathname === "/agents" && req.method === "GET") {
-    const directory = url.searchParams.get("directory");
-    if (directory !== null && !isDirectory(directory))
-      return { status: 400, body: { error: "directory must be an absolute path" } };
-    return { status: 200, body: await agentCatalog(deps, directory, url.searchParams.get("refresh") === "1") };
-  }
-  if (url.pathname === "/agents/commands" && req.method === "POST") {
-    const body = await deps.readJson(req);
-    const entries = Array.isArray(body.entries) ? body.entries : [];
-    if (entries.length > 40 || !entries.every((entry) => isRunAssignee(entry?.assignee) && ["preset", "agent"].includes(entry.kind))) {
-      return { status: 400, body: { error: "entries must be at most 40 of { assignee, kind: preset | agent }" } };
-    }
-    if (body.directory !== undefined && body.directory !== null && !isDirectory(body.directory))
-      return { status: 400, body: { error: "directory must be an absolute path" } };
-    let commands;
-    try {
-      commands = deps.commands.ensure(entries);
-    } catch (error) {
-      return { status: 409, body: { error: `Could not write the agent command in ${deps.commands.dir}: ${error instanceof Error ? error.message : String(error)}` } };
-    }
-    const listed = body.wait === true && commands.length ? await deps.info.waitListed(commands.map((command) => command.name), body.directory ?? homedir()) : null;
-    return { status: 200, body: { commands, listed, dir: deps.commands.dir } };
-  }
-  return null;
+var agentCatalog = async (configDir, info, directory, refresh) => {
+  const fromConfig = discoverAgents(configDir, directory);
+  const [live, models] = await Promise.all([info.liveAgents(directory ?? homedir()), info.modelList(directory, refresh)]);
+  return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...models.pending ? { modelsPending: true } : {}, configDir };
 };
 
-// service/main.ts
-var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
-var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
-if (!port || !token) {
-  console.error("OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
-  process.exit(1);
-}
+// service/context.ts
+var buildContext = async (dir, log) => {
+  let sync = null;
+  const store = new EventStore({ dir, log, onCommit: () => sync?.schedule() });
+  await store.init();
+  const planner = new Planner(store);
+  sync = new SyncManager(store, planner, log);
+  await sync.init();
+  const github = new GitHubSource;
+  const feeds = new CalendarFeeds(join4(dirname5(dir), "cache"));
+  const linearWorkspaces = new LinearWorkspaces(join4(dirname5(dir), "linear-workspaces.json"), undefined, log);
+  const google = new GoogleAccounts(join4(dirname5(dir), "google-accounts.json"), undefined, undefined, log);
+  const googleData = new GoogleData(google);
+  const gmail = new GmailActions(google);
+  const contacts = new GoogleContacts(google);
+  const googleCalendars = new GoogleCalendars(googleData);
+  const meetings = new MeetingImport(planner, googleCalendars, log);
+  const googleDueTasks = new GoogleDueTasks(googleData);
+  const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
+  const taskNotifications = new TaskNotifications(join4(dirname5(dir), "task-notifications.json"), () => planner.state, {
+    accounts: () => google.emailsWith("tasks"),
+    due: (accounts, from, to) => googleDueTasks.read(accounts, from, to, false),
+    byIds: (groups) => googleDueTasks.byIds(groups, false)
+  });
+  const series = new GoogleSeries(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleDueTasks.forget() });
+  const decliner = new MeetingDecliner(join4(dirname5(dir), "declined-meetings.json"), () => planner.state, {
+    accounts: async () => (await google.status()).accounts.filter((account) => account.workspace && account.features.includes("calendar") && account.features.includes("tasks")).map((account) => account.email),
+    byIds: (groups) => googleDueTasks.byIds(groups, true)
+  }, googleData, { log, onDeclined: () => googleCalendars.forget() });
+  const opencodeInfo = new OpenCodeInfo;
+  const agentCommands = new CommandFiles(opencodeConfigDir(), log);
+  return {
+    log,
+    store,
+    planner,
+    sync,
+    snapshot: () => ({ ...planner.snapshot(), sync: sync.status() }),
+    zone: () => planner.state.settings.timezone ?? "UTC",
+    feeds,
+    meetings,
+    github,
+    linearWorkspaces,
+    google,
+    googleData,
+    gmail,
+    contacts,
+    googleCalendars,
+    googleDueTasks,
+    timeboxes,
+    taskNotifications,
+    series,
+    decliner,
+    opencodeInfo,
+    agentCommands,
+    syncAgentCommands: () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? [])
+  };
+};
+
+// service/http.ts
+import http2 from "node:http";
 var BODY_LIMIT = 1e6;
-var SYNC_ANSWER_MS = 20000;
-var dir = process.env.PLANNER_DATA_DIR || join4(homedir2(), ".local", "share", "openchamber-planner", "data");
-var log = (message) => console.error(`[planner] ${message}`);
-var sync = null;
-var store = new EventStore({ dir, log, onCommit: () => sync?.schedule() });
-await store.init();
-var planner = new Planner(store);
-sync = new SyncManager(store, planner, log);
-await sync.init();
-var snapshot = () => ({ ...planner.snapshot(), sync: sync.status() });
-var github = new GitHubSource;
-var feeds = new CalendarFeeds(join4(dirname5(dir), "cache"));
-var linearWorkspaces = new LinearWorkspaces(join4(dirname5(dir), "linear-workspaces.json"), undefined, log);
-var google = new GoogleAccounts(join4(dirname5(dir), "google-accounts.json"), undefined, undefined, log);
-var googleData = new GoogleData(google);
-var gmail = new GmailActions(google);
-var contacts = new GoogleContacts(google);
-var googleCalendars = new GoogleCalendars(googleData);
-var meetings = new MeetingImport(planner, googleCalendars, log);
-var googleDueTasks = new GoogleDueTasks(googleData);
-var timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
-var taskAccounts = async () => (await google.status()).accounts.filter((account) => account.features.includes("tasks")).map((account) => account.email);
-var taskNotifications2 = new TaskNotifications(join4(dirname5(dir), "task-notifications.json"), () => planner.state, {
-  accounts: taskAccounts,
-  due: (accounts, from, to) => googleDueTasks.read(accounts, from, to, false),
-  byIds: (groups) => googleDueTasks.byIds(groups, false)
-});
-var series = new GoogleSeries(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleDueTasks.forget() });
-var decliner = new MeetingDecliner(join4(dirname5(dir), "declined-meetings.json"), () => planner.state, {
-  accounts: async () => (await google.status()).accounts.filter((account) => account.workspace && account.features.includes("calendar") && account.features.includes("tasks")).map((account) => account.email),
-  byIds: (groups) => googleDueTasks.byIds(groups, true)
-}, googleData, { log, onDeclined: () => googleCalendars.forget() });
-decliner.start(planner);
-var opencodeConfig = opencodeConfigDir();
-var opencodeInfo = new OpenCodeInfo;
-var agentCommands = new CommandFiles(opencodeConfig, log);
-var syncAgentCommands = () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? []);
-syncAgentCommands();
-agentCommands.retireLeftovers();
-var json = (res, status, body) => {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(body));
-};
-var PULL_LOOKUPS_PER_REQUEST = 4;
-var isLookup = (value) => {
-  const lookup = value;
-  return typeof lookup?.runId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) && (lookup.branch === null || typeof lookup.branch === "string" && lookup.branch.length <= 200) && (lookup.url === undefined || typeof lookup.url === "string" && lookup.url.length <= 300) && Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === "string" && item.length <= 1024);
-};
-var mapLimited2 = async (items, limit, fn) => {
-  const results = new Array(items.length);
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await fn(items[index]);
-    }
-  }));
-  return results;
-};
-var isEmail2 = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
-var isGoogleId = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
-var perAccount = async (feature, ask) => {
-  const accounts = (await google.status()).accounts.filter((account) => account.features.includes(feature));
-  const items = [];
-  const errors = [];
-  await Promise.all(accounts.map(async (account) => {
-    try {
-      items.push(...await ask(account.email));
-    } catch (error) {
-      errors.push({ account: account.email, message: error instanceof Error ? error.message : String(error) });
-    }
-  }));
-  return { items, errors };
-};
-var googleRoute = async (req, url) => {
-  const path = url.pathname;
-  const ok = (body) => ({ status: 200, body });
-  const written = await googleWriteRoute(req, url, { data: googleData, series, snapshot, readJson, zone: () => planner.state.settings.timezone ?? "UTC", changed: (what) => (what === "calendar" ? googleCalendars : googleDueTasks).forget() });
-  if (written)
-    return written;
-  if (path === "/google/status" && req.method === "GET")
-    return ok({ ...await google.status(), timeboxError: timeboxes.lastError });
-  if (path === "/google/client" && req.method === "PUT") {
-    const body = await readJson(req);
-    if (typeof body.id !== "string" || typeof body.secret !== "string")
-      return { status: 400, body: { error: "id and secret must be strings" } };
-    return ok(await google.setClient(body.id, body.secret));
-  }
-  if (path === "/google/client" && req.method === "DELETE")
-    return ok(await google.clearClient());
-  if (path === "/google/connect" && req.method === "POST") {
-    const body = await readJson(req);
-    const features = Array.isArray(body.features) ? GOOGLE_FEATURES.filter((feature) => body.features.includes(feature)) : [];
-    return ok(await google.startSignIn(features));
-  }
-  const signIn = /^\/google\/connect\/([A-Za-z0-9_-]{8,40})(\/finish)?$/.exec(path);
-  if (signIn && !signIn[2] && req.method === "GET")
-    return ok(google.signIn(signIn[1]));
-  if (signIn && signIn[2] && req.method === "POST") {
-    const body = await readJson(req);
-    if (typeof body.url !== "string" || body.url.length > 4000)
-      return { status: 400, body: { error: "url must be the address the browser was sent to" } };
-    return ok(await google.finishSignIn(signIn[1], body.url));
-  }
-  const account = /^\/google\/accounts\/([^/]+)$/.exec(path);
-  if (account && req.method === "DELETE")
-    return ok({ removed: await google.remove(decodeURIComponent(account[1])) });
-  if (path === "/google/calendars" && req.method === "GET") {
-    const { items, errors } = await perAccount("calendar", (email) => googleData.calendars(email));
-    return ok({ calendars: items, errors });
-  }
-  if (path === "/google/tasklists" && req.method === "GET") {
-    const { items, errors } = await perAccount("tasks", (email) => googleData.taskLists(email));
-    return ok({ lists: items, errors });
-  }
-  if (path === "/google/tasks" && req.method === "GET") {
-    const email = url.searchParams.get("account");
-    const list = url.searchParams.get("list");
-    if (!isEmail2(email) || !isGoogleId(list))
-      return { status: 400, body: { error: "account and list are required" } };
-    return ok({ tasks: await googleData.tasks(email, list) });
-  }
-  if (path === "/google/tasks/pending" && req.method === "GET") {
-    const today = todayIn(planner.state.settings.timezone ?? "UTC");
-    const { from, to } = pendingRange(today);
-    const read = await googleDueTasks.read(await taskAccounts(), from, to, url.searchParams.get("refresh") === "1", true);
-    return ok({ tasks: pendingTasks(read.items, today), today, from, to, errors: read.errors });
-  }
-  if (path === "/google/tasks/notifications" && req.method === "POST") {
-    return ok(await taskNotifications2.take());
-  }
-  if (path === "/google/tasks/notifications/ack" && req.method === "POST") {
-    const body = await readJson(req);
-    const keys = Array.isArray(body.keys) ? body.keys : null;
-    if (!keys || keys.length > ACK_LIMITS.keys || !keys.every((key) => typeof key === "string" && key.length > 0 && key.length <= ACK_LIMITS.key)) {
-      return { status: 400, body: { error: `keys is a list of at most ${ACK_LIMITS.keys} notification keys` } };
-    }
-    await taskNotifications2.ack(keys);
-    return ok({ acknowledged: keys.length });
-  }
-  if (path === "/google/tasks/decline" && req.method === "POST") {
-    return ok(await decliner.run());
-  }
-  if (path === "/google/tasks/declined" && req.method === "GET") {
-    const [email, task] = [url.searchParams.get("account"), url.searchParams.get("task")];
-    if (!isEmail2(email) || !isGoogleId(task))
-      return { status: 400, body: { error: "account and task are required" } };
-    return ok({ declined: await decliner.declinedFor(email, task), more: decliner.progress(email) });
-  }
-  if (path === "/google/drive/files" && req.method === "GET") {
-    const [email, text, pageToken] = [url.searchParams.get("account"), url.searchParams.get("q") ?? "", url.searchParams.get("pageToken") ?? undefined];
-    if (!isEmail2(email) || text.length > 200 || pageToken !== undefined && pageToken.length > 500)
-      return { status: 400, body: { error: "account is required, and the search must be at most 200 characters" } };
-    const account = (await google.status()).accounts.find((item) => item.email === email.toLowerCase());
-    if (!account?.features.includes("drive"))
-      return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
-    return ok(await googleData.driveFiles(email, text, pageToken));
-  }
-  if (path === "/google/tasks/linked" && req.method === "POST") {
-    const body = await readJson(req);
-    const groups = (Array.isArray(body.groups) ? body.groups : []).filter((group) => isEmail2(group?.account) && isGoogleId(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isGoogleId));
-    if (groups.length > 10 || groups.some((group) => group.ids.length > 50))
-      return { status: 400, body: { error: "at most 10 lists of 50 tasks per request" } };
-    const tasks = [];
-    const missing = [];
-    const errors = [];
-    await Promise.all(groups.map(async (group) => {
-      try {
-        const found = await googleData.linkedTasks(group.account, group.listId, group.ids);
-        tasks.push(...found.tasks);
-        missing.push(...found.missing.map((id) => ({ account: group.account, listId: group.listId, id })));
-      } catch (error) {
-        errors.push({ account: group.account, message: error instanceof Error ? error.message : String(error) });
-      }
-    }));
-    return ok({ tasks, missing, errors });
-  }
-  if (path === "/google/tasks" && (req.method === "PATCH" || req.method === "POST")) {
-    const body = await readJson(req);
-    if (!isEmail2(body.account) || !isGoogleId(body.listId))
-      return { status: 400, body: { error: "account and listId are required" } };
-    if (body.due !== undefined && body.due !== null && !isDateKey(body.due))
-      return { status: 400, body: { error: "due must be a date or null" } };
-    if (body.notes !== undefined && (typeof body.notes !== "string" || body.notes.length > 8192))
-      return { status: 400, body: { error: "notes must be text, at most 8192 characters (as Google Tasks keeps)" } };
-    if (body.title !== undefined && (typeof body.title !== "string" || !body.title.trim() || body.title.length > 1024))
-      return { status: 400, body: { error: "title must be 1 to 1024 characters" } };
-    if (req.method === "PATCH") {
-      if (!isGoogleId(body.id))
-        return { status: 400, body: { error: "id is required" } };
-      if (body.completed !== undefined && typeof body.completed !== "boolean")
-        return { status: 400, body: { error: "completed must be true or false" } };
-      if (body.deleted !== undefined && body.deleted !== false)
-        return { status: 400, body: { error: "deleted can only be false (Undo); DELETE deletes" } };
-      const patch = { ...body.completed !== undefined ? { completed: body.completed } : {}, ...body.due !== undefined ? { due: body.due } : {}, ...body.title !== undefined ? { title: body.title.trim() } : {}, ...body.notes !== undefined ? { notes: body.notes } : {}, ...body.deleted === false ? { deleted: false } : {} };
-      const task = await googleData.updateTask(body.account, body.listId, body.id, patch);
-      googleDueTasks.forget();
-      return ok({ task });
-    }
-    if (typeof body.title !== "string")
-      return { status: 400, body: { error: "title is required" } };
-    if (body.parent !== undefined && body.parent !== null && !isGoogleId(body.parent) || body.previous !== undefined && body.previous !== null && !isGoogleId(body.previous))
-      return { status: 400, body: { error: "parent and previous must be task ids" } };
-    const task = await googleData.createTask(body.account, body.listId, { title: body.title.trim(), ...body.notes ? { notes: body.notes } : {}, ...body.due ? { due: body.due } : {}, parent: body.parent ?? null, previous: body.previous ?? null });
-    googleDueTasks.forget();
-    return ok({ task });
-  }
-  if (path === "/google/mail/labels" && req.method === "GET") {
-    const email = url.searchParams.get("account");
-    if (!isEmail2(email))
-      return { status: 400, body: { error: "account is required" } };
-    return ok({ labels: await gmail.labels(email) });
-  }
-  if (path === "/google/mail/thread" && req.method === "GET") {
-    const email = url.searchParams.get("account");
-    const thread = url.searchParams.get("thread") ?? "";
-    if (!isEmail2(email) || !/^[0-9a-zA-Z_-]{1,64}$/.test(thread))
-      return { status: 400, body: { error: "account and thread are required" } };
-    const found = await gmail.thread(email, thread);
-    return found ? ok({ thread: found }) : { status: 404, body: { error: "Gmail no longer has this email" } };
-  }
-  if (path === "/google/contacts" && req.method === "GET") {
-    const email = url.searchParams.get("account");
-    const query = (url.searchParams.get("q") ?? "").trim();
-    if (!isEmail2(email) || !query || query.length > 100)
-      return { status: 400, body: { error: "account and a search of at most 100 characters are required" } };
-    const allowed = (await google.status()).accounts.find((account) => account.email === email)?.features.includes("contacts");
-    if (!allowed)
-      return { status: 403, body: { error: `Google Contacts are not allowed for ${email}: allow them to search people to invite`, reason: "not-allowed" } };
-    return ok({ contacts: await contacts.search(email, query) });
-  }
-  if (path === "/google/mail/act" && req.method === "POST") {
-    const body = await readJson(req);
-    const actions = Array.isArray(body.actions) ? body.actions : [];
-    const valid = actions.length > 0 && actions.length <= 12 && actions.every((action) => Boolean(action) && GMAIL_ACTIONS.includes(action.kind) && (action.kind === "addLabel" || action.kind === "removeLabel" ? typeof action.label === "string" && action.label.trim().length > 0 && action.label.length <= 225 : action.label === undefined));
-    if (!isEmail2(body.account) || typeof body.thread !== "string" || !/^[0-9a-zA-Z_-]{1,64}$/.test(body.thread) || !valid)
-      return { status: 400, body: { error: "account, thread and one to twelve Gmail actions are required" } };
-    const allowed = (await google.status()).accounts.find((account) => account.email === body.account)?.features.includes("mailActions");
-    if (!allowed)
-      return { status: 403, body: { error: `Gmail actions are not allowed for ${body.account}: allow them in Settings → Google`, reason: "not-allowed" } };
-    return ok(await gmail.act(body.account, body.thread, actions));
-  }
-  if (path === "/google/mail/resolve" && req.method === "POST") {
-    const body = await readJson(req);
-    const id = (value) => typeof value === "string" && /^[0-9a-f]{1,32}$/.test(value);
-    if (!id(body.thread) && !id(body.message))
-      return { status: 400, body: { error: "thread or message must be a Gmail API id" } };
-    const accounts = (await google.status()).accounts.filter((account) => account.features.includes("mail")).map((account) => account.email);
-    const named = isEmail2(body.account) ? body.account.toLowerCase() : null;
-    const errors = [];
-    for (const account of [...accounts.filter((email) => email === named), ...accounts.filter((email) => email !== named)]) {
-      try {
-        const item = await googleData.mailItem(account, { thread: id(body.thread) ? body.thread : null, message: id(body.message) ? body.message : null });
-        if (item)
-          return ok({ item });
-      } catch (error) {
-        errors.push(`${account}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    return { status: 404, body: { error: errors.length ? errors.join("; ") : accounts.length ? "This message is in none of your Gmail accounts" : "No Google account has Gmail" } };
-  }
-  if (path === "/google/mail" && req.method === "GET") {
-    const email = url.searchParams.get("account");
-    const query = url.searchParams.get("q") ?? "in:inbox";
-    const pageToken = url.searchParams.get("pageToken") ?? undefined;
-    if (!isEmail2(email) || query.length > 500 || pageToken !== undefined && pageToken.length > 500)
-      return { status: 400, body: { error: "account is required, and the search must be shorter" } };
-    return ok(await googleData.mail(email, query, pageToken));
-  }
-  return null;
-};
+var ok = (body, after) => ({ status: 200, body, after });
+var bad = (error) => ({ status: 400, body: { error } });
 var readJson = (req) => new Promise((resolve, reject) => {
   let size = 0;
   const chunks = [];
@@ -8145,312 +7639,814 @@ var readJson = (req) => new Promise((resolve, reject) => {
   });
   req.on("error", reject);
 });
-var server = http2.createServer(async (req, res) => {
+var json = (res, status, body) => {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
+};
+var createServer = (ctx, token, routes) => http2.createServer(async (req, res) => {
   if (req.headers.authorization !== `Bearer ${token}`) {
     json(res, 401, { error: "unauthorized" });
     return;
   }
-  const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  let url;
   try {
-    if (url.pathname === "/health" && req.method === "GET") {
-      json(res, 200, { ok: true, version: planner.state.version, today: planner.today() });
-      return;
-    }
-    if (url.pathname === "/state" && req.method === "GET") {
-      json(res, 200, snapshot());
-      return;
-    }
-    if (url.pathname === "/github/status" && req.method === "GET") {
-      json(res, 200, await github.status());
-      return;
-    }
-    if (url.pathname === "/github/list" && req.method === "GET") {
-      const kind = url.searchParams.get("kind") ?? "assigned";
-      const after = url.searchParams.get("after");
-      const text = url.searchParams.get("q") ?? "";
-      if (!(kind in LISTS) || after !== null && !/^[A-Za-z0-9+/=_-]{1,200}$/.test(after) || text.length > 200) {
-        json(res, 400, { error: "kind must be assigned, review or mine; after a cursor; q at most 200 characters" });
-        return;
-      }
-      try {
-        json(res, 200, await github.list(kind, { after, text }));
-      } catch (error) {
-        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
-      }
-      return;
-    }
-    if (url.pathname === "/github/repos" && req.method === "GET") {
-      try {
-        json(res, 200, { repos: await github.repositories() });
-      } catch (error) {
-        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
-      }
-      return;
-    }
-    if (url.pathname === "/github/items" && req.method === "POST") {
-      const body = await readJson(req);
-      const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === "string" && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
-      if (ids.length > NODES_MAX) {
-        json(res, 400, { error: `at most ${NODES_MAX} ids a request` });
-        return;
-      }
-      try {
-        json(res, 200, { items: await github.items(ids) });
-      } catch (error) {
-        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
-      }
-      return;
-    }
-    if (url.pathname === "/meetings/sync" && req.method === "POST") {
-      json(res, 200, await meetings.run());
-      return;
-    }
-    if (url.pathname === "/github/activity" && req.method === "GET") {
-      const from = url.searchParams.get("from") ?? "";
-      const to = url.searchParams.get("to") ?? "";
-      const source = url.searchParams.get("source");
-      const after = url.searchParams.get("after") ?? "";
-      const instant = (value) => /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
-      const span = Date.parse(to) - Date.parse(from);
-      if (!instant(from) || !instant(to) || !(span > 0 && span <= 26 * 3600000) || source !== null && !ACTIVITY_SOURCES.includes(source) || !/^[A-Za-z0-9+/=_:-]{0,400}$/.test(after)) {
-        json(res, 400, { error: "from and to must be the bounds of one day (ISO instants); source one of the activity sources; after a cursor" });
-        return;
-      }
-      try {
-        json(res, 200, source ? await github.activityPage(source, from, to, after) : await github.activity(from, to));
-      } catch (error) {
-        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
-      }
-      return;
-    }
-    if (url.pathname === "/github/resolve" && req.method === "POST") {
-      const body = await readJson(req);
-      if (typeof body.url !== "string" || !parseGitHubUrl(body.url)) {
-        json(res, 400, { error: "url must be a GitHub issue or pull request URL" });
-        return;
-      }
-      try {
-        const item = await github.byUrl(body.url);
-        json(res, item ? 200 : 404, item ? { item } : { error: `${parseGitHubUrl(body.url).key} was not found on GitHub, or this gh can't see it` });
-      } catch (error) {
-        json(res, 502, { error: error instanceof Error ? error.message : String(error) });
-      }
-      return;
-    }
-    if (url.pathname === "/github/pulls" && req.method === "POST") {
-      const body = await readJson(req);
-      if (Array.isArray(body.runs) && body.runs.length > PULL_LOOKUPS_PER_REQUEST) {
-        json(res, 400, { error: `at most ${PULL_LOOKUPS_PER_REQUEST} runs a request` });
-        return;
-      }
-      const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup) : [];
-      const results = await mapLimited2(runs, 4, async (run) => {
-        try {
-          return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };
-        } catch (error) {
-          return { runId: run.runId, pullRequest: null, error: error instanceof Error ? error.message : String(error) };
-        }
-      });
-      json(res, 200, { results });
-      return;
-    }
-    if (url.pathname === "/agents" || url.pathname.startsWith("/agents/")) {
-      const answer = await agentRoute(req, url, { configDir: opencodeConfig, info: opencodeInfo, commands: agentCommands, readJson });
-      if (answer) {
-        json(res, answer.status, answer.body);
-        return;
-      }
-    }
-    if (url.pathname.startsWith("/google/")) {
-      try {
-        const answer = await googleRoute(req, url);
-        if (answer) {
-          json(res, answer.status, answer.body);
-          return;
-        }
-      } catch (error) {
-        if (error instanceof GoogleError) {
-          json(res, error.status, { error: error.message });
-          return;
-        }
-        throw error;
-      }
-    }
-    if (url.pathname.startsWith("/linear/")) {
-      try {
-        if (url.pathname === "/linear/workspaces" && req.method === "GET") {
-          json(res, 200, { workspaces: await linearWorkspaces.list() });
-          return;
-        }
-        if (url.pathname === "/linear/workspaces" && req.method === "POST") {
-          const body = await readJson(req);
-          if (typeof body.key !== "string") {
-            json(res, 400, { error: "key must be a string" });
-            return;
-          }
-          json(res, 200, { workspace: await linearWorkspaces.add(body.key) });
-          return;
-        }
-        const one = /^\/linear\/workspaces\/([A-Za-z0-9_-]{1,100})$/.exec(url.pathname);
-        if (one && req.method === "DELETE") {
-          json(res, 200, { removed: await linearWorkspaces.remove(one[1]) });
-          return;
-        }
-        if (url.pathname === "/linear/graphql" && req.method === "POST") {
-          const body = await readJson(req);
-          if (typeof body.workspaceId !== "string" || typeof body.query !== "string") {
-            json(res, 400, { error: "workspaceId and query must be strings" });
-            return;
-          }
-          json(res, 200, await linearWorkspaces.graphql(body.workspaceId, body.query, body.variables ?? {}));
-          return;
-        }
-      } catch (error) {
-        if (error instanceof WorkspaceError) {
-          json(res, error.status, { error: error.message });
-          return;
-        }
-        throw error;
-      }
-    }
-    if (url.pathname === "/sync") {
-      if (req.method === "GET") {
-        json(res, 200, sync.status());
-        return;
-      }
-      if (req.method === "PUT") {
-        const body = await readJson(req);
-        if (body.remote !== null && typeof body.remote !== "string") {
-          json(res, 400, { error: "remote must be a string or null" });
-          return;
-        }
-        try {
-          json(res, 200, await sync.setRemote(body.remote));
-        } catch (error) {
-          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
-        }
-        return;
-      }
-      if (req.method === "POST") {
-        const done = sync.run().catch((error) => ({ ...sync.status(), lastError: error instanceof Error ? error.message : String(error) }));
-        const status = await Promise.race([done, new Promise((resolve) => setTimeout(() => resolve(sync.status()), SYNC_ANSWER_MS).unref?.())]);
-        json(res, 200, { status, ...snapshot() });
-        syncAgentCommands();
-        return;
-      }
-    }
-    if (url.pathname === "/calendar" && req.method === "GET") {
-      const from = url.searchParams.get("from") ?? "";
-      const to = url.searchParams.get("to") ?? "";
-      if (!isDateKey(from) || !isDateKey(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 62) {
-        json(res, 400, { error: "from and to must be dates at most 62 days apart" });
-        return;
-      }
-      const zone = planner.state.settings.timezone ?? "UTC";
-      const refresh = url.searchParams.get("refresh") === "1";
-      const calendars = Object.values(planner.state.calendars);
-      const timeMin = instantAt(from, 0, zone);
-      const timeMax = instantAt(addDays(to, 1), 0, zone);
-      const shownAccounts = planner.state.settings.googleTasksOnCalendar ? await taskAccounts() : [];
-      const [feed, fromGoogle, due, deadlines] = await Promise.all([
-        feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
-        googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
-        googleDueTasks.read(shownAccounts, from, to, refresh),
-        googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, shownAccounts, from, to), refresh)
-      ]);
-      const dueEvents = due.items.flatMap((item) => item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
-      json(res, 200, {
-        events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
-        deadlineTasks: deadlines.items,
-        errors: [...feed.errors, ...fromGoogle.errors, ...[...due.errors, ...deadlines.errors].map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]
-      });
-      if (fromGoogle.reads.size)
-        timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => log(`Google Calendar: ${error instanceof Error ? error.message : String(error)}`));
-      return;
-    }
-    if (url.pathname === "/calendar/search" && req.method === "GET") {
-      const query = (url.searchParams.get("q") ?? "").trim();
-      if (!query || query.length > 200) {
-        json(res, 400, { error: "q must be 1-200 characters" });
-        return;
-      }
-      const zone = planner.state.settings.timezone ?? "UTC";
-      const today = todayIn(zone);
-      const [from, to] = [addDays(today, -366), addDays(today, 731)];
-      const [timeMin, timeMax] = [instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone)];
-      const shown = Object.values(planner.state.calendars).filter((calendar) => calendar.visible);
-      const needle = query.toLocaleLowerCase();
-      const errors = [];
-      let more = false;
-      const [feed, ...fromGoogle] = await Promise.all([
-        feeds.eventsFor(shown.filter((calendar) => !calendar.google), from, to, zone),
-        ...shown.filter((calendar) => calendar.google).map((calendar) => googleData.searchEvents(calendar.google.account, calendar.google.calendarId, query, timeMin, timeMax, zone, calendar.id).catch((error) => {
-          errors.push({ calendarId: calendar.id, message: error instanceof Error ? error.message : String(error) });
-          return { events: [], more: false };
-        }))
-      ]);
-      errors.push(...feed.errors);
-      const events = feed.events.filter((event) => `${event.title}
-${event.location}`.toLocaleLowerCase().includes(needle));
-      for (const found of fromGoogle) {
-        events.push(...found.events);
-        more ||= found.more;
-      }
-      json(res, 200, { events: events.sort((a, b) => a.start.localeCompare(b.start)), from, to, more, errors });
-      return;
-    }
-    if (url.pathname === "/activity" && req.method === "GET") {
-      const taskId = url.searchParams.get("task") ?? "";
-      json(res, 200, { events: planner.activity(taskId) });
-      return;
-    }
-    if (url.pathname === "/commands" && req.method === "POST") {
-      const body = await readJson(req);
-      if (!Array.isArray(body.commands)) {
-        json(res, 400, { error: "commands must be an array" });
-        return;
-      }
-      await sync.idle();
-      const result = planner.execute(body.commands, { undo: body.undo === true });
-      if (!result.ok) {
-        if (result.conflict)
-          json(res, 409, { error: result.error, index: result.index, conflict: result.conflict, ...snapshot() });
-        else
-          json(res, 400, { error: result.error, index: result.index });
-        return;
-      }
-      json(res, 200, { applied: result.applied, ...snapshot() });
-      syncAgentCommands();
-      return;
-    }
-    if (url.pathname === "/undo" && req.method === "POST") {
-      const body = await readJson(req);
-      if (typeof body.batch !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.batch)) {
-        json(res, 400, { error: "batch must be the command id of a batch" });
-        return;
-      }
-      await sync.idle();
-      const result = planner.undo(body.batch);
-      if (!result.ok) {
-        json(res, result.reason === "gone" ? 410 : 409, { error: result.reason === "gone" ? UNDO_GONE : CHANGED_SINCE, changed: result.reason === "changed" ? result.changed : [], ...snapshot() });
-        return;
-      }
-      json(res, 200, { applied: result.applied, commands: result.commands, ...snapshot() });
-      syncAgentCommands();
+    url = new URL(req.url ?? "/", "http://127.0.0.1");
+  } catch {
+    json(res, 400, { error: "bad request target" });
+    return;
+  }
+  try {
+    for (const route of routes) {
+      const answer = await route(ctx, req, url);
+      if (!answer)
+        continue;
+      json(res, answer.status, answer.body);
+      answer.after?.();
       return;
     }
     json(res, 404, { error: "not found" });
   } catch (error) {
-    json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    if (res.headersSent)
+      ctx.log(`${url.pathname}: ${messageOf(error)}`);
+    else
+      json(res, 500, { error: messageOf(error) });
   }
 });
+
+// service/routes/agents.ts
+import { homedir as homedir2 } from "node:os";
+import { isAbsolute as isAbsolute3 } from "node:path";
+var isDirectory = (value) => typeof value === "string" && value.length <= 1024 && isAbsolute3(value);
+var agentsRoute = async ({ opencodeInfo, agentCommands }, req, url) => {
+  if (url.pathname === "/agents" && req.method === "GET") {
+    const directory = url.searchParams.get("directory");
+    if (directory !== null && !isDirectory(directory))
+      return bad("directory must be an absolute path");
+    return ok(await agentCatalog(agentCommands.configDir, opencodeInfo, directory, url.searchParams.get("refresh") === "1"));
+  }
+  if (url.pathname === "/agents/commands" && req.method === "POST") {
+    const body = await readJson(req);
+    const entries = Array.isArray(body.entries) ? body.entries : [];
+    if (entries.length > 40 || !entries.every((entry) => isRunAssignee(entry?.assignee) && ["preset", "agent"].includes(entry.kind))) {
+      return bad("entries must be at most 40 of { assignee, kind: preset | agent }");
+    }
+    if (body.directory !== undefined && body.directory !== null && !isDirectory(body.directory))
+      return bad("directory must be an absolute path");
+    let commands;
+    try {
+      commands = agentCommands.ensure(entries);
+    } catch (error) {
+      return { status: 409, body: { error: `Could not write the agent command in ${agentCommands.dir}: ${messageOf(error)}` } };
+    }
+    const listed = body.wait === true && commands.length ? await opencodeInfo.waitListed(commands.map((command) => command.name), body.directory ?? homedir2()) : null;
+    return ok({ commands, listed, dir: agentCommands.dir });
+  }
+  return null;
+};
+
+// service/routes/calendar.ts
+var calendarRoute = async (ctx, req, url) => {
+  const { planner, feeds, google, googleData, googleCalendars, googleDueTasks, timeboxes } = ctx;
+  if (url.pathname === "/calendar" && req.method === "GET") {
+    const from = url.searchParams.get("from") ?? "";
+    const to = url.searchParams.get("to") ?? "";
+    if (!isDateKey(from) || !isDateKey(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 62)
+      return bad("from and to must be dates at most 62 days apart");
+    const zone = ctx.zone();
+    const refresh = url.searchParams.get("refresh") === "1";
+    const calendars = Object.values(planner.state.calendars);
+    const timeMin = instantAt(from, 0, zone);
+    const timeMax = instantAt(addDays(to, 1), 0, zone);
+    const shownAccounts = planner.state.settings.googleTasksOnCalendar ? await google.emailsWith("tasks") : [];
+    const [feed, fromGoogle, due, deadlines] = await Promise.all([
+      feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
+      googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
+      googleDueTasks.read(shownAccounts, from, to, refresh),
+      googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, shownAccounts, from, to), refresh)
+    ]);
+    const dueEvents = due.items.flatMap((item) => item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
+    const answer = {
+      events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
+      deadlineTasks: deadlines.items,
+      errors: [...feed.errors, ...fromGoogle.errors, ...[...due.errors, ...deadlines.errors].map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]
+    };
+    return ok(answer, () => {
+      if (fromGoogle.reads.size)
+        timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => ctx.log(`Google Calendar: ${messageOf(error)}`));
+    });
+  }
+  if (url.pathname === "/calendar/search" && req.method === "GET") {
+    const query = (url.searchParams.get("q") ?? "").trim();
+    if (!query || query.length > 200)
+      return bad("q must be 1-200 characters");
+    const zone = ctx.zone();
+    const today = todayIn(zone);
+    const [from, to] = [addDays(today, -366), addDays(today, 731)];
+    const [timeMin, timeMax] = [instantAt(from, 0, zone), instantAt(addDays(to, 1), 0, zone)];
+    const shown = Object.values(planner.state.calendars).filter((calendar) => calendar.visible);
+    const needle = query.toLocaleLowerCase();
+    const errors = [];
+    let more = false;
+    const [feed, ...fromGoogle] = await Promise.all([
+      feeds.eventsFor(shown.filter((calendar) => !calendar.google), from, to, zone),
+      ...shown.filter((calendar) => calendar.google).map((calendar) => googleData.searchEvents(calendar.google.account, calendar.google.calendarId, query, timeMin, timeMax, zone, calendar.id).catch((error) => {
+        errors.push({ calendarId: calendar.id, message: messageOf(error) });
+        return { events: [], more: false };
+      }))
+    ]);
+    errors.push(...feed.errors);
+    const events = feed.events.filter((event) => `${event.title}
+${event.location}`.toLocaleLowerCase().includes(needle));
+    for (const found of fromGoogle) {
+      events.push(...found.events);
+      more ||= found.more;
+    }
+    return ok({ events: events.sort((a, b) => a.start.localeCompare(b.start)), from, to, more, errors });
+  }
+  if (url.pathname === "/meetings/sync" && req.method === "POST") {
+    return ok(await ctx.meetings.run());
+  }
+  return null;
+};
+
+// service/routes/github.ts
+var PULL_LOOKUPS_PER_REQUEST = 4;
+var isLookup = (value) => {
+  const lookup = value;
+  return typeof lookup?.runId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(lookup.runId) && (lookup.branch === null || typeof lookup.branch === "string" && lookup.branch.length <= 200) && (lookup.url === undefined || typeof lookup.url === "string" && lookup.url.length <= 300) && Array.isArray(lookup.directories) && lookup.directories.length <= 3 && lookup.directories.every((item) => typeof item === "string" && item.length <= 1024);
+};
+var viaGh = async (ask) => {
+  try {
+    return await ask();
+  } catch (error) {
+    return { status: 502, body: { error: messageOf(error) } };
+  }
+};
+var githubRoute = async ({ github }, req, url) => {
+  const path = url.pathname;
+  if (path === "/github/status" && req.method === "GET")
+    return ok(await github.status());
+  if (path === "/github/list" && req.method === "GET") {
+    const kind = url.searchParams.get("kind") ?? "assigned";
+    const after = url.searchParams.get("after");
+    const text = url.searchParams.get("q") ?? "";
+    if (!(kind in LISTS) || after !== null && !/^[A-Za-z0-9+/=_-]{1,200}$/.test(after) || text.length > 200)
+      return bad("kind must be assigned, review or mine; after a cursor; q at most 200 characters");
+    return viaGh(async () => ok(await github.list(kind, { after, text })));
+  }
+  if (path === "/github/repos" && req.method === "GET") {
+    return viaGh(async () => ok({ repos: await github.repositories() }));
+  }
+  if (path === "/github/items" && req.method === "POST") {
+    const body = await readJson(req);
+    const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === "string" && /^[A-Za-z0-9_=-]{1,100}$/.test(id)) : [];
+    if (ids.length > NODES_MAX)
+      return bad(`at most ${NODES_MAX} ids a request`);
+    return viaGh(async () => ok({ items: await github.items(ids) }));
+  }
+  if (path === "/github/activity" && req.method === "GET") {
+    const from = url.searchParams.get("from") ?? "";
+    const to = url.searchParams.get("to") ?? "";
+    const source = url.searchParams.get("source");
+    const after = url.searchParams.get("after") ?? "";
+    const instant = (value) => /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
+    const span = Date.parse(to) - Date.parse(from);
+    if (!instant(from) || !instant(to) || !(span > 0 && span <= 26 * 3600000) || source !== null && !ACTIVITY_SOURCES.includes(source) || !/^[A-Za-z0-9+/=_:-]{0,400}$/.test(after)) {
+      return bad("from and to must be the bounds of one day (ISO instants); source one of the activity sources; after a cursor");
+    }
+    return viaGh(async () => ok(source ? await github.activityPage(source, from, to, after) : await github.activity(from, to)));
+  }
+  if (path === "/github/resolve" && req.method === "POST") {
+    const body = await readJson(req);
+    const link = body.url;
+    if (typeof link !== "string" || !parseGitHubUrl(link))
+      return bad("url must be a GitHub issue or pull request URL");
+    return viaGh(async () => {
+      const item = await github.byUrl(link);
+      return item ? ok({ item }) : { status: 404, body: { error: `${parseGitHubUrl(link).key} was not found on GitHub, or this gh can't see it` } };
+    });
+  }
+  if (path === "/github/pulls" && req.method === "POST") {
+    const body = await readJson(req);
+    if (Array.isArray(body.runs) && body.runs.length > PULL_LOOKUPS_PER_REQUEST)
+      return bad(`at most ${PULL_LOOKUPS_PER_REQUEST} runs a request`);
+    const runs = Array.isArray(body.runs) ? body.runs.filter(isLookup) : [];
+    const results = await Promise.all(runs.map(async (run) => {
+      try {
+        return { runId: run.runId, pullRequest: run.url ? await github.pullRequestAt(run.url) : run.branch ? await github.pullRequestFor(run.branch, run.directories) : null };
+      } catch (error) {
+        return { runId: run.runId, pullRequest: null, error: messageOf(error) };
+      }
+    }));
+    return ok({ results });
+  }
+  return null;
+};
+
+// src/domain/google/taskPending.ts
+var PENDING_DAYS = 365;
+var pendingRange = (today) => ({ from: addDays(today, -PENDING_DAYS), to: addDays(today, -1) });
+var pendingTasks = (items, today) => {
+  const { from, to } = pendingRange(today);
+  const seen = new Set;
+  const out = [];
+  for (const item of items) {
+    const key = `${item.account}
+${item.id}`;
+    if (item.completed || !item.due || item.due < from || item.due > to || seen.has(key))
+      continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out.sort((a, b) => (b.due ?? "").localeCompare(a.due ?? "") || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
+};
+
+// service/routes/google.ts
+var isEmail = (value) => typeof value === "string" && /^[^\s@]{1,100}@[^\s@]{1,100}$/.test(value);
+var isId2 = (value) => typeof value === "string" && value.length > 0 && value.length <= 1024;
+var isTitle2 = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 1024;
+var isThread = (value) => typeof value === "string" && /^[0-9a-zA-Z_-]{1,64}$/.test(value);
+var sendOf = (value) => value === "all" ? "all" : "none";
+var scopeOf = (value) => value === undefined ? "this" : EDIT_SCOPES.includes(value) ? value : null;
+var RESPONSES2 = ["accepted", "declined", "tentative"];
+var isMinutes2 = (value, low, high) => value === null || Number.isInteger(value) && value >= low && value <= high;
+var isOccurrence = (value) => isRecord(value) && typeof value.title === "string" && value.title.length <= 1024 && typeof value.notes === "string" && value.notes.length <= GOOGLE_NOTES_MAX && isDateKey(value.due) && isMinutes2(value.time, 0, 24 * 60 - 1) && isMinutes2(value.duration, 5, 24 * 60) && (value.deadline === null || isDateKey(value.deadline)) && (value.attachments === undefined || isFiles(value.attachments));
+var isFiles = (value) => Array.isArray(value) && value.length <= ATTACHMENTS_MAX && value.every((file) => isRecord(file) && typeof file.id === "string");
+var isKeptEntry = (value) => isRecord(value) && isEmail(value.account) && isId2(value.listId) && isId2(value.taskId) && typeof value.updatedAt === "string" && (value.repeat === null || isRecord(value.repeat));
+var isMade = (value) => isRecord(value) && isId2(value.listId) && isId2(value.id) && typeof value.title === "string" && typeof value.notes === "string" && (value.due === null || isDateKey(value.due)) && typeof value.updatedAt === "string";
+var isSeriesSide = (value) => isRecord(value) && (value.rule === null || typeof value.rule === "string" && value.rule.length <= 500) && (value.due === null || isDateKey(value.due)) && isRecord(value.template) && typeof value.template.title === "string" && typeof value.template.notes === "string" && isDateKey(value.template.start);
+var OWN_FIELDS = ["time", "duration", "deadline", "starred", "busy", "visibility", "color", "attachments", "doNotDisturb", "decline"];
+var occurrenceEditOf = (input) => {
+  if (input.skip === true)
+    return { skip: true };
+  if ("restore" in input)
+    return input.restore === null || isRecord(input.restore) ? { restore: input.restore } : null;
+  return isOccurrence(input.before) && isOccurrence(input.after) ? { before: input.before, after: input.after } : null;
+};
+var readInput = async (req) => await readJson(req);
+var perAccount = async (google, feature, ask) => {
+  const items = [];
+  const errors = [];
+  await Promise.all((await google.emailsWith(feature)).map(async (account) => {
+    try {
+      items.push(...await ask(account));
+    } catch (error) {
+      errors.push({ account, message: messageOf(error) });
+    }
+  }));
+  return { items, errors };
+};
+var accountRoutes = async ({ google, timeboxes }, req, url) => {
+  const path = url.pathname;
+  if (path === "/google/status" && req.method === "GET")
+    return ok({ ...await google.status(), timeboxError: timeboxes.lastError });
+  if (path === "/google/client" && req.method === "PUT") {
+    const input = await readInput(req);
+    if (typeof input.id !== "string" || typeof input.secret !== "string")
+      return bad("id and secret must be strings");
+    return ok(await google.setClient(input.id, input.secret));
+  }
+  if (path === "/google/client" && req.method === "DELETE")
+    return ok(await google.clearClient());
+  if (path === "/google/connect" && req.method === "POST") {
+    const input = await readInput(req);
+    const features = Array.isArray(input.features) ? GOOGLE_FEATURES.filter((feature) => input.features.includes(feature)) : [];
+    return ok(await google.startSignIn(features));
+  }
+  const signIn = /^\/google\/connect\/([A-Za-z0-9_-]{8,40})(\/finish)?$/.exec(path);
+  if (signIn && !signIn[2] && req.method === "GET")
+    return ok(google.signIn(signIn[1]));
+  if (signIn && signIn[2] && req.method === "POST") {
+    const input = await readInput(req);
+    if (typeof input.url !== "string" || input.url.length > 4000)
+      return bad("url must be the address the browser was sent to");
+    return ok(await google.finishSignIn(signIn[1], input.url));
+  }
+  const account = /^\/google\/accounts\/([^/]+)$/.exec(path);
+  if (account && req.method === "DELETE")
+    return ok({ removed: await google.remove(decodeURIComponent(account[1])) });
+  return null;
+};
+var calendarRoutes = async ({ google, googleData, googleCalendars, contacts, zone }, req, url) => {
+  const path = url.pathname;
+  const method = req.method;
+  const query = (name) => url.searchParams.get(name);
+  if (path === "/google/calendars" && method === "GET") {
+    const { items, errors } = await perAccount(google, "calendar", (email) => googleData.calendars(email));
+    return ok({ calendars: items, errors });
+  }
+  if (path === "/google/event" && method === "GET") {
+    const [account, calendar, id] = [query("account"), query("calendar"), query("id")];
+    if (!isEmail(account) || !isId2(calendar) || !isId2(id))
+      return bad("account, calendar and id are required");
+    return ok({ event: await googleData.eventDetail(account, calendar, id) });
+  }
+  if (path === "/google/events" && (method === "POST" || method === "PATCH")) {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.calendarId))
+      return bad("account and calendarId are required");
+    if (typeof input.event !== "object" || input.event === null)
+      return bad("event is required");
+    if (method === "POST") {
+      const event = await googleData.insertEvent(input.account, input.calendarId, input.event, sendOf(input.sendUpdates));
+      googleCalendars.forget();
+      return ok({ event });
+    }
+    const scope = scopeOf(input.scope);
+    if (!isId2(input.eventId) || !scope)
+      return bad("eventId and a scope (this, following or all) are required");
+    try {
+      return ok({ requests: await googleData.updateEvent(input.account, input.calendarId, input.eventId, input.event, scope, sendOf(input.sendUpdates), zone()) });
+    } finally {
+      googleCalendars.forget();
+    }
+  }
+  if (path === "/google/events" && method === "DELETE") {
+    const [account, calendar, id, scope] = [query("account"), query("calendar"), query("id"), scopeOf(query("scope") ?? undefined)];
+    if (!isEmail(account) || !isId2(calendar) || !isId2(id) || !scope)
+      return bad("account, calendar, id and a scope are required");
+    try {
+      return ok(await googleData.deleteEvent(account, calendar, id, scope, sendOf(query("sendUpdates"))));
+    } finally {
+      googleCalendars.forget();
+    }
+  }
+  if (path === "/google/events/restore" && method === "POST") {
+    const input = await readInput(req);
+    if (!isId2(input?.token))
+      return bad("token is required");
+    try {
+      await googleData.restoreEvent(input.token);
+      return ok({ restored: true });
+    } finally {
+      googleCalendars.forget();
+    }
+  }
+  if (path === "/google/events/respond" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.calendarId) || !isId2(input.eventId))
+      return bad("account, calendarId and eventId are required");
+    if (!RESPONSES2.includes(input.response))
+      return bad("response must be accepted, declined or tentative");
+    const scope = input.scope === "all" ? "all" : "this";
+    try {
+      return ok({ requests: await googleData.respond(input.account, input.calendarId, input.eventId, input.response, scope) });
+    } finally {
+      googleCalendars.forget();
+    }
+  }
+  if (path === "/google/events/move" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.calendarId) || !isId2(input.eventId) || !isId2(input.destination))
+      return bad("account, calendarId, eventId and destination are required");
+    try {
+      return ok({ event: await googleData.moveEvent(input.account, input.calendarId, input.eventId, input.destination, sendOf(input.sendUpdates)) });
+    } finally {
+      googleCalendars.forget();
+    }
+  }
+  if (path === "/google/contacts" && method === "GET") {
+    const email = query("account");
+    const text = (query("q") ?? "").trim();
+    if (!isEmail(email) || !text || text.length > 100)
+      return bad("account and a search of at most 100 characters are required");
+    if (!await google.allows(email, "contacts"))
+      return { status: 403, body: { error: `Google Contacts are not allowed for ${email}: allow them to search people to invite`, reason: "not-allowed" } };
+    return ok({ contacts: await contacts.search(email, text) });
+  }
+  return null;
+};
+var taskRoutes = async ({ google, googleData, googleDueTasks, taskNotifications, decliner, zone }, req, url) => {
+  const path = url.pathname;
+  const method = req.method;
+  const query = (name) => url.searchParams.get(name);
+  if (path === "/google/tasklists" && method === "GET") {
+    const { items, errors } = await perAccount(google, "tasks", (email) => googleData.taskLists(email));
+    return ok({ lists: items, errors });
+  }
+  if (path === "/google/tasklists" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isTitle2(input.title))
+      return bad("account and a title (at most 1024 characters) are required");
+    const list = await googleData.createTaskList(input.account, input.title.trim());
+    return ok({ list });
+  }
+  if (path === "/google/tasklists" && method === "PATCH") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.listId) || !isTitle2(input.title))
+      return bad("account, listId and a title are required");
+    return ok({ list: await googleData.renameTaskList(input.account, input.listId, input.title.trim()) });
+  }
+  if (path === "/google/tasklists" && method === "DELETE") {
+    const [account, list] = [query("account"), query("list")];
+    if (!isEmail(account) || !isId2(list))
+      return bad("account and list are required");
+    try {
+      await googleData.deleteTaskList(account, list);
+      return ok({ deleted: true });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks" && method === "GET") {
+    const [email, list] = [query("account"), query("list")];
+    if (!isEmail(email) || !isId2(list))
+      return bad("account and list are required");
+    return ok({ tasks: await googleData.tasks(email, list) });
+  }
+  if (path === "/google/tasks/all" && method === "GET") {
+    const [account, list] = [query("account"), query("list")];
+    if (!isEmail(account) || !isId2(list))
+      return bad("account and list are required");
+    return ok(await googleData.allTasks(account, list));
+  }
+  if (path === "/google/tasks" && (method === "PATCH" || method === "POST")) {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.listId))
+      return bad("account and listId are required");
+    if (input.due !== undefined && input.due !== null && !isDateKey(input.due))
+      return bad("due must be a date or null");
+    if (input.notes !== undefined && (typeof input.notes !== "string" || input.notes.length > 8192))
+      return bad("notes must be text, at most 8192 characters (as Google Tasks keeps)");
+    if (input.title !== undefined && !isTitle2(input.title))
+      return bad("title must be 1 to 1024 characters");
+    if (method === "PATCH") {
+      if (!isId2(input.id))
+        return bad("id is required");
+      if (input.completed !== undefined && typeof input.completed !== "boolean")
+        return bad("completed must be true or false");
+      if (input.deleted !== undefined && input.deleted !== false)
+        return bad("deleted can only be false (Undo); DELETE deletes");
+      const patch = { ...input.completed !== undefined ? { completed: input.completed } : {}, ...input.due !== undefined ? { due: input.due } : {}, ...input.title !== undefined ? { title: input.title.trim() } : {}, ...input.notes !== undefined ? { notes: input.notes } : {}, ...input.deleted === false ? { deleted: false } : {} };
+      const task = await googleData.updateTask(input.account, input.listId, input.id, patch);
+      googleDueTasks.forget();
+      return ok({ task });
+    }
+    if (typeof input.title !== "string")
+      return bad("title is required");
+    if (input.parent !== undefined && input.parent !== null && !isId2(input.parent) || input.previous !== undefined && input.previous !== null && !isId2(input.previous))
+      return bad("parent and previous must be task ids");
+    const task = await googleData.createTask(input.account, input.listId, { title: input.title.trim(), ...input.notes ? { notes: input.notes } : {}, ...input.due ? { due: input.due } : {}, parent: input.parent ?? null, previous: input.previous ?? null });
+    googleDueTasks.forget();
+    return ok({ task });
+  }
+  if (path === "/google/tasks" && method === "DELETE") {
+    const [account, list, id] = [query("account"), query("list"), query("id")];
+    if (!isEmail(account) || !isId2(list) || !isId2(id))
+      return bad("account, list and id are required");
+    try {
+      await googleData.deleteTask(account, list, id);
+      return ok({ deleted: true });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/move" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
+      return bad("account, listId and id are required");
+    for (const key of ["parent", "previous", "destinationListId"])
+      if (input[key] !== undefined && input[key] !== null && !isId2(input[key]))
+        return bad(`${key} must be a task or list id`);
+    try {
+      const task = await googleData.moveTask(input.account, input.listId, input.id, { parent: input.parent ?? null, previous: input.previous ?? null, destination: input.destinationListId ?? null });
+      return ok({ task });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/linked" && method === "POST") {
+    const input = await readInput(req);
+    const groups = (Array.isArray(input.groups) ? input.groups : []).filter((group) => isEmail(group?.account) && isId2(group?.listId) && Array.isArray(group?.ids) && group.ids.every(isId2));
+    if (groups.length > 10 || groups.some((group) => group.ids.length > 50))
+      return bad("at most 10 lists of 50 tasks per request");
+    const tasks = [];
+    const missing = [];
+    const errors = [];
+    await Promise.all(groups.map(async (group) => {
+      try {
+        const found = await googleData.linkedTasks(group.account, group.listId, group.ids);
+        tasks.push(...found.tasks);
+        missing.push(...found.missing.map((id) => ({ account: group.account, listId: group.listId, id })));
+      } catch (error) {
+        errors.push({ account: group.account, message: messageOf(error) });
+      }
+    }));
+    return ok({ tasks, missing, errors });
+  }
+  if (path === "/google/tasks/pending" && method === "GET") {
+    const today = todayIn(zone());
+    const { from, to } = pendingRange(today);
+    const read = await googleDueTasks.read(await google.emailsWith("tasks"), from, to, query("refresh") === "1", true);
+    return ok({ tasks: pendingTasks(read.items, today), today, from, to, errors: read.errors });
+  }
+  if (path === "/google/tasks/notifications" && method === "POST") {
+    return ok(await taskNotifications.take());
+  }
+  if (path === "/google/tasks/notifications/ack" && method === "POST") {
+    const input = await readInput(req);
+    const keys = Array.isArray(input.keys) ? input.keys : null;
+    if (!keys || keys.length > ACK_LIMITS.keys || !keys.every((key) => typeof key === "string" && key.length > 0 && key.length <= ACK_LIMITS.key)) {
+      return bad(`keys is a list of at most ${ACK_LIMITS.keys} notification keys`);
+    }
+    await taskNotifications.ack(keys);
+    return ok({ acknowledged: keys.length });
+  }
+  if (path === "/google/tasks/decline" && method === "POST") {
+    return ok(await decliner.run());
+  }
+  if (path === "/google/tasks/declined" && method === "GET") {
+    const [email, task] = [query("account"), query("task")];
+    if (!isEmail(email) || !isId2(task))
+      return bad("account and task are required");
+    return ok({ declined: await decliner.declinedFor(email, task), more: decliner.progress(email) });
+  }
+  if (path === "/google/drive/files" && method === "GET") {
+    const [email, text, pageToken] = [query("account"), query("q") ?? "", query("pageToken") ?? undefined];
+    if (!isEmail(email) || text.length > 200 || pageToken !== undefined && pageToken.length > 500)
+      return bad("account is required, and the search must be at most 200 characters");
+    if (!await google.allows(email.toLowerCase(), "drive"))
+      return { status: 403, body: { error: `${email} has not allowed the Planner to see Google Drive: allow it first` } };
+    return ok(await googleData.driveFiles(email, text, pageToken));
+  }
+  return null;
+};
+var seriesRoutes = async ({ series, snapshot, googleDueTasks }, req, url) => {
+  const path = url.pathname;
+  const method = req.method;
+  const query = (name) => url.searchParams.get(name);
+  if (path === "/google/tasks/next" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
+      return bad("account, listId and id are required");
+    if (input.completed !== undefined && typeof input.completed !== "boolean" || input.due !== undefined && input.due !== null && !isDateKey(input.due))
+      return bad("completed must be true or false, due a date");
+    const hint = { ...input.completed !== undefined ? { completed: input.completed } : {}, ...input.due !== undefined ? { due: input.due } : {} };
+    try {
+      return ok({ ...await series.next(input.account, input.listId, input.id, hint), ...snapshot() });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/occurrence" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.seriesId) || !isDateKey(input.on))
+      return bad("account, seriesId and on (a date) are required");
+    const edit = occurrenceEditOf(input);
+    if (!edit)
+      return bad("skip, restore, or before and after (an occurrence each) are required");
+    try {
+      const { before } = await series.occurrence(input.account, input.seriesId, input.on, edit);
+      return ok({ changed: true, before, ...snapshot() });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/series/edit" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.taskId) || !isId2(input.seriesId))
+      return bad("account, listId, taskId and seriesId are required");
+    if (!isRecord(input.own) || Object.keys(input.own).some((key) => !OWN_FIELDS.includes(key)))
+      return bad(`own may only carry ${OWN_FIELDS.join(", ")}`);
+    if (!isSeriesSide(input.before) || !isSeriesSide(input.after))
+      return bad("before and after (rule, template and due) are required");
+    try {
+      await series.edit(input.account, input.taskId, input.seriesId, input.own, input.before, input.after);
+      return ok({ changed: true, ...snapshot() });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/series/undo" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.seriesId))
+      return bad("account and seriesId are required");
+    let undo;
+    if (input.kind === "one" && isKeptEntry(input.task) && (input.made === null || isMade(input.made)))
+      undo = { kind: "one", task: input.task, made: input.made };
+    else if (input.kind === "cut" && (input.from === null || isDateKey(input.from)) && Array.isArray(input.deleted) && input.deleted.length <= 5000 && input.deleted.every((task) => isRecord(task) && isId2(task.listId) && isId2(task.id)) && Array.isArray(input.before) && input.before.length <= 5000 && input.before.every(isKeptEntry)) {
+      undo = { kind: "cut", from: input.from, deleted: input.deleted, before: input.before };
+    } else
+      return bad("kind one (task, made) or cut (from, deleted, before) is required");
+    try {
+      return ok({ ...await series.undo(input.account, input.seriesId, undo), ...snapshot() });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/uncomplete" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
+      return bad("account, listId and id are required");
+    if (!(input.before === null || isKeptEntry(input.before)) || !(input.made === null || isMade(input.made)))
+      return bad("before (what was kept for it) and made (its next task) are required, or null");
+    try {
+      return ok({ ...await series.uncomplete(input.account, input.listId, input.id, { before: input.before, made: input.made }), ...snapshot() });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/gone" && method === "POST") {
+    const input = await readInput(req);
+    if (!isEmail(input.account) || !isId2(input.listId) || !isId2(input.id))
+      return bad("account, listId and id are required");
+    try {
+      await series.gone(input.account, input.listId, input.id);
+      return ok({ ...snapshot() });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  if (path === "/google/tasks/series" && method === "DELETE") {
+    const [account, seriesId, from, task] = [query("account"), query("series"), query("from"), query("task")];
+    if (!isEmail(account) || !isId2(seriesId))
+      return bad("account and series are required");
+    if (from !== null && !isDateKey(from) || task !== null && !isId2(task))
+      return bad("from must be a date, task a task id");
+    try {
+      return ok({ ...await series.remove(account, seriesId, from, task), ...snapshot() });
+    } finally {
+      googleDueTasks.forget();
+    }
+  }
+  return null;
+};
+var mailRoutes = async ({ google, googleData, gmail }, req, url) => {
+  const path = url.pathname;
+  if (path === "/google/mail/labels" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    if (!isEmail(email))
+      return bad("account is required");
+    return ok({ labels: await gmail.labels(email) });
+  }
+  if (path === "/google/mail/thread" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    const thread = url.searchParams.get("thread") ?? "";
+    if (!isEmail(email) || !isThread(thread))
+      return bad("account and thread are required");
+    const found = await gmail.thread(email, thread);
+    return found ? ok({ thread: found }) : { status: 404, body: { error: "Gmail no longer has this email" } };
+  }
+  if (path === "/google/mail/act" && req.method === "POST") {
+    const input = await readInput(req);
+    const actions = Array.isArray(input.actions) ? input.actions : [];
+    const valid = actions.length > 0 && actions.length <= 12 && actions.every((action) => Boolean(action) && GMAIL_ACTIONS.includes(action.kind) && (action.kind === "addLabel" || action.kind === "removeLabel" ? typeof action.label === "string" && action.label.trim().length > 0 && action.label.length <= 225 : action.label === undefined));
+    if (!isEmail(input.account) || !isThread(input.thread) || !valid)
+      return bad("account, thread and one to twelve Gmail actions are required");
+    if (!await google.allows(input.account, "mailActions"))
+      return { status: 403, body: { error: `Gmail actions are not allowed for ${input.account}: allow them in Settings → Google`, reason: "not-allowed" } };
+    return ok(await gmail.act(input.account, input.thread, actions));
+  }
+  if (path === "/google/mail/resolve" && req.method === "POST") {
+    const input = await readInput(req);
+    const id = (value) => typeof value === "string" && /^[0-9a-f]{1,32}$/.test(value);
+    if (!id(input.thread) && !id(input.message))
+      return bad("thread or message must be a Gmail API id");
+    const accounts = await google.emailsWith("mail");
+    const named = isEmail(input.account) ? input.account.toLowerCase() : null;
+    const errors = [];
+    for (const account of [...accounts.filter((email) => email === named), ...accounts.filter((email) => email !== named)]) {
+      try {
+        const item = await googleData.mailItem(account, { thread: id(input.thread) ? input.thread : null, message: id(input.message) ? input.message : null });
+        if (item)
+          return ok({ item });
+      } catch (error) {
+        errors.push(`${account}: ${messageOf(error)}`);
+      }
+    }
+    return { status: 404, body: { error: errors.length ? errors.join("; ") : accounts.length ? "This message is in none of your Gmail accounts" : "No Google account has Gmail" } };
+  }
+  if (path === "/google/mail" && req.method === "GET") {
+    const email = url.searchParams.get("account");
+    const query = url.searchParams.get("q") ?? "in:inbox";
+    const pageToken = url.searchParams.get("pageToken") ?? undefined;
+    if (!isEmail(email) || query.length > 500 || pageToken !== undefined && pageToken.length > 500)
+      return bad("account is required, and the search must be shorter");
+    return ok(await googleData.mail(email, query, pageToken));
+  }
+  return null;
+};
+var googleRoute = async (ctx, req, url) => {
+  if (!url.pathname.startsWith("/google/"))
+    return null;
+  try {
+    return await accountRoutes(ctx, req, url) ?? await calendarRoutes(ctx, req, url) ?? await taskRoutes(ctx, req, url) ?? await seriesRoutes(ctx, req, url) ?? await mailRoutes(ctx, req, url);
+  } catch (error) {
+    if (error instanceof GoogleError)
+      return { status: error.status, body: { error: error.message } };
+    throw error;
+  }
+};
+
+// service/routes/linear.ts
+var linearRoute = async ({ linearWorkspaces }, req, url) => {
+  if (!url.pathname.startsWith("/linear/"))
+    return null;
+  try {
+    if (url.pathname === "/linear/workspaces" && req.method === "GET")
+      return ok({ workspaces: await linearWorkspaces.list() });
+    if (url.pathname === "/linear/workspaces" && req.method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.key !== "string")
+        return bad("key must be a string");
+      return ok({ workspace: await linearWorkspaces.add(body.key) });
+    }
+    const one = /^\/linear\/workspaces\/([A-Za-z0-9_-]{1,100})$/.exec(url.pathname);
+    if (one && req.method === "DELETE")
+      return ok({ removed: await linearWorkspaces.remove(one[1]) });
+    if (url.pathname === "/linear/graphql" && req.method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.workspaceId !== "string" || typeof body.query !== "string")
+        return bad("workspaceId and query must be strings");
+      return ok(await linearWorkspaces.graphql(body.workspaceId, body.query, body.variables ?? {}));
+    }
+    return null;
+  } catch (error) {
+    if (error instanceof WorkspaceError)
+      return { status: error.status, body: { error: error.message } };
+    throw error;
+  }
+};
+
+// service/routes/plan.ts
+var SYNC_ANSWER_MS = 20000;
+var planRoute = async ({ planner, sync, snapshot, syncAgentCommands }, req, url) => {
+  const path = url.pathname;
+  if (path === "/health" && req.method === "GET")
+    return ok({ ok: true, version: planner.state.version, today: planner.today() });
+  if (path === "/state" && req.method === "GET")
+    return ok(snapshot());
+  if (path === "/sync") {
+    if (req.method === "GET")
+      return ok(sync.status());
+    if (req.method === "PUT") {
+      const body = await readJson(req);
+      if (body.remote !== null && typeof body.remote !== "string")
+        return bad("remote must be a string or null");
+      try {
+        return ok(await sync.setRemote(body.remote));
+      } catch (error) {
+        return bad(messageOf(error));
+      }
+    }
+    if (req.method === "POST") {
+      const done = sync.run().catch((error) => ({ ...sync.status(), lastError: messageOf(error) }));
+      const status = await Promise.race([done, new Promise((resolve) => setTimeout(() => resolve(sync.status()), SYNC_ANSWER_MS).unref?.())]);
+      return ok({ status, ...snapshot() }, syncAgentCommands);
+    }
+  }
+  if (path === "/activity" && req.method === "GET") {
+    const taskId = url.searchParams.get("task") ?? "";
+    return ok({ events: planner.activity(taskId) });
+  }
+  if (path === "/commands" && req.method === "POST") {
+    const body = await readJson(req);
+    if (!Array.isArray(body.commands))
+      return bad("commands must be an array");
+    await sync.idle();
+    const result = planner.execute(body.commands, { undo: body.undo === true });
+    if (!result.ok) {
+      if (result.conflict)
+        return { status: 409, body: { error: result.error, index: result.index, conflict: result.conflict, ...snapshot() } };
+      return { status: 400, body: { error: result.error, index: result.index } };
+    }
+    return ok({ applied: result.applied, ...snapshot() }, syncAgentCommands);
+  }
+  if (path === "/undo" && req.method === "POST") {
+    const body = await readJson(req);
+    if (typeof body.batch !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.batch))
+      return bad("batch must be the command id of a batch");
+    await sync.idle();
+    const result = planner.undo(body.batch);
+    if (!result.ok) {
+      return { status: result.reason === "gone" ? 410 : 409, body: { error: result.reason === "gone" ? UNDO_GONE : CHANGED_SINCE, changed: result.reason === "changed" ? result.changed : [], ...snapshot() } };
+    }
+    return ok({ applied: result.applied, commands: result.commands, ...snapshot() }, syncAgentCommands);
+  }
+  return null;
+};
+
+// service/main.ts
+var port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
+var token = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
+if (!port || !token) {
+  console.error("OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
+  process.exit(1);
+}
+var dir = process.env.PLANNER_DATA_DIR || join5(homedir3(), ".local", "share", "openchamber-planner", "data");
+var log = (message) => console.error(`[planner] ${message}`);
+var ctx = await buildContext(dir, log);
+ctx.decliner.start(ctx.planner);
+ctx.syncAgentCommands();
+ctx.agentCommands.retireLeftovers();
+var server = createServer(ctx, token, [planRoute, calendarRoute, googleRoute, linearRoute, githubRoute, agentsRoute]);
 var shutdown = async () => {
   server.close();
-  await Promise.race([Promise.all([timeboxes.settled(), series.settled()]), new Promise((resolve) => setTimeout(resolve, 3000))]);
-  await store.flush();
+  await Promise.race([Promise.all([ctx.timeboxes.settled(), ctx.series.settled()]), new Promise((resolve) => setTimeout(resolve, 3000))]);
+  await ctx.store.flush();
   process.exit(0);
 };
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 server.listen(port, "127.0.0.1");
-meetings.start();
+ctx.meetings.start();

@@ -6,6 +6,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { ALL_DOCUMENTS, MUTATION_INPUT_KEYS, WHOAMI_QUERY, readGraphql } from '../../src/domain/linear/linear.ts';
+import { messageOf } from '../../src/domain/core/values.ts';
 
 const LINEAR_API = 'https://api.linear.app/graphql';
 const TIMEOUT_MS = 20_000;
@@ -85,7 +86,7 @@ export class LinearWorkspaces {
       try {
         data = readGraphql(answer.body);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = messageOf(error);
         throw new WorkspaceError(400, /authenticat/i.test(message) ? 'Linear rejected the key' : `Linear answered: ${message}`);
       }
       const entry: StoredWorkspace = { id: data.organization.id, name: data.organization.name, urlKey: data.organization.urlKey, account: data.viewer.name, key, addedAt: new Date().toISOString() };
@@ -137,7 +138,7 @@ export class LinearWorkspaces {
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (error) {
-      throw new WorkspaceError(502, `Could not reach Linear: ${error instanceof Error ? error.message : String(error)}`);
+      throw new WorkspaceError(502, `Could not reach Linear: ${messageOf(error)}`);
     }
     return { status: response.status, body: await response.text() };
   }
