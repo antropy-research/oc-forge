@@ -407,7 +407,7 @@ kbd { font: var(--pl-text-micro) var(--oc-font, system-ui, sans-serif); padding:
 .settings fieldset { border: 0; padding: 0; margin: 0 0 26px; max-width: 640px; display: flex; flex-direction: column; gap: 10px; }
 .settings legend { font-weight: 600; font-size: var(--pl-text-body); margin-bottom: 8px; width: 100%; padding: 0; }
 .settings fieldset ~ fieldset > legend { padding-top: 22px; border-top: 1px solid var(--pl-line-muted); }
-.settings label { display: grid; grid-template-columns: 224px minmax(0, 1fr); align-items: center; gap: 8px 24px; }
+.settings label { display: grid; grid-template-columns: 240px minmax(0, 1fr); align-items: center; gap: 8px 24px; }
 .settings label > select, .settings label > input[type='number'], .settings label > input[type='time'] { justify-self: start; max-width: 100%; }
 /* A setting that is on or off: its check before its words, as OpenChamber's settings have them. */
 .settings label:has(> input[type='checkbox']) { grid-template-columns: auto minmax(0, 1fr); justify-content: start; gap: 8px; }
