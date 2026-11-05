@@ -445,16 +445,15 @@ const request = (await browser.newContext()).request;
 const seeded = {};
 for (const [name, base] of Object.entries(instances)) seeded[name] = await seed(name, base, request);
 
-// With no extension using the APIs: the test extension and the Planner (its panel is global and loads at startup, its
-// service starts with the server) off; the plain extension, which uses none, on.
-const usingTheApis = [TEST, PLANNER];
+// With no extension using the APIs: the test extension off. The Planner only uses links, keys and modals, which show
+// nothing until it is used; the plain extension uses none (its static page is the compared page).
+const usingTheApis = [TEST];
 for (const base of Object.values(instances)) {
   await request.post(`${base}/auth/session`, { data: { password } });
   for (const id of usingTheApis) await setEnabled(request, base, id, false);
-  await setEnabled(request, base, PLAIN, true);
+  for (const id of [PLAIN, PLANNER]) await setEnabled(request, base, id, true);
 }
 if (parts.has('compare')) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await compare(browser, seeded, request, viewport);
-for (const base of Object.values(instances)) await setEnabled(request, base, PLANNER, true);
 if (parts.has('extensions')) for (const [name, base] of Object.entries(instances)) await realExtensions(browser, name, base, seeded[name], request);
 
 // Every API, with the test extensions on.

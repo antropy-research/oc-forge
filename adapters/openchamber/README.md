@@ -14,8 +14,6 @@ pixels differ).
 | **keys** | tab shortcuts | Forward a key press to OpenChamber, which runs it through its own shortcut handlers, for navigation actions only and only with a user activation; the frame is told the current bindings. In an installed app window, Chrome's own tab keys act on OpenChamber's tabs. |
 | **links** | Cmd+click | `?extension=<id>&route=<route>` deep links to its page; URL prefixes for real `<a href>` links to its page and to chats; its page can keep its route in the address bar. |
 | **modals** | (printing) | Its frames sandboxed with `allow-modals` as well, so `print()` opens the browser's print dialog (the Planner's task lists and calendar). |
-| **global panel** | (the Planner in the right panel, the same in every chat) | Its panel is the window's, not a folder's: one frame, loaded hidden at startup, kept through every change of chat or folder; shown or not, and expanded or not, as the user last chose, in every folder. |
-| **autostart** | (the Planner starts with OpenChamber) | The server starts its service when OpenChamber starts, and again after each extension change, instead of on a frame's first request. |
 
 Beside the APIs, one fix for a host bug the Planner runs into ("Fixes", below).
 
@@ -69,9 +67,6 @@ package installs and runs on a stock OpenChamber.
 
 The server reads the block from the same `package.json` OpenChamber parsed
 (`server/manifest.js`) and publishes it in the catalog row as `ocForge`.
-| `globalPanel` | `true`: the extension's panel is one for the window, not one per folder. Its pane is mounted, hidden, as soon as the catalog lists the extension active, before it is first opened, and stays mounted in every folder, so the frame loads at startup and keeps its state through every change of chat or folder. Whether it shows in its zone, and whether that zone is expanded, is one choice for the window: the user's last, in whatever folder, carried into each folder as it comes on screen (in the same render when the chat or folder is picked through OpenChamber's stores, else before the browser paints) and kept in localStorage (`oc-forge:global-panels`) for the next load | `panel.entry` |
-| `autostart` | `true`: the server sends the extension's service a `GET /health` through the release's own proxy (the same enabled, grant and package checks as a frame's request) once its routes are registered, and again after every catalog change (install, update, rebuilt folder, enable, approval), so the service starts with OpenChamber rather than on the first request a frame sends. A paused or unapproved extension, or a folder mid-rebuild, is skipped quietly; any other failure is logged once | `service.entry` |
-
 Fields only the VS Code extension used (`zone`, `rail`, `page`) are ignored.
 
 ### Wire protocol
@@ -138,25 +133,8 @@ Chromium has no app window: `on` under the window's localStorage key
   page shows; leaving the page drops them. `links.page`/`links.session` are
   prefixes in the window's own origin, so modified clicks on real `<a href>`
   open new browser tabs even from the sandboxed frame (Chromium; see the study).
-- **Global panels** (`ocForge.globalPanel`). The release keeps the context
-  panel per folder (each zone's tab, open and expanded state) and mounts a
-  plugin's frame while its folder's panel has its tab, so a chat in another
-  folder shows that folder's panel and loads the frame anew. `ContextSurfacePanes`
-  adds a tab for each global panel to every folder's plugin tabs
-  (`host/panels.ts` `ocForgeWithGlobalPanels`). A plugin tab's id is its mode in
-  every folder, so React keeps that one pane, and its frame, through every
-  switch. The host (`useOcForgeGlobalPanels`) records the window's choice from
-  the folder on screen and carries it into each folder it switches to, through
-  the store's own `openContextPanelTab`, `closeContextZone` and
-  `toggleContextPanelExpanded`: in the same tick when the chat or folder is
-  picked (a subscription to the session and folder stores), else in a layout
-  effect before the browser paints. A deep link to a global panel shows it in
-  the folder on screen and records that choice first, so the first folder the
-  window carries its choice into does not close it again. The frame stays
-  mounted while hidden: its rail badge is not cleared on open (the release
-  clears it when a panel mounts), and it runs while the window does.
-- Pages, the rail, the header's tabs, the zone frames and guest service
-  requests are the release's.
+- Pages, the rail, the header's tabs, zones and guest service requests are the
+  release's.
 
 ## How it is applied
 
@@ -165,20 +143,18 @@ Chromium has no app window: `on` under the window's localStorage key
 | Edits to upstream UI files | `edits/*.ts` (anchors + replacements) | `vite-plugin.ts`: Vite `transform` hook, in memory, before any other plugin |
 | Edits to upstream server files | `edits/core.ts` (`packages/web/server/…`) | `cli.ts stage … server`: they ship unbuilt, so the adapted copy is what gets packed |
 | New UI modules | `host/` → `packages/ui/src/oc-forge/` | `cli.ts stage … added`, into the scratch build tree |
-| New server modules | `server/manifest.js`, `server/autostart.js` → `packages/web/server/lib/oc-forge/` | the same |
+| New server module | `server/manifest.js` → `packages/web/server/lib/oc-forge/` | the same |
 | Extension client | `client/index.ts` (+ `host/protocol.ts`) | bundled by extensions |
 
 Every edit names exact upstream text that must occur exactly once
 (`apply.ts`); otherwise the build stops with the adapter, the file and the
 anchor. The Vite plugin also fails the build if a targeted module never loaded
 (upstream stopped using it); `lib/guests/types.ts` is exempt, being imported
-only as types. 27 edits in 12 files (18 `insertAfter`, 7 `replace`, 2
+only as types. 22 edits in 10 files (16 `insertAfter`, 5 `replace`, 1
 `insertBefore`): `core` 14 (the frame channel and its sandbox in `PluginPane`,
 the `ocForge` block through the catalog and its CSP, the host in `MainLayout`),
-`links` 6 (the router), `fixes` 2, `panels` 2 (the plugin panes in
-`ContextSurfacePanes`), `autostart` 3 (the guest routes' setup in
-`feature-routes-runtime.js`). Before 2026-11-04 there were 72 in 23; the 50
-that went were the VS Code extension's.
+`links` 6 (the router), `fixes` 2. Before 2026-11-04 there were 72 in 23; the
+50 that went were the VS Code extension's.
 
 OpenChamber is compiled with the React Compiler, which memoizes on the values a
 render reads: host code that renders passes the oc-forge state it read as an
@@ -203,19 +179,15 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
   (`OPENCHAMBER_SOURCE` for another checkout) and produces the expected code; a
   moved or doubled anchor fails with a message naming it; the Vite plugin
   rewrites targeted modules and fails a build that never loaded one; the
-  release's rail, header tabs, zone frames, panel state and service requests
-  are not adapted; a global panel's pane is added to every folder's plugin
-  tabs; the autostart is created with the guest routes and asked again on
-  each catalog change; the edit count above is the edits there are.
+  release's rail, header tabs, zones and service requests are not adapted; the
+  edit count above is the edits there are.
 - `tests/openchamber-client.test.ts`: the protocol readers, the manifest rules
   (server and UI), shortcut matching as OpenChamber does it, the client's
-  handshake, requests, events and key forwarding, and which services start
-  with the server, what they are sent, which failures are said, and that
-  passes never overlap.
+  handshake, requests, events and key forwarding.
 - `tests/e2e/openchamber-adapters/`: two throwaway instances on this machine
   (the npm release and the adapted package), two scratch extensions
   (`extension/`, which asks for `modals`, and `plain-extension/`, which
-  doesn't) and the repository's Planner extension. `run.mjs` checks every API
+  doesn't and has a static page, the compared page) and the repository's Planner extension. `run.mjs` checks every API
   at 1440×900 and 1024×768, the release against the adapted build with no
   extension using the APIs (rail, header and an extension page, pixel by
   pixel), and that the Planner works on both. R4 forwards keys from a frame

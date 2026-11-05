@@ -13,7 +13,6 @@ import {
   type OcForgeShortcuts,
 } from "../adapters/openchamber/client/index"
 import { ocForgeDocumentSandbox, parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
-import { createOcForgeAutostart, ocForgeAutostartGuests } from "../adapters/openchamber/server/autostart.js"
 import { ocForgeCommandsOnceLoaded } from "../adapters/openchamber/host/commands.ts"
 
 const linux: OcForgeShortcuts = {
@@ -88,91 +87,6 @@ describe("the ocForge manifest block", () => {
     expect(parseOcForgeManifest(JSON.stringify({ ocForge: old }), withPage)).toBeNull()
     expect(parseOcForgeManifest(JSON.stringify({ ocForge: { ...old, modals: true } }), withPage)).toEqual({ apiVersion: 1, modals: true })
     expect(readOcForgeManifest(old)).toEqual({ apiVersion: 1 })
-  })
-  test("a global panel needs a panel page, a service that starts with the server needs a service; only `true` counts", () => {
-    const panelOnly = { contributes: { panel: { entry: "panel/index.html" } } }
-    const serviceOnly = { contributes: { service: { entry: "service/main.js" } } }
-    const block = (fields: Record<string, unknown>) => JSON.stringify({ ocForge: { apiVersion: 1, ...fields } })
-    expect(parseOcForgeManifest(block({ modals: true, globalPanel: true, autostart: true }), manifest)).toEqual({ apiVersion: 1, modals: true, globalPanel: true, autostart: true })
-    expect(parseOcForgeManifest(block({ globalPanel: true, autostart: true }), panelOnly)).toEqual({ apiVersion: 1, globalPanel: true })
-    expect(parseOcForgeManifest(block({ globalPanel: true, autostart: true }), serviceOnly)).toEqual({ apiVersion: 1, autostart: true })
-    expect(parseOcForgeManifest(block({ globalPanel: "yes", autostart: 1 }), manifest)).toBeNull()
-    expect(readOcForgeManifest({ apiVersion: 1, globalPanel: true, autostart: true })).toEqual({ apiVersion: 1, globalPanel: true, autostart: true })
-    expect(readOcForgeManifest({ apiVersion: 1, globalPanel: "true", autostart: 1 })).toEqual({ apiVersion: 1 })
-  })
-})
-
-describe("services that start with the server", () => {
-  const guest = (id: string, fields: Record<string, unknown> = {}) => ({
-    id, name: id.toUpperCase(), packageRoot: `/x/${id}`, service: { entry: "service/main.js" }, enabled: true,
-    capabilityGrants: ["service"], ocForge: { apiVersion: 1, autostart: true }, ...fields,
-  })
-  test("only an enabled extension that asks, with its service approved", () => {
-    const listed = [
-      guest("asks"),
-      guest("plain", { ocForge: { apiVersion: 1, modals: true } }),
-      guest("paused", { enabled: false }),
-      guest("unapproved", { capabilityGrants: [] }),
-      guest("no-service", { service: undefined }),
-    ]
-    expect(ocForgeAutostartGuests(listed).map((entry) => entry.id)).toEqual(["asks"])
-    expect(ocForgeAutostartGuests(null)).toEqual([])
-  })
-  test("each pass asks the service for /health through the release's proxy; quiet refusals are not warned, a failure once", async () => {
-    const sent: Array<Record<string, unknown>> = []
-    const warnings: string[] = []
-    let failure: { code: string; message: string } | null = { code: "SERVICE_FAILED", message: "it crashed" }
-    const autostart = createOcForgeAutostart({
-      listGuests: async () => [guest("planner"), guest("other", { ocForge: null })],
-      persistPath: "/data/extensions.json",
-      request: async (params: Record<string, unknown>) => {
-        sent.push(params)
-        if (failure) throw Object.assign(new Error(failure.message), { code: failure.code })
-        return { status: 200, body: "ok" }
-      },
-      log: { warn: (message: string) => warnings.push(message) },
-    })
-    await autostart.pass()
-    await autostart.pass()
-    expect(sent.map((params) => [params.guestId, params.method, params.path, params.persistPath, params.packageRoot])).toEqual([
-      ["planner", "GET", "/health", "/data/extensions.json", "/x/planner"],
-      ["planner", "GET", "/health", "/data/extensions.json", "/x/planner"],
-    ])
-    expect(warnings).toEqual(["oc-forge: could not start the service of PLANNER: it crashed"])
-    failure = { code: "NO_SERVICE", message: "The extension is being rebuilt" }
-    await autostart.pass()
-    failure = null
-    await autostart.pass()
-    expect(sent).toHaveLength(4)
-    expect(warnings).toHaveLength(1)
-  })
-  test("a pass asked for during a pass runs after it, never beside it", async () => {
-    let inFlight = 0
-    let most = 0
-    let passes = 0
-    let release: () => void = () => {}
-    const autostart = createOcForgeAutostart({
-      listGuests: async () => {
-        passes += 1
-        return [guest("planner")]
-      },
-      persistPath: "/p",
-      request: async () => {
-        inFlight += 1
-        most = Math.max(most, inFlight)
-        if (passes === 1) await new Promise<void>((resolve) => { release = resolve })
-        inFlight -= 1
-      },
-      log: { warn: () => {} },
-    })
-    const first = autostart.pass()
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    await autostart.pass()
-    release()
-    await first
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(passes).toBe(2)
-    expect(most).toBe(1)
   })
 })
 

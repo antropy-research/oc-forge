@@ -6,15 +6,13 @@ import type { Adapter } from "./apply"
 import { core } from "./edits/core"
 import { links } from "./edits/links"
 import { fixes } from "./edits/fixes"
-import { panels } from "./edits/panels"
-import { autostart } from "./edits/autostart"
 
 export type { Adapter, Edit } from "./apply"
 
 // The OpenChamber release the anchors are checked against: vendors/openchamber's pin (written against 2.5.2).
 export const TARGET = { version: "2.6.1", commit: "ce853f415704d1bfe8d076a5cfb2caabac00fffd" } as const
 
-export const adapters: readonly Adapter[] = [core, links, fixes, panels, autostart]
+export const adapters: readonly Adapter[] = [core, links, fixes]
 
 // Files the adapters add: path in the OpenChamber tree -> path under adapters/openchamber.
 export const addedFiles: Readonly<Record<string, string>> = {
@@ -27,9 +25,7 @@ export const addedFiles: Readonly<Record<string, string>> = {
   "packages/ui/src/oc-forge/frames.ts": "host/frames.ts",
   "packages/ui/src/oc-forge/manifest-schema.ts": "host/manifest-schema.ts",
   "packages/ui/src/oc-forge/host.tsx": "host/host.tsx",
-  "packages/ui/src/oc-forge/panels.ts": "host/panels.ts",
   "packages/web/server/lib/oc-forge/manifest.js": "server/manifest.js",
-  "packages/web/server/lib/oc-forge/autostart.js": "server/autostart.js",
 }
 
 // Upstream server sources ship as they are (no build step), so their edits are

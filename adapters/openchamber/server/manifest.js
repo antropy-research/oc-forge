@@ -5,9 +5,7 @@
 //
 //   "ocForge": {
 //     "apiVersion": 1,
-//     "modals": true,                                    // its frames may open the browser's print dialog
-//     "globalPanel": true,                               // its panel is the window's, loaded at startup
-//     "autostart": true                                  // its service starts with the server
+//     "modals": true                                     // its frames may open the browser's print dialog
 //   }
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -21,8 +19,7 @@ export const ocForgeDocumentSandbox = (guest) => (guest?.ocForge?.modals === tru
 
 /**
  * The block as the catalog publishes it, or null. `raw` is the package.json
- * text; `manifest` is OpenChamber's parse of the same file. `modals` and
- * `globalPanel` need a panel page, `autostart` a service; only `true` counts.
+ * text; `manifest` is OpenChamber's parse of the same file. It needs a panel page.
  */
 export const parseOcForgeManifest = (raw, manifest) => {
   let document;
@@ -33,11 +30,6 @@ export const parseOcForgeManifest = (raw, manifest) => {
   }
   const block = isObject(document) ? document.ocForge : null;
   if (!isObject(block) || block.apiVersion !== 1) return null;
-  const panel = Boolean(manifest?.contributes?.panel?.entry);
-  const service = Boolean(manifest?.contributes?.service?.entry);
-  const read = { apiVersion: 1 };
-  if (panel && block.modals === true) read.modals = true;
-  if (panel && block.globalPanel === true) read.globalPanel = true;
-  if (service && block.autostart === true) read.autostart = true;
-  return Object.keys(read).length > 1 ? read : null;
+  if (!manifest?.contributes?.panel?.entry) return null;
+  return block.modals === true ? { apiVersion: 1, modals: true } : null;
 };

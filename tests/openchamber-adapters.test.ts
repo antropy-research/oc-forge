@@ -75,38 +75,17 @@ describe("openchamber adapters", () => {
     expect(layout).toContain("<ErrorBoundary><GuestHosts /></ErrorBoundary>\n                            <ErrorBoundary><OcForgeHost /></ErrorBoundary>")
   })
 
-  test("the release's rail, header tabs, zone frames, panel state and guest service requests are left as they are", () => {
+  test("the release's rail, header tabs, zones and guest service requests are left as they are", () => {
     const files = adaptedFiles(adapters)
     for (const file of [
       "packages/ui/src/components/layout/ContextPanelRail.tsx",
-      "packages/ui/src/components/layout/ContextPanel.tsx",
       "packages/ui/src/components/layout/SessionTabsStrip.tsx",
       "packages/ui/src/components/layout/Header.tsx",
-      "packages/ui/src/stores/useUIStore.ts",
+      "packages/ui/src/components/layout/ContextSurfacePanes.tsx",
       "packages/ui/src/lib/sessionTabs.ts",
       "packages/ui/src/lib/guests/service.ts",
       "packages/web/server/index.js",
-      "packages/web/server/lib/guests/service.js",
     ]) expect(files).not.toContain(file)
-  })
-
-  test("a global panel's pane is mounted in every folder, beside the folder's own plugin tabs", () => {
-    const panes = adapted("packages/ui/src/components/layout/ContextSurfacePanes.tsx")
-    expect(panes).toContain("import { ocForgeWithGlobalPanels, useOcForgeGlobalPanelModes } from '@/oc-forge/panels';")
-    expect(panes).toContain(
-      "  const ocForgeGlobalModes = useOcForgeGlobalPanelModes();\n  const pluginTabs = React.useMemo(\n" +
-        "    () => ocForgeWithGlobalPanels(tabs.filter((tab) => isPluginContextPanelMode(tab.mode)), ocForgeGlobalModes),\n" +
-        "    [ocForgeGlobalModes, tabs],\n  );",
-    )
-    // The panes are still the release's: one ZonePane per plugin tab, keyed by the tab's id (its mode).
-    expect(panes).toContain("{pluginTabs.map((tab) => {\n        if (!isPluginContextPanelMode(tab.mode)) return null;")
-  })
-
-  test("a service that asks starts with the server, and again after each extension change", () => {
-    const runtime = adapted("packages/web/server/lib/opencode/feature-routes-runtime.js")
-    expect(runtime).toContain("import { createOcForgeAutostart } from '../oc-forge/autostart.js';")
-    expect(runtime).toContain("    ocForgeAutostart.soon();\n    stopGuestPackageWatch();\n    ({ stopPackageWatch: stopGuestPackageWatch } = registerGuestRoutes(app, {")
-    expect(runtime).toContain("        announceChange('openchamber:guests-changed');\n        // oc-forge: an install, update, rebuilt folder, enable or approval starts such a service again.\n        ocForgeAutostart.soon();")
   })
 
   test("deep links: the router keeps, applies and writes ?extension=&route=", () => {
