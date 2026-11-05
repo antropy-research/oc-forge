@@ -2,9 +2,9 @@
 // Google Calendar lists them (every 15 minutes, ends with their length), the
 // calendars the account may write to, and the default calendar and list.
 import type { CalendarSubscription, PlannerState } from '../../../src/domain/core/types.ts';
-import { compactClock } from '../../../src/domain/calendar/views.ts';
 import type { GoogleCalendarInfo, GoogleTaskList } from '../../../src/domain/google/google.ts';
 import type { CalendarPrefs } from '../../lib/calendar/calendarUi.ts';
+import { compactClock } from '../../../src/domain/core/dates.ts';
 
 const STEP = 15;
 

@@ -9,7 +9,7 @@
 // Do not disturb, declining meetings); and task notifications, lent to the window that takes them until it shows them.
 import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
-import { FreshnessError, listKey, OCCURRENCE_KEEPS_DATE, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, TaskConflict } from '../panel/lib/google/store.ts';
+import { FreshnessError, listKey, OCCURRENCE_KEEPS_DATE, REPEATING_NO_SUBTASKS, REPEATING_NOT_SUBTASK, REPEATING_STAYS, SHARED_NO_REPEAT, SHARED_NO_SUBTASKS, SUBTASK_NO_REPEAT, SUBTASKS_NO_REPEAT, TaskConflict } from '../panel/lib/google/types.ts';
 import { startTaskNotifications } from '../panel/lib/google/notifications.ts';
 import { instantAt, todayIn, zonedDateMinutes } from '../src/domain/core/dates.ts';
 import type { EventBody } from '../src/domain/core/events.ts';

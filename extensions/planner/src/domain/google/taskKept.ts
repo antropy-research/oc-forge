@@ -11,8 +11,7 @@
 // rest: nothing kept here is written into a task's title or details.
 import type { CalendarEvent } from '../calendar/ics.ts';
 import { googleTaskKey, type DateKey, type GoogleTaskException, type GoogleTaskKept, type GoogleTaskTemplate, type PlannerState, type TaskAttachment, type TaskVisibility } from '../core/types.ts';
-import { addDays, daysBetween, daysInMonth, instantAt, monthDay, weekday, weekdayName } from '../core/dates.ts';
-import { addMonths, compactClock, compactRange } from '../calendar/views.ts';
+import { addDays, addMonths, compactClock, compactRange, daysBetween, daysInMonth, instantAt, monthDay, weekday, weekdayName } from '../core/dates.ts';
 import { formatRRule, parseRRule, untilDate, WEEKDAY_CODES, type RRule } from './rrule.ts';
 import { GOOGLE_TASKS_CALENDAR, type GoogleTaskItem } from './google.ts';
 import type { DeclineInput, EventBody, GoogleTaskKeptPatch } from '../core/events.ts';

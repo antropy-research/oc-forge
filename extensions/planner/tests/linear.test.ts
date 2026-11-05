@@ -7,7 +7,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { startPlanner, until, usePlanner, type LinearCall, type Planner, type PlannerWindow } from './support/planner.ts';
 import { KEYS, bigLinear, calmZone, fakeKey, harnessLinear, unreachable } from './support/linear.ts';
-import type { LinearSource, ListId } from '../panel/lib/linear/store.ts';
+import type { LinearSource, ListId } from '../panel/lib/linear/types.ts';
 import { addParsedTask } from '../panel/lib/core/addTask.ts';
 import { parseQuickAdd } from '../src/domain/plan/quickAdd.ts';
 import { addDays, startOfWeek } from '../src/domain/core/dates.ts';

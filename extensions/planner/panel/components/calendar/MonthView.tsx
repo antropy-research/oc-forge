@@ -4,8 +4,8 @@
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
 import type { DateKey, Placement } from '../../../src/domain/core/types.ts';
-import { addDays, daysBetween, instantAt, isWeekend, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
-import { eventSpan, fitRow, layoutRow, longDay, monthWeeks, weekdayShort, type RowItem } from '../../../src/domain/calendar/views.ts';
+import { addDays, daysBetween, instantAt, isWeekend, longDay, weekdayShort, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { eventSpan, fitRow, layoutRow, monthWeeks, type RowItem } from '../../../src/domain/calendar/views.ts';
 import { isGoogleTaskItem } from '../../../src/domain/google/google.ts';
 import { isGitHubItem } from '../../../src/domain/github/github.ts';
 import { isLinearIssue } from '../../../src/domain/linear/linear.ts';

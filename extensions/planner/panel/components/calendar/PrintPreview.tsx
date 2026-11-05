@@ -10,8 +10,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
 import type { DateKey } from '../../../src/domain/core/types.ts';
 import type { GoogleResponse } from '../../../src/domain/google/google.ts';
-import { clockLabel, daysBetween, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
-import { compactRange, scheduleDays, weekdayShort, longDay, type CalendarMode } from '../../../src/domain/calendar/views.ts';
+import { clockLabel, compactRange, daysBetween, longDay, weekdayShort, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { scheduleDays, type CalendarMode } from '../../../src/domain/calendar/views.ts';
 import { layoutLanes } from '../../../src/domain/plan/schedule.ts';
 import {
   PRINT_COLORS,

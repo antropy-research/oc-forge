@@ -2,30 +2,18 @@
 // show, their titles, how the arrows step, and where events go in a month row
 // (bars in the first free line, then "N more") and in the schedule list.
 import type { DateKey } from '../core/types.ts';
-import { addDays, daysBetween, daysInMonth, isWeekend, startOfWeek, weekday, zonedDateMinutes } from '../core/dates.ts';
+import { addDays, addMonths, daysBetween, daysInMonth, isWeekend, MONTH_NAMES, monthStart, startOfWeek, zonedDateMinutes } from '../core/dates.ts';
 
 export type CalendarMode = 'day' | 'week' | 'month' | 'year' | 'schedule';
 export const CALENDAR_MODES: readonly CalendarMode[] = ['day', 'week', 'month', 'year', 'schedule'];
 /** How many days the Schedule view lists from its first day. */
 export const SCHEDULE_DAYS = 30;
 
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const MONTHS = MONTH_NAMES;
 const SHORT = MONTHS.map((month) => month.slice(0, 3));
-const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 const parts = (key: DateKey) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
 const keyOf = (year: number, month: number, day: number): DateKey => `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-
-
-export const monthStart = (key: DateKey): DateKey => `${key.slice(0, 8)}01`;
-
-/** The same day `n` months later, or the month's last day when it is shorter. */
-export const addMonths = (key: DateKey, n: number): DateKey => {
-  const { year, month, day } = parts(key);
-  const index = year * 12 + (month - 1) + n;
-  const first = keyOf(Math.floor(index / 12), (index % 12) + 1, 1);
-  return keyOf(Math.floor(index / 12), (index % 12) + 1, Math.min(day, daysInMonth(first)));
-};
 
 /** The weeks of the month around `anchor`, whole weeks as a month grid draws them (four to six). */
 export const monthWeeks = (anchor: DateKey, weekStartsOn: 0 | 1): DateKey[][] => {
@@ -35,7 +23,6 @@ export const monthWeeks = (anchor: DateKey, weekStartsOn: 0 | 1): DateKey[][] =>
   for (let week = startOfWeek(first, weekStartsOn); week <= last; week = addDays(week, 7)) weeks.push(Array.from({ length: 7 }, (_, index) => addDays(week, index)));
   return weeks;
 };
-
 
 /** The days a view shows around `anchor`; without weekends, Saturdays and Sundays are left out of Week and Month. */
 export const viewDays = (mode: CalendarMode, anchor: DateKey, weekStartsOn: 0 | 1, weekends = true): DateKey[] => {
@@ -89,31 +76,6 @@ export const rangeTitle = (mode: CalendarMode, anchor: DateKey, days: readonly D
   if (first.year !== last.year) return `${SHORT[first.month - 1]} ${first.year} – ${SHORT[last.month - 1]} ${last.year}`;
   if (first.month !== last.month) return `${SHORT[first.month - 1]} – ${SHORT[last.month - 1]} ${last.year}`;
   return `${MONTHS[first.month - 1]} ${first.year}`;
-};
-
-/** "Monday, October 26" */
-export const longDay = (key: DateKey): string => `${WEEKDAYS[weekday(key)]}, ${MONTHS[parts(key).month - 1]} ${parts(key).day}`;
-/** "MON" */
-export const weekdayShort = (key: DateKey): string => WEEKDAYS[weekday(key)]!.slice(0, 3).toUpperCase();
-/** "Oct 26" */
-export const shortDay = (key: DateKey): string => `${SHORT[parts(key).month - 1]} ${parts(key).day}`;
-
-/** Google's compact clock: "9am", "9:30am", "12pm". */
-export const compactClock = (minutes: number): string => {
-  const total = ((Math.round(minutes) % 1440) + 1440) % 1440;
-  const hour = Math.floor(total / 60);
-  const minute = total % 60;
-  const suffix = hour < 12 ? 'am' : 'pm';
-  const h = hour % 12 === 0 ? 12 : hour % 12;
-  return minute ? `${h}:${String(minute).padStart(2, '0')}${suffix}` : `${h}${suffix}`;
-};
-
-/** Google's time range: "9 – 10am", "9:30 – 11am", "11am – 12:30pm". */
-export const compactRange = (start: number, end: number): string => {
-  const a = compactClock(start);
-  const b = compactClock(end);
-  const sameHalf = (start < 720) === (((end % 1440) + 1440) % 1440 < 720) && end - start < 720;
-  return sameHalf ? `${a.replace(/(am|pm)$/, '')} – ${b}` : `${a} – ${b}`;
 };
 
 /**

@@ -1,8 +1,8 @@
 // Google Calendar's Year view: the twelve months of the year side by side,
 // today ringed; a date opens that day.
 import type { DateKey } from '../../../src/domain/core/types.ts';
-import { addDays } from '../../../src/domain/core/dates.ts';
-import { longDay, monthWeeks } from '../../../src/domain/calendar/views.ts';
+import { addDays, longDay } from '../../../src/domain/core/dates.ts';
+import { monthWeeks } from '../../../src/domain/calendar/views.ts';
 import { useView } from '../../lib/core/context.ts';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];

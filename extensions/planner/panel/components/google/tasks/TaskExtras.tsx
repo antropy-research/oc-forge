@@ -5,15 +5,14 @@
 // for Calendar and Tasks), inserts the ones chosen, and lists them to open or
 // remove. Both are kept in the Planner: Google Tasks' API has neither.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { TaskAttachment } from '../../../src/domain/core/types.ts';
-import { ATTACHMENTS_MAX } from '../../../src/domain/core/events.ts';
-import { TASK_COLORS, colorName, driveKind, withAttachments, type DriveFile } from '../../../src/domain/google/taskAdvanced.ts';
-import { shortDay } from '../../../src/domain/calendar/views.ts';
-import { useGoogle, usePlanner } from '../../lib/core/context.ts';
-import { Icon } from '../calendar/Icon.tsx';
-import { SignInPending } from '../settings/Settings.tsx';
-import { messageOf } from '../../../src/domain/core/values.ts';
-
+import type { TaskAttachment } from '../../../../src/domain/core/types.ts';
+import { ATTACHMENTS_MAX } from '../../../../src/domain/core/events.ts';
+import { TASK_COLORS, colorName, driveKind, withAttachments, type DriveFile } from '../../../../src/domain/google/taskAdvanced.ts';
+import { useGoogle, usePlanner } from '../../../lib/core/context.ts';
+import { Icon } from '../../calendar/Icon.tsx';
+import { SignInPending } from '../../settings/Settings.tsx';
+import { messageOf } from '../../../../src/domain/core/values.ts';
+import { shortDay } from '../../../../src/domain/core/dates.ts';
 
 /** Google Calendar's color menu for a task: its list's color, or one of Google's colors. */
 export const TaskColorMenu = ({ color, listColor, disabled, note, onChange }: { color: string | null; listColor: string; disabled?: boolean; note?: string; onChange: (color: string | null) => void }) => {

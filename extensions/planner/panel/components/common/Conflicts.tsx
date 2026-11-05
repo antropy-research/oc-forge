@@ -12,11 +12,11 @@ import { useState } from 'preact/hooks';
 import { GOOGLE_FIELDS, type FormField, type FormValues } from '../../../src/domain/google/taskForm.ts';
 import { VISIBILITY_LABELS, keptTimeLabel } from '../../../src/domain/google/taskKept.ts';
 import { colorName } from '../../../src/domain/google/taskAdvanced.ts';
-import { longDay } from '../../../src/domain/calendar/views.ts';
 import { describeRecurrence } from '../../../src/domain/google/rrule.ts';
 import type { GoogleTaskList } from '../../../src/domain/google/google.ts';
 import type { DateKey } from '../../../src/domain/core/types.ts';
 import type { TaskConflict } from '../../lib/google/store.ts';
+import { longDay } from '../../../src/domain/core/dates.ts';
 
 /** Changed elsewhere while it was edited here: each change, and the two ways on (`mineLabel`: one with nothing of mine to save, Show it). */
 export const ConflictBanner = ({ lines, onTheirs, onMine, mineLabel = 'Save mine' }: { lines: readonly string[]; onTheirs: () => void; onMine: () => void; mineLabel?: string }) => (

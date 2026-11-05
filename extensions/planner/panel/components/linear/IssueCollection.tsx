@@ -12,8 +12,9 @@ import { PRIORITY_NAMES, groupIssues, showsEmpty, sortIssues, type GroupTarget, 
 import type { LinearProperty, Task } from '../../../src/domain/core/types.ts';
 import { LINEAR_DRAG_TYPE, useLinear, usePlanner, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
-import type { IssueRef, ListId } from '../../lib/linear/store.ts';
+import type { IssueRef, ListId } from '../../lib/linear/types.ts';
 import { AssignButton } from '../agents/AssigneePicker.tsx';
+import { workspaceNames } from './common.tsx';
 import { Avatar, CycleIcon, Dot, PriorityIcon, ProjectIcon, StatusIcon } from './icons.tsx';
 
 /** Drag payload for moving an issue between groups: its workspace and id. */
@@ -256,7 +257,7 @@ export const IssueCollection = ({ listId, issues, display, footer }: { listId: L
   const lv = useLinear();
   const list = lv.lists[listId];
   const [folded, setFolded] = useState<ReadonlySet<string>>(new Set());
-  const names = useMemo(() => new Map(lv.workspaces.map((workspace) => [workspace.id, workspace.name])), [lv.workspaces]);
+  const names = useMemo(() => workspaceNames(lv), [lv.workspaces]);
   const several = lv.workspaces.length > 1;
   const states = linear.statesForTeams(linear.teamsOf(list));
   const more = Object.keys(list.more).length > 0;

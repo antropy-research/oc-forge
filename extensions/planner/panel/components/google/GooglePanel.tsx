@@ -2,21 +2,15 @@ import { useEffect, useState } from 'preact/hooks';
 import type { Task } from '../../../src/domain/core/types.ts';
 import { addDays, monthDay } from '../../../src/domain/core/dates.ts';
 import { taskForGoogleTask, type GoogleTaskItem } from '../../../src/domain/google/google.ts';
-import { GOOGLE_DRAG_TYPE, useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
+import { useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
-import type { GoogleDrag } from '../../lib/google/store.ts';
+import { dragGoogle } from '../../lib/google/sources.ts';
 import { plannedLabel } from '../github/GitHubPanel.tsx';
 import { PlanActions } from '../plan/PlanActions.tsx';
 import { TasksView } from './TasksView.tsx';
 import { CalendarOverlays } from '../calendar/Overlays.tsx';
 import { GmailItems, GmailTaskSection } from './GmailPanel.tsx';
 import { messageOf } from '../../../src/domain/core/values.ts';
-
-
-const dragStart = (event: DragEvent, drag: GoogleDrag) => {
-  event.dataTransfer?.setData(GOOGLE_DRAG_TYPE, JSON.stringify(drag));
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copyMove';
-};
 
 const NotConnected = ({ what }: { what: string }) => <p class="hint">Connect a Google account with {what} in Settings → Google.</p>;
 
@@ -35,7 +29,7 @@ const TaskRow = ({ item }: { item: GoogleTaskItem }) => {
   const linked = taskForGoogleTask(view.state, item);
   const due = dueLabel(item.due, view.today);
   return (
-    <li class={`issue-row${item.parent ? ' is-subtask' : ''}`} draggable aria-label={item.title} onDragStart={(event) => dragStart(event, { kind: 'gtask', item })}>
+    <li class={`issue-row${item.parent ? ' is-subtask' : ''}`} draggable aria-label={item.title} onDragStart={(event) => dragGoogle(event, { kind: 'gtask', item })}>
       <span class="gtask-mark" aria-hidden="true">○</span>
       <span class="issue-main">
         <span class="issue-title">{item.title}</span>

@@ -8,20 +8,14 @@ import { clockLabel, monthDay, zonedDateMinutes } from '../../../src/domain/core
 import { taskForMail, type MailItem } from '../../../src/domain/google/google.ts';
 import { GMAIL_ACTION_LABELS, emailUrl, gmailActionKey, gmailActionText, pickLabel, type GmailLabel } from '../../../src/domain/google/gmail.ts';
 import type { GmailAction } from '../../../src/domain/core/types.ts';
-import { GOOGLE_DRAG_TYPE, useGmail, useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
+import { useGmail, useGoogle, usePlanner, useView } from '../../lib/core/context.ts';
 import { mailOf, threadKey } from '../../lib/google/gmail.ts';
-import type { GoogleDrag } from '../../lib/google/store.ts';
+import { dragGoogle } from '../../lib/google/sources.ts';
 import { useUi } from '../../lib/core/ui.ts';
 import { plannedLabel } from '../github/GitHubPanel.tsx';
 import { PlanActions } from '../plan/PlanActions.tsx';
 import { ExternalLink } from '../common/ExternalLink.tsx';
 import { messageOf } from '../../../src/domain/core/values.ts';
-
-
-const dragStart = (event: DragEvent, drag: GoogleDrag) => {
-  event.dataTransfer?.setData(GOOGLE_DRAG_TYPE, JSON.stringify(drag));
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copyMove';
-};
 
 const senderName = (from: string): string => /^\s*"?([^"<]+?)"?\s*</.exec(from)?.[1]?.trim() || from.replace(/[<>]/g, '').trim();
 
@@ -37,7 +31,7 @@ const MailRow = ({ item }: { item: MailItem }) => {
   const when = item.date ? zonedDateMinutes(item.date, zone) : null;
   const mailClient = view.state.settings.emailClient;
   return (
-    <li class={`issue-row mail-row${item.unread ? ' is-unread' : ''}`} draggable aria-label={item.subject} onDragStart={(event) => dragStart(event, { kind: 'mail', item })}>
+    <li class={`issue-row mail-row${item.unread ? ' is-unread' : ''}`} draggable aria-label={item.subject} onDragStart={(event) => dragGoogle(event, { kind: 'mail', item })}>
       <span class="issue-main">
         <span class="issue-title">{item.subject}</span>
         <span class="issue-meta">

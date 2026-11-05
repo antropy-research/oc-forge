@@ -2,7 +2,9 @@
 // as Google Tasks' Print list has it, the list's title, its open tasks in the
 // list's order with subtasks indented, each with its date and time, repeat,
 // deadline, star and details, and its completed tasks when Completed is open.
-import type { PrintedList, PrintedTask } from '../../../src/domain/google/taskPrint.ts';
+import { useEffect, useRef } from 'preact/hooks';
+import type { PrintedList, PrintedTask } from '../../../../src/domain/google/taskPrint.ts';
+import { clearPrintable, setPrintable } from '../../../lib/openchamber/print.ts';
 
 const PrintedRow = ({ task }: { task: PrintedTask }) => (
   <li class={`print-task depth-${task.depth}${task.completed ? ' is-done' : ''}`} data-task={task.id}>
@@ -50,4 +52,17 @@ export const TaskListSheet = ({ sheet }: { sheet: PrintedList }) => {
       {sheet.partial && <p class="print-meta">This list is longer than the Planner reads at once; Google Tasks has the rest.</p>}
     </article>
   );
+};
+
+/**
+ * Keeps what `sheet` prints in the print sheet while `on` (what Print list and Ctrl/⌘+P would print now), so print
+ * media always finds the list shown; nothing once the view is closed.
+ */
+export const usePrintable = (on: boolean, sheet: () => PrintedList) => {
+  const owner = useRef({}).current;
+  const signature = on ? JSON.stringify(sheet()) : '';
+  useEffect(() => {
+    if (on) setPrintable(owner, <TaskListSheet sheet={JSON.parse(signature) as PrintedList} />);
+  }, [on, signature]);
+  useEffect(() => () => clearPrintable(owner), []);
 };

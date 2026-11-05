@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
 import type { DateKey } from '../../../src/domain/core/types.ts';
-import { zonedDateMinutes } from '../../../src/domain/core/dates.ts';
-import { compactRange, longDay, scheduleDays, shortDay, weekdayShort } from '../../../src/domain/calendar/views.ts';
+import { compactRange, longDay, shortDay, weekdayShort, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { scheduleDays } from '../../../src/domain/calendar/views.ts';
 import { usePlanner, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
 import { anchorOf, calendarUi, popoverKind, searchEvents, useCalendarUi } from '../../lib/calendar/calendarUi.ts';

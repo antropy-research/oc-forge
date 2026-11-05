@@ -8,7 +8,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { isProjectView, viewUrl } from '../../../src/domain/linear/linear.ts';
 import { useLinear, usePlanner, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
-import { displayOf, sameSource, type IssueList, type LinearView } from '../../lib/linear/store.ts';
+import { displayOf, sameSource, type IssueList, type LinearView } from '../../lib/linear/types.ts';
 import { HeadSearch, LinearChromeContext, SidebarToggle, type LinearChrome } from './chrome.tsx';
 import { ConnectLinear, LinearErrors, needsConnect, workspaceLabel } from './common.tsx';
 import { ViewIcon } from './icons.tsx';

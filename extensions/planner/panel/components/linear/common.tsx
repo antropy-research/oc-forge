@@ -1,6 +1,6 @@
 // Pieces the Linear page and the side panels share.
 import { usePlanner } from '../../lib/core/context.ts';
-import type { LinearView } from '../../lib/linear/store.ts';
+import type { LinearView } from '../../lib/linear/types.ts';
 import { messageOf } from '../../../src/domain/core/values.ts';
 
 
@@ -14,6 +14,9 @@ export const workspaceLabel = (lv: LinearView, id: string | null | undefined): s
 export const workspaceNames = (lv: LinearView): Map<string, string> => new Map(lv.workspaces.map((workspace) => [workspace.id, workspace.name]));
 
 export const excerpt = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max).trimEnd()}…` : text);
+
+/** When something happened in Linear, as the issue view says it: "Nov 5, 3:04 PM". */
+export const when = (instant: string): string => new Date(instant).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 export const ConnectLinear = () => {
   const { linear, client } = usePlanner();

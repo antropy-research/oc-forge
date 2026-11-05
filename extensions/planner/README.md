@@ -12,12 +12,78 @@ Plan and progress live in the zmemory project: `.tasks/1024-planner-sunsama-feat
 
 ## Architecture
 
-| Part | Path | Role |
-|---|---|---|
-| Domain | `src/domain/` | Types, events and validation, reducer, rollover, recurrence, scheduling (free slots, lanes, playlist), ICS parsing, Linear/GitHub mapping, agent runs, rituals, suggestions, Braindump and assistant parsing. Pure; shared by service and panel. |
-| Service | `service/` → `service/main.js` | Local Node service the host starts on the first `serviceRequest`: with a chat on screen, the Work Status section asks as OpenChamber's window loads. It validates commands, appends events, folds state, commits history, syncs with a git remote, fetches ICS feeds, reads GitHub through `gh` (issues, and the pull requests agents open), keeps the API keys of extra Linear workspaces and runs the Planner's Linear queries with them, signs in Google accounts (and tells a work or school account by Google's `hd`) and talks to Google Calendar, Google Tasks, Gmail and Drive (file names, to attach to a task), declines the meetings that overlap a Busy task set to decline them (`service/google/decline.ts`), changes a repeating Google task's series (`service/google/series.ts`: its next occurrence, one upcoming occurrence changed or deleted alone, an edit of all its tasks or no repeat any more, This and following tasks or All tasks deleted, and its open task gone from Google; one change of a series at a time, whichever window asks, each worked out from the plan as it is when it is written), writes working sessions to Google Calendar (with the visibility of the Google task they plan), reads Pending tasks, gives Google Calendar's task notifications to the panel's surfaces, each once, finds OpenCode's agents (its config folders, and its running server when it is up) and models (`opencode models`), and writes one OpenCode command per agent a task can be assigned to. |
-| Panel | `panel/` → `panel/main.js` | Preact UI bundled as a classic IIFE. One bundle serves the rail panel (the whole Planner, in OpenChamber's right panel), the Work Status section and a hidden background frame (message actions and slash commands). The Planner has no page of its own since 2026-11-05: the panel is the Planner, and its expand button gives it the width a page had. It is a plain extension: it changes nothing in OpenChamber and keeps the Planner the same in every chat with the released extension API alone (`panel/lib/openchamber/follow.ts`, `panel/lib/openchamber/place.ts`; see "In OpenChamber" below). Markdown is parsed with `marked`'s lexer and drawn as plain elements (`panel/lib/core/markdown.ts`): raw HTML stays text, only http(s) and mailto links, images become links, never `innerHTML`. |
-| Tests | `tests/*.test.ts`, `tests/support/`, `tests/e2e/` | End to end, at two levels. **Scenarios** (`bun test tests/`, in CI): each test is one thing a user does, run against the real service process as OpenChamber starts it (a loopback port and a token, its plan and keys in a temporary home), with the journeys' own fakes for Google (`tests/e2e/fakeGoogle.mjs`), GitHub (the real `gh` against `tests/e2e/fakeGithub.mjs` on a socket) and Linear (`tests/e2e/linearFake.mjs`, through OpenChamber's connection and through API keys), and Planner windows made of the panel's own client and stores, over a headless host that records what they asked OpenChamber for (`tests/support/planner.ts`): `plan` (tasks, days, rituals, Undo, subtasks in two windows, sync between machines), `googleCalendar`, `googleTasks`, `linear`, `github`, `gmail`, `agents`. Only security properties no scenario reaches are tested on their own (Markdown drawn from a safe tree; Google's tokens sent to Google alone), and `linear.test.ts` checks every document against Linear's real schema when `LINEAR_SCHEMA` names it. **Browser journeys** (Playwright): against the dev container (`containers/openchamber-dev`), `run.mjs` and `agentpr.mjs` on the installed extension (`agentpr.mjs`: a real agent opens a pull request against the fake GitHub), and `harness.mjs` journeys on this checkout's build: `smoke.mjs`, `look.mjs`, `subtasks.mjs`, `undo.mjs`, `sunsama.mjs` (its GitHub, Gmail and meetings parts run alone with `SUNSAMA_PARTS=github,gmail,meetings`; `github` needs the real `gh` as `GH_BIN`), `linear.mjs`, `calendar.mjs` and `tasks-calendar.mjs` (their service signed in to the fake Google; task notifications are off in a harness's plan unless a journey turns them on, as `tasks-calendar.mjs` does); on the adapters' scratch stack, the release and the adapted build: `forge.mjs` (links, Cmd+click and keys) and `follow.mjs` (the Planner the same in every chat and window). |
+Three layers, split by the same features:
+
+- **The domain** (`src/domain/`) is pure TypeScript, shared by the other two: the plan's types, its commands and their
+  checks, the fold of events into state, and each feature's rules.
+- **The service** (`service/` → `service/main.js`) is the local Node process OpenChamber starts on the first
+  `serviceRequest`. It keeps the plan (an event log in a git repository) and talks to the outside world: Google, GitHub
+  (through `gh`), the Linear workspaces added with an API key, and OpenCode.
+- **The panel** (`panel/` → `panel/main.js`) is the Preact UI in OpenChamber's frames: one bundle for the rail panel
+  (the whole Planner), the Work Status section and a hidden background frame (message actions and slash commands). Its
+  state is a store per feature (`panel/lib/`), drawn by the components (`panel/components/`). The Planner has no page of
+  its own since 2026-11-05: the panel is the Planner, and its expand button gives it the width a page had. It is a plain
+  extension: it changes nothing in OpenChamber and keeps the Planner the same in every chat with the released extension
+  API alone (`panel/lib/openchamber/follow.ts`, `place.ts`; see "In OpenChamber" below). Markdown is parsed with
+  `marked`'s lexer and drawn as plain elements (`panel/lib/core/markdown.ts`): raw HTML stays text, only http(s) and
+  mailto links, images become links, never `innerHTML`.
+
+```text
+panel/components ──▶ panel/lib ──────────┐            serviceRequest, relayed by OpenChamber
+ (what is drawn)     (a store a feature) │                          │
+                                         ▼                          ▼
+                                    src/domain ◀────────────── service
+                                    (pure, shared)             (routes a feature; the plan; Google,
+                                                                GitHub, Linear keys, OpenCode)
+```
+
+The rules, kept by `tests/architecture.test.ts`:
+
+1. The domain imports only the domain. Its `core/` imports no feature, but `core/events.ts`, which checks every
+   feature's commands.
+2. The service and the panel never import each other: they meet over HTTP, the panel's `serviceRequest`.
+3. The panel's state (`panel/lib/`) never imports its components.
+4. A feature lives in the same-named folder in each layer; inside it, names drop the feature's prefix
+   (`google/taskKept.ts`, `linear/filter.ts`, `service/google/decline.ts`).
+5. A helper exists once: `src/domain/core/values.ts` (`messageOf`, `isRecord`), `core/dates.ts` (date arithmetic, and
+   days and times as Google Calendar writes them).
+
+| Feature | Domain `src/domain/` | Service `service/` | Panel state `panel/lib/` | Panel UI `panel/components/` |
+|---|---|---|---|---|
+| The plan | `core/` types, events (commands and their checks), reducer (the fold), selectors, dates, ids, values | `main.ts` (start, wire, stop), `context.ts` (every service object), `http.ts` (token, body, JSON, the routes in order), `routes/plan.ts`; `plan/` planner (commands → events → state), store (the event log in git), sync (a git remote) | `core/` client (the service, applied at once through the same reducer), context, ui, commands, addTask, background (actions and slash commands), dayTargets, sourcePanel, autoSchedule, hover, popover, markdown, time | `app/` App, Shell, CommandPalette, StatusSection; `common/` Conflicts, ExternalLink, Markdown |
+| Planning days and weeks | `plan/` rollover, recurrence, rituals, undo, merge, sort, schedule, suggest, quickAdd, pastedUrl, activity | `plan/`, `routes/plan.ts` | `core/` | `plan/` Board (Home), TodayView, Backlog, DayColumn, TaskList, TaskCard, AddTask, FocusView, SourcePanel, ...; `task/` TaskDetail and its sections; `rituals/` |
+| Calendars | `calendar/` ics (feeds, and the calendar item every view draws), views (which days a view shows, where events go), meetings (the import), print | `calendar/` feeds (ICS), meetings (the import, run by the service); `routes/calendar.ts` | `calendar/` events (what a range shows), calendarUi (popovers, drafts, changes on their way), items (colors, labels, drags) | `calendar/` CalendarView, TimeGrid, MonthView, ScheduleView, YearView, EventEditor, Popovers, PrintPreview, ... |
+| Google | `google/` google (sources, linked tasks), events (event writes, recurring changes), rrule, tasks (a list as the Tasks app shows it), taskKept, taskAdvanced, taskForm, taskNotify, taskPending, taskPrint, gmail | `google/` accounts (OAuth, every request), data, series, timeboxes, decline, notifications, contacts, gmail; `routes/google.ts` | `google/` store (`GoogleStore`; its methods live in its parts: accounts, calendars, sources, linked, board, kept, edits, series; their shared shapes in types), pendingTasks, notifications, gmail | `google/` TasksView with `tasks/` (ListColumn, TaskForm, TaskRow, StarredColumn, ...), GooglePanel, GmailPanel |
+| Linear | `linear/` linear (documents, mapping, sync), filter, display | `linear/` workspaces (API keys); `routes/linear.ts` | `linear/` store (`LinearStore`, in layers: workspaces → lists → page → store; prompts, types) | `linear/` LinearPage, FilterBar, FilterMenu, IssueEditor, IssueProperties, LinearPanel, ... |
+| GitHub | `github/` github, activity | `github/` github (`gh`), activity; `routes/github.ts` | `github/` store, activity | `github/` GitHubPanel |
+| Agents | `agents/` runs, assignees | `agents/` agents (OpenCode's agents and models, the command files); `routes/agents.ts` | `agents/` store | `agents/` Agents, AssigneePicker |
+| Assistant | `assistant/` assistant (Ask Planner), braindump | | | `assistant/` Assistant, Braindump |
+| OpenChamber | | | `openchamber/` follow (the same Planner in every chat), place, forge (oc-forge's host APIs), deepLink, print | `settings/` |
+
+**What the service does.** OpenChamber starts it on the first `serviceRequest`: with a chat on screen, the Work
+Status section asks as OpenChamber's window loads. It checks commands, appends events, folds the plan, commits its
+history and syncs it with a git remote (`plan/`); fetches ICS feeds and imports meetings (`calendar/`); reads GitHub
+through `gh`, issues and the pull requests agents open (`github/`); keeps the API keys of the Linear workspaces added
+with one and runs the Planner's own GraphQL documents with them (`linear/`); signs in Google accounts (telling a work or
+school account by Google's `hd`) and talks to Google Calendar, Google Tasks, Gmail and Drive (`google/`): it declines
+the meetings that overlap a Busy task set to decline them (`decline.ts`), changes a repeating Google task's series, one
+change of a series at a time whichever window asks, each worked out from the plan as it is when it is written
+(`series.ts`), writes working sessions to Google Calendar with the visibility of the Google task they plan
+(`timeboxes.ts`), reads Pending tasks and gives the task notifications to the panel's surfaces, each once
+(`notifications.ts`); and finds OpenCode's agents (its config folders, and its running server when it is up) and
+models (`opencode models`), writing one OpenCode command per agent a task can be assigned to (`agents/`).
+
+**A change, end to end.** A component calls its store. The store builds commands with the domain; the client applies
+them at once through the domain's reducer and sends them to the service (`POST /commands`, through OpenChamber), which
+checks them against the plan as it is, appends them as events, folds them, commits and answers with the plan; the
+client takes that answer. What touches the outside world is a service route the store calls; the panel never reaches
+Google, GitHub or OpenCode itself.
+
+**Stores.** A store is one object the panel holds, with one view its components subscribe to. A store whose parts
+build on each other one way is layered, a class a file (Linear: workspaces → lists → page → store). The Google store's
+parts call each other both ways, so it is one class whose methods live in its part modules (`store.ts` lists them).
+
+**Tests.** End to end, at two levels. **Scenarios** (`bun test tests/`, in CI): each test is one thing a user does, run against the real service process as OpenChamber starts it (a loopback port and a token, its plan and keys in a temporary home), with the journeys' own fakes for Google (`tests/e2e/fakeGoogle.mjs`), GitHub (the real `gh` against `tests/e2e/fakeGithub.mjs` on a socket) and Linear (`tests/e2e/linearFake.mjs`, through OpenChamber's connection and through API keys), and Planner windows made of the panel's own client and stores, over a headless host that records what they asked OpenChamber for (`tests/support/planner.ts`): `plan` (tasks, days, rituals, Undo, subtasks in two windows, sync between machines), `googleCalendar`, `googleTasks`, `linear`, `github`, `gmail`, `agents`. Only security properties no scenario reaches are tested on their own (Markdown drawn from a safe tree; Google's tokens sent to Google alone), and `linear.test.ts` checks every document against Linear's real schema when `LINEAR_SCHEMA` names it. **Browser journeys** (Playwright): against the dev container (`containers/openchamber-dev`), `run.mjs` and `agentpr.mjs` on the installed extension (`agentpr.mjs`: a real agent opens a pull request against the fake GitHub), and `harness.mjs` journeys on this checkout's build: `smoke.mjs`, `look.mjs`, `subtasks.mjs`, `undo.mjs`, `sunsama.mjs` (its GitHub, Gmail and meetings parts run alone with `SUNSAMA_PARTS=github,gmail,meetings`; `github` needs the real `gh` as `GH_BIN`), `linear.mjs`, `calendar.mjs` and `tasks-calendar.mjs` (their service signed in to the fake Google; task notifications are off in a harness's plan unless a journey turns them on, as `tasks-calendar.mjs` does); on the adapters' scratch stack, the release and the adapted build: `forge.mjs` (links, Cmd+click and keys) and `follow.mjs` (the Planner the same in every chat and window).
 
 **Data.** An append-only event log, `events/YYYY-MM.jsonl`, in a git repository at
 `~/.local/share/openchamber-planner/data` on the machine running OpenChamber. State is

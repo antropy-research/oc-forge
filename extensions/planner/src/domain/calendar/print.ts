@@ -5,8 +5,8 @@
 // and for Schedule the descriptions and your response), and what each page
 // of the printout holds.
 import type { DateKey } from '../core/types.ts';
-import { addDays, daysInMonth, isWeekend, weekday } from '../core/dates.ts';
-import { SCHEDULE_DAYS, addMonths, longDay, monthStart, monthWeeks, rangeTitle, type CalendarMode } from './views.ts';
+import { addDays, addMonths, daysInMonth, isWeekend, longDay, monthStart, weekday } from '../core/dates.ts';
+import { SCHEDULE_DAYS, monthWeeks, rangeTitle, type CalendarMode } from './views.ts';
 
 /** The print preview's View: Auto prints as the calendar shows (a year, month by month). */
 type PrintView = 'auto' | 'day' | 'week' | 'month' | 'schedule';

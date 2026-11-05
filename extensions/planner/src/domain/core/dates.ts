@@ -58,8 +58,8 @@ export const nextWeekday = (from: DateKey, day: number): DateKey => {
   return addDays(from, delta);
 };
 
-const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+export const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+export const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 export const weekdayName = (key: DateKey): string => WEEKDAY_NAMES[weekday(key)]!;
 
@@ -140,3 +140,46 @@ export const daysInMonth = (key: DateKey): number => {
 
 /** Saturday or Sunday. */
 export const isWeekend = (key: DateKey): boolean => weekday(key) === 0 || weekday(key) === 6;
+
+// ── Days and times as Google Calendar writes them ────────────────────────────
+
+const SHORT_MONTHS = MONTH_NAMES.map((month) => month.slice(0, 3));
+const parts = (key: DateKey) => ({ year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)), day: Number(key.slice(8)) });
+const keyOf = (year: number, month: number, day: number): DateKey => `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+export const monthStart = (key: DateKey): DateKey => `${key.slice(0, 8)}01`;
+
+/** The same day `n` months later, or the month's last day when it is shorter. */
+export const addMonths = (key: DateKey, n: number): DateKey => {
+  const { year, month, day } = parts(key);
+  const index = year * 12 + (month - 1) + n;
+  const first = keyOf(Math.floor(index / 12), (index % 12) + 1, 1);
+  return keyOf(Math.floor(index / 12), (index % 12) + 1, Math.min(day, daysInMonth(first)));
+};
+
+/** "Monday, October 26" */
+export const longDay = (key: DateKey): string => `${WEEKDAY_NAMES[weekday(key)]}, ${MONTH_NAMES[parts(key).month - 1]} ${parts(key).day}`;
+
+/** "MON" */
+export const weekdayShort = (key: DateKey): string => WEEKDAY_NAMES[weekday(key)]!.slice(0, 3).toUpperCase();
+
+/** "Oct 26" */
+export const shortDay = (key: DateKey): string => `${SHORT_MONTHS[parts(key).month - 1]} ${parts(key).day}`;
+
+/** Google's compact clock: "9am", "9:30am", "12pm". */
+export const compactClock = (minutes: number): string => {
+  const total = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  const hour = Math.floor(total / 60);
+  const minute = total % 60;
+  const suffix = hour < 12 ? 'am' : 'pm';
+  const h = hour % 12 === 0 ? 12 : hour % 12;
+  return minute ? `${h}:${String(minute).padStart(2, '0')}${suffix}` : `${h}${suffix}`;
+};
+
+/** Google's time range: "9 – 10am", "9:30 – 11am", "11am – 12:30pm". */
+export const compactRange = (start: number, end: number): string => {
+  const a = compactClock(start);
+  const b = compactClock(end);
+  const sameHalf = (start < 720) === (((end % 1440) + 1440) % 1440 < 720) && end - start < 720;
+  return sameHalf ? `${a.replace(/(am|pm)$/, '')} – ${b}` : `${a} – ${b}`;
+};

@@ -8,8 +8,7 @@
 import { useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
 import type { DateKey } from '../../../src/domain/core/types.ts';
-import { addDays, isDateKey } from '../../../src/domain/core/dates.ts';
-import { longDay } from '../../../src/domain/calendar/views.ts';
+import { addDays, isDateKey, longDay } from '../../../src/domain/core/dates.ts';
 import { describeRecurrence } from '../../../src/domain/google/rrule.ts';
 import type { GoogleTaskItem } from '../../../src/domain/google/google.ts';
 import { keptFor, keptTimeLabel } from '../../../src/domain/google/taskKept.ts';

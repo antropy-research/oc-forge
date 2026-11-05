@@ -1,7 +1,7 @@
 // Google Tasks' scenarios, on top of the shared harness (planner.ts): Planner windows whose Google store starts as the
 // panel starts it, what the fake Google has, what its calendar shows, and a task form's values as the editor sends them.
 import type { CommitListener } from '../../panel/lib/core/client.ts';
-import type { TaskFields } from '../../panel/lib/google/store.ts';
+import type { TaskFields } from '../../panel/lib/google/types.ts';
 import { addDays, zonedDateMinutes } from '../../src/domain/core/dates.ts';
 import type { GoogleTaskItem } from '../../src/domain/google/google.ts';
 import { formValuesOf, withOccurrence, type FormValues } from '../../src/domain/google/taskForm.ts';

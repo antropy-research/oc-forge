@@ -6,7 +6,7 @@ import { useMemo, useRef, useState } from 'preact/hooks';
 import { LINEAR_COMPLETED, LINEAR_GROUPS, LINEAR_ORDERS, LINEAR_PROPERTIES, type LinearCompletedWindow, type LinearGroupBy, type LinearOrderBy } from '../../../src/domain/core/types.ts';
 import { COMPLETED_LABELS, GROUP_LABELS, ORDER_LABELS, PROPERTY_LABELS, type IssueDisplay, type ProjectGroupBy, type ProjectOrderBy } from '../../../src/domain/linear/display.ts';
 import { useLinear, usePlanner, useView } from '../../lib/core/context.ts';
-import { displayOf, type ListId } from '../../lib/linear/store.ts';
+import { displayOf, type ListId } from '../../lib/linear/types.ts';
 import { Picker, PickerButton, useDismiss } from './Picker.tsx';
 
 const Switch = ({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) => (

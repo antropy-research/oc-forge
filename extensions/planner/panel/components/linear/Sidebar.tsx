@@ -9,7 +9,7 @@ import { groupViews, isProjectView, type LinearFavorite, type LinearSavedView } 
 import { searchChoices } from '../../../src/domain/linear/filter.ts';
 import { useLinear, usePlanner } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
-import { sameSource, type LinearSource } from '../../lib/linear/store.ts';
+import { sameSource, type LinearSource } from '../../lib/linear/types.ts';
 import { workspaceLabel, workspaceNames } from './common.tsx';
 import { Kbd, ProjectIcon, StatusIcon, ViewIcon } from './icons.tsx';
 import { Picker, PickerButton } from './Picker.tsx';

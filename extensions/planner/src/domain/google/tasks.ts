@@ -3,8 +3,7 @@
 // where a task goes (Google's parent and previous sibling) when it is dragged,
 // indented or outdented.
 import type { DateKey } from '../core/types.ts';
-import { addDays } from '../core/dates.ts';
-import { shortDay, weekdayShort } from '../calendar/views.ts';
+import { addDays, shortDay, weekdayShort } from '../core/dates.ts';
 import type { GoogleTaskItem } from './google.ts';
 
 /** "Today", "Tomorrow", "Wed, Oct 28", as Google Tasks labels a date. */

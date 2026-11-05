@@ -6,7 +6,7 @@ import { monthDay } from '../../../src/domain/core/dates.ts';
 import { HEALTH_LABELS, groupProjects } from '../../../src/domain/linear/display.ts';
 import type { LinearProject, LinearProjectDetail } from '../../../src/domain/linear/linear.ts';
 import { useLinear, usePlanner, useView } from '../../lib/core/context.ts';
-import { displayOf, type OpenProject } from '../../lib/linear/store.ts';
+import { displayOf, type OpenProject } from '../../lib/linear/types.ts';
 import { HeadSearch, SidebarToggle } from './chrome.tsx';
 import { LinearErrors, excerpt, workspaceLabel } from './common.tsx';
 import { Avatar, ProjectIcon } from './icons.tsx';

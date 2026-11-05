@@ -6,7 +6,7 @@ import { ExternalLink } from '../common/ExternalLink.tsx';
 import { groupIssues, sortIssues } from '../../../src/domain/linear/display.ts';
 import { LINEAR_DRAG_TYPE, usePlanner, useLinear, useView } from '../../lib/core/context.ts';
 import { useUi } from '../../lib/core/ui.ts';
-import { displayOf, type LinearSource, type LinearTeam } from '../../lib/linear/store.ts';
+import { displayOf, type LinearSource, type LinearTeam } from '../../lib/linear/types.ts';
 import { useDayTargets } from '../../lib/core/dayTargets.ts';
 import { ConnectLinear, LinearErrors, needsConnect, workspaceLabel, workspaceNames } from './common.tsx';
 import { FilterBar } from './FilterBar.tsx';

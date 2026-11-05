@@ -3,11 +3,11 @@ import { addMeetingCommands, eventKey, taskForEvent as taskForEventKey } from '.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CalendarEvent } from '../../../src/domain/calendar/ics.ts';
 import type { DateKey, Placement, WorkBlock } from '../../../src/domain/core/types.ts';
-import { addDays, clockLabel, daysBetween, instantAt, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { addDays, clockLabel, compactClock, compactRange, daysBetween, instantAt, longDay, weekdayShort, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
 import { blocksOnDay, edgePosition } from '../../../src/domain/core/selectors.ts';
 import { isGoogleTaskItem } from '../../../src/domain/google/google.ts';
 import { keptFor } from '../../../src/domain/google/taskKept.ts';
-import { blockText, compactClock, compactRange, eventSpan, fitRow, layoutRow, longDay, weekdayShort, type RowItem } from '../../../src/domain/calendar/views.ts';
+import { blockText, eventSpan, fitRow, layoutRow, type RowItem } from '../../../src/domain/calendar/views.ts';
 import { layoutLanes } from '../../../src/domain/plan/schedule.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import { DRAG_TYPE, GITHUB_DRAG_TYPE, GOOGLE_DRAG_TYPE, LINEAR_DRAG_TYPE, usePlanner, useView } from '../../lib/core/context.ts';
