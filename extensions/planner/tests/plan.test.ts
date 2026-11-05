@@ -718,7 +718,8 @@ describe('the plan on disk', () => {
     expect(subtasksOf(await planner.state(), old)).toEqual([{ id: 'b', title: 'Beta renamed', done: true }, { id: 'c', title: 'Gamma', done: false }]);
 
     // As older Planners left a long history: hundreds of loose objects (here on a side ref), packed when it starts.
-    const git = (...args: string[]) => execFileSync('git', ['-C', data, ...args], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    // With an identity of its own: a machine without one (CI) refuses commit-tree.
+    const git = (...args: string[]) => execFileSync('git', ['-C', data, '-c', 'user.name=Planner e2e', '-c', 'user.email=e2e@example.invalid', ...args], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
     const count = (name: string) => Number(new RegExp(`^${name}: (\\d+)$`, 'm').exec(git('count-objects', '-v'))?.[1]);
     const blobs = mkdtempSync(join(tmpdir(), 'planner-loose-'));
     const files = Array.from({ length: 300 }, (_, index) => join(blobs, `b${index}`));
@@ -730,7 +731,15 @@ describe('the plan on disk', () => {
     expect(count('count')).toBeGreaterThan(256);
     await planner.restart();
     expect(await until(() => count('packs') >= 1 && count('count') < 256, 15_000)).toBe(true);
-    expect(git('fsck', '--no-progress')).toBe('');
+    // Intact once the service's `gc --auto` after the repack is through (a history broken for good never passes).
+    const intact = () => {
+      try {
+        return git('fsck', '--no-progress') === '';
+      } catch {
+        return false;
+      }
+    };
+    expect(await until(intact, 10_000, 100)).toBe(true);
   }, 30_000);
 
   // Found by this suite (2026-11-05): the store appended after a torn last line without ending it first, so the first
