@@ -99,6 +99,9 @@ never otherwise; on 2026-10-28 a leak held 90 of them). Free them, or raise the 
    ```
 
 2. To reach it from other machines, publish it on another address: `echo OC_DEV_BIND=<address> > .env`.
+   If that address goes away (on 2026-11-05 the host's tailnet node was re-created with a new IP), write
+   the new one and run `docker compose up -d --no-build`. Until then Docker keeps listening on the old
+   address and still reports the container healthy.
 3. Build (above), run `docker compose up -d`, open `http://<address>:35310`, and sign in with the UI password.
 
 OpenCode reads provider keys from the environment: uncomment one key line in the

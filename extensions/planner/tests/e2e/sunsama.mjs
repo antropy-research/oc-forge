@@ -1159,7 +1159,7 @@ const agentOf = async (runRecord, timeout = 90_000) => {
   for (;;) {
     if (runRecord?.sessionId) {
       const directory = runRecord.worktree?.directory ?? runRecord.directory ?? '';
-      const response = await h.context.request.get(`http://100.116.120.66:35310/api/session/${runRecord.sessionId}/message?directory=${encodeURIComponent(directory)}`);
+      const response = await h.context.request.get(`${h.base}/api/session/${runRecord.sessionId}/message?directory=${encodeURIComponent(directory)}`);
       const body = await response.json().catch(() => null);
       const items = (Array.isArray(body) ? body : body?.data ?? []).map((item) => item.info ?? item);
       const agents = [...new Set(items.filter((item) => (item.type === 'assistant' || item.type === 'agent-switched' || item.role === 'assistant') && item.agent).map((item) => item.agent))];
@@ -1176,8 +1176,8 @@ const agentOf = async (runRecord, timeout = 90_000) => {
 
 /** The chats (the agents' and the empty ones that made their worktrees), worktrees and branches the agent phases made, and the command file. */
 const cleanUp = async () => {
-  const base = 'http://100.116.120.66:35310';
   try {
+    const { base } = h;
     const latest = await state();
     const chats = new Map();
     for (const record of Object.values(latest.runs ?? {})) {
