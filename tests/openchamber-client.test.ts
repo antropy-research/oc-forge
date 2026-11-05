@@ -5,11 +5,8 @@ import {
   connectOcForge,
   envelope,
   matchHostShortcut,
-  OC_FORGE_LEGACY_LIMITS,
-  OC_FORGE_LIMITS,
   parseOcForgeRequest,
   readOcForgeManifest,
-  readOcForgeRailEntries,
   readOcForgeRequest,
   type OcForgeHello,
   type OcForgeKey,
@@ -17,8 +14,6 @@ import {
 } from "../adapters/openchamber/client/index"
 import { ocForgeDocumentSandbox, parseOcForgeManifest } from "../adapters/openchamber/server/manifest.js"
 import { ocForgeCommandsOnceLoaded } from "../adapters/openchamber/host/commands.ts"
-import { newOcForgeWindowId } from "../adapters/openchamber/host/ids.ts"
-import { createOcForgeServiceSocket, type OcForgeSocketLike } from "../adapters/openchamber/host/service-socket.ts"
 
 const linux: OcForgeShortcuts = {
   mod: ["ctrl"],
@@ -46,118 +41,52 @@ describe("frame requests", () => {
     expect(readOcForgeRequest(envelope({ type: "hello" }))).toEqual({ id: null, request: { type: "hello" } })
     expect(readOcForgeRequest({ channel: "openchamber", v: 1, type: "hello" })).toBeNull()
     expect(readOcForgeRequest({ channel: "oc-forge", v: 2, type: "hello" })).toBeNull()
-    const open = readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "file:///a.ts", title: " a.ts ", icon: "<svg viewBox='0 0 1 1'/>", activate: true } }, "7"))
-    expect(open).toEqual({ id: "7", request: { type: "tab-open", payload: { id: "file:///a.ts", title: "a.ts", icon: "<svg viewBox='0 0 1 1'/>", activate: true } } })
-    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "" } }))).toBeNull()
-    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", icon: "javascript:alert(1)" } }))).toBeNull()
-    expect(readOcForgeRequest(envelope({ type: "tab-update", payload: { id: "a", icon: null, dirty: true } }))?.request).toEqual({ type: "tab-update", payload: { id: "a", icon: null, dirty: true } })
+    expect(readOcForgeRequest(envelope({ type: "route", payload: { route: "/task/1", push: true } }, "7"))).toEqual({ id: "7", request: { type: "route", payload: { route: "/task/1", push: true } } })
+    expect(readOcForgeRequest(envelope({ type: "route", payload: { route: "x".repeat(2048) } }))?.request.type).toBe("route")
     expect(readOcForgeRequest(envelope({ type: "route", payload: { route: "x".repeat(2049) } }))).toBeNull()
-    expect(readOcForgeRequest(envelope({ type: "rail-active", payload: { entry: "a--b" } }))).toBeNull()
-    // rail.open names one of the extension's own entries by its id, never a surface.
-    expect(readOcForgeRequest(envelope({ type: "rail-open", payload: { entry: "terminal" } }, "4"))).toEqual({ id: "4", request: { type: "rail-open", payload: { entry: "terminal" } } })
-    expect(readOcForgeRequest(envelope({ type: "rail-open", payload: { entry: "plugin:oc-forge-vscode--terminal" } }))).toBeNull()
-    expect(readOcForgeRequest(envelope({ type: "rail-open", payload: {} }))).toBeNull()
     expect(readOcForgeRequest(envelope({ type: "key", payload: press("1", "Digit1", { ctrlKey: true }) }))?.request.type).toBe("key")
     expect(readOcForgeRequest(envelope({ type: "key", payload: { key: "1", code: "Digit1" } }))).toBeNull()
-    expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: true } }))?.request).toEqual({ type: "tab-close-handler", payload: { on: true } })
-    // A tab's route: a string within the route limit; an update may clear it with null.
-    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", route: "/tab/a" } }))?.request).toEqual({ type: "tab-open", payload: { id: "a", title: "A", route: "/tab/a" } })
-    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", route: 7 } }))).toBeNull()
-    expect(readOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "A", route: "x".repeat(2049) } }))).toBeNull()
-    expect(readOcForgeRequest(envelope({ type: "tab-update", payload: { id: "a", route: null } }))?.request).toEqual({ type: "tab-update", payload: { id: "a", route: null } })
-    expect(readOcForgeRequest(envelope({ type: "tab-close-handler", payload: { on: "yes" } }))).toBeNull()
   })
 
   test("one the host can't take says why, for the host to answer at once; anything not on the channel is nothing", () => {
     expect(parseOcForgeRequest({ channel: "openchamber", v: 1, type: "hello" })).toBeNull()
     expect(parseOcForgeRequest({ channel: "oc-forge", v: 1 })).toBeNull()
     const refused = (type: string, payload: unknown) => parseOcForgeRequest(envelope({ type, payload }, "9")) as { id: string; error: string }
-    expect(refused("tab-open", { id: "a", title: "t".repeat(513) })).toEqual({ id: "9", error: "Refused tab-open: a title is 1–512 characters." })
-    expect(refused("tab-open", { id: "x".repeat(1025), title: "A" }).error).toBe("Refused tab-open: a tab's id is 1–1024 characters.")
-    expect(refused("tab-update", { id: "a", route: "x".repeat(2049) }).error).toBe("Refused tab-update: a route is at most 2048 characters.")
-    expect(refused("tab-open", { id: "a", title: "A", icon: "javascript:alert(1)" }).error).toMatch(/^Refused tab-open: an icon is/)
-    expect(refused("tab-open", { id: "a", title: "A", activate: "yes" }).error).toBe("Refused tab-open: activate is true or false.")
+    expect(refused("route", { route: "x".repeat(2049) })).toEqual({ id: "9", error: "Refused route: a route is at most 2048 characters." })
     expect(refused("route", { route: "/x", push: 1 }).error).toBe("Refused route: push is true or false.")
     expect(refused("key", { key: "1" }).error).toMatch(/^Refused key: a press has/)
-    expect(refused("tab-shuffle", {}).error).toBe("Refused tab-shuffle: not a request this host knows.")
-    const entryRule = "an entry's id is kebab-case, at most 48 characters."
-    expect(refused("rail-open", { entry: "oc-forge-vscode--terminal" }).error).toBe(`Refused rail-open: ${entryRule}`)
-    expect(refused("rail-open", { entry: "e".repeat(49) }).error).toBe(`Refused rail-open: ${entryRule}`)
-    expect(refused("rail-active", { entry: "e".repeat(49) }).error).toBe(`Refused rail-active: ${entryRule}`)
-    expect(parseOcForgeRequest(envelope({ type: "rail-open", payload: { entry: "e".repeat(48) } }, "5"))).toEqual({ id: "5", request: { type: "rail-open", payload: { entry: "e".repeat(48) } } })
+    // What only the VS Code extension used (header tabs, rail entries, the window's id) is no request any more.
+    for (const type of ["tab-open", "rail-open", "rail-badges", "page-warm"]) {
+      expect(refused(type, { id: "a", title: "A", entry: "terminal" }).error).toBe(`Refused ${type}: not a request this host knows.`)
+    }
     // Without an id there is nothing to answer, but it is still refused.
-    expect(parseOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a" } }))).toEqual({ id: null, error: "Refused tab-open: a title is 1–512 characters." })
-    // The well-formed read as before.
-    expect(parseOcForgeRequest(envelope({ type: "tab-open", payload: { id: "a", title: "t".repeat(512) } }, "3"))).toEqual({ id: "3", request: { type: "tab-open", payload: { id: "a", title: "t".repeat(512) } } })
-  })
-
-  test("the limits: room for a thousand tabs and a file's whole name; an older host's for a hello without them", () => {
-    expect(OC_FORGE_LIMITS).toMatchObject({ tabs: 1000, title: 512, tabId: 1024, route: 2048 })
-    expect(OC_FORGE_LEGACY_LIMITS).toEqual({ ...OC_FORGE_LIMITS, tabs: 64, title: 80 })
-  })
-})
-
-describe("rail entries from a service", () => {
-  test("ordered by `order`, then as listed; a bad entry is dropped on its own", () => {
-    const entries = readOcForgeRailEntries({
-      entries: [
-        { id: "search", title: "Search", icon: "search-line" },
-        { id: "scm", title: "Source Control", icon: "git-branch", order: 2 },
-        { id: "explorer", title: "Explorer", icon: "<svg xmlns='http://www.w3.org/2000/svg'/>", order: 1 },
-        { id: "terminal", title: "Terminal", icon: "terminal-box", zone: "bottom" },
-        { id: "bad--id", title: "Reserved separator", icon: "apps" },
-        { id: "scm", title: "Duplicate", icon: "apps" },
-        { id: "nozone", title: "Bad zone", icon: "apps", zone: "top" },
-        { id: "noicon", title: "No icon" },
-        "not an object",
-      ],
-    })
-    expect(entries?.map((entry) => entry.id)).toEqual(["explorer", "scm", "search", "terminal"])
-    expect(entries?.find((entry) => entry.id === "terminal")?.zone).toBe("bottom")
-    expect(readOcForgeRailEntries({ items: [] })).toBeNull()
-    expect(readOcForgeRailEntries({ entries: Array.from({ length: 120 }, (_, i) => ({ id: `e${i}`, title: `E${i}`, icon: "apps" })) })).toHaveLength(100)
+    expect(parseOcForgeRequest(envelope({ type: "route", payload: {} }))).toEqual({ id: null, error: "Refused route: a route is at most 2048 characters." })
   })
 })
 
 describe("the ocForge manifest block", () => {
   const manifest = { contributes: { panel: { entry: "panel/index.html" }, service: { entry: "service/main.js" } } }
-  test("the server reads zone and rail source, clamping the interval", () => {
-    const raw = JSON.stringify({ openchamber: {}, ocForge: { apiVersion: 1, zone: "bottom", rail: { path: "/rail", interval: 10 } } })
-    expect(parseOcForgeManifest(raw, manifest)).toEqual({ apiVersion: 1, zone: "bottom", rail: { path: "/rail", interval: 1000 } })
-  })
-  test("a rail needs a service, everything needs a panel page, other versions are ignored", () => {
-    const raw = JSON.stringify({ ocForge: { apiVersion: 1, zone: "left", rail: { path: "/rail" } } })
-    expect(parseOcForgeManifest(raw, { contributes: { panel: { entry: "a.html" } } })).toEqual({ apiVersion: 1, zone: "left" })
-    expect(parseOcForgeManifest(raw, { contributes: { panel: {} } })).toBeNull()
-    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 2, zone: "left" } }), manifest)).toBeNull()
-    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, rail: { path: "../x" } } }), manifest)).toBeNull()
-    expect(parseOcForgeManifest("{", manifest)).toBeNull()
-  })
-  test("a page may keep the bottom zone under it; that needs a page, and only `true` counts", () => {
-    const raw = JSON.stringify({ ocForge: { apiVersion: 1, page: { keepBottomZone: true } } })
-    const withPage = { contributes: { panel: { entry: "panel/index.html" }, page: { entry: "page/index.html" } } }
-    expect(parseOcForgeManifest(raw, withPage)).toEqual({ apiVersion: 1, page: { keepBottomZone: true } })
-    expect(parseOcForgeManifest(raw, manifest)).toBeNull()
-    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, page: { keepBottomZone: "yes" } } }), withPage)).toBeNull()
-    expect(readOcForgeManifest({ apiVersion: 1, page: { keepBottomZone: true } })).toEqual({ apiVersion: 1, page: { keepBottomZone: true } })
-    expect(readOcForgeManifest({ apiVersion: 1, page: { keepBottomZone: 1 } })).toEqual({ apiVersion: 1 })
-  })
   test("frames may ask for allow-modals (print); that needs only a panel page, and only `true` counts", () => {
     const panelOnly = { contributes: { panel: { entry: "panel/index.html" } } }
     expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, modals: true } }), panelOnly)).toEqual({ apiVersion: 1, modals: true })
     expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, modals: "yes" } }), manifest)).toBeNull()
-    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, zone: "left", modals: 1 } }), manifest)).toEqual({ apiVersion: 1, zone: "left" })
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 1, modals: true } }), { contributes: { panel: {} } })).toBeNull()
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { apiVersion: 2, modals: true } }), manifest)).toBeNull()
+    expect(parseOcForgeManifest("{", manifest)).toBeNull()
     expect(readOcForgeManifest({ apiVersion: 1, modals: true })).toEqual({ apiVersion: 1, modals: true })
     expect(readOcForgeManifest({ apiVersion: 1, modals: "true" })).toEqual({ apiVersion: 1 })
+    expect(readOcForgeManifest("nope")).toBeUndefined()
     // The server's CSP sandboxes the document as well: it widens only for the extension that asks.
     expect(ocForgeDocumentSandbox({ ocForge: { apiVersion: 1, modals: true } })).toBe("sandbox allow-scripts allow-modals")
-    expect(ocForgeDocumentSandbox({ ocForge: { apiVersion: 1, zone: "left" } })).toBe("sandbox allow-scripts")
+    expect(ocForgeDocumentSandbox({ ocForge: { apiVersion: 1 } })).toBe("sandbox allow-scripts")
     expect(ocForgeDocumentSandbox({})).toBe("sandbox allow-scripts")
   })
-  test("the UI reads the catalog row's field the same way", () => {
-    expect(readOcForgeManifest({ apiVersion: 1, rail: { path: "/rail" } })).toEqual({ apiVersion: 1, rail: { path: "/rail", interval: 3000 } })
-    expect(readOcForgeManifest({ apiVersion: 1, zone: "top" })).toEqual({ apiVersion: 1 })
-    expect(readOcForgeManifest("nope")).toBeUndefined()
+  test("what only the VS Code extension used (a default zone, rail entries, the bottom zone under a page) is ignored", () => {
+    const withPage = { contributes: { ...manifest.contributes, page: { entry: "page/index.html" } } }
+    const old = { apiVersion: 1, zone: "bottom", rail: { path: "/rail", interval: 1000 }, page: { keepBottomZone: true } }
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: old }), withPage)).toBeNull()
+    expect(parseOcForgeManifest(JSON.stringify({ ocForge: { ...old, modals: true } }), withPage)).toEqual({ apiVersion: 1, modals: true })
+    expect(readOcForgeManifest(old)).toEqual({ apiVersion: 1 })
   })
 })
 
@@ -218,11 +147,9 @@ const fakeFrame = () => {
 
 const hello: OcForgeHello = {
   version: 1,
-  features: ["rail", "tabs", "zones", "keys", "links"],
+  features: ["keys", "links"],
   extension: "ocforge-test",
-  surface: "panel",
-  rail: { entry: "alpha", own: false },
-  tabs: { list: [], active: null, shown: false, strip: true },
+  surface: "page",
   route: null,
   links: { page: "http://h/?extension=ocforge-test&route=", session: "http://h/?session=" },
   shortcuts: linux,
@@ -248,136 +175,33 @@ describe("the client module", () => {
     deliver(envelope({ type: "hello", payload: hello }))
     const forge = await connecting
     expect(forge?.hello.extension).toBe("ocforge-test")
-    expect(forge?.has("tabs")).toBe(true)
-    // This hello names no limits, as an older host's: those hold.
-    expect(forge?.limits()).toEqual(OC_FORGE_LEGACY_LIMITS)
+    expect(forge?.has("links")).toBe(true)
+    expect(forge?.has("modals")).toBe(false)
     expect(forge?.links.pageUrl("/task/1 a")).toBe("http://h/?extension=ocforge-test&route=%2Ftask%2F1%20a")
     expect(forge?.links.sessionUrl("ses_1")).toBe("http://h/?session=ses_1")
 
-    const opening = forge!.tabs.open({ id: "a", title: "A" }, { activate: true })
+    const routing = forge!.links.setRoute("/task/1", { push: true })
     const request = host.posted.at(-1)!.data as { id: string; type: string; payload: unknown }
-    expect(request).toMatchObject({ channel: "oc-forge", type: "tab-open", payload: { id: "a", title: "A", activate: true } })
+    expect(request).toMatchObject({ channel: "oc-forge", type: "route", payload: { route: "/task/1", push: true } })
     deliver(envelope({ type: "result", id: request.id, ok: true }))
-    await opening
+    await routing
+    expect(forge!.links.route()).toBe("/task/1")
 
-    const refused = forge!.tabs.activate("missing")
-    deliver(envelope({ type: "result", id: (host.posted.at(-1)!.data as { id: string }).id, ok: false, error: "No such tab." }))
-    await expect(refused).rejects.toThrow("No such tab.")
+    const refused = forge!.keys.forward(press("i", "KeyI", { ctrlKey: true }))
+    deliver(envelope({ type: "result", id: (host.posted.at(-1)!.data as { id: string }).id, ok: false, error: "Not one of the OpenChamber navigation shortcuts a frame may forward." }))
+    await expect(refused).rejects.toThrow("Not one of the OpenChamber navigation shortcuts")
 
     const seen: string[] = []
-    forge!.rail.onEntry((entry) => seen.push(`entry:${entry}`))
-    forge!.tabs.onActivate((id) => seen.push(`tab:${id}`))
-    forge!.tabs.onClose((id) => seen.push(`closed:${id}`))
     forge!.links.onRoute((route) => seen.push(`route:${route}`))
-    deliver(envelope({ type: "rail-entry", payload: { entry: "beta" } }))
-    deliver(envelope({ type: "tab-activated", payload: { id: "a" } }))
-    deliver(envelope({ type: "tab-closed", payload: { id: "a" } }))
+    forge!.keys.onChange((shortcuts) => seen.push(`close:${shortcuts.bindings.close_session_tab}`))
     deliver(envelope({ type: "route", payload: { route: "/x" } }))
-    expect(seen).toEqual(["entry:beta", "tab:a", "closed:a", "route:/x"])
-    expect(forge!.rail.entry()).toBe("beta")
+    deliver(envelope({ type: "shortcuts", payload: { ...linux, bindings: { ...linux.bindings, close_session_tab: "mod+w" } } }))
+    // Events of what the host no longer has are nothing to the client.
+    deliver(envelope({ type: "tab-activated", payload: { id: "a" } }))
+    expect(seen).toEqual(["route:/x", "close:mod+w"])
     expect(forge!.links.route()).toBe("/x")
+    expect(forge!.keys.shortcuts().bindings.close_session_tab).toBe("mod+w")
     forge!.dispose()
-  })
-
-  test("a current host's hello says its limits", async () => {
-    const { frame, deliver } = fakeFrame()
-    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
-    deliver(envelope({ type: "hello", payload: { ...hello, limits: OC_FORGE_LIMITS } }))
-    const forge = await connecting
-    expect(forge?.limits()).toEqual(OC_FORGE_LIMITS)
-    forge!.dispose()
-  })
-
-  test("rail.open asks the host to show one of the extension's own entries, and says why it refused one", async () => {
-    const { frame, host, deliver } = fakeFrame()
-    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
-    deliver(envelope({ type: "hello", payload: { ...hello, surface: "page", rail: null, features: [...hello.features, "rail-open", "window-id"], windowId: "0f".repeat(16) } }))
-    const forge = (await connecting)!
-    expect(forge.has("rail-open")).toBe(true)
-    const opening = forge.rail.open("dock")
-    const request = host.posted.at(-1)!.data as { id: string }
-    expect(request).toMatchObject({ channel: "oc-forge", v: 1, type: "rail-open", payload: { entry: "dock" } })
-    deliver(envelope({ type: "result", id: request.id, ok: true }))
-    await opening
-    const refusal = 'ocforge-test has no rail entry "explorer"; a frame opens only its own extension\'s entries.'
-    const refused = forge.rail.open("explorer")
-    deliver(envelope({ type: "result", id: (host.posted.at(-1)!.data as { id: string }).id, ok: false, error: refusal }))
-    await expect(refused).rejects.toThrow(refusal)
-    forge.dispose()
-  })
-
-  test("rail.setBadges sends the frame's counts on its extension's entries; the host reads whole counts per entry", async () => {
-    const { frame, host, deliver } = fakeFrame()
-    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
-    deliver(envelope({ type: "hello", payload: { ...hello, features: [...hello.features, "rail-open", "rail-badge"] } }))
-    const forge = (await connecting)!
-    expect(forge.has("rail-badge")).toBe(true)
-    const sending = forge.rail.setBadges({ scm: 3, extensions: 1 })
-    const request = host.posted.at(-1)!.data as { id: string }
-    expect(request).toMatchObject({ channel: "oc-forge", v: 1, type: "rail-badges", payload: { badges: { scm: 3, extensions: 1 } } })
-    deliver(envelope({ type: "result", id: request.id, ok: true }))
-    await sending
-    // The user works in this frame: its counts are its view of every entry.
-    const fresh = forge.rail.setBadges({}, { fresh: true })
-    const freshRequest = host.posted.at(-1)!.data as { id: string }
-    expect(freshRequest).toMatchObject({ type: "rail-badges", payload: { badges: {}, fresh: true } })
-    deliver(envelope({ type: "result", id: freshRequest.id, ok: true }))
-    await fresh
-    forge.dispose()
-    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: {}, fresh: true } }, "12"))).toEqual({ id: "12", request: { type: "rail-badges", payload: { badges: {}, fresh: true } } })
-    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: {}, fresh: "yes" } }, "13"))).toMatchObject({ error: "Refused rail-badges: fresh is true or false." })
-
-    // Zero is no badge; anything but a whole count on a kebab-case entry is refused, saying why.
-    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: { scm: 3, search: 0 } } }, "7"))).toEqual({ id: "7", request: { type: "rail-badges", payload: { badges: { scm: 3 } } } })
-    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: { scm: 1.5 } } }, "8"))).toMatchObject({ error: "Refused rail-badges: a count is a whole number from 0 to 1000000." })
-    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: { "oc--scm": 1 } } }, "9"))).toMatchObject({ error: "Refused rail-badges: an entry's id is kebab-case, at most 48 characters." })
-    const many = Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`e${index}`, 1]))
-    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: { badges: many } }, "10"))).toMatchObject({ error: "Refused rail-badges: badges are at most 100 entries' counts." })
-    expect(parseOcForgeRequest(envelope({ type: "rail-badges", payload: {} }, "11"))).toMatchObject({ error: "Refused rail-badges: badges are at most 100 entries' counts." })
-  })
-
-  test("window.id is the window's id from the hello, again after the frame says hello again; an older host has none", async () => {
-    const { frame, deliver } = fakeFrame()
-    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
-    const windowId = "0123456789abcdef0123456789abcdef"
-    deliver(envelope({ type: "hello", payload: { ...hello, features: [...hello.features, "window-id"], windowId } }))
-    const forge = (await connecting)!
-    expect(forge.has("window-id")).toBe(true)
-    expect(forge.window.id()).toBe(windowId)
-    deliver(envelope({ type: "hello", payload: { ...hello, features: [...hello.features, "window-id"], windowId } }))
-    expect(forge.window.id()).toBe(windowId)
-    forge.dispose()
-
-    const older = fakeFrame()
-    const connectingOlder = connectOcForge({ target: older.frame, timeoutMs: 500 })
-    older.deliver(envelope({ type: "hello", payload: hello }))
-    const forgeOlder = (await connectingOlder)!
-    expect(forgeOlder.has("window-id")).toBe(false)
-    expect(() => forgeOlder.window.id()).toThrow("names no window")
-    forgeOlder.dispose()
-  })
-
-  test("onCloseRequest: the frame decides how dirty tabs close while it listens", async () => {
-    const { frame, host, deliver } = fakeFrame()
-    const connecting = connectOcForge({ target: frame, timeoutMs: 500 })
-    deliver(envelope({ type: "hello", payload: hello }))
-    const forge = (await connecting)!
-    const handlerPosts = () => host.posted.map((post) => post.data as { type: string; payload?: { on: boolean } }).filter((data) => data.type === "tab-close-handler").map((data) => data.payload?.on)
-    const asked: string[] = []
-    const first = forge.tabs.onCloseRequest((id) => asked.push(`one:${id}`))
-    const second = forge.tabs.onCloseRequest((id) => asked.push(`two:${id}`))
-    // Said once when the first listener comes, and once when the last goes.
-    expect(handlerPosts()).toEqual([true])
-    deliver(envelope({ type: "tab-close-request", payload: { id: "file:///a.ts" } }))
-    expect(asked).toEqual(["one:file:///a.ts", "two:file:///a.ts"])
-    first()
-    expect(handlerPosts()).toEqual([true])
-    second()
-    second()
-    expect(handlerPosts()).toEqual([true, false])
-    deliver(envelope({ type: "tab-close-request", payload: { id: "b" } }))
-    expect(asked).toHaveLength(2)
-    forge.dispose()
   })
 
   test("forwardHostShortcuts takes OpenChamber's keys from the frame and leaves the rest", async () => {
@@ -404,22 +228,6 @@ describe("the client module", () => {
   })
 })
 
-describe("an OpenChamber window's id", () => {
-  test("128 random bits in hex, another each time; made without randomUUID, which plain HTTP (not a secure context) lacks", () => {
-    const own = Object.getOwnPropertyDescriptor(crypto, "randomUUID")
-    Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true, writable: true })
-    try {
-      const ids = new Set(Array.from({ length: 200 }, () => newOcForgeWindowId()))
-      expect(ids.size).toBe(200)
-      for (const id of ids) expect(id).toMatch(/^[0-9a-f]{32}$/)
-    } finally {
-      if (own) Object.defineProperty(crypto, "randomUUID", own)
-      else delete (crypto as { randomUUID?: unknown }).randomUUID
-    }
-    expect(typeof crypto.randomUUID).toBe("function")
-  })
-})
-
 describe("a folder's commands, once OpenCode 2.2 has loaded them", () => {
   test("an empty first answer is asked again; a list is taken as it is; an empty folder gives up after the wait", async () => {
     const answers = [[], [], ["init", "review", "oc-planner-x"]]
@@ -432,117 +240,5 @@ describe("a folder's commands, once OpenCode 2.2 has loaded them", () => {
     const started = Date.now()
     expect(await ocForgeCommandsOnceLoaded(async () => [], 60, 10)).toEqual([])
     expect(Date.now() - started).toBeGreaterThanOrEqual(55)
-  })
-})
-
-describe("guest service requests over the window's socket", () => {
-  type Fake = OcForgeSocketLike & { sent: string[]; closed: boolean; fire: (type: string, data?: string) => void }
-  const fakeSocket = (): Fake => {
-    const listeners = new Map<string, ((event: { data?: unknown }) => void)[]>()
-    const socket: Fake = {
-      readyState: 0,
-      sent: [],
-      closed: false,
-      send(data) {
-        if (socket.readyState !== 1) throw new Error("not open")
-        socket.sent.push(data)
-      },
-      close() {
-        socket.closed = true
-        ;(socket as { readyState: number }).readyState = 3
-      },
-      addEventListener(type, listener) {
-        listeners.set(type, [...(listeners.get(type) ?? []), listener])
-      },
-      fire(type, data) {
-        if (type === "open") (socket as { readyState: number }).readyState = 1
-        if (type === "close") (socket as { readyState: number }).readyState = 3
-        for (const listener of listeners.get(type) ?? []) listener({ data })
-      },
-    }
-    return socket
-  }
-  const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
-
-  test("requests share one socket and are answered by id, in any order", async () => {
-    const sockets: Fake[] = []
-    const transport = createOcForgeServiceSocket(() => {
-      const socket = fakeSocket()
-      sockets.push(socket)
-      return socket
-    })
-    const recv = transport.request("oc-forge-vscode", { method: "POST", path: "/tunnel/recv", body: "{}" })
-    const health = transport.request("oc-forge-vscode", { method: "GET", path: "/health" })
-    expect(sockets).toHaveLength(1)
-    sockets[0]!.fire("open")
-    await tick()
-    expect(sockets[0]!.sent).toEqual([
-      '1 oc-forge-vscode\n{"method":"POST","path":"/tunnel/recv","body":"{}"}',
-      '2 oc-forge-vscode\n{"method":"GET","path":"/health"}',
-    ])
-    sockets[0]!.fire("message", '2 200\n{"status":200,"body":"ok"}')
-    expect(await health).toEqual({ status: 200, text: '{"status":200,"body":"ok"}' })
-    sockets[0]!.fire("message", '1 400\n{"error":"invalid-request"}')
-    expect(await recv).toEqual({ status: 400, text: '{"error":"invalid-request"}' })
-    // An answer nobody waits for is dropped.
-    sockets[0]!.fire("message", "9 200\nnull")
-  })
-
-  test("what was not sent is left to fetch: no socket, an id the server would refuse", async () => {
-    let opened = 0
-    const none = createOcForgeServiceSocket(() => {
-      opened += 1
-      return null
-    })
-    expect(await none.request("oc-forge-vscode", {})).toBeNull()
-    expect(await none.request("Not An Id", {})).toBeNull()
-    expect(opened).toBe(1)
-  })
-
-  test("a socket that will not open sends everything over fetch for a while, then is tried again", async () => {
-    let clock = 0
-    const sockets: Fake[] = []
-    const transport = createOcForgeServiceSocket(() => {
-      const socket = fakeSocket()
-      sockets.push(socket)
-      return socket
-    }, () => clock)
-    const first = transport.request("ocforge-test", {})
-    sockets[0]!.fire("error")
-    sockets[0]!.fire("close")
-    expect(await first).toBeNull()
-    expect(sockets[0]!.closed).toBe(true)
-    clock = 29_000
-    expect(await transport.request("ocforge-test", {})).toBeNull()
-    expect(sockets).toHaveLength(1)
-    clock = 31_000
-    const later = transport.request("ocforge-test", {})
-    expect(sockets).toHaveLength(2)
-    sockets[1]!.fire("open")
-    await tick()
-    sockets[1]!.fire("message", "1 200\n{}")
-    expect(await later).toEqual({ status: 200, text: "{}" })
-  })
-
-  test("a socket that goes fails its requests in flight without sending them again, and the next request opens another", async () => {
-    const sockets: Fake[] = []
-    const transport = createOcForgeServiceSocket(() => {
-      const socket = fakeSocket()
-      sockets.push(socket)
-      return socket
-    })
-    const inFlight = transport.request("oc-forge-vscode", { method: "POST", path: "/tunnel/send" })
-    sockets[0]!.fire("open")
-    await tick()
-    sockets[0]!.fire("close")
-    expect(await inFlight).toEqual({ status: 502, text: "null" })
-    expect(sockets[0]!.sent).toHaveLength(1)
-    const next = transport.request("oc-forge-vscode", { method: "GET", path: "/health" })
-    expect(sockets).toHaveLength(2)
-    sockets[1]!.fire("open")
-    await tick()
-    expect(sockets[1]!.sent).toEqual(['2 oc-forge-vscode\n{"method":"GET","path":"/health"}'])
-    sockets[1]!.fire("message", '2 200\n{"status":200,"body":"ok"}')
-    expect((await next)?.status).toBe(200)
   })
 })

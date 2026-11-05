@@ -1,5 +1,5 @@
 // Planner UI harness: the real OpenChamber host UI of the shared dev container
-// (http://100.116.120.66:35310), with the Planner's panel bundle and service
+// (where Docker publishes it, see devBase), with the Planner's panel bundle and service
 // taken from YOUR worktree, so you can check a build without touching the
 // shared container's extension folder or its Planner data.
 //
@@ -26,13 +26,25 @@
 // Build first: (cd <worktree>/extensions/planner && bun run build).
 // Never print the UI password. Anything you create through the host (chats, worktrees via
 // startSession) is real in the shared container: prefix titles with `harness-` and delete them.
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+
+/**
+ * The shared dev container's OpenChamber, where Docker publishes it (OC_DEV_BIND in the deploy checkout's
+ * containers/openchamber-dev/.env). Asked on every run: when the host's tailnet IP changed on 2026-11-05, an
+ * address written into the tests pointed at one no node had.
+ */
+export const devBase = () => {
+  const published = execFileSync('docker', ['port', 'oc-forge-openchamber-dev', '3000/tcp'], { encoding: 'utf8' }).trim().split('\n')[0];
+  const at = published.lastIndexOf(':');
+  const host = published.slice(0, at);
+  return `http://${host === '0.0.0.0' || host === '[::]' ? '127.0.0.1' : host}:${published.slice(at + 1)}`;
+};
 
 const freePort = () => new Promise((resolve, reject) => {
   const server = createServer();
@@ -136,7 +148,7 @@ export const answerLinear = (o, op, variables = {}) => {
 export async function startHarness({
   worktree = resolve(import.meta.dirname, '../../../..'),
   out = '/tmp/opencode/planner-harness/out',
-  base = 'http://100.116.120.66:35310',
+  base = devBase(),
   viewport = { width: 1440, height: 900 },
   linearWorld = defaultLinearWorld(),
   /** (op, variables, world) => data | undefined (undefined: use the default answer). */
@@ -200,9 +212,10 @@ export async function startHarness({
   if (!password) throw new Error('no UI password in secrets.env');
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport, timezoneId });
-  // oc-forge's adapted OpenChamber sends service requests over a WebSocket (adapters/openchamber, Transport), past the
-  // HTTP routes that answer them here, to the container's own Planner service: its switch keeps them on HTTP, and any
-  // that still come over the socket are refused loudly instead of reaching the real plan.
+  // oc-forge's adapted OpenChamber before 2026-11-04 (any image tagged before then, a rollback) sent service requests
+  // over a WebSocket, past the HTTP routes that answer them here, to the container's own Planner service: its switch
+  // keeps them on HTTP, and any that still come over the socket are refused loudly instead of reaching the real plan.
+  // The current host sends them over HTTP, as the release does, and ignores both.
   await context.addInitScript(() => {
     try {
       localStorage.setItem('oc-forge:service-socket', 'off');
@@ -362,5 +375,5 @@ export async function startHarness({
     await browser.close().catch(() => {});
     child.kill('SIGTERM');
   };
-  return { page, context, browser, frame, openPlanner, nav, shot, call, linearWorld, linearCalls, serviceCalls, github, problems, serviceLog, home, close };
+  return { base, page, context, browser, frame, openPlanner, nav, shot, call, linearWorld, linearCalls, serviceCalls, github, problems, serviceLog, home, close };
 }

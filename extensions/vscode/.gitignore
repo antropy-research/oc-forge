@@ -1,3 +1,0 @@
-# The VS Code workbench this extension prepares from the user's VS Code Server
-# (one folder per VS Code commit): copied at run time, never committed.
-vscode-web/

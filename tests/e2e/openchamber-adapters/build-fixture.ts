@@ -1,7 +1,7 @@
 // Builds the scratch test extensions into <out>/ocforge-test and
-// <out>/ocforge-test-zone: their manifests, the service, and one panel page
-// bundled with @openchamber/sdk (from <sdk>, an installed npm package) and
-// oc-forge's client module.
+// <out>/ocforge-test-plain: their manifests and one panel page bundled with
+// @openchamber/sdk (from <sdk>, an installed npm package) and oc-forge's
+// client module.
 //   bun tests/e2e/openchamber-adapters/build-fixture.ts <out> <sdk package dir>
 import { cpSync, mkdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
@@ -25,7 +25,7 @@ const bundle = await Bun.build({
 })
 if (!bundle.success) throw new AggregateError(bundle.logs, "panel bundle failed")
 
-for (const [name, from] of [["ocforge-test", "extension"], ["ocforge-test-zone", "zone-extension"]]) {
+for (const [name, from] of [["ocforge-test", "extension"], ["ocforge-test-plain", "plain-extension"]]) {
   const target = join(out, name)
   rmSync(target, { recursive: true, force: true })
   cpSync(join(here, from), target, { recursive: true })
@@ -34,4 +34,4 @@ for (const [name, from] of [["ocforge-test", "extension"], ["ocforge-test-zone",
   rmSync(join(target, "panel/main.ts"), { force: true })
   await Bun.write(join(target, "panel/main.js"), bundle.outputs[0])
 }
-console.log(`built ocforge-test and ocforge-test-zone into ${out}`)
+console.log(`built ocforge-test and ocforge-test-plain into ${out}`)

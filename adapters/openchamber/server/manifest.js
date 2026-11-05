@@ -5,23 +5,10 @@
 //
 //   "ocForge": {
 //     "apiVersion": 1,
-//     "zone": "bottom",                                  // the panel's zone until the user moves it
-//     "rail": { "path": "/rail", "interval": 3000 },     // the service path polled for rail entries
-//     "page": { "keepBottomZone": true },                // the bottom zone stays shown under its page
 //     "modals": true                                     // its frames may open the browser's print dialog
 //   }
 
-const ZONES = new Set(['left', 'right', 'bottom']);
-const INTERVAL_DEFAULT = 3000;
-const INTERVAL_MIN = 1000;
-const INTERVAL_MAX = 60000;
-
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
-
-const isRequestPath = (value) => (
-  typeof value === 'string' && value.startsWith('/') && value.length <= 512 && !value.includes('\0')
-  && !value.includes('\\') && !value.includes('://') && !value.split('/').some((segment) => segment === '.' || segment === '..')
-);
 
 /**
  * The `sandbox` directive of the CSP the server sends with a guest's documents: the release's `allow-scripts`, and
@@ -32,8 +19,7 @@ export const ocForgeDocumentSandbox = (guest) => (guest?.ocForge?.modals === tru
 
 /**
  * The block as the catalog publishes it, or null. `raw` is the package.json
- * text; `manifest` is OpenChamber's parse of the same file. A zone needs a
- * panel page, a rail source needs the page and a service to poll.
+ * text; `manifest` is OpenChamber's parse of the same file. It needs a panel page.
  */
 export const parseOcForgeManifest = (raw, manifest) => {
   let document;
@@ -44,17 +30,6 @@ export const parseOcForgeManifest = (raw, manifest) => {
   }
   const block = isObject(document) ? document.ocForge : null;
   if (!isObject(block) || block.apiVersion !== 1) return null;
-  const contributes = manifest?.contributes ?? {};
-  if (!contributes.panel?.entry) return null;
-  const result = { apiVersion: 1 };
-  if (ZONES.has(block.zone)) result.zone = block.zone;
-  if (contributes.service && isObject(block.rail) && isRequestPath(block.rail.path)) {
-    const interval = Number.isInteger(block.rail.interval)
-      ? Math.min(INTERVAL_MAX, Math.max(INTERVAL_MIN, block.rail.interval))
-      : INTERVAL_DEFAULT;
-    result.rail = { path: block.rail.path, interval };
-  }
-  if (contributes.page?.entry && isObject(block.page) && block.page.keepBottomZone === true) result.page = { keepBottomZone: true };
-  if (block.modals === true) result.modals = true;
-  return result.zone || result.rail || result.page || result.modals ? result : null;
+  if (!manifest?.contributes?.panel?.entry) return null;
+  return block.modals === true ? { apiVersion: 1, modals: true } : null;
 };

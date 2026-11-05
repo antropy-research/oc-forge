@@ -26,8 +26,9 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { defaultGithubWorld, ghConfigFiles } from './fakeGithub.mjs';
 import { watchPlannerRequests } from './drain.mjs';
+import { devBase } from './harness.mjs';
 
-const base = process.argv[2] ?? 'http://100.116.120.66:35310';
+const base = process.argv[2] ?? devBase();
 const out = process.argv[3] ?? '/tmp/opencode/planner-agentpr';
 mkdirSync(out, { recursive: true });
 const CONTAINER = 'oc-forge-openchamber-dev';

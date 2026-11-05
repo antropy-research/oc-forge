@@ -1,17 +1,13 @@
 import { envelope, type OcForgeEvent } from './protocol.ts';
 
-/** A mounted extension frame (rail panel, page, Work Status section, file editor, dialog). */
+/** A mounted extension frame (its panel, page, Work Status section, file editor, dialog). */
 export type OcForgeFrame = {
   guestId: string;
-  /** `plugin:<extension>`, or `plugin:<extension>--<entry>` for an entry's own panel. */
+  /** `plugin:<extension>`. */
   mode: string;
   surface: string;
-  /** Set for a rail entry's own panel. */
-  ownEntry: string | null;
   /** Its client said hello on the oc-forge channel; only such frames get events. */
   listening: boolean;
-  /** Its client decides how the extension's dirty tabs close (`tabs.onCloseRequest`). */
-  closeHandler: boolean;
   window: () => Window | null;
 };
 
@@ -36,5 +32,3 @@ export const broadcastOcForge = (guestId: string | null, event: OcForgeEvent, fi
     postToFrame(frame, event);
   }
 };
-
-export const listeningFrames = (guestId: string): OcForgeFrame[] => [...frames].filter((frame) => frame.listening && frame.guestId === guestId);
