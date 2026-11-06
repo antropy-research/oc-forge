@@ -302,10 +302,11 @@ export const startFakeGoogle = async (world = defaultFakeWorld()) => {
       if (!message) return [404, { error: { message: 'Not Found' } }];
       return [200, rawMessage(message)];
     }
-    // A thread: its messages, oldest first, as Gmail gives them (what a pasted thread address opens).
+    // A thread: its messages, oldest first, as Gmail gives them (what a pasted thread address opens). By time: a
+    // date's text ("Fri, 06 Nov …" before "Thu, 05 Nov …") put a reply first when UTC's midnight fell between them.
     const threadMatch = /^\/gmail\/v1\/users\/me\/threads\/([^/]+)$/.exec(path);
     if (threadMatch && method === 'GET') {
-      const messages = (world.mail ?? []).filter((one) => one.threadId === decodeURIComponent(threadMatch[1])).sort((a, b) => a.date.localeCompare(b.date));
+      const messages = (world.mail ?? []).filter((one) => one.threadId === decodeURIComponent(threadMatch[1])).sort((a, b) => Date.parse(a.date) - Date.parse(b.date));
       if (!messages.length) return [404, { error: { message: 'Not Found' } }];
       return [200, { id: decodeURIComponent(threadMatch[1]), messages: messages.map(rawMessage) }];
     }
