@@ -134,6 +134,11 @@ docker compose exec -w /extensions/planner openchamber bun run build   # panel/m
 A folder install keeps its real path: the catalog re-reads `package.json` and serves
 the rebuilt files, so reload the page after a build instead of reinstalling.
 
+`extensions/cloak-browser` is a submodule, its own repository
+([openchamber-cloak-browser](https://github.com/antropy-research/openchamber-cloak-browser)):
+check it out with `git submodule update --init extensions/cloak-browser` before
+building it, and again after its pin moves.
+
 ## A model for agents
 
 Without a provider of its own, the container's OpenCode runs agents on OpenCode's free

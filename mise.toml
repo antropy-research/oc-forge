@@ -38,10 +38,13 @@ dir = "vendors/opencode/packages/core"
 run = "bun run script/test.ts --preload {{config_root}}/tests/preload.ts {{config_root}}/tests"
 
 [tasks."test:extensions"]
-description = "Type-check, test and rebuild the OpenChamber extension; its committed bundles must match their sources"
+description = "Type-check, test and rebuild the OpenChamber extensions; their committed bundles must match their sources"
 run = [
   "cd extensions/planner && bun install --frozen-lockfile && bun run check && bun test tests/ && bun run build",
   "git diff --exit-code -- extensions/planner/panel/main.js extensions/planner/service/main.js",
+  # A submodule, its own repository (antropy-research/openchamber-cloak-browser): the bundles are checked inside it.
+  "cd extensions/cloak-browser && bun install --frozen-lockfile && bun run check && bun run build",
+  "git -C extensions/cloak-browser diff --exit-code -- panel/main.js service/main.js",
 ]
 
 [tasks.ci]
