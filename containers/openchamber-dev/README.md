@@ -137,7 +137,11 @@ the rebuilt files, so reload the page after a build instead of reinstalling.
 `extensions/cloak-browser` is a submodule, its own repository
 ([openchamber-cloak-browser](https://github.com/antropy-research/openchamber-cloak-browser)):
 check it out with `git submodule update --init extensions/cloak-browser` before
-building it, and again after its pin moves.
+building it, and again after its pin moves. It runs CloakBrowser, a Chromium, in the
+container: the image has Chromium's libraries and fonts for it, and the extension
+downloads the browser itself on first use into the home volume
+(`~/.cache/oc-forge-cloak-browser`, about 700 MB), its profile beside the other data
+(`~/.local/share/oc-forge-cloak-browser`).
 
 ## A model for agents
 

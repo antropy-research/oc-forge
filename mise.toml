@@ -43,7 +43,8 @@ run = [
   "cd extensions/planner && bun install --frozen-lockfile && bun run check && bun test tests/ && bun run build",
   "git diff --exit-code -- extensions/planner/panel/main.js extensions/planner/service/main.js",
   # A submodule, its own repository (antropy-research/openchamber-cloak-browser): the bundles are checked inside it.
-  "cd extensions/cloak-browser && bun install --frozen-lockfile && bun run check && bun run build",
+  # Its tests drive a real Chromium (GitHub's Ubuntu runners have Google Chrome).
+  "cd extensions/cloak-browser && bun install --frozen-lockfile && bun run check && bun run build && bun run test",
   "git -C extensions/cloak-browser diff --exit-code -- panel/main.js service/main.js",
 ]
 
