@@ -50,6 +50,10 @@ run = [
   # Its tests drive a real Chromium (GitHub's Ubuntu runners have Google Chrome).
   "cd extensions/cloak-browser && bun install --frozen-lockfile && bun run check && bun run build && bun run test",
   "git -C extensions/cloak-browser diff --exit-code -- panel/main.js service/main.js",
+  # The File Browser is a private repository (it builds Dawn's private source), `update = none` in .gitmodules: public
+  # CI and fresh clones skip it. Where it is checked out (`git submodule update --init --checkout --recursive
+  # extensions/file-browser`), it is checked and built here; it commits no bundle.
+  "if [ -f extensions/file-browser/vendor/dawn/package.json ]; then cd extensions/file-browser && bun install --frozen-lockfile && bun run check && bun run build --quiet && bun run test; else echo 'extensions/file-browser: private submodule not checked out; skipped'; fi",
 ]
 
 [tasks.ci]

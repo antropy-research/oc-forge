@@ -13,3 +13,7 @@
 [submodule "extensions/planner"]
 	path = extensions/planner
 	url = https://github.com/antropy-research/openchamber-planner.git
+[submodule "extensions/file-browser"]
+	path = extensions/file-browser
+	url = https://github.com/antropy-research/openchamber-file-browser.git
+	update = none
