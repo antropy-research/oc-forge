@@ -8,7 +8,7 @@ import { objectivesForWeek, planningDate, ritualRecord, weekStartOf } from '../.
 import { DayCalendar } from '../calendar/TimeGrid.tsx';
 import { newId } from '../../../src/domain/core/ids.ts';
 import { usePlanner, useView } from '../../lib/core/context.ts';
-import { moveTo } from '../../lib/core/commands.ts';
+import { moveTo } from '../../../src/domain/plan/commands.ts';
 import { autoTimebox } from '../../lib/core/autoSchedule.ts';
 import { useCalendarEvents } from '../../lib/calendar/events.ts';
 import { BacklogBuckets } from '../plan/Backlog.tsx';

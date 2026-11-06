@@ -1,7 +1,7 @@
 // Every object the service is made of, built over the plan's data folder: the plan (its event store, the planner and
 // git sync), calendar feeds and the meeting import, GitHub, Linear workspaces, Google (the accounts, their data, and
-// what is kept in step with them) and OpenCode's agents. Each route gets them as its context. Files kept beside the
-// data folder stay on this machine, never in its synced repository.
+// what is kept in step with them), OpenCode's agents and Ask Planner's. Each route gets them as its context. Files kept
+// beside the data folder stay on this machine, never in its synced repository.
 import { dirname, join } from 'node:path';
 import { EventStore } from './plan/store.ts';
 import { Planner } from './plan/planner.ts';
@@ -19,6 +19,7 @@ import { TaskNotifications } from './google/notifications.ts';
 import { GoogleSeries } from './google/series.ts';
 import { MeetingDecliner } from './google/decline.ts';
 import { CommandFiles, OpenCodeInfo, opencodeConfigDir } from './agents/agents.ts';
+import { Asks } from './assistant/asks.ts';
 
 /** What every route works with. */
 export type Context = Awaited<ReturnType<typeof buildContext>>;
@@ -69,6 +70,9 @@ export const buildContext = async (dir: string, log: (message: string) => void) 
   // Agents to assign tasks to: one OpenCode command per preset, in OpenCode's own config folder.
   const opencodeInfo = new OpenCodeInfo();
   const agentCommands = new CommandFiles(opencodeConfigDir(), log);
+  // Ask Planner: the chat's agent works on the plan with the Planner's command line; its key, launcher and runs stay
+  // beside the data.
+  const asks = new Asks(dirname(dir), log);
   return {
     log,
     store,
@@ -94,6 +98,7 @@ export const buildContext = async (dir: string, log: (message: string) => void) 
     decliner,
     opencodeInfo,
     agentCommands,
+    asks,
     /** A command for every agent preset, after a change that may have changed them. */
     syncAgentCommands: () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? []),
   };

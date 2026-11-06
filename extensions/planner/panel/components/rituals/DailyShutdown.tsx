@@ -4,7 +4,7 @@ import { addDays, formatMinutes, monthDay, weekdayName } from '../../../src/doma
 import { actualIsFromPlan, actualMinutes, tasksForDay } from '../../../src/domain/core/selectors.ts';
 import { completedOnDay, ritualRecord, timeByChannel } from '../../../src/domain/plan/rituals.ts';
 import { usePlanner, useView } from '../../lib/core/context.ts';
-import { moveTo } from '../../lib/core/commands.ts';
+import { moveTo } from '../../../src/domain/plan/commands.ts';
 import { useUi } from '../../lib/core/ui.ts';
 import { Wizard } from './Wizard.tsx';
 

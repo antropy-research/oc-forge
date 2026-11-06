@@ -6,7 +6,7 @@ import { braindumpSystem, parseBraindump, readBraindumpAnswer, type DumpItem } f
 import { parseDuration } from '../../../src/domain/plan/quickAdd.ts';
 import { liveChannels } from '../../../src/domain/core/selectors.ts';
 import { usePlanner, useView } from '../../lib/core/context.ts';
-import { createManyTaskCommands } from '../../lib/core/commands.ts';
+import { createManyTaskCommands } from '../../../src/domain/plan/commands.ts';
 
 type Row = DumpItem & { keep: boolean };
 

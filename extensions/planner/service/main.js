@@ -1,9 +1,10 @@
 // service/main.ts
 import { homedir as homedir3 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // service/context.ts
-import { dirname as dirname5, join as join4 } from "node:path";
+import { dirname as dirname5, join as join5 } from "node:path";
 
 // service/plan/store.ts
 import { execFile } from "node:child_process";
@@ -24,6 +25,7 @@ var LINEAR_GROUPS = ["status", "priority", "project", "team", "assignee", "works
 var LINEAR_ORDERS = ["priority", "updated", "due", "identifier", "status", "manual", "created"];
 var LINEAR_COMPLETED = ["all", "day", "5days", "week", "month", "3months", "6months", "year", "none"];
 var LINEAR_PROPERTIES = ["id", "status", "priority", "assignee", "labels", "project", "cycle", "estimate", "due", "created", "updated"];
+var CHANNEL_COLORS = ["#e8590c", "#1c7ed6", "#2f9e44", "#ae3ec9", "#f08c00", "#0c8599", "#e64980", "#5c940d"];
 var RITUALS = ["planning", "shutdown", "highlights", "weeklyPlanning", "weeklyReview"];
 var GMAIL_ACTIONS = ["markRead", "markUnread", "archive", "trash", "star", "unstar", "addLabel", "removeLabel"];
 var MEETING_EXCLUSIONS = ["noAttendees", "nonBlocking", "oooHold", "unconfirmed", "multiDayAllDay"];
@@ -125,7 +127,9 @@ var startOfWeek = (key, weekStartsOn) => {
   const offset = (weekday(key) - weekStartsOn + 7) % 7;
   return addDays(key, -offset);
 };
+var WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 var MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+var weekdayName = (key) => WEEKDAY_NAMES[weekday(key)];
 var zonedFormatters = new Map;
 var zonedFormatter = (timeZone) => {
   let formatter = zonedFormatters.get(timeZone);
@@ -158,6 +162,12 @@ var instantAt = (date, minutes, timeZone) => {
   let guess = local - offsetAt(local, timeZone);
   guess = local - offsetAt(guess, timeZone);
   return new Date(guess).toISOString();
+};
+var formatMinutes = (minutes) => {
+  if (minutes == null || !Number.isFinite(minutes))
+    return "";
+  const total = Math.max(0, Math.round(minutes));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 };
 var daysInMonth = (key) => {
   const [year, month] = key.split("-").map(Number);
@@ -204,6 +214,17 @@ var trackedMinutes = (state, taskId, now) => {
   if (now !== undefined && state.timer?.taskId === taskId)
     ms += Math.max(0, now - Date.parse(state.timer.startedAt));
   return ms / 60000;
+};
+var actualMinutes = (state, task, now) => {
+  const tracked = trackedMinutes(state, task.id, now);
+  if (tracked > 0)
+    return tracked;
+  return state.settings.plannedAsActual && task.completedAt && task.plannedMinutes ? task.plannedMinutes : 0;
+};
+var liveChannels = (state) => Object.values(state.channels).filter((channel) => !channel.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+var channelByName = (state, name) => {
+  const lower = name.toLowerCase();
+  return liveChannels(state).find((channel) => channel.name.toLowerCase() === lower) ?? null;
 };
 var edgePosition = (state, placement, edge) => {
   const list = tasksIn(state, placement);
@@ -2084,6 +2105,7 @@ var inverseOfBatch = (state, bodies) => {
   }
   return inverses.reverse().flat();
 };
+var asEvents = (bodies, at = new Date().toISOString()) => bodies.map((body, index) => ({ v: 1, id: `check-${index}`, at, ...body }));
 var COLLECTIONS = ["tasks", "blocks", "entries", "objectives", "channels", "folders", "calendars", "rituals", "series", "runs", "googleTasks"];
 var IGNORED = {
   tasks: new Set(["updatedAt", "rolloverCount"]),
@@ -2173,7 +2195,7 @@ var newId = (now = Date.now()) => {
 
 // service/plan/planner.ts
 var UNDO_KEEP_MS = 60000;
-var UNDO_KEEP_MAX = 50;
+var UNDO_KEEP_MAX = 200;
 var summarize = (events, titleOf) => {
   if (events.length > 1)
     return `${events.length} changes`;
@@ -2365,13 +2387,13 @@ class Planner {
     if (events.length)
       this.persist(events, working);
     if (options.undo && events.length)
-      this.keepUndo(commands[0].cmd, before, events, working);
+      this.keepUndo(commands[0].cmd, before, events, working, options.keepMs ?? UNDO_KEEP_MS);
     return { ok: true, applied: events.length };
   }
   undo(batch) {
     const record = this.undos.get(batch);
     this.undos.delete(batch);
-    if (!record || this.now().getTime() - record.at > UNDO_KEEP_MS)
+    if (!record || this.now().getTime() > record.until)
       return { ok: false, reason: "gone" };
     let working = this.state;
     const events = [];
@@ -2408,14 +2430,18 @@ class Planner {
     }
     return {};
   }
-  keepUndo(batch, before, events, after) {
+  keepUndo(batch, before, events, after, keepMs) {
     const now = this.now().getTime();
     for (const [key, record] of this.undos)
-      if (now - record.at > UNDO_KEEP_MS || this.undos.size >= UNDO_KEEP_MAX)
+      if (now > record.until || this.undos.size >= UNDO_KEEP_MAX)
         this.undos.delete(key);
     const inverse = inverseOfBatch(before, events);
     if (inverse)
-      this.undos.set(batch, { inverse, after, at: now });
+      this.undos.set(batch, { inverse, after, until: now + keepMs });
+  }
+  undoable(batch) {
+    const record = this.undos.get(batch);
+    return Boolean(record && this.now().getTime() <= record.until);
   }
   reload() {
     const events = this.store.load();
@@ -7554,6 +7580,125 @@ var agentCatalog = async (configDir, info, directory, refresh) => {
   return { agents: mergeAgents(fromConfig.agents, live), defaultAgent: fromConfig.defaultAgent, models: models.models, modelsError: models.error, ...models.pending ? { modelsPending: true } : {}, configDir };
 };
 
+// service/assistant/asks.ts
+import { randomBytes as randomBytes3 } from "node:crypto";
+import { chmodSync, existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join4 } from "node:path";
+var RUNS_KEPT = 30;
+var CHANGES_KEPT = 200;
+var AGENT_UNDO_MS = 24 * 60 * 60 * 1000;
+var quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
+
+class Asks {
+  base;
+  log;
+  key = randomBytes3(24).toString("hex");
+  runs = [];
+  problem = null;
+  constructor(base, log) {
+    this.base = base;
+    this.log = log;
+    try {
+      const saved = JSON.parse(readFileSync4(this.file, "utf8"));
+      if (Array.isArray(saved.runs))
+        this.runs = saved.runs;
+    } catch {}
+  }
+  get file() {
+    return join4(this.base, "asks.json");
+  }
+  get launcher() {
+    return join4(this.base, "bin", "planner");
+  }
+  prepare(port, node, cli) {
+    try {
+      mkdirSync4(join4(this.base, "bin"), { recursive: true });
+      const agentFile = join4(this.base, "agent.json");
+      const draft = `${agentFile}.${process.pid}.tmp`;
+      writeFileSync4(draft, `${JSON.stringify({ url: `http://127.0.0.1:${port}`, key: this.key, pid: process.pid })}
+`, { mode: 384 });
+      chmodSync(draft, 384);
+      renameSync2(draft, agentFile);
+      const script = [
+        "#!/bin/sh",
+        "# The Planner's command line, for the agent working on the plan (Ask Planner). Written by the Planner's service at",
+        '# each start; run it with "help" to see what it does.',
+        `PLANNER_AGENT_FILE=${quote(agentFile)} exec ${quote(node)} ${quote(cli)} "$@"`,
+        ""
+      ].join(`
+`);
+      const launcherDraft = `${this.launcher}.${process.pid}.tmp`;
+      writeFileSync4(launcherDraft, script, { mode: 493 });
+      chmodSync(launcherDraft, 493);
+      renameSync2(launcherDraft, this.launcher);
+      this.problem = null;
+    } catch (error) {
+      this.problem = `could not write the Planner's command line: ${messageOf(error)}`;
+      this.log(this.problem);
+    }
+  }
+  get ready() {
+    return !this.problem && existsSync5(this.launcher);
+  }
+  start(request) {
+    const run = { id: randomBytes3(6).toString("hex"), request, at: new Date().toISOString(), sessionId: null, directory: null, changes: [] };
+    this.runs = [run, ...this.runs].slice(0, RUNS_KEPT);
+    this.save();
+    return run;
+  }
+  attach(runId, sessionId, directory) {
+    const run = this.runs.find((entry) => entry.id === runId);
+    if (!run)
+      return null;
+    const early = this.runs.find((entry) => entry !== run && entry.request === null && entry.sessionId === sessionId);
+    if (early) {
+      run.changes = [...early.changes, ...run.changes].sort((a, b) => a.at.localeCompare(b.at)).slice(-CHANGES_KEPT);
+      this.runs = this.runs.filter((entry) => entry !== early);
+    }
+    run.sessionId = sessionId;
+    run.directory = directory;
+    this.save();
+    return run;
+  }
+  run(runId) {
+    return this.runs.find((entry) => entry.id === runId) ?? null;
+  }
+  runOf(sessionId) {
+    const found = this.runs.find((entry) => entry.sessionId === sessionId && (sessionId !== null || entry.request === null));
+    if (found)
+      return found;
+    const run = { id: randomBytes3(6).toString("hex"), request: null, at: new Date().toISOString(), sessionId, directory: null, changes: [] };
+    this.runs = [run, ...this.runs].slice(0, RUNS_KEPT);
+    return run;
+  }
+  record(sessionId, change) {
+    const run = this.runOf(sessionId);
+    run.changes = [...run.changes, change].slice(-CHANGES_KEPT);
+    this.save();
+    return run;
+  }
+  mark(changeId, undone) {
+    for (const run of this.runs)
+      for (const change of run.changes)
+        if (change.id === changeId)
+          change.undone = undone;
+    this.save();
+  }
+  recent(limit = 10) {
+    return this.runs.slice(0, limit);
+  }
+  save() {
+    try {
+      const draft = `${this.file}.${process.pid}.tmp`;
+      writeFileSync4(draft, `${JSON.stringify({ runs: this.runs }, null, 1)}
+`, { mode: 384 });
+      renameSync2(draft, this.file);
+    } catch (error) {
+      this.log(`Ask Planner: could not save its runs: ${messageOf(error)}`);
+    }
+  }
+}
+
 // service/context.ts
 var buildContext = async (dir, log) => {
   let sync = null;
@@ -7563,9 +7708,9 @@ var buildContext = async (dir, log) => {
   sync = new SyncManager(store, planner, log);
   await sync.init();
   const github = new GitHubSource;
-  const feeds = new CalendarFeeds(join4(dirname5(dir), "cache"));
-  const linearWorkspaces = new LinearWorkspaces(join4(dirname5(dir), "linear-workspaces.json"), undefined, log);
-  const google = new GoogleAccounts(join4(dirname5(dir), "google-accounts.json"), undefined, undefined, log);
+  const feeds = new CalendarFeeds(join5(dirname5(dir), "cache"));
+  const linearWorkspaces = new LinearWorkspaces(join5(dirname5(dir), "linear-workspaces.json"), undefined, log);
+  const google = new GoogleAccounts(join5(dirname5(dir), "google-accounts.json"), undefined, undefined, log);
   const googleData = new GoogleData(google);
   const gmail = new GmailActions(google);
   const contacts = new GoogleContacts(google);
@@ -7573,18 +7718,19 @@ var buildContext = async (dir, log) => {
   const meetings = new MeetingImport(planner, googleCalendars, log);
   const googleDueTasks = new GoogleDueTasks(googleData);
   const timeboxes = new GoogleTimeboxes(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleCalendars.forget() });
-  const taskNotifications = new TaskNotifications(join4(dirname5(dir), "task-notifications.json"), () => planner.state, {
+  const taskNotifications = new TaskNotifications(join5(dirname5(dir), "task-notifications.json"), () => planner.state, {
     accounts: () => google.emailsWith("tasks"),
     due: (accounts, from, to) => googleDueTasks.read(accounts, from, to, false),
     byIds: (groups) => googleDueTasks.byIds(groups, false)
   });
   const series = new GoogleSeries(planner, googleData, { idle: () => sync.idle(), log, onWrite: () => googleDueTasks.forget() });
-  const decliner = new MeetingDecliner(join4(dirname5(dir), "declined-meetings.json"), () => planner.state, {
+  const decliner = new MeetingDecliner(join5(dirname5(dir), "declined-meetings.json"), () => planner.state, {
     accounts: async () => (await google.status()).accounts.filter((account) => account.workspace && account.features.includes("calendar") && account.features.includes("tasks")).map((account) => account.email),
     byIds: (groups) => googleDueTasks.byIds(groups, true)
   }, googleData, { log, onDeclined: () => googleCalendars.forget() });
   const opencodeInfo = new OpenCodeInfo;
   const agentCommands = new CommandFiles(opencodeConfigDir(), log);
+  const asks = new Asks(dirname5(dir), log);
   return {
     log,
     store,
@@ -7608,6 +7754,7 @@ var buildContext = async (dir, log) => {
     decliner,
     opencodeInfo,
     agentCommands,
+    asks,
     syncAgentCommands: () => agentCommands.syncPresets(planner.state.settings.agentPresets ?? [])
   };
 };
@@ -7643,9 +7790,14 @@ var json = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
 };
-var createServer = (ctx, token, routes) => http2.createServer(async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${token}`) {
+var createServer = (ctx, doors) => http2.createServer(async (req, res) => {
+  const door = doors.find((entry) => entry.token && req.headers.authorization === `Bearer ${entry.token}`);
+  if (!door) {
     json(res, 401, { error: "unauthorized" });
+    return;
+  }
+  if (door.noBrowser && req.headers.origin !== undefined) {
+    json(res, 403, { error: "not from a browser" });
     return;
   }
   let url;
@@ -7656,7 +7808,7 @@ var createServer = (ctx, token, routes) => http2.createServer(async (req, res) =
     return;
   }
   try {
-    for (const route of routes) {
+    for (const route of door.routes) {
       const answer = await route(ctx, req, url);
       if (!answer)
         continue;
@@ -7704,36 +7856,547 @@ var agentsRoute = async ({ opencodeInfo, agentCommands }, req, url) => {
   return null;
 };
 
+// src/domain/plan/suggest.ts
+var STOP_WORDS = new Set(["the", "a", "an", "to", "for", "of", "and", "or", "in", "on", "with", "at", "by", "from", "my", "your", "this", "that", "is", "be", "do", "up", "it"]);
+var CJK = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u;
+var titleTokens = (title) => {
+  const tokens = new Set;
+  for (const word of title.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+    if (CJK.test(word)) {
+      const chars = [...word];
+      if (chars.length === 1)
+        tokens.add(chars[0]);
+      for (let index = 0;index < chars.length - 1; index++)
+        tokens.add(chars[index] + chars[index + 1]);
+    } else if (word.length >= 2 && !STOP_WORDS.has(word) && !/^\d+$/.test(word)) {
+      tokens.add(word);
+    }
+  }
+  return tokens;
+};
+var similarity = (a, b) => {
+  let shared = 0;
+  for (const token of a)
+    if (b.has(token))
+      shared++;
+  return shared === 0 ? 0 : shared / (a.size + b.size - shared);
+};
+var median = (values) => {
+  const sorted = [...values].sort((x, y) => x - y);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+var THRESHOLD = 0.5;
+var NEIGHBOURS = 7;
+var suggestFor = (state, title, excludeTaskId) => {
+  const target = titleTokens(title);
+  if (target.size === 0)
+    return null;
+  const scored = [];
+  for (const task of Object.values(state.tasks)) {
+    if (task.id === excludeTaskId || task.deletedAt)
+      continue;
+    const score = similarity(target, titleTokens(task.title));
+    if (score < THRESHOLD)
+      continue;
+    const tracked = task.completedAt ? actualMinutes(state, task) : 0;
+    scored.push({ score, updatedAt: task.updatedAt, minutes: tracked > 0 ? tracked : task.plannedMinutes ?? 0, channelId: task.channelId });
+  }
+  if (scored.length === 0)
+    return null;
+  const top = scored.sort((a, b) => b.score - a.score || b.updatedAt.localeCompare(a.updatedAt)).slice(0, NEIGHBOURS);
+  const known = top.map((item) => item.minutes).filter((minutes) => minutes > 0);
+  const minutes = known.length ? Math.max(5, Math.round(median(known) / 5) * 5) : null;
+  const counts = new Map;
+  for (const item of top) {
+    const channel = item.channelId ? state.channels[item.channelId] : undefined;
+    if (channel && !channel.deletedAt)
+      counts.set(channel.id, (counts.get(channel.id) ?? 0) + 1);
+  }
+  const channelId = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  return minutes === null && channelId === null ? null : { minutes, channelId, basis: top.length };
+};
+
+// src/domain/plan/rituals.ts
+var weekStartOf = (state, date) => startOfWeek(date, state.settings.weekStartsOn);
+var objectivesForWeek = (state, weekStart) => Object.values(state.objectives).filter((objective) => !objective.deletedAt && objective.weekStart === weekStart).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+var objectiveByText = (state, weekStart, text) => {
+  const needle = text.toLowerCase().replace(/[-_]/g, " ");
+  const list = objectivesForWeek(state, weekStart);
+  const title = (objective) => objective.title.toLowerCase();
+  return list.find((objective) => title(objective) === needle) ?? list.find((objective) => title(objective).startsWith(needle)) ?? list.find((objective) => title(objective).includes(needle)) ?? null;
+};
+
+// src/domain/plan/commands.ts
+var createManyTaskCommands = (state, inputs, fallback, options = {}) => {
+  const bodies = [];
+  const newChannels = new Map;
+  const next = new Map;
+  const edge = options.edge ?? "bottom";
+  const positionFor = (placement) => {
+    const key = placement.kind === "day" ? `d:${placement.date}` : `b:${placement.bucket}`;
+    const position = next.get(key) ?? edgePosition(state, placement, edge);
+    next.set(key, edge === "top" ? position + 1 : position + 1024);
+    return position;
+  };
+  const channelFor = (name) => {
+    const existing = channelByName(state, name);
+    if (existing)
+      return existing.id;
+    const key = name.toLowerCase();
+    const known = newChannels.get(key);
+    if (known)
+      return known;
+    const id = newId();
+    const color = CHANNEL_COLORS[(liveChannels(state).length + newChannels.size) % CHANNEL_COLORS.length];
+    bodies.push({ type: "channel.created", channel: { id, name, color, context: "work" } });
+    newChannels.set(key, id);
+    return id;
+  };
+  for (const input of inputs) {
+    const placement = input.placement ?? fallback;
+    const week = weekStartOf(state, placement.kind === "day" ? placement.date : options.today ?? new Date().toISOString().slice(0, 10));
+    const objective = input.objective ? objectiveByText(state, week, input.objective) : null;
+    const title = input.objective && !objective ? `${input.title} $${input.objective}` : input.title;
+    const suggestion = state.settings.suggestFromHistory && (input.plannedMinutes === null || !input.channel) ? suggestFor(state, title) : null;
+    const channelId = input.channel ? channelFor(input.channel) : suggestion?.channelId ?? null;
+    bodies.push({
+      type: "task.created",
+      task: {
+        id: newId(),
+        title,
+        plannedMinutes: input.plannedMinutes ?? suggestion?.minutes ?? null,
+        priority: input.priority,
+        placement,
+        position: positionFor(placement),
+        channelId,
+        objectiveId: objective?.id ?? null,
+        ...options.folderId ? { folderId: options.folderId } : {}
+      }
+    });
+  }
+  return bodies;
+};
+var moveTo = (state, taskId, placement, edge = "bottom") => ({
+  type: "task.moved",
+  taskId,
+  placement,
+  position: edgePosition(state, placement, edge)
+});
+
+// src/domain/assistant/assistant.ts
+var MAX_OPS = 40;
+var TITLE_MAX2 = 500;
+var NOTES_MAX2 = 20000;
+var PRIORITIES = ["urgent", "high", "medium", "low"];
+var BUCKETS = new Set(BACKLOG_BUCKETS.map((bucket) => bucket.id));
+var whenToPlacement = (when, today) => {
+  if (when === "today")
+    return { kind: "day", date: today };
+  if (when === "tomorrow")
+    return { kind: "day", date: addDays(today, 1) };
+  if (isDateKey(when))
+    return { kind: "day", date: when };
+  return BUCKETS.has(when) ? { kind: "backlog", bucket: when } : null;
+};
+var dayOf3 = (value, today) => value === "today" ? today : value === "tomorrow" ? addDays(today, 1) : isDateKey(value) ? value : null;
+var clockMinutes = (value) => {
+  const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(value.trim());
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+};
+var clock = (minutes) => {
+  const whole = Math.floor(minutes);
+  return `${String(Math.floor(whole / 60) % 24).padStart(2, "0")}:${String(whole % 60).padStart(2, "0")}`;
+};
+var live = (state, id) => {
+  const task = typeof id === "string" ? state.tasks[id] : undefined;
+  return task && !task.deletedAt ? task : null;
+};
+var text = (value, max) => typeof value === "string" && value.trim() ? value.trim().slice(0, max) : null;
+var minutesOf = (value) => {
+  if (value === null)
+    return null;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 24 * 60 ? value : undefined;
+};
+var channelOf = (state, value) => {
+  if (value === null)
+    return null;
+  if (typeof value !== "string")
+    return;
+  return channelByName(state, value.trim().replace(/^#/, ""))?.name;
+};
+var priorityOf = (value) => value === null ? null : PRIORITIES.includes(value) ? value : undefined;
+var channelNames = (state) => liveChannels(state).map((channel) => `#${channel.name}`).join(", ") || "none";
+var readOp = (raw, state, today) => {
+  if (typeof raw !== "object" || raw === null)
+    return "an operation must be an object";
+  const op = raw;
+  const kind = op.op;
+  if (kind === "add") {
+    const title = text(op.title, TITLE_MAX2);
+    if (!title)
+      return "add needs a title";
+    const when = op.when === undefined || op.when === null ? "today" : op.when;
+    if (typeof when !== "string" || !whenToPlacement(when, today))
+      return `unknown day "${String(when)}": use today, tomorrow, a date YYYY-MM-DD or a backlog bucket (${[...BUCKETS].join(", ")})`;
+    const minutes = minutesOf(op.minutes ?? null);
+    if (minutes === undefined)
+      return "minutes must be a whole number from 1 to 1440";
+    const channel = channelOf(state, op.channel ?? null);
+    if (channel === undefined)
+      return `unknown channel "${String(op.channel)}"; the channels are ${channelNames(state)}`;
+    const priority = priorityOf(op.priority ?? null);
+    if (priority === undefined)
+      return `priority must be one of ${PRIORITIES.join(", ")}`;
+    const due = op.due === undefined || op.due === null ? null : typeof op.due === "string" ? dayOf3(op.due, today) : null;
+    if (op.due !== undefined && op.due !== null && !due)
+      return "due must be today, tomorrow or a date YYYY-MM-DD";
+    return { op: "add", title, when, minutes, channel, priority, notes: text(op.notes, NOTES_MAX2), due };
+  }
+  if (!["move", "done", "reopen", "archive", "estimate", "channel", "rename", "notes", "due", "priority", "subtask", "schedule"].includes(String(kind))) {
+    return kind === "delete" ? "tasks are never deleted here: archive one instead" : `unknown operation "${String(kind)}"`;
+  }
+  const task = live(state, op.taskId);
+  if (!task)
+    return `no task [${String(op.taskId)}] in the plan (find it with: planner find <words>)`;
+  const taskId = task.id;
+  switch (kind) {
+    case "move": {
+      if (typeof op.when !== "string" || !whenToPlacement(op.when, today))
+        return `unknown day "${String(op.when)}": use today, tomorrow, a date YYYY-MM-DD or a backlog bucket (${[...BUCKETS].join(", ")})`;
+      return { op: "move", taskId, when: op.when };
+    }
+    case "done":
+      return task.completedAt ? `[${taskId}] "${task.title}" is done already` : { op: "done", taskId };
+    case "reopen":
+      return task.completedAt ? { op: "reopen", taskId } : `[${taskId}] "${task.title}" is not done`;
+    case "archive":
+      return task.archivedAt ? `[${taskId}] "${task.title}" is archived already` : { op: "archive", taskId };
+    case "estimate": {
+      const minutes = minutesOf(op.minutes);
+      return minutes === undefined ? "minutes must be a whole number from 1 to 1440, or null to clear it" : { op: "estimate", taskId, minutes };
+    }
+    case "channel": {
+      const channel = channelOf(state, op.channel);
+      return channel === undefined ? `unknown channel "${String(op.channel)}"; the channels are ${channelNames(state)}` : { op: "channel", taskId, channel };
+    }
+    case "rename": {
+      const title = text(op.title, TITLE_MAX2);
+      return title ? { op: "rename", taskId, title } : "rename needs a title";
+    }
+    case "notes": {
+      if (typeof op.notes !== "string")
+        return "notes must be text";
+      return { op: "notes", taskId, notes: op.notes.slice(0, NOTES_MAX2), append: op.append === true };
+    }
+    case "due": {
+      if (op.due === null)
+        return { op: "due", taskId, due: null };
+      const due = typeof op.due === "string" ? dayOf3(op.due, today) : null;
+      return due ? { op: "due", taskId, due } : "due must be today, tomorrow, a date YYYY-MM-DD, or null to clear it";
+    }
+    case "priority": {
+      const priority = priorityOf(op.priority);
+      return priority === undefined ? `priority must be one of ${PRIORITIES.join(", ")}, or null to clear it` : { op: "priority", taskId, priority };
+    }
+    case "subtask": {
+      const title = text(op.title, TITLE_MAX2);
+      if (!title)
+        return "subtask needs a title";
+      const minutes = minutesOf(op.minutes ?? null);
+      return minutes === undefined ? "minutes must be a whole number from 1 to 1440" : { op: "subtask", taskId, title, minutes };
+    }
+    case "schedule": {
+      const date = op.date === undefined || op.date === null ? task.placement.kind === "day" ? task.placement.date : today : typeof op.date === "string" ? dayOf3(op.date, today) : null;
+      if (!date)
+        return "schedule needs a day: today, tomorrow or a date YYYY-MM-DD";
+      const start = typeof op.start === "string" ? clockMinutes(op.start) : null;
+      if (start === null)
+        return "schedule needs a start time HH:MM (24-hour)";
+      const minutes = op.minutes === undefined || op.minutes === null ? Math.max(15, task.plannedMinutes ?? 30) : minutesOf(op.minutes);
+      if (minutes === undefined || minutes === null)
+        return "minutes must be a whole number from 1 to 1440";
+      if (start + minutes > 24 * 60)
+        return "the session must end by midnight";
+      return { op: "schedule", taskId, date, start, minutes };
+    }
+  }
+  return `unknown operation "${String(kind)}"`;
+};
+var readOps = (raw, state, today, zone) => {
+  if (!Array.isArray(raw) || raw.length === 0)
+    return { ok: false, error: "ops must be a list of operations", index: -1 };
+  if (raw.length > MAX_OPS)
+    return { ok: false, error: `at most ${MAX_OPS} operations at once`, index: MAX_OPS };
+  const ops = [];
+  let working = state;
+  for (let index = 0;index < raw.length; index++) {
+    const op = readOp(raw[index], working, today);
+    if (typeof op === "string")
+      return { ok: false, error: op, index };
+    ops.push(op);
+    working = applyEvents(working, asEvents(opCommands(working, op, today, zone)));
+  }
+  return { ok: true, ops };
+};
+var opCommands = (state, op, today, zone, newId = randomId) => {
+  if (op.op === "add") {
+    const bodies = createManyTaskCommands(state, [{ title: op.title, plannedMinutes: op.minutes, placement: whenToPlacement(op.when, today), channel: op.channel, priority: op.priority, objective: null }], { kind: "day", date: today }, { today });
+    const made = bodies.find((body) => body.type === "task.created");
+    if (made && (op.notes || op.due))
+      bodies.push({ type: "task.updated", taskId: made.task.id, patch: { ...op.notes ? { notes: op.notes } : {}, ...op.due ? { dueDate: op.due } : {} } });
+    return bodies;
+  }
+  const task = state.tasks[op.taskId];
+  switch (op.op) {
+    case "move": {
+      const placement = whenToPlacement(op.when, today);
+      return [moveTo(state, task.id, placement)];
+    }
+    case "done":
+      return [{ type: "task.completed", taskId: task.id, on: today }];
+    case "reopen":
+      return [{ type: "task.reopened", taskId: task.id }];
+    case "archive":
+      return [{ type: "task.archived", taskId: task.id }];
+    case "estimate":
+      return [{ type: "task.updated", taskId: task.id, patch: { plannedMinutes: op.minutes } }];
+    case "channel":
+      return [{ type: "task.updated", taskId: task.id, patch: { channelId: op.channel ? channelByName(state, op.channel).id : null } }];
+    case "rename":
+      return [{ type: "task.updated", taskId: task.id, patch: { title: op.title } }];
+    case "notes":
+      return [{ type: "task.updated", taskId: task.id, patch: { notes: op.append && task.notes.trim() ? `${task.notes.trimEnd()}
+
+${op.notes}` : op.notes } }];
+    case "due":
+      return [{ type: "task.updated", taskId: task.id, patch: { dueDate: op.due } }];
+    case "priority":
+      return [{ type: "task.updated", taskId: task.id, patch: { priority: op.priority } }];
+    case "subtask": {
+      const after = task.subtasks.at(-1)?.id ?? null;
+      return [{ type: "subtask.added", taskId: task.id, subtask: { id: newId(), title: op.title, done: false, ...op.minutes ? { plannedMinutes: op.minutes } : {} }, after }];
+    }
+    case "schedule": {
+      const moved = task.placement.kind === "day" && task.placement.date === op.date ? [] : [moveTo(state, task.id, { kind: "day", date: op.date })];
+      return [...moved, { type: "block.created", block: { id: newId(), taskId: task.id, start: instantAt(op.date, op.start, zone), end: instantAt(op.date, op.start + op.minutes, zone) } }];
+    }
+  }
+};
+var randomId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+var opsCommands = (state, ops, today, zone, newId) => {
+  const bodies = [];
+  let working = state;
+  for (const op of ops) {
+    const next = opCommands(working, op, today, zone, newId);
+    bodies.push(...next);
+    working = applyEvents(working, asEvents(next));
+  }
+  return bodies;
+};
+var whenLabel = (when, today) => {
+  const placement = whenToPlacement(when, today);
+  if (!placement)
+    return when;
+  if (placement.kind === "backlog")
+    return `the backlog (${BACKLOG_BUCKETS.find((bucket) => bucket.id === placement.bucket).label.toLowerCase()})`;
+  return dayLabel(placement.date, today);
+};
+var dayLabel = (date, today) => date === today ? "today" : date === addDays(today, 1) ? "tomorrow" : `${weekdayName(date)} ${date}`;
+var describeOp = (state, op, today) => {
+  if (op.op === "add")
+    return `Added "${op.title}" for ${whenLabel(op.when, today)}${op.minutes ? ` (${formatMinutes(op.minutes)})` : ""}${op.channel ? ` in #${op.channel}` : ""}`;
+  const title = `"${state.tasks[op.taskId]?.title ?? op.taskId}"`;
+  switch (op.op) {
+    case "move":
+      return `Moved ${title} to ${whenLabel(op.when, today)}`;
+    case "done":
+      return `Completed ${title}`;
+    case "reopen":
+      return `Reopened ${title}`;
+    case "archive":
+      return `Archived ${title}`;
+    case "estimate":
+      return op.minutes ? `Planned ${formatMinutes(op.minutes)} for ${title}` : `Cleared the planned time of ${title}`;
+    case "channel":
+      return op.channel ? `Put ${title} in #${op.channel}` : `Took ${title} out of its channel`;
+    case "rename":
+      return `Renamed ${title} to "${op.title}"`;
+    case "notes":
+      return op.append ? `Added to the notes of ${title}` : `Rewrote the notes of ${title}`;
+    case "due":
+      return op.due ? `Set ${title} due ${dayLabel(op.due, today)}` : `Cleared the due date of ${title}`;
+    case "priority":
+      return op.priority ? `Gave ${title} ${op.priority} priority` : `Cleared the priority of ${title}`;
+    case "subtask":
+      return `Added the subtask "${op.title}" to ${title}`;
+    case "schedule":
+      return `Scheduled ${title} ${dayLabel(op.date, today)} ${clock(op.start)}–${clock(op.start + op.minutes)}`;
+  }
+};
+var describeOps = (state, ops, today) => ops.length === 1 ? describeOp(state, ops[0], today) : `${ops.length} changes: ${ops.map((op) => describeOp(state, op, today)).join("; ")}`;
+
+// service/calendar/range.ts
+var readCalendar = async (ctx, from, to, refresh) => {
+  const { planner, feeds, google, googleCalendars, googleDueTasks, timeboxes } = ctx;
+  const zone = ctx.zone();
+  const calendars = Object.values(planner.state.calendars);
+  const timeMin = instantAt(from, 0, zone);
+  const timeMax = instantAt(addDays(to, 1), 0, zone);
+  const shownAccounts = planner.state.settings.googleTasksOnCalendar ? await google.emailsWith("tasks") : [];
+  const [feed, fromGoogle, due, deadlines] = await Promise.all([
+    feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
+    googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
+    googleDueTasks.read(shownAccounts, from, to, refresh),
+    googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, shownAccounts, from, to), refresh)
+  ]);
+  const dueEvents = due.items.flatMap((item) => item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
+  return {
+    events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
+    deadlineTasks: deadlines.items,
+    errors: [...feed.errors, ...fromGoogle.errors, ...[...due.errors, ...deadlines.errors].map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))],
+    reconcile: () => {
+      if (fromGoogle.reads.size)
+        timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => ctx.log(`Google Calendar: ${messageOf(error)}`));
+    }
+  };
+};
+
+// service/routes/assistant.ts
+var REQUEST_MAX = 4000;
+var SESSION = /^[A-Za-z0-9_-]{1,128}$/;
+var runView = (ctx, run) => ({ ...run, changes: run.changes.map((change) => ({ ...change, undoable: !change.undone && ctx.planner.undoable(change.id) })) });
+var undoChange = (ctx, changeId) => {
+  const result = ctx.planner.undo(changeId);
+  if (result.ok) {
+    ctx.asks.mark(changeId, "undone");
+    return "undone";
+  }
+  if (result.reason === "changed")
+    ctx.asks.mark(changeId, "kept");
+  return result.reason === "changed" ? "kept" : "gone";
+};
+var askRoute = async (ctx, req, url) => {
+  const { asks, planner, sync } = ctx;
+  const path = url.pathname;
+  if (path === "/ask/runs" && req.method === "GET")
+    return ok({ runs: asks.recent().map((run) => runView(ctx, run)), launcher: asks.launcher, problem: asks.problem });
+  if (path === "/ask/runs" && req.method === "POST") {
+    const body = await readJson(req);
+    const request = typeof body.request === "string" ? body.request.trim() : "";
+    if (!request || request.length > REQUEST_MAX)
+      return bad(`request must be 1-${REQUEST_MAX} characters`);
+    if (!asks.ready)
+      return { status: 503, body: { error: asks.problem ?? "the Planner's command line is not ready" } };
+    return ok({ run: asks.start(request), launcher: asks.launcher });
+  }
+  const match = /^\/ask\/runs\/([a-f0-9]{1,32})(\/undo)?$/.exec(path);
+  if (match && !match[2] && req.method === "PUT") {
+    const body = await readJson(req);
+    if (typeof body.sessionId !== "string" || !SESSION.test(body.sessionId))
+      return bad("sessionId must be a chat id");
+    const run = asks.attach(match[1], body.sessionId, typeof body.directory === "string" ? body.directory : null);
+    return run ? ok({ run: runView(ctx, run) }) : { status: 404, body: { error: "no such run" } };
+  }
+  if (match && match[2] && req.method === "POST") {
+    const run = asks.run(match[1]);
+    if (!run)
+      return { status: 404, body: { error: "no such run" } };
+    await sync.idle();
+    const outcomes = [...run.changes].reverse().filter((change) => !change.undone).map((change) => ({ label: change.label, outcome: undoChange(ctx, change.id) }));
+    return ok({ undone: outcomes.filter((entry) => entry.outcome === "undone").length, kept: outcomes.filter((entry) => entry.outcome !== "undone").map((entry) => ({ label: entry.label, why: entry.outcome === "kept" ? CHANGED_SINCE : UNDO_GONE })), run: runView(ctx, run), ...ctx.snapshot() });
+  }
+  return null;
+};
+var eventsByDay = async (ctx, from, to) => {
+  const zone = ctx.zone();
+  const days = {};
+  for (let date = from;date <= to; date = addDays(date, 1))
+    days[date] = [];
+  try {
+    const read = await readCalendar(ctx, from, to, false);
+    read.reconcile();
+    const calendars = Object.keys(ctx.planner.state.calendars).length;
+    if (calendars === 0 || read.errors.length >= calendars && read.events.length === 0)
+      for (const date of Object.keys(days))
+        days[date] = null;
+    for (const event of read.events) {
+      if (event.googleTask || event.pendingTasks || event.upcoming)
+        continue;
+      const first = zonedDateMinutes(event.start, zone).date;
+      const end = zonedDateMinutes(event.end, zone);
+      const last = event.allDay ? addDays(end.date, end.minutes === 0 ? -1 : 0) : first;
+      for (let date = first;date <= last && date <= to; date = addDays(date, 1))
+        days[date]?.push({ title: event.title, start: event.start, end: event.end, allDay: event.allDay, busy: event.busy && !event.transparent });
+    }
+  } catch (error) {
+    ctx.log(`Ask Planner: the calendar could not be read: ${messageOf(error)}`);
+    for (const date of Object.keys(days))
+      days[date] = null;
+  }
+  return days;
+};
+var agentRoute = async (ctx, req, url) => {
+  const { asks, planner, sync } = ctx;
+  const path = url.pathname;
+  if (path === "/agent/state" && req.method === "GET") {
+    const snapshot = planner.snapshot();
+    return ok({ state: snapshot.state, today: snapshot.today, zone: ctx.zone(), now: clock(zonedDateMinutes(Date.now(), ctx.zone()).minutes) });
+  }
+  if (path === "/agent/calendar" && req.method === "GET") {
+    const from = url.searchParams.get("from") ?? "";
+    const to = url.searchParams.get("to") ?? "";
+    if (!isDateKey(from) || !isDateKey(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 14)
+      return bad("from and to must be dates at most 14 days apart");
+    return ok({ days: await eventsByDay(ctx, from, to) });
+  }
+  if (path === "/agent/ops" && req.method === "POST") {
+    const body = await readJson(req);
+    const session = typeof body.session === "string" && SESSION.test(body.session) ? body.session : null;
+    await sync.idle();
+    const today = planner.today();
+    if (!today)
+      return bad("the plan has no time zone yet: open the Planner once");
+    const before = planner.state;
+    const read = readOps(body.ops, before, today, ctx.zone());
+    if (!read.ok)
+      return { status: 400, body: { error: read.error, index: read.index } };
+    const commands = opsCommands(before, read.ops, today, ctx.zone(), newId).map((command) => ({ ...command, cmd: newId() }));
+    const result = planner.execute(commands, { undo: true, keepMs: AGENT_UNDO_MS });
+    if (!result.ok)
+      return { status: result.conflict ? 409 : 400, body: { error: result.error, index: result.index } };
+    const change = { id: commands[0].cmd, label: describeOps(before, read.ops, today), at: new Date().toISOString() };
+    const run = asks.record(session, change);
+    return ok({ change, run: run.id });
+  }
+  if (path === "/agent/undo" && req.method === "POST") {
+    const body = await readJson(req);
+    const session = typeof body.session === "string" && SESSION.test(body.session) ? body.session : null;
+    const run = asks.runOf(session);
+    const change = typeof body.change === "string" ? run.changes.find((entry) => entry.id === body.change) : [...run.changes].reverse().find((entry) => !entry.undone);
+    if (!change)
+      return { status: 404, body: { error: typeof body.change === "string" ? `no change ${body.change} of this chat` : "this chat has made no change to take back" } };
+    if (change.undone)
+      return bad(`"${change.label}" was ${change.undone === "undone" ? "taken back" : "kept"} already`);
+    await sync.idle();
+    const outcome = undoChange(ctx, change.id);
+    if (outcome === "undone")
+      return ok({ undone: change.label });
+    return { status: outcome === "kept" ? 409 : 410, body: { error: `${outcome === "kept" ? CHANGED_SINCE : UNDO_GONE}: "${change.label}"` } };
+  }
+  return null;
+};
+
 // service/routes/calendar.ts
 var calendarRoute = async (ctx, req, url) => {
-  const { planner, feeds, google, googleData, googleCalendars, googleDueTasks, timeboxes } = ctx;
+  const { planner, feeds, googleData } = ctx;
   if (url.pathname === "/calendar" && req.method === "GET") {
     const from = url.searchParams.get("from") ?? "";
     const to = url.searchParams.get("to") ?? "";
     if (!isDateKey(from) || !isDateKey(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 62)
       return bad("from and to must be dates at most 62 days apart");
-    const zone = ctx.zone();
-    const refresh = url.searchParams.get("refresh") === "1";
-    const calendars = Object.values(planner.state.calendars);
-    const timeMin = instantAt(from, 0, zone);
-    const timeMax = instantAt(addDays(to, 1), 0, zone);
-    const shownAccounts = planner.state.settings.googleTasksOnCalendar ? await google.emailsWith("tasks") : [];
-    const [feed, fromGoogle, due, deadlines] = await Promise.all([
-      feeds.eventsFor(calendars.filter((calendar) => !calendar.google), from, to, zone, refresh),
-      googleCalendars.read(calendars, timeboxes.calendarsFor(planner.state, timeMin, timeMax), timeMin, timeMax, zone, refresh),
-      googleDueTasks.read(shownAccounts, from, to, refresh),
-      googleDueTasks.byIds(deadlineGroups(planner.state.googleTasks, shownAccounts, from, to), refresh)
-    ]);
-    const dueEvents = due.items.flatMap((item) => item.due ? [dueTaskEvent({ ...item, due: item.due }, zone)] : []);
-    const answer = {
-      events: [...feed.events, ...fromGoogle.events, ...dueEvents].sort((a, b) => a.start.localeCompare(b.start)),
-      deadlineTasks: deadlines.items,
-      errors: [...feed.errors, ...fromGoogle.errors, ...[...due.errors, ...deadlines.errors].map((message) => ({ calendarId: GOOGLE_TASKS_CALENDAR, message }))]
-    };
-    return ok(answer, () => {
-      if (fromGoogle.reads.size)
-        timeboxes.reconcile(fromGoogle.reads, timeMin, timeMax).catch((error) => ctx.log(`Google Calendar: ${messageOf(error)}`));
-    });
+    const { events, deadlineTasks, errors, reconcile } = await readCalendar(ctx, from, to, url.searchParams.get("refresh") === "1");
+    return ok({ events, deadlineTasks, errors }, reconcile);
   }
   if (url.pathname === "/calendar/search" && req.method === "GET") {
     const query = (url.searchParams.get("q") ?? "").trim();
@@ -8433,13 +9096,16 @@ if (!port || !token) {
   console.error("OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
   process.exit(1);
 }
-var dir = process.env.PLANNER_DATA_DIR || join5(homedir3(), ".local", "share", "openchamber-planner", "data");
+var dir = process.env.PLANNER_DATA_DIR || join6(homedir3(), ".local", "share", "openchamber-planner", "data");
 var log = (message) => console.error(`[planner] ${message}`);
 var ctx = await buildContext(dir, log);
 ctx.decliner.start(ctx.planner);
 ctx.syncAgentCommands();
 ctx.agentCommands.retireLeftovers();
-var server = createServer(ctx, token, [planRoute, calendarRoute, googleRoute, linearRoute, githubRoute, agentsRoute]);
+var server = createServer(ctx, [
+  { token, routes: [planRoute, calendarRoute, googleRoute, linearRoute, githubRoute, agentsRoute, askRoute] },
+  { token: ctx.asks.key, routes: [agentRoute], noBrowser: true }
+]);
 var shutdown = async () => {
   server.close();
   await Promise.race([Promise.all([ctx.timeboxes.settled(), ctx.series.settled()]), new Promise((resolve) => setTimeout(resolve, 3000))]);
@@ -8448,5 +9114,6 @@ var shutdown = async () => {
 };
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
-server.listen(port, "127.0.0.1");
+var cli = fileURLToPath2(new URL(import.meta.url.endsWith(".ts") ? "./assistant/cli.ts" : "./cli.js", import.meta.url));
+server.listen(port, "127.0.0.1", () => ctx.asks.prepare(port, process.execPath, cli));
 ctx.meetings.start();

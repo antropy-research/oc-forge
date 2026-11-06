@@ -11,7 +11,7 @@ import { isLinearIssue, issueSource } from '../../../src/domain/linear/linear.ts
 import { gtaskSource, isGoogleTaskItem, isMailItem, mailSource } from '../../../src/domain/google/google.ts';
 import { ExternalLink } from '../common/ExternalLink.tsx';
 import { SourceIcon } from './SourceIcons.tsx';
-import { moveTo } from '../../lib/core/commands.ts';
+import { moveTo } from '../../../src/domain/plan/commands.ts';
 import { actualMinutes, blocksFor, positionAt, tasksIn } from '../../../src/domain/core/selectors.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import { clockLabel, zonedDateMinutes } from '../../../src/domain/core/dates.ts';

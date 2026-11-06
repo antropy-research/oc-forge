@@ -1,10 +1,12 @@
 // Area A, the plan (tasks, days, rituals, history), over the shared harness (planner.ts): the plan's days in a zone
 // whose midnight is hours away, tasks made through the service, Planner windows whose commands can be held on their
-// way (as review 12's reviewer held one), a two-window race and a two-window Undo, and what the Add task field, the
-// Braindump and Ask Planner modals do with what is typed and with the Small Model's answer (their glue lives in
-// components, so it is repeated here, step for step, over the panel's own builders).
+// way (as review 12's reviewer held one), a two-window race and a two-window Undo, what the Add task field and the
+// Braindump modal do with what is typed and with the Small Model's answer (their glue lives in components, so it is
+// repeated here, step for step, over the panel's own builders), and Ask Planner: the chat it starts, and the Planner's
+// command line run as that chat's agent runs it.
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import type { HostClient } from '@openchamber/sdk';
-import { ASSISTANT_SYSTEM, assistantContext, readAssistantAnswer } from '../../src/domain/assistant/assistant.ts';
 import { braindumpSystem, parseBraindump, readBraindumpAnswer, type DumpItem } from '../../src/domain/assistant/braindump.ts';
 import { addDays } from '../../src/domain/core/dates.ts';
 import type { EventBody, SubtaskConflict } from '../../src/domain/core/events.ts';
@@ -12,9 +14,9 @@ import { newId } from '../../src/domain/core/ids.ts';
 import { parseQuickAdd } from '../../src/domain/plan/quickAdd.ts';
 import { liveChannels } from '../../src/domain/core/selectors.ts';
 import type { Placement, PlannerState, Subtask } from '../../src/domain/core/types.ts';
-import { assistantCommands } from '../../panel/components/assistant/Assistant.tsx';
+import { startAsk } from '../../panel/lib/assistant/ask.ts';
 import { addParsedTask } from '../../panel/lib/core/addTask.ts';
-import { createManyTaskCommands } from '../../panel/lib/core/commands.ts';
+import { createManyTaskCommands } from '../../src/domain/plan/commands.ts';
 import type { Planner, PlannerWindow, WindowOptions } from './planner.ts';
 
 const minutesIn = (zone: string, at = Date.now()): number => {
@@ -123,14 +125,19 @@ export const braindump = async (window: PlannerWindow, text: string): Promise<Du
   return items;
 };
 
-/** Ask Planner → Ask → Apply every change proposed: the model's reply, or null when its answer could not be read. */
-export const askPlanner = async (window: PlannerWindow, request: string): Promise<string | null> => {
-  const { state, today } = window.client.getView();
-  const { text: reply } = await window.host.generate({ system: ASSISTANT_SYSTEM, prompt: `${assistantContext(state, today)}\n\nRequest: ${request.trim()}`.slice(0, 60_000), maxOutputTokens: 1500 });
-  const parsed = readAssistantAnswer(reply, state, today);
-  if (!parsed) return null;
-  await window.client.dispatch(assistantCommands(state, parsed.ops, today), { undo: `Assistant made ${parsed.ops.length} change${parsed.ops.length === 1 ? '' : 's'}` });
-  return parsed.reply;
+/** Ask Planner → Ask, as the dialog does: the chat OpenChamber started for it (its first message, its chip). */
+export const askPlanner = async (window: PlannerWindow, request: string) => {
+  const started = await startAsk(window.host, window.client, request);
+  return { ...started, chat: window.started.at(-1)! };
+};
+
+/**
+ * The Planner's command line, run as the agent of chat `session` runs it with its shell (OpenCode sets
+ * `OPENCODE_SESSION_ID`): the launcher the service wrote beside the plan, as the chat's first message names it.
+ */
+export const plannerCli = (planner: Planner, session: string | null, ...args: string[]): { code: number | null; out: string; err: string } => {
+  const result = spawnSync(join(planner.home, 'bin', 'planner'), args, { env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: planner.home, ...(session ? { OPENCODE_SESSION_ID: session } : {}) }, encoding: 'utf8', timeout: 20_000 });
+  return { code: result.status, out: (result.stdout ?? '').trim(), err: (result.stderr ?? '').trim() };
 };
 
 /** The titles of a day's tasks (neither deleted nor archived), top to bottom. */

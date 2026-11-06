@@ -1,17 +1,18 @@
 // The plan end to end (Area A): tasks, days, rituals and history, through the real service and Planner windows made of
 // the panel's own client (tests/support/planner.ts, plan.ts). Each test is one thing a user does: set up through the
-// service, act through a window as the UI does (its commands, its Undo, the Add task field, the modals' Small Model),
-// and check the plan, each window's view and what it said. Past findings kept here as steps: review 12's P0 (subtasks
-// changed in two windows at once), review 13 (a subtask turned into a task keeps all it holds, and comes once), the
-// Planner's own Undo in two windows, and a history packed at start (a first push to a sync remote timed out).
+// service, act through a window as the UI does (its commands, its Undo, the Add task field, the Braindump's Small Model,
+// the chat Ask Planner starts and the command line that chat's agent runs), and check the plan, each window's view and
+// what it said. Past findings kept here as steps: review 12's P0 (subtasks changed in two windows at once), review 13
+// (a subtask turned into a task keeps all it holds, and comes once), the Planner's own Undo in two windows, and a
+// history packed at start (a first push to a sync remote timed out).
 import { describe, expect, test } from 'bun:test';
-import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { GenerateRequest } from '@openchamber/sdk';
-import { addDays, instantAt, startOfWeek } from '../src/domain/core/dates.ts';
+import { addDays, instantAt, longDay, startOfWeek, weekdayName } from '../src/domain/core/dates.ts';
 import { SUBTASKS_ONE_BY_ONE, SUBTASK_CHANGED, type EventBody } from '../src/domain/core/events.ts';
 import { newId } from '../src/domain/core/ids.ts';
 import { convertSubtaskCommands, mergeItemCommands, mergeTaskCommands } from '../src/domain/plan/merge.ts';
@@ -21,8 +22,9 @@ import { reorderCommands, sortTasks, type SortKey } from '../src/domain/plan/sor
 import { CHANGED_SINCE, UNDO_GONE } from '../src/domain/plan/undo.ts';
 import type { PlannerState, Subtask, TaskSourceRef } from '../src/domain/core/types.ts';
 import { parseMarkdown, type MdBlock, type MdInline } from '../panel/lib/core/markdown.ts';
+import { undoAsk, type AskRunView } from '../panel/lib/assistant/ask.ts';
 import { startPlanner, until, usePlanner, type PlannerWindow } from './support/planner.ts';
-import { ZONE, addTask, askPlanner, backlog, braindump, day, dayList, daysOf, holdable, makeTask, race, sub, undoAfter } from './support/plan.ts';
+import { ZONE, addTask, askPlanner, backlog, braindump, day, dayList, daysOf, holdable, makeTask, plannerCli, race, sub, undoAfter } from './support/plan.ts';
 
 let model: (request: GenerateRequest) => string = () => '';
 const planner = usePlanner({ zone: ZONE, generate: (request) => model(request) });
@@ -627,7 +629,7 @@ describe('merging tasks', () => {
   });
 });
 
-describe("the Small Model's answers are read strictly (only what they say well is applied)", () => {
+describe("Braindump's Small Model answers are read strictly (only what they say well is applied)", () => {
   test('Braindump with the Small Model adds its items as it read them, a time over ten hours, an unknown channel and an empty title dropped; an answer that is not a list makes each line a task, read as Add task reads it', async () => {
     const { tomorrow } = await daysOf(planner);
     const window = await planner.window();
@@ -643,31 +645,136 @@ describe("the Small Model's answers are read strictly (only what they say well i
     expect(taskTitled(plan, 'renew the passport')).toMatchObject({ plannedMinutes: 15, placement: day(tomorrow), channelId: 'personal' });
     expect(taskTitled(plan, 'water the plants')).toMatchObject({ priority: 'high', placement: backlog });
   });
+});
 
-  test('Ask Planner applies only known operations on known tasks: one on a task that is not there, a delete and an unknown channel are dropped; the model was given the plan by task id; Undo takes the rest back; an answer it cannot read changes nothing', async () => {
+describe("Ask Planner hands the request to the chat's agent, which works on the plan with the Planner's command line", () => {
+  const launcher = () => join(planner.home, 'bin', 'planner');
+  const runsOf = async (window: PlannerWindow) => (await window.client.call<{ runs: AskRunView[] }>('GET', '/ask/runs')).runs;
+
+  test('Ask starts one chat beside the Planner, on the agent the composer has selected: the request first, then where the plan is and the command to work on it with, and an Ask chip; that chat\'s agent reads the plan by task id and changes it, each change kept under the run; a change it cannot make says why and writes nothing', async () => {
     const { today, tomorrow } = await daysOf(planner);
     const gym = await makeTask(planner, 'Gym session', day(today), { plannedMinutes: 60 });
     const report = await makeTask(planner, 'Weekly report', backlog, { channelId: 'work' });
-    const window = await planner.window();
-    let prompt = '';
-    model = (request) => {
-      prompt = request.prompt;
-      return `Sure! {"reply":"Moved the gym.","ops":[{"op":"move","taskId":"${gym}","when":"tomorrow"},{"op":"move","taskId":"ghost","when":"tomorrow"},{"op":"delete","taskId":"${report}"},{"op":"create","title":"Stretch","when":"today","minutes":10,"channel":"WORK"},{"op":"estimate","taskId":"${report}","minutes":45},{"op":"channel","taskId":"${gym}","channel":"nope"},{"op":"move","taskId":"${report}","when":"someday"}]}`;
-    };
-    expect(await askPlanner(window, 'Move the gym to tomorrow')).toBe('Moved the gym.');
-    expect(prompt).toContain(`- [${gym}] Gym session (1:00)`);
+    const window = await planner.window({ directory: '/projects/demo' });
+    const request = 'Move the gym to tomorrow and add 15 minutes for email';
+    const asked = await askPlanner(window, request);
+    expect(window.started).toHaveLength(1);
+    expect(asked.chat).toMatchObject({ providerId: 'oc-forge-planner', id: 'Ask', title: request, url: 'https://planner.invalid/ask', navigation: 'open', data: { ask: expect.any(String) } });
+    expect(asked.chat.text!.startsWith(`${request}\n\n(Ask Planner: this is about my plan in the Planner`)).toBe(true);
+    expect(asked.chat.text).toContain(`\`${launcher()} help\``);
+    const chat = asked.sessionId;
+
+    const help = plannerCli(planner, chat, 'help');
+    expect([help.code, help.out]).toEqual([0, expect.stringMatching(new RegExp(`Today is ${weekdayName(today)} ${today}, \\d\\d:\\d\\d now \\(${ZONE.replace('/', '\\/')}\\)\\.`))]);
+    expect(help.out).toContain('planner move <id>... --to W');
+    const shown = plannerCli(planner, chat, 'show', 'today');
+    expect(shown.out).toMatch(new RegExp(`^${longDay(today)}, ${today} \\(today, \\d\\d:\\d\\d now\\): `));
+    expect(shown.out).toContain(`- [${gym}] Gym session (1:00)`);
+    expect(shown.out).toContain('Calendar events: not read');
+    expect(plannerCli(planner, chat, 'find', 'weekly').out).toContain(`- [${report}] Weekly report (#work) · backlog next-weeks`);
+
+    const moved = plannerCli(planner, chat, 'move', `[${gym}]`, '--to', 'tomorrow');
+    expect([moved.code, moved.out]).toEqual([0, expect.stringMatching(/^Moved "Gym session" to tomorrow \(change \S+\)$/)]);
+    const added = plannerCli(planner, chat, 'add', 'Email', '--minutes', '15', '--channel', '#Work');
+    expect(added.out).toMatch(/^Added "Email" for today \(0:15\) in #work \(change \S+\)$/);
+    expect(plannerCli(planner, chat, 'estimate', report, '45').code).toBe(0);
     let plan = await planner.state();
-    expect(plan.tasks[gym]).toMatchObject({ placement: day(tomorrow), channelId: null });
-    expect(plan.tasks[report]).toMatchObject({ deletedAt: null, plannedMinutes: 45, placement: { kind: 'backlog', bucket: 'someday' } });
-    expect(taskTitled(plan, 'Stretch')).toMatchObject({ placement: day(today), plannedMinutes: 10, channelId: 'work' });
-    expect(window.client.getView().undoLabel).toBe('Assistant made 4 changes');
-    await window.client.undo();
-    plan = await planner.state();
-    expect([plan.tasks[gym]!.placement, plan.tasks[report]!.plannedMinutes, plan.tasks[report]!.placement, taskTitled(plan, 'Stretch')]).toEqual([day(today), null, backlog, undefined]);
-    model = () => 'no json';
+    expect(plan.tasks[gym]!.placement).toEqual(day(tomorrow));
+    expect(taskTitled(plan, 'Email')).toMatchObject({ placement: day(today), plannedMinutes: 15, channelId: 'work' });
+    expect(plan.tasks[report]!.plannedMinutes).toBe(45);
+    expect(plannerCli(planner, chat, 'task', report).out).toContain('Planned time: 0:45');
+
+    // Refused, with the reason, and nothing written.
     const version = plan.version;
-    expect(await askPlanner(window, 'Anything')).toBeNull();
-    expect((await planner.state()).version).toBe(version);
+    const refused = [
+      plannerCli(planner, chat, 'move', 'ghost', '--to', 'tomorrow'),
+      plannerCli(planner, chat, 'channel', gym, 'nope'),
+      plannerCli(planner, chat, 'move', gym, '--to', 'later'),
+      plannerCli(planner, chat, 'delete', gym),
+      plannerCli(planner, chat, 'done', gym, 'ghost'),
+    ];
+    expect(refused.map((result) => [result.code, result.err])).toEqual([
+      [1, 'planner: no task [ghost] in the plan (find it with: planner find <words>)'],
+      [1, expect.stringMatching(/^planner: unknown channel "nope"; the channels are #work, #personal\b/)],
+      [1, expect.stringMatching(/^planner: unknown day "later": use today, tomorrow, a date YYYY-MM-DD or a backlog bucket/)],
+      [1, 'planner: unknown command "delete": planner help lists them'],
+      [1, 'planner: no task [ghost] in the plan (find it with: planner find <words>)'],
+    ]);
+    plan = await planner.state();
+    expect([plan.version, plan.tasks[gym]!.completedAt]).toEqual([version, null]);
+
+    const [run] = await runsOf(window);
+    expect(run).toMatchObject({ request, sessionId: chat, directory: '/projects/demo' });
+    expect(run!.changes.map((change) => [change.label, change.undoable])).toEqual([
+      ['Moved "Gym session" to tomorrow', true],
+      ['Added "Email" for today (0:15) in #work', true],
+      ['Planned 0:45 for "Weekly report"', true],
+    ]);
+  });
+
+  test("Undo its changes takes a run's changes back, newest first, and keeps one the person changed since, saying so; the agent takes back its own last change; a chat the Planner did not start, or the command line outside a chat, keeps its changes under a run of its own", async () => {
+    const { today, tomorrow } = await daysOf(planner);
+    const first = await makeTask(planner, 'Undo me A', day(today));
+    const second = await makeTask(planner, 'Undo me B', day(today));
+    const window = await planner.window();
+    const { sessionId: chat } = await askPlanner(window, 'Tidy my day');
+    plannerCli(planner, chat, 'move', first, '--to', 'tomorrow');
+    plannerCli(planner, chat, 'rename', second, 'B, renamed');
+    plannerCli(planner, chat, 'schedule', second, '15:30', '--minutes', '45');
+    let plan = await planner.state();
+    expect(Object.values(plan.blocks).filter((block) => block.taskId === second)).toEqual([expect.objectContaining({ start: instantAt(today, 15 * 60 + 30, ZONE), end: instantAt(today, 16 * 60 + 15, ZONE) })]);
+    // The person puts A back themselves before taking the agent's changes back.
+    await send(window, [{ type: 'task.moved', taskId: first, placement: day(today), position: 1 }]);
+    const run = (await runsOf(window)).find((entry) => entry.sessionId === chat)!;
+    const answer = await undoAsk(window.client, run.id);
+    expect([answer.undone, answer.kept]).toEqual([2, [{ label: 'Moved "Undo me A" to tomorrow', why: CHANGED_SINCE }]]);
+    plan = window.client.getView().state;
+    expect([plan.tasks[second]!.title, Object.values(plan.blocks).some((block) => block.taskId === second && !plan.tasks[second]!.deletedAt), plan.tasks[first]!.placement]).toEqual(['Undo me B', false, day(today)]);
+    expect(answer.run.changes.map((change) => change.undone)).toEqual(['kept', 'undone', 'undone']);
+
+    // The agent's own Undo: this chat's last change.
+    expect(plannerCli(planner, chat, 'estimate', first, '30').code).toBe(0);
+    const undone = plannerCli(planner, chat, 'undo');
+    expect([undone.code, undone.out]).toEqual([0, 'Took back: Planned 0:30 for "Undo me A"']);
+    expect((await planner.state()).tasks[first]!.plannedMinutes).toBeNull();
+    expect(plannerCli(planner, chat, 'undo').err).toBe('planner: this chat has made no change to take back');
+
+    // Another chat (not started by Ask Planner), and the command line outside a chat.
+    plannerCli(planner, 'ses_elsewhere', 'add', 'From another chat', '--when', 'tomorrow');
+    plannerCli(planner, null, 'add', 'From a terminal', '--when', 'someday');
+    const runs = await runsOf(window);
+    expect(runs.find((entry) => entry.sessionId === 'ses_elsewhere')).toMatchObject({ request: null, changes: [{ label: 'Added "From another chat" for tomorrow' }] });
+    expect(runs.find((entry) => entry.sessionId === null)).toMatchObject({ request: null, changes: [{ label: 'Added "From a terminal" for the backlog (someday)' }] });
+    expect(taskTitled(await planner.state(), 'From another chat')!.placement).toEqual(day(tomorrow));
+  });
+
+  test("the agent's key opens only its own routes, never from a browser, and stays this user's; after a restart the same command reaches the new service, the runs are still listed, and what can no longer be taken back says so; the command line says when the Planner is not running", async () => {
+    const window = await planner.window();
+    const agentFile = join(planner.home, 'agent.json');
+    const agent = JSON.parse(readFileSync(agentFile, 'utf8')) as { url: string; key: string };
+    const as = (key: string, path: string, init: RequestInit = {}) => fetch(`${agent.url}${path}`, { ...init, headers: { Authorization: `Bearer ${key}`, ...(init.headers ?? {}) } }).then((response) => response.status);
+    // The agent's key finds no other route (404), OpenChamber's token none of the agent's.
+    expect([await as(agent.key, '/agent/state'), await as(agent.key, '/state'), await as(agent.key, '/commands', { method: 'POST', body: '{"commands":[]}' }), await as(agent.key, '/agent/state', { headers: { Origin: 'http://example.com' } }), await as(planner.token, '/agent/state'), await as('nope', '/agent/state')]).toEqual([200, 404, 404, 403, 404, 401]);
+    expect([statSync(agentFile).mode & 0o777, statSync(launcher()).mode & 0o777]).toEqual([0o600, 0o755]);
+
+    const { sessionId: chat } = await askPlanner(window, 'Plan the review');
+    const task = await makeTask(planner, 'Restart me', backlog);
+    expect(plannerCli(planner, chat, 'move', task, '--to', 'today').code).toBe(0);
+    await planner.restart();
+    const reloaded = JSON.parse(readFileSync(agentFile, 'utf8')) as { url: string; key: string };
+    expect(reloaded.key).not.toBe(agent.key);
+    expect(plannerCli(planner, chat, 'show', 'backlog').code).toBe(0);
+    const run = (await runsOf(await planner.window())).find((entry) => entry.sessionId === chat)!;
+    expect(run.changes.map((change) => [change.label, change.undoable])).toEqual([['Moved "Restart me" to today', false]]);
+    expect(plannerCli(planner, chat, 'undo').err).toBe(`planner: ${UNDO_GONE}: "Moved "Restart me" to today"`);
+
+    // A file that names no running Planner, and none at all.
+    const away = mkdtempSync(join(tmpdir(), 'planner-away-'));
+    writeFileSync(join(away, 'agent.json'), JSON.stringify({ url: 'http://127.0.0.1:9', key: 'gone' }));
+    const cli = (env: Record<string, string>) => spawnSync(process.execPath, [join(import.meta.dir, '../service/assistant/cli.ts'), 'show'], { env: { PATH: process.env.PATH ?? '', HOME: away, ...env }, encoding: 'utf8' }).stderr.trim();
+    expect(cli({ PLANNER_AGENT_FILE: join(away, 'agent.json') })).toBe('planner: the Planner is not running: open the Planner in OpenChamber, then run this again');
+    expect(cli({})).toBe('planner: the Planner has not started on this machine yet: open the Planner in OpenChamber, then run this again');
+    rmSync(away, { recursive: true, force: true });
   });
 });
 

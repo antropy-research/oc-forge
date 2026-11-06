@@ -1,11 +1,11 @@
-// Command builders shared by the views.
-import type { EventBody } from '../../../src/domain/core/events.ts';
-import type { QuickAdd } from '../../../src/domain/plan/quickAdd.ts';
-import { channelByName, edgePosition, liveChannels } from '../../../src/domain/core/selectors.ts';
-import { suggestFor } from '../../../src/domain/plan/suggest.ts';
-import { newId } from '../../../src/domain/core/ids.ts';
-import { CHANNEL_COLORS, type DateKey, type Placement, type PlannerState } from '../../../src/domain/core/types.ts';
-import { objectiveByText, weekStartOf } from '../../../src/domain/plan/rituals.ts';
+// Command builders for new and moved tasks, shared by the panel's views and the service (Ask Planner's agent).
+import type { EventBody } from '../core/events.ts';
+import type { QuickAdd } from './quickAdd.ts';
+import { channelByName, edgePosition, liveChannels } from '../core/selectors.ts';
+import { suggestFor } from './suggest.ts';
+import { newId } from '../core/ids.ts';
+import { CHANNEL_COLORS, type DateKey, type Placement, type PlannerState } from '../core/types.ts';
+import { objectiveByText, weekStartOf } from './rituals.ts';
 
 interface CreateOptions {
   edge?: 'top' | 'bottom';

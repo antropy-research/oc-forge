@@ -15,7 +15,7 @@ import type { LinearStore } from '../linear/store.ts';
 import type { GitHubStore } from '../github/store.ts';
 import type { GoogleStore } from '../google/store.ts';
 import { eventDetail } from '../calendar/calendarUi.ts';
-import { createTaskCommands } from './commands.ts';
+import { createTaskCommands } from '../../../src/domain/plan/commands.ts';
 import { addMeetingCommands, eventKey } from '../../../src/domain/calendar/meetings.ts';
 import { CANNOT_MERGE_EVENTS, mergeTarget, mergeTaskCommands } from '../../../src/domain/plan/merge.ts';
 import { applyEvents } from '../../../src/domain/core/reducer.ts';

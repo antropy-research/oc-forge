@@ -875,10 +875,18 @@ button.issue-title { background: none; border: 0; padding: 0; text-align: left; 
 .assistant-row { display: flex; gap: 10px; align-items: center; }
 .assistant-row .hint { margin: 0; flex: 1; }
 .assistant-row button.primary:disabled { opacity: 0.5; cursor: default; }
-.assistant-reply { margin: 0; font-weight: 500; }
-.assistant-ops { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.assistant-ops label.inline { display: flex; gap: 8px; align-items: center; }
 .assistant-note { margin: 0; }
+/* The recent asks: one tile each, its request on a line with what became of it, its changes under it. */
+.assistant-runs { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.assistant-runs h3 { margin: 0; font-size: var(--pl-text-meta); font-weight: 500; color: var(--oc-muted); }
+.assistant-runs > ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.assistant-run { padding: 8px 10px; border-radius: var(--pl-card-radius); background-color: var(--pl-tile); }
+.assistant-run-head { display: flex; gap: 12px; align-items: baseline; }
+.assistant-run-request { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-run-status { color: var(--oc-muted); font-size: var(--pl-text-meta); white-space: nowrap; }
+.assistant-run-head button.link { font-size: var(--pl-text-meta); white-space: nowrap; }
+.assistant-changes { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; color: var(--oc-muted); font-size: var(--pl-text-meta); }
+.assistant-changes li.undone { text-decoration: line-through; }
 
 /* Playlist */
 .playlist-time { font-variant-numeric: tabular-nums; color: var(--oc-info-text, #1c7ed6); }

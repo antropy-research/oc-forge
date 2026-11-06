@@ -4,7 +4,7 @@ import { monthDay } from '../../../src/domain/core/dates.ts';
 import { archivedTasks, deletedTasks } from '../../../src/domain/core/selectors.ts';
 import { timeAgo } from '../../../src/domain/plan/activity.ts';
 import { usePlanner, useView } from '../../lib/core/context.ts';
-import { moveTo } from '../../lib/core/commands.ts';
+import { moveTo } from '../../../src/domain/plan/commands.ts';
 
 const Row = ({ task, kind }: { task: Task; kind: 'archive' | 'trash' }) => {
   const { client } = usePlanner();

@@ -21,9 +21,12 @@ export type ExecuteResult = { ok: true; applied: number } | { ok: false; error: 
  */
 type UndoResult = { ok: true; applied: number; commands: Command[] } | { ok: false; reason: 'changed'; changed: string[] } | { ok: false; reason: 'gone' };
 
-/** How long, and how many, Undos are kept: a window offers one for eight seconds. */
+/**
+ * How long, and how many, Undos are kept: a window offers one for eight seconds; Ask Planner's agent keeps its own
+ * changes longer (`keepMs`), as the person reads the chat and undoes them from the Planner later.
+ */
 const UNDO_KEEP_MS = 60_000;
-const UNDO_KEEP_MAX = 50;
+const UNDO_KEEP_MAX = 200;
 
 /** Told after events are written here, with the state before and after them. */
 export type PersistListener = (events: readonly PlannerEvent[], before: PlannerState, after: PlannerState) => void;
@@ -104,7 +107,7 @@ export class Planner {
    * each back, against the plan as it was just before it, and the plan right
    * after it, which an Undo is checked against.
    */
-  private readonly undos = new Map<string, { inverse: EventBody[]; after: PlannerState; at: number }>();
+  private readonly undos = new Map<string, { inverse: EventBody[]; after: PlannerState; until: number }>();
   private readonly log: PlannerEvent[];
   private lastAt = 0;
   private readonly persistListeners = new Set<PersistListener>();
@@ -165,12 +168,13 @@ export class Planner {
    * Apply a batch atomically. Each command is validated against the state the
    * earlier ones produced, so one batch can create a task and then move it.
    * A command id seen before is skipped, which makes client retries safe.
-   * With `undo`, what takes it back is kept, by its first command (`undo`).
+   * With `undo`, what takes it back is kept, by its first command (`undo`),
+   * for `keepMs` (a minute unless said).
    * A subtask command meeting a change made elsewhere since refuses the
    * batch with that conflict (`subtaskConflict`); a subtask another window
    * turned into a task says which (`became`).
    */
-  execute(commands: readonly unknown[], options: { undo?: boolean } = {}): ExecuteResult {
+  execute(commands: readonly unknown[], options: { undo?: boolean; keepMs?: number } = {}): ExecuteResult {
     const before = this.state;
     let working = this.state;
     const events: PlannerEvent[] = [];
@@ -188,7 +192,7 @@ export class Planner {
       working = applyEvents(working, [event]);
     }
     if (events.length) this.persist(events, working);
-    if (options.undo && events.length) this.keepUndo((commands[0] as Command).cmd, before, events, working);
+    if (options.undo && events.length) this.keepUndo((commands[0] as Command).cmd, before, events, working, options.keepMs ?? UNDO_KEEP_MS);
     return { ok: true, applied: events.length };
   }
 
@@ -204,7 +208,7 @@ export class Planner {
   undo(batch: string): UndoResult {
     const record = this.undos.get(batch);
     this.undos.delete(batch);
-    if (!record || this.now().getTime() - record.at > UNDO_KEEP_MS) return { ok: false, reason: 'gone' };
+    if (!record || this.now().getTime() > record.until) return { ok: false, reason: 'gone' };
     let working = this.state;
     const events: PlannerEvent[] = [];
     for (const body of record.inverse) {
@@ -238,11 +242,17 @@ export class Planner {
     return {};
   }
 
-  private keepUndo(batch: string, before: PlannerState, events: readonly PlannerEvent[], after: PlannerState): void {
+  private keepUndo(batch: string, before: PlannerState, events: readonly PlannerEvent[], after: PlannerState, keepMs: number): void {
     const now = this.now().getTime();
-    for (const [key, record] of this.undos) if (now - record.at > UNDO_KEEP_MS || this.undos.size >= UNDO_KEEP_MAX) this.undos.delete(key);
+    for (const [key, record] of this.undos) if (now > record.until || this.undos.size >= UNDO_KEEP_MAX) this.undos.delete(key);
     const inverse = inverseOfBatch(before, events);
-    if (inverse) this.undos.set(batch, { inverse, after, at: now });
+    if (inverse) this.undos.set(batch, { inverse, after, until: now + keepMs });
+  }
+
+  /** Whether a batch can still be offered for Undo (it may still be refused: something changed since). */
+  undoable(batch: string): boolean {
+    const record = this.undos.get(batch);
+    return Boolean(record && this.now().getTime() <= record.until);
   }
 
   /** Read the whole log again, after a merge brought in events from another machine. */

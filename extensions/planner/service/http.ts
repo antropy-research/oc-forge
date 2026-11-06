@@ -1,6 +1,7 @@
-// The service's HTTP layer, the same for every route: a request carries OpenChamber's bearer token (401 without
-// it), a body is JSON of at most 1 MB, and every answer is JSON. The routes are tried in order and the first that
-// answers does; none: 404; one that throws: 500, with what went wrong.
+// The service's HTTP layer, the same for every route: a request carries a bearer token that opens one door (401
+// without one): OpenChamber's token opens the panel's routes, Ask Planner's agent key only the agent's, and never from a
+// browser. A body is JSON of at most 1 MB, and every answer is JSON. A door's routes are tried in order and the first
+// that answers does; none: 404; one that throws: 500, with what went wrong.
 import http from 'node:http';
 import { messageOf } from '../src/domain/core/values.ts';
 import type { Context } from './context.ts';
@@ -46,11 +47,19 @@ const json = (res: http.ServerResponse, status: number, body: unknown): void => 
   res.end(JSON.stringify(body));
 };
 
-/** The service's server: each request with `token` goes to `routes`, in order, over `ctx`. */
-export const createServer = (ctx: Context, token: string, routes: readonly Route[]): http.Server =>
+/** A bearer token and the routes it opens; `noBrowser`: a request a browser sent (it has an Origin) is refused. */
+export type Door = { token: string; routes: readonly Route[]; noBrowser?: boolean };
+
+/** The service's server: each request goes to the routes of the door its token opens, in order, over `ctx`. */
+export const createServer = (ctx: Context, doors: readonly Door[]): http.Server =>
   http.createServer(async (req, res) => {
-    if (req.headers.authorization !== `Bearer ${token}`) {
+    const door = doors.find((entry) => entry.token && req.headers.authorization === `Bearer ${entry.token}`);
+    if (!door) {
       json(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    if (door.noBrowser && req.headers.origin !== undefined) {
+      json(res, 403, { error: 'not from a browser' });
       return;
     }
     // A request target no URL reads is refused, not left to throw out of the handler (and the process).
@@ -62,7 +71,7 @@ export const createServer = (ctx: Context, token: string, routes: readonly Route
       return;
     }
     try {
-      for (const route of routes) {
+      for (const route of door.routes) {
         const answer = await route(ctx, req, url);
         if (!answer) continue;
         json(res, answer.status, answer.body);

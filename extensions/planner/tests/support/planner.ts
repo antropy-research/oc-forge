@@ -381,7 +381,11 @@ export const startPlanner = async (options: PlannerOptions = {}): Promise<Planne
       startSession: async (request: StartSessionRequest) => {
         const sessionId = `ses_e2e${String(started.length + 1).padStart(4, '0')}${randomBytes(3).toString('hex')}`;
         started.push({ ...request, sessionId });
-        return { sessionId };
+        // As OpenChamber answers: the chat, and that its first message went out (when it has one); the folder it is in
+        // for one in a project, the window's, or a worktree there (a new worktree's folder is OpenChamber's to name).
+        const worktree = request.worktree && typeof request.worktree === 'object' ? request.worktree : null;
+        const folder = worktree?.kind === 'existing' ? worktree.directory : request.projectId ? projects.find((project) => project.id === request.projectId)?.directory : directory;
+        return { sessionId, sent: request.text ? 'sent' : 'skipped', ...(worktree?.kind === 'new' || folder === undefined ? {} : { directory: folder }), linked: true };
       },
       openSession: async (id: string) => void openedSessions.push(id),
       onAction: (handler: typeof onAction) => {

@@ -8,7 +8,7 @@ import { parseQuickAdd } from '../../../src/domain/plan/quickAdd.ts';
 import { edgePosition, tasksForDay } from '../../../src/domain/core/selectors.ts';
 import type { Task } from '../../../src/domain/core/types.ts';
 import type { ClientView, PlannerClient } from './client.ts';
-import { createTaskCommands } from './commands.ts';
+import { createTaskCommands } from '../../../src/domain/plan/commands.ts';
 import { PANEL_ID } from '../agents/store.ts';
 
 const NOTES_MAX = 40_000;

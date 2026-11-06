@@ -1,72 +1,86 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { HostRequestError } from '@openchamber/sdk';
-import type { EventBody } from '../../../src/domain/core/events.ts';
-import { ASSISTANT_SYSTEM, assistantContext, describeOp, readAssistantAnswer, whenToPlacement, type AssistantOp } from '../../../src/domain/assistant/assistant.ts';
-import { channelByName } from '../../../src/domain/core/selectors.ts';
-import type { DateKey, PlannerState } from '../../../src/domain/core/types.ts';
-import { usePlanner, useView } from '../../lib/core/context.ts';
-import { createManyTaskCommands, moveTo } from '../../lib/core/commands.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
+import { askRuns, startAsk, undoAsk, type AskRunView } from '../../lib/assistant/ask.ts';
+import { useAgents, usePlanner } from '../../lib/core/context.ts';
 
-/** Planner commands for confirmed assistant operations. */
-export const assistantCommands = (state: PlannerState, ops: readonly AssistantOp[], today: DateKey): EventBody[] => {
-  const creates = ops.flatMap((op) => (op.op === 'create' ? [{ title: op.title, plannedMinutes: op.minutes, placement: whenToPlacement(op.when, today), channel: op.channel, priority: null, objective: null }] : []));
-  const bodies = createManyTaskCommands(state, creates, { kind: 'day', date: today }, { today });
-  for (const op of ops) {
-    if (op.op === 'create') continue;
-    const task = state.tasks[op.taskId];
-    if (!task) continue;
-    if (op.op === 'move') {
-      const placement = whenToPlacement(op.when, today);
-      if (placement) bodies.push(moveTo(state, task.id, placement));
-    } else if (op.op === 'complete' && !task.completedAt) bodies.push({ type: 'task.completed', taskId: task.id, on: today });
-    else if (op.op === 'reopen' && task.completedAt) bodies.push({ type: 'task.reopened', taskId: task.id });
-    else if (op.op === 'archive' && !task.archivedAt) bodies.push({ type: 'task.archived', taskId: task.id });
-    else if (op.op === 'estimate') bodies.push({ type: 'task.updated', taskId: task.id, patch: { plannedMinutes: op.minutes } });
-    else if (op.op === 'channel') {
-      const channel = channelByName(state, op.channel);
-      if (channel) bodies.push({ type: 'task.updated', taskId: task.id, patch: { channelId: channel.id } });
-    }
-  }
-  return bodies;
-};
+/** How often the open dialog reads the recent asks again, while their agents work. */
+const RUNS_POLL_MS = 4000;
+const RUNS_SHOWN = 3;
+const CHANGES_SHOWN = 6;
 
-/** Ask Planner: say what to change; review what the model proposes; apply it (undoable). */
+const plural = (count: number, one: string, many = `${one}s`): string => `${count} ${count === 1 ? one : many}`;
+
+/**
+ * Ask Planner: the request goes to the agent the chat composer has selected, in a new chat beside the Planner, and
+ * that agent reads and changes the plan with the Planner's command line. The recent asks list what each chat's agent
+ * changed, to open the chat or take the changes back.
+ */
 export const AssistantModal = ({ initial, onClose }: { initial: string; onClose: () => void }) => {
-  const { client, host } = usePlanner();
-  const view = useView();
+  const { client, host, agents } = usePlanner();
+  const live = useAgents().sessions;
   const box = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState(initial);
-  const [answer, setAnswer] = useState<{ reply: string; ops: AssistantOp[] } | null>(null);
-  const [keep, setKeep] = useState<boolean[]>([]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  useEffect(() => box.current?.focus(), []);
+  const [runs, setRuns] = useState<AskRunView[]>([]);
+  const [undoing, setUndoing] = useState<string | null>(null);
+
+  useEffect(() => {
+    box.current?.focus();
+    let open = true;
+    const load = () =>
+      void askRuns(client)
+        .then((answer) => {
+          if (!open) return;
+          setRuns(answer.runs);
+          if (answer.problem) setProblem(answer.problem);
+        })
+        .catch(() => {});
+    load();
+    const timer = setInterval(load, RUNS_POLL_MS);
+    return () => {
+      open = false;
+      clearInterval(timer);
+    };
+  }, [client]);
 
   const ask = async () => {
-    if (!text.trim()) return;
+    const request = text.trim();
+    if (!request || busy) return;
     setBusy(true);
     setProblem(null);
-    setAnswer(null);
     try {
-      const { text: reply } = await host.generate({ system: ASSISTANT_SYSTEM, prompt: `${assistantContext(view.state, view.today)}\n\nRequest: ${text.trim()}`.slice(0, 60_000), maxOutputTokens: 1500 });
-      const parsed = readAssistantAnswer(reply, view.state, view.today);
-      if (!parsed) setProblem('The answer could not be read. Try saying it another way.');
-      else {
-        setAnswer(parsed);
-        setKeep(parsed.ops.map(() => true));
-      }
+      const { sent } = await startAsk(host, client, request);
+      if (sent === 'no-model') client.notify('The chat was created, but no model is set up to answer it. Open the chat to pick one.');
+      else if (sent === 'failed') client.notify('The chat was created, but the request did not send. Open the chat to send it again.');
+      onClose();
     } catch (error) {
-      const code = error instanceof HostRequestError ? error.code : '';
-      setProblem(code === 'NO_MODEL' || code === 'MODEL_FAILED' ? 'No model is set up for the assistant. Add a provider key, or choose a Small Model in OpenChamber settings.' : `The assistant failed: ${error instanceof Error ? error.message : String(error)}`);
+      setProblem(`Ask Planner could not start the chat: ${messageOf(error)}`);
     } finally {
       setBusy(false);
     }
   };
 
-  const chosen = answer ? answer.ops.filter((_, index) => keep[index]) : [];
-  const apply = () => {
-    void client.dispatch(assistantCommands(view.state, chosen, view.today), { undo: `Assistant made ${chosen.length} change${chosen.length === 1 ? '' : 's'}` });
-    onClose();
+  const undo = async (run: AskRunView) => {
+    setUndoing(run.id);
+    try {
+      const answer = await undoAsk(client, run.id);
+      setRuns((current) => current.map((entry) => (entry.id === run.id ? answer.run : entry)));
+      const kept = answer.kept.length ? ` Kept ${answer.kept.map((entry) => `"${entry.label}" (${entry.why.toLowerCase()})`).join(', ')}.` : '';
+      client.notify(`Took back ${plural(answer.undone, 'change')}.${kept}`);
+    } catch (error) {
+      client.notify(`Could not take the changes back: ${messageOf(error)}`);
+    } finally {
+      setUndoing(null);
+    }
+  };
+
+  const status = (run: AskRunView): string => {
+    const activity = run.sessionId ? live.get(run.sessionId)?.activity : undefined;
+    if (activity === 'running' || activity === 'retrying') return 'Working…';
+    if (activity === 'waiting-question' || activity === 'waiting-permission') return 'Needs you in the chat';
+    const made = run.changes.filter((change) => change.undone !== 'undone').length;
+    return made ? plural(made, 'change') : 'No changes';
   };
 
   return (
@@ -85,33 +99,48 @@ export const AssistantModal = ({ initial, onClose }: { initial: string; onClose:
           }}
         />
         <div class="row assistant-row">
-          <span class="hint">The plan and your request go to OpenChamber's Small Model. Nothing changes until you apply.</span>
-          <button class="primary" disabled={busy || !text.trim()} onClick={() => void ask()}>{busy ? 'Thinking…' : 'Ask'}</button>
+          <span class="hint">Goes to the agent you chat with, in a new chat beside the Planner. It reads and changes your plan as it works; you can take its changes back here.</span>
+          <button class="primary" disabled={busy || !text.trim()} onClick={() => void ask()}>{busy ? 'Starting…' : 'Ask'}</button>
         </div>
         {problem && <p class="danger assistant-note" role="alert">{problem}</p>}
-        {answer && (
-          <div class="assistant-answer">
-            <p class="assistant-reply">{answer.reply}</p>
-            {answer.ops.length > 0 && (
-              <>
-                <ul class="assistant-ops">
-                  {answer.ops.map((op, index) => (
-                    <li key={index}>
-                      <label class="inline">
-                        <input type="checkbox" checked={keep[index]} onChange={(event) => setKeep(keep.map((value, at) => (at === index ? event.currentTarget.checked : value)))} />
-                        {describeOp(view.state, op, view.today)}
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-                <div class="row assistant-row">
-                  <div class="nav-spacer" />
-                  <button class="link" onClick={onClose}>Cancel</button>
-                  <button class="primary" disabled={chosen.length === 0} onClick={apply}>Apply {chosen.length} change{chosen.length === 1 ? '' : 's'}</button>
-                </div>
-              </>
-            )}
-          </div>
+        {runs.length > 0 && (
+          <section class="assistant-runs" aria-label="Recent asks">
+            <h3>Recent</h3>
+            <ul>
+              {runs.slice(0, RUNS_SHOWN).map((run) => {
+                const undoable = run.changes.filter((change) => change.undoable);
+                return (
+                  <li key={run.id} class="assistant-run">
+                    <div class="assistant-run-head">
+                      <span class="assistant-run-request" title={run.request ?? undefined}>{run.request ?? 'A chat that changed the plan'}</span>
+                      <span class="assistant-run-status">{status(run)}</span>
+                      {run.sessionId && (
+                        <button class="link" onClick={() => void agents.openSession(run.sessionId!).then(onClose).catch((error) => client.notify(`Could not open the chat: ${messageOf(error)}`))}>
+                          Open chat
+                        </button>
+                      )}
+                      {undoable.length > 0 && (
+                        <button class="link" disabled={undoing === run.id} onClick={() => void undo(run)}>
+                          {undoing === run.id ? 'Taking back…' : `Undo ${undoable.length === 1 ? 'its change' : `its ${undoable.length} changes`}`}
+                        </button>
+                      )}
+                    </div>
+                    {run.changes.length > 0 && (
+                      <ul class="assistant-changes">
+                        {run.changes.slice(-CHANGES_SHOWN).map((change) => (
+                          <li key={change.id} class={change.undone === 'undone' ? 'undone' : undefined}>
+                            {change.label}
+                            {change.undone === 'kept' ? ' · kept, changed since' : ''}
+                          </li>
+                        ))}
+                        {run.changes.length > CHANGES_SHOWN && <li>and {plural(run.changes.length - CHANGES_SHOWN, 'earlier change')}</li>}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
         )}
       </div>
     </div>

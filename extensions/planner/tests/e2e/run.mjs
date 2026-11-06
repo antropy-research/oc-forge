@@ -1482,12 +1482,8 @@ try {
   // The dev container has gh (2.5.2 image) but no GitHub sign-in; elsewhere gh may be missing or signed in.
   check('GitHub says plainly how to connect when gh is missing or signed out', /GitHub CLI \(gh\) is not installed|gh auth login|Signed in as/.test(ghState + (await frame.locator('.view-sub').first().innerText())), ghState.slice(0, 120));
 
-  const isAskGenerate = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/generate';
-  await context.route(isAskGenerate, (route) => {
-    const prompt = JSON.parse(route.request().postData() ?? '{}').prompt ?? '';
-    const gymId = new RegExp(`\\[([A-Za-z0-9_-]+)\\] ${run} gym`).exec(prompt)?.[1] ?? 'missing';
-    return route.fulfill({ json: { ok: true, result: { text: JSON.stringify({ reply: 'Moved the gym and added a stretch.', ops: [{ op: 'move', taskId: gymId, when: 'tomorrow' }, { op: 'create', title: `${run} stretch`, when: 'today', minutes: 10, channel: null }] }) } } });
-  });
+  // Ask Planner hands the question to the chat's agent in a new chat; run.mjs works on the real plan, so it checks the
+  // dialog and starts no chat (the chat and the agent's command line: tests/plan.test.ts and tests/e2e/ask.mjs).
   await nav('Home').click();
   await frame.getByRole('heading', { name: 'Home' }).click();
   await page.keyboard.press('Control+k');
@@ -1495,18 +1491,9 @@ try {
   await frame.getByRole('option', { name: /^Ask Planner: "move my gym to tomorrow"/ }).click();
   const ask = frame.getByRole('dialog', { name: 'Ask Planner' });
   check('the palette hands a question to Ask Planner', (await ask.getByRole('textbox', { name: 'Ask Planner' }).inputValue()) === 'move my gym to tomorrow');
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
-  await ask.getByRole('button', { name: 'Apply 2 changes' }).waitFor({ timeout: 10_000 });
-  const preview = (await ask.locator('.assistant-ops').innerText()).replace(/\s+/g, ' ');
+  check('Ask Planner says it goes to the agent you chat with', (await ask.innerText()).includes('Goes to the agent you chat with, in a new chat beside the Planner'));
   await shot('23-ask');
-  await ask.getByRole('button', { name: 'Apply 2 changes' }).click();
-  const tomorrowKey2 = (() => { const d = new Date(`${todayKey}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
-  const asked = await waitForState((latest) => Object.values(latest.state.tasks).some((task) => task.title === `${run} gym` && task.placement.date === tomorrowKey2 && !task.deletedAt) && Boolean(taskTitled(latest, `${run} stretch`)));
-  check('Ask Planner previews and applies the changes', preview.includes(`Move "${run} gym" to tomorrow`) && Boolean(taskTitled(asked, `${run} stretch`)), preview.slice(0, 140));
-  await frame.getByRole('status').filter({ hasText: 'Assistant made 2 changes' }).getByRole('button', { name: 'Undo' }).click();
-  const undone = await waitForState((latest) => !taskTitled(latest, `${run} stretch`) && !Object.values(latest.state.tasks).some((task) => task.title === `${run} gym` && task.placement.date === tomorrowKey2 && !task.deletedAt));
-  check('the assistant changes undo in one step', !taskTitled(undone, `${run} stretch`));
-  await context.unroute(isAskGenerate);
+  await ask.getByRole('textbox', { name: 'Ask Planner' }).press('Escape');
 
   const bare = '/home/node/planner-sync-e2e.git';
   execFileSync('docker', ['exec', 'oc-forge-openchamber-dev', 'sh', '-c', `rm -rf ${bare} /tmp/planner-replica && git init --quiet --bare -b main ${bare}`]);

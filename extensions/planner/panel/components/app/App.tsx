@@ -29,7 +29,7 @@ import { isGuestAttachItem } from '@openchamber/sdk';
 import { CommandPalette, QuickAddModal } from './CommandPalette.tsx';
 import { AssistantModal } from '../assistant/Assistant.tsx';
 import { hoveredSource, hoveredTask } from '../../lib/core/hover.ts';
-import { moveTo } from '../../lib/core/commands.ts';
+import { moveTo } from '../../../src/domain/plan/commands.ts';
 import { autoTimebox } from '../../lib/core/autoSchedule.ts';
 import { startTaskNotifications } from '../../lib/google/notifications.ts';
 import { parseRoute } from '../../lib/openchamber/deepLink.ts';
@@ -147,12 +147,17 @@ export const App = ({ surface }: { surface: string }) => {
     };
   }, [client, linear, agents, github, google]);
 
-  // Clicking a task's chip in a chat opens that task here.
+  // Clicking a task's chip in a chat opens that task here; an Ask's chip opens Ask Planner, with what its agent changed.
   useEffect(
     () =>
       host.onItem((item) => {
         if (!item || !isGuestAttachItem(item)) return;
-        const data = item.data as { taskId?: unknown } | undefined;
+        const data = item.data as { taskId?: unknown; ask?: unknown } | undefined;
+        if (typeof data?.ask === 'string') {
+          setAskText('');
+          setOverlay('ask');
+          return;
+        }
         const taskId = typeof data?.taskId === 'string' ? data.taskId : item.id;
         if (client.getView().state.tasks[taskId]) setUi({ openTaskId: taskId });
       }),
