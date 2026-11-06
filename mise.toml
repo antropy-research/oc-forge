@@ -40,9 +40,13 @@ run = "bun run script/test.ts --preload {{config_root}}/tests/preload.ts {{confi
 [tasks."test:extensions"]
 description = "Type-check, test and rebuild the OpenChamber extensions; their committed bundles must match their sources"
 run = [
+  # Each extension is a submodule, its own repository (antropy-research/openchamber-planner, -cloak-browser): the
+  # bundles are checked inside it.
   "cd extensions/planner && bun install --frozen-lockfile && bun run check && bun test tests/ && bun run build",
-  "git diff --exit-code -- extensions/planner/panel/main.js extensions/planner/service/main.js",
-  # A submodule, its own repository (antropy-research/openchamber-cloak-browser): the bundles are checked inside it.
+  "git -C extensions/planner diff --exit-code -- panel/main.js service/main.js service/cli.js",
+  # The Planner keeps the extension side of the host APIs, so it builds on its own: the same bytes as the adapters'.
+  "cmp adapters/openchamber/client/index.ts extensions/planner/panel/lib/openchamber/ocforge/client/index.ts",
+  "cmp adapters/openchamber/host/protocol.ts extensions/planner/panel/lib/openchamber/ocforge/host/protocol.ts",
   # Its tests drive a real Chromium (GitHub's Ubuntu runners have Google Chrome).
   "cd extensions/cloak-browser && bun install --frozen-lockfile && bun run check && bun run build && bun run test",
   "git -C extensions/cloak-browser diff --exit-code -- panel/main.js service/main.js",

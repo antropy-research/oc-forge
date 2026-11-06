@@ -10,3 +10,6 @@
 [submodule "extensions/cloak-browser"]
 	path = extensions/cloak-browser
 	url = https://github.com/antropy-research/openchamber-cloak-browser.git
+[submodule "extensions/planner"]
+	path = extensions/planner
+	url = https://github.com/antropy-research/openchamber-planner.git
