@@ -143,9 +143,11 @@ in its repository first; this one then commits the submodule's new commit. It ru
 container: the image has Chromium's libraries and fonts for it, and the extension
 downloads the browser itself on first use into the home volume
 (`~/.cache/oc-forge-cloak-browser`, about 700 MB), its profile beside the other data
-(`~/.local/share/oc-forge-cloak-browser`). The agent's browser actions run in it once Cloak
-Browser is the Browser provider (Settings → General → OpenChamber Tools; dev has it since
-2026-11-06); `tests/e2e/dev.mjs` in the extension walks through both sides.
+(`~/.local/share/oc-forge-cloak-browser`). The agent's browser actions run in it: at every start the
+container makes Cloak Browser the Browser provider (Settings → General → OpenChamber Tools),
+installing and approving the folder first when it is not (`dev-defaults.mjs`, set by
+`OC_DEV_BROWSER_PROVIDER` in `compose.yaml`; `builtin` is OpenChamber's own browser). A change in
+Settings lasts until the next start. `tests/e2e/dev.mjs` in the extension walks through both sides.
 
 ## A model for agents
 

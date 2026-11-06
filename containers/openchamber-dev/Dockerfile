@@ -99,6 +99,11 @@ RUN apt-get update \
     fonts-liberation fonts-noto-cjk fonts-noto-color-emoji fonts-noto-core \
   && rm -rf /var/lib/apt/lists/*
 
+# The dev defaults, applied once OpenChamber answers: Cloak Browser installed, approved and the Browser
+# provider (OC_DEV_BROWSER_PROVIDER in compose.yaml), so the agent's browser actions run on CloakBrowser.
+# Into a folder that exists: a folder COPY makes would get the file's mode, which the `node` user cannot enter.
+COPY --chmod=0644 containers/openchamber-dev/dev-defaults.mjs /usr/local/lib/oc-forge-dev-defaults.mjs
+
 ENV LANG=C.UTF-8
 # The image's `node` user is UID 1000, so files written into the bind-mounted
 # extensions folder stay owned by the host user.
@@ -107,4 +112,6 @@ WORKDIR /home/node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1
-CMD ["openchamber", "serve", "--foreground", "--port", "3000", "--host", "0.0.0.0"]
+# OpenChamber in the foreground, and the dev defaults beside it; the subshell leaves the helper to init (compose's
+# `init: true`), which reaps it when it is done.
+CMD ["sh", "-c", "(node /usr/local/lib/oc-forge-dev-defaults.mjs &); exec openchamber serve --foreground --port 3000 --host 0.0.0.0"]

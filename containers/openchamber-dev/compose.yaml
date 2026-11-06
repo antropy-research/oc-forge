@@ -19,6 +19,10 @@ services:
       # Loopback by default; set OC_DEV_BIND in the untracked .env to publish
       # on another address, such as the host's Tailscale IP.
       - "${OC_DEV_BIND:-127.0.0.1}:${OC_DEV_PORT:-35310}:3000"
+    environment:
+      # The Browser provider the container sets at every start (dev-defaults.mjs): the agent's browser actions run
+      # on CloakBrowser. `builtin` is OpenChamber's own browser.
+      OC_DEV_BROWSER_PROVIDER: oc-forge-cloak-browser
     env_file:
       # The UI password and provider API keys live outside the repository.
       - path: ${HOME}/.local/share/oc-forge-openchamber-dev/secrets.env

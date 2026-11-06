@@ -9,6 +9,7 @@
 !upstream.json
 !vendors/opencode
 !vendors/openchamber
+!containers/openchamber-dev/dev-defaults.mjs
 # The vendors as committed: no git metadata (a submodule's .git points outside the context) and nothing
 # installed on the host (`mise run setup` installs into vendors/opencode).
 **/.git
