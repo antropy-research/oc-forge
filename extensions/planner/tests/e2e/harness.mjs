@@ -9,7 +9,6 @@
 //   that this harness starts on 127.0.0.1 with a temporary HOME and PLANNER_DATA_DIR (empty plan).
 // - Linear (the host integration route) answers from an in-memory fixture world (`h.linear`), never a real workspace.
 // - GitHub service paths answer from fixtures (`h.github`) unless you pass `serviceOverride`.
-// - The Small Model (`/generate`) answers from `generate` (default: an empty JSON array).
 // - Google: start tests/e2e/fakeGoogle.mjs and pass `serviceEnv: { PLANNER_GOOGLE_API_BASE: fake.base }` and
 //   `homeFiles: { 'google-accounts.json': fake.accountsFile() }`; your service then signs in to the fake (see calendar.mjs).
 // - Task notifications (OpenChamber toasts that stay until dismissed) are off in the private plan unless you pass
@@ -68,8 +67,6 @@ export async function startHarness({
   linear,
   /** ({ method, path, body }) => answer object | undefined (undefined: your private service answers). */
   serviceOverride,
-  /** (request) => text the Small Model answers. */
-  generate = () => '[]',
   timezoneId = 'America/Los_Angeles',
   /** Extra environment for your private service, e.g. PLANNER_GOOGLE_API_BASE from tests/e2e/fakeGoogle.mjs. */
   serviceEnv = {},
@@ -240,11 +237,6 @@ export async function startHarness({
     const custom = linear ? await linear(op, variables, linearWorld) : undefined;
     const data = custom !== undefined ? custom : answerLinear(linearWorld, op, variables);
     await route.fulfill({ json: { status: 200, body: JSON.stringify(data ? { data } : { errors: [{ message: `harness: unexpected ${op}` }] }) } });
-  });
-  await context.route((url) => /\/api\/guests\/oc-forge-planner\/generate$/.test(new URL(url).pathname), async (route) => {
-    routedRequests.add(route.request());
-    const request = route.request().postDataJSON();
-    route.fulfill({ json: { ok: true, result: { text: await generate(request) } } });
   });
 
   const page = await context.newPage();

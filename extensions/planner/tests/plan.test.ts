@@ -1,8 +1,8 @@
 // The plan end to end (Area A): tasks, days, rituals and history, through the real service and Planner windows made of
 // the panel's own client (tests/support/planner.ts, plan.ts). Each test is one thing a user does: set up through the
-// service, act through a window as the UI does (its commands, its Undo, the Add task field, the Braindump's Small Model,
-// the chat Ask Planner starts and the command line that chat's agent runs), and check the plan, each window's view and
-// what it said. Past findings kept here as steps: review 12's P0 (subtasks changed in two windows at once), review 13
+// service, act through a window as the UI does (its commands, its Undo, the Add task field, the Braindump, the chat
+// Ask Planner, Braindump and the Daily highlights summary start and the command line that chat's agent runs), and check
+// the plan, each window's view and what it said. Past findings kept here as steps: review 12's P0 (subtasks changed in two windows at once), review 13
 // (a subtask turned into a task keeps all it holds, and comes once), the Planner's own Undo in two windows, and a
 // history packed at start (a first push to a sync remote timed out).
 import { describe, expect, test } from 'bun:test';
@@ -11,12 +11,12 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileS
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { GenerateRequest } from '@openchamber/sdk';
-import { addDays, instantAt, longDay, startOfWeek, weekdayName } from '../src/domain/core/dates.ts';
+import { addDays, instantAt, longDay, monthDay, startOfWeek, weekdayName } from '../src/domain/core/dates.ts';
 import { SUBTASKS_ONE_BY_ONE, SUBTASK_CHANGED, type EventBody } from '../src/domain/core/events.ts';
 import { newId } from '../src/domain/core/ids.ts';
 import { convertSubtaskCommands, mergeItemCommands, mergeTaskCommands } from '../src/domain/plan/merge.ts';
 import { instanceId } from '../src/domain/plan/recurrence.ts';
+import { ritualRecord } from '../src/domain/plan/rituals.ts';
 import { positionAt, tasksForDay } from '../src/domain/core/selectors.ts';
 import { reorderCommands, sortTasks, type SortKey } from '../src/domain/plan/sort.ts';
 import { CHANGED_SINCE, UNDO_GONE } from '../src/domain/plan/undo.ts';
@@ -24,10 +24,9 @@ import type { PlannerState, Subtask, TaskSourceRef } from '../src/domain/core/ty
 import { parseMarkdown, type MdBlock, type MdInline } from '../panel/lib/core/markdown.ts';
 import { undoAsk, type AskRunView } from '../panel/lib/assistant/ask.ts';
 import { startPlanner, until, usePlanner, type PlannerWindow } from './support/planner.ts';
-import { ZONE, addTask, askPlanner, backlog, braindump, day, dayList, daysOf, holdable, makeTask, plannerCli, race, sub, undoAfter } from './support/plan.ts';
+import { ZONE, addTask, askPlanner, backlog, braindump, braindumpWithAgent, day, dayList, daysOf, holdable, makeTask, plannerCli, race, sub, summarizeWithAgent, undoAfter } from './support/plan.ts';
 
-let model: (request: GenerateRequest) => string = () => '';
-const planner = usePlanner({ zone: ZONE, generate: (request) => model(request) });
+const planner = usePlanner({ zone: ZONE });
 
 const taskTitled = (state: PlannerState, title: string) => Object.values(state.tasks).find((task) => task.title === title && !task.deletedAt);
 const subtasksOf = (state: PlannerState, taskId: string) => state.tasks[taskId]!.subtasks;
@@ -629,21 +628,21 @@ describe('merging tasks', () => {
   });
 });
 
-describe("Braindump's Small Model answers are read strictly (only what they say well is applied)", () => {
-  test('Braindump with the Small Model adds its items as it read them, a time over ten hours, an unknown channel and an empty title dropped; an answer that is not a list makes each line a task, read as Add task reads it', async () => {
+describe('Braindump, one task per line', () => {
+  test('each line is a task, read as Add task reads it (bullets and numbers dropped; ~time, @day, #channel and !priority honored), added where the Braindump was opened, in one step Undo takes back', async () => {
     const { tomorrow } = await daysOf(planner);
     const window = await planner.window();
-    model = () => 'Here you go:\n[{"title":"Call the bank about the card","minutes":15,"when":"tomorrow","channel":"Personal"},{"title":"","minutes":5},{"title":"Fix the flaky login test","minutes":9999,"when":"next-month","channel":"ops","priority":"high"}]';
-    await braindump(window, 'call the bank about the card\nfix the flaky login test, it takes forever');
+    const folder = newId();
+    await window.client.dispatch([{ type: 'folder.created', folder: { id: folder, name: 'Errands' } }]);
+    const items = await braindump(window, '- renew the passport ~15m @tomorrow #personal\n\n2. water the plants !high', folder);
+    expect(items.map((item) => item.title)).toEqual(['renew the passport', 'water the plants']);
     let plan = await planner.state();
-    expect(taskTitled(plan, 'Call the bank about the card')).toMatchObject({ plannedMinutes: 15, placement: day(tomorrow), channelId: 'personal' });
-    expect(taskTitled(plan, 'Fix the flaky login test')).toMatchObject({ plannedMinutes: null, placement: { kind: 'backlog', bucket: 'next-month' }, channelId: null, priority: 'high' });
-    expect([taskTitled(plan, ''), window.client.getView().undoLabel]).toEqual([undefined, 'Added 2 tasks']);
-    model = () => 'no json here';
-    await braindump(window, '- renew the passport ~15m @tomorrow #personal\n\n2. water the plants !high');
+    expect(taskTitled(plan, 'renew the passport')).toMatchObject({ plannedMinutes: 15, placement: day(tomorrow), channelId: 'personal', folderId: folder });
+    expect(taskTitled(plan, 'water the plants')).toMatchObject({ priority: 'high', placement: backlog, folderId: folder });
+    expect(window.client.getView().undoLabel).toBe('Added 2 tasks');
+    await window.client.undo();
     plan = await planner.state();
-    expect(taskTitled(plan, 'renew the passport')).toMatchObject({ plannedMinutes: 15, placement: day(tomorrow), channelId: 'personal' });
-    expect(taskTitled(plan, 'water the plants')).toMatchObject({ priority: 'high', placement: backlog });
+    expect([taskTitled(plan, 'renew the passport'), taskTitled(plan, 'water the plants')]).toEqual([undefined, undefined]);
   });
 });
 
@@ -775,6 +774,52 @@ describe("Ask Planner hands the request to the chat's agent, which works on the 
     expect(cli({ PLANNER_AGENT_FILE: join(away, 'agent.json') })).toBe('planner: the Planner is not running: open the Planner in OpenChamber, then run this again');
     expect(cli({})).toBe('planner: the Planner has not started on this machine yet: open the Planner in OpenChamber, then run this again');
     rmSync(away, { recursive: true, force: true });
+  });
+  test("Braindump's Organize with the agent hands the notes to the chat's agent in a chat of their own, named for them, with the folder it was opened in; the agent's tasks go there, a folder it does not know is refused with the ones there are, and the run lists them", async () => {
+    const window = await planner.window({ directory: '/projects/demo' });
+    await window.client.dispatch([{ type: 'folder.created', folder: { id: newId(), name: 'House' } }]);
+    const notes = 'call the plumber about the leak\nbuy paint ~30m #personal';
+    const { sessionId: chat, chat: started } = await braindumpWithAgent(window, notes, 'House');
+    expect(started).toMatchObject({ id: 'Ask', title: 'Braindump: call the plumber about the leak', navigation: 'open' });
+    expect(started.text).toContain('Braindump: turn my notes below into tasks in the Planner');
+    expect(started.text).toContain('Put every one in the backlog folder "House" (planner add --folder).');
+    expect(started.text).toContain(`My notes:\n${notes}`);
+    expect(started.text).toContain(`\`${launcher()} help\``);
+    expect(plannerCli(planner, chat, 'add', 'Call the plumber about the leak', '--when', 'next-weeks', '--folder', 'house').code).toBe(0);
+    expect(plannerCli(planner, chat, 'add', 'Buy paint', '--minutes', '30', '--channel', 'personal', '--when', 'next-weeks', '--folder', 'House').out).toMatch(/^Added "Buy paint" for the backlog \(someday in the next week or two\) \(0:30\) in #personal in the folder "House" \(change \S+\)$/);
+    expect(plannerCli(planner, chat, 'add', 'Sand the door', '--folder', 'Garage').err).toMatch(/^planner: unknown backlog folder "Garage"; the folders are .*"House"$/);
+    const plan = await planner.state();
+    const house = Object.values(plan.folders).find((folder) => folder.name === 'House')!.id;
+    expect([taskTitled(plan, 'Call the plumber about the leak')?.folderId, taskTitled(plan, 'Buy paint')?.folderId, taskTitled(plan, 'Sand the door')]).toEqual([house, house, undefined]);
+    expect(plannerCli(planner, chat, 'channels').out).toMatch(/\nBacklog folders:\n(?:".+"\n)*"House"/);
+    const [run] = await runsOf(window);
+    expect(run).toMatchObject({ request: 'Braindump: call the plumber about the leak', sessionId: chat });
+    expect(run!.changes.map((change) => change.label)).toEqual(['Added "Call the plumber about the leak" for the backlog (someday in the next week or two) in the folder "House"', 'Added "Buy paint" for the backlog (someday in the next week or two) (0:30) in #personal in the folder "House"']);
+  });
+
+  test("Daily highlights' Summarize with the agent starts a chat for the day; its agent reads the day's highlights and saves the summary on the page, which the run lists and Undo takes back", async () => {
+    const { today } = await daysOf(planner);
+    const shipped = await makeTask(planner, 'Ship the calendar view', day(today));
+    const window = await planner.window();
+    await send(window, [{ type: 'task.completed', taskId: shipped, on: today }]);
+    const { sessionId: chat, chat: started } = await summarizeWithAgent(window, today);
+    expect(started).toMatchObject({ title: `Highlights summary: ${weekdayName(today)}, ${monthDay(today)}`, navigation: 'open' });
+    expect(started.text).toContain(`write the summary of my workday on ${weekdayName(today)} ${today}`);
+    expect(started.text).toContain(`planner summary ${today} "<the summary>"`);
+    const read = plannerCli(planner, chat, 'highlights', today);
+    expect(read.out).toContain('- Ship the calendar view');
+    expect(read.out).toContain('Summary: none');
+    const saved = plannerCli(planner, chat, 'summary', today, 'I shipped the calendar view and closed the day early.');
+    expect(saved.out).toMatch(/^Wrote the highlights summary of today \(change \S+\)$/);
+    await window.client.load();
+    expect(ritualRecord(window.client.getView().state, 'highlights', today).summary).toBe('I shipped the calendar view and closed the day early.');
+    expect(plannerCli(planner, chat, 'highlights').out).toContain('Summary: I shipped the calendar view and closed the day early.');
+    expect(plannerCli(planner, chat, 'summary', 'someday', 'x').err).toBe('planner: summary needs a day: today, yesterday or a date YYYY-MM-DD');
+    const run = (await runsOf(window)).find((entry) => entry.sessionId === chat)!;
+    expect(run.changes.map((change) => change.label)).toEqual(['Wrote the highlights summary of today']);
+    expect((await undoAsk(window.client, run.id)).undone).toBe(1);
+    // Back to no summary ('' reads as none: the page offers Summarize with the agent again).
+    expect(ritualRecord(await planner.state(), 'highlights', today).summary).toBe('');
   });
 });
 

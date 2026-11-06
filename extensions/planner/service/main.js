@@ -2034,6 +2034,13 @@ var inverseOne = (state, body) => {
     const aligned = Object.values(state.tasks).filter((task) => task.objectiveId === objective.id);
     return [{ type: "objective.restored", objectiveId: objective.id }, ...aligned.map((task) => ({ type: "task.updated", taskId: task.id, patch: { objectiveId: objective.id } }))];
   }
+  if (body.type === "ritual.saved") {
+    const fields = Object.keys(body.fields);
+    if (!fields.length || fields.some((field) => field !== "summary" && field !== "reflection"))
+      return null;
+    const before = state.rituals[ritualKey(body.ritual, body.date)] ?? {};
+    return [{ type: "ritual.saved", ritual: body.ritual, date: body.date, fields: Object.fromEntries(fields.map((field) => [field, before[field] ?? ""])) }];
+  }
   if (!("taskId" in body))
     return null;
   const task = state.tasks[body.taskId];
@@ -7988,6 +7995,7 @@ var moveTo = (state, taskId, placement, edge = "bottom") => ({
 var MAX_OPS = 40;
 var TITLE_MAX2 = 500;
 var NOTES_MAX2 = 20000;
+var SUMMARY_MAX = 4000;
 var PRIORITIES = ["urgent", "high", "medium", "low"];
 var BUCKETS = new Set(BACKLOG_BUCKETS.map((bucket) => bucket.id));
 var whenToPlacement = (when, today) => {
@@ -7999,7 +8007,7 @@ var whenToPlacement = (when, today) => {
     return { kind: "day", date: when };
   return BUCKETS.has(when) ? { kind: "backlog", bucket: when } : null;
 };
-var dayOf3 = (value, today) => value === "today" ? today : value === "tomorrow" ? addDays(today, 1) : isDateKey(value) ? value : null;
+var dayOf3 = (value, today) => value === "today" ? today : value === "tomorrow" ? addDays(today, 1) : value === "yesterday" ? addDays(today, -1) : isDateKey(value) ? value : null;
 var clockMinutes = (value) => {
   const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(value.trim());
   return match ? Number(match[1]) * 60 + Number(match[2]) : null;
@@ -8027,6 +8035,12 @@ var channelOf = (state, value) => {
 };
 var priorityOf = (value) => value === null ? null : PRIORITIES.includes(value) ? value : undefined;
 var channelNames = (state) => liveChannels(state).map((channel) => `#${channel.name}`).join(", ") || "none";
+var liveFolders = (state) => Object.values(state.folders).filter((folder) => !folder.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+var folderByName = (state, name) => {
+  const lower = name.trim().toLowerCase();
+  return liveFolders(state).find((folder) => folder.name.toLowerCase() === lower) ?? null;
+};
+var folderNames = (state) => liveFolders(state).map((folder) => `"${folder.name}"`).join(", ") || "none";
 var readOp = (raw, state, today) => {
   if (typeof raw !== "object" || raw === null)
     return "an operation must be an object";
@@ -8051,7 +8065,17 @@ var readOp = (raw, state, today) => {
     const due = op.due === undefined || op.due === null ? null : typeof op.due === "string" ? dayOf3(op.due, today) : null;
     if (op.due !== undefined && op.due !== null && !due)
       return "due must be today, tomorrow or a date YYYY-MM-DD";
-    return { op: "add", title, when, minutes, channel, priority, notes: text(op.notes, NOTES_MAX2), due };
+    const folder = op.folder === undefined || op.folder === null ? null : typeof op.folder === "string" ? folderByName(state, op.folder)?.name : undefined;
+    if (folder === undefined)
+      return `unknown backlog folder "${String(op.folder)}"; the folders are ${folderNames(state)}`;
+    return { op: "add", title, when, minutes, channel, priority, notes: text(op.notes, NOTES_MAX2), due, folder };
+  }
+  if (kind === "summary") {
+    const date = typeof op.date === "string" ? dayOf3(op.date, today) : null;
+    if (!date)
+      return "summary needs a day: today, yesterday or a date YYYY-MM-DD";
+    const summary = text(op.text, SUMMARY_MAX);
+    return summary ? { op: "summary", date, text: summary } : "summary needs its text";
   }
   if (!["move", "done", "reopen", "archive", "estimate", "channel", "rename", "notes", "due", "priority", "subtask", "schedule"].includes(String(kind))) {
     return kind === "delete" ? "tasks are never deleted here: archive one instead" : `unknown operation "${String(kind)}"`;
@@ -8141,12 +8165,15 @@ var readOps = (raw, state, today, zone) => {
 };
 var opCommands = (state, op, today, zone, newId = randomId) => {
   if (op.op === "add") {
-    const bodies = createManyTaskCommands(state, [{ title: op.title, plannedMinutes: op.minutes, placement: whenToPlacement(op.when, today), channel: op.channel, priority: op.priority, objective: null }], { kind: "day", date: today }, { today });
+    const folderId = op.folder ? folderByName(state, op.folder)?.id ?? null : null;
+    const bodies = createManyTaskCommands(state, [{ title: op.title, plannedMinutes: op.minutes, placement: whenToPlacement(op.when, today), channel: op.channel, priority: op.priority, objective: null }], { kind: "day", date: today }, { today, folderId });
     const made = bodies.find((body) => body.type === "task.created");
     if (made && (op.notes || op.due))
       bodies.push({ type: "task.updated", taskId: made.task.id, patch: { ...op.notes ? { notes: op.notes } : {}, ...op.due ? { dueDate: op.due } : {} } });
     return bodies;
   }
+  if (op.op === "summary")
+    return [{ type: "ritual.saved", ritual: "highlights", date: op.date, fields: { summary: op.text } }];
   const task = state.tasks[op.taskId];
   switch (op.op) {
     case "move": {
@@ -8205,7 +8232,9 @@ var whenLabel = (when, today) => {
 var dayLabel = (date, today) => date === today ? "today" : date === addDays(today, 1) ? "tomorrow" : `${weekdayName(date)} ${date}`;
 var describeOp = (state, op, today) => {
   if (op.op === "add")
-    return `Added "${op.title}" for ${whenLabel(op.when, today)}${op.minutes ? ` (${formatMinutes(op.minutes)})` : ""}${op.channel ? ` in #${op.channel}` : ""}`;
+    return `Added "${op.title}" for ${whenLabel(op.when, today)}${op.minutes ? ` (${formatMinutes(op.minutes)})` : ""}${op.channel ? ` in #${op.channel}` : ""}${op.folder ? ` in the folder "${op.folder}"` : ""}`;
+  if (op.op === "summary")
+    return `Wrote the highlights summary of ${dayLabel(op.date, today)}`;
   const title = `"${state.tasks[op.taskId]?.title ?? op.taskId}"`;
   switch (op.op) {
     case "move":

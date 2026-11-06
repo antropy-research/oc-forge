@@ -1,8 +1,9 @@
-// Ask Planner in the browser, on this checkout's build (harness.mjs): the dialog starts a chat in the dev container's
-// OpenChamber, beside the Planner, whose first message carries the request and the Planner's command line. That first
-// message is held here, so no model runs and nothing reaches the container's real plan; the journey runs the command
-// line on the host as that chat's agent would (OPENCODE_SESSION_ID). The Planner shows the agent's change; Ask Planner
-// lists it under the request and takes it back. The chat is deleted at the end.
+// The chat's agent in the browser, on this checkout's build (harness.mjs): Ask Planner, Braindump's Organize with the
+// agent and Daily highlights' Summarize each start a chat in the dev container's OpenChamber, beside the Planner, whose
+// first message carries the request and the Planner's command line. Those first messages are held here, so no model
+// runs and nothing reaches the container's real plan; the journey runs the command line on the host as each chat's
+// agent would (OPENCODE_SESSION_ID). The Planner shows the agent's changes; Ask Planner lists them under the request
+// and takes them back. The chats are deleted at the end.
 // Run on the host: node extensions/planner/tests/e2e/ask.mjs [outDir]
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -25,9 +26,14 @@ const waitFor = async (probe, timeout = 20_000) => {
 const tag = `harness-ask-${Date.now().toString(36)}`;
 const request = `${tag}: add a 15 minute email task for today`;
 const MARK = 'Ask Planner: this is about my plan';
-/** The Ask chat's first message, held: whatever path carries it, it never reaches OpenCode. */
+/** The chats' first messages, held: whatever path carries them, they never reach OpenCode. */
 const held = [];
-let chat = null;
+/** The runs the journey started, for their chats to be deleted at the end. */
+const chats = [];
+/** The run of the request `label`, once the Planner knows its chat. */
+const runOf = (label) => waitFor(async () => (await h.call('GET', '/ask/runs')).json?.runs.find((entry) => entry.request === label && entry.sessionId));
+/** The command line, as the agent of `run`'s chat runs it with its shell. */
+const agentOf = (run) => (...args) => spawnSync(join(h.home, 'bin', 'planner'), args, { env: { PATH: process.env.PATH, HOME: h.home, OPENCODE_SESSION_ID: run?.sessionId ?? '' }, encoding: 'utf8', timeout: 20_000 });
 try {
   await h.context.route((url) => /^\/api\/session\/[^/]+\/.+/.test(new URL(url).pathname), async (route) => {
     const sent = route.request();
@@ -48,14 +54,14 @@ try {
 
   const first = await waitFor(() => held[0]);
   check('the chat\'s first message carries the request and the Planner\'s command line', Boolean(first?.body.includes(request) && first.body.includes(`${join(h.home, 'bin', 'planner')} help`)), first ? first.path : 'no first message seen');
-  const run = await waitFor(async () => (await h.call('GET', '/ask/runs')).json?.runs.find((entry) => entry.request === request && entry.sessionId));
-  chat = run ?? null;
+  const run = await runOf(request);
+  if (run) chats.push(run);
   check('the Planner knows which chat the Ask became', Boolean(run?.sessionId), JSON.stringify(run));
   check('the dialog closed, and the Planner stays beside the chat', (await waitFor(async () => !(await dialog.isVisible()) && (await h.page.locator(PLANNER_FRAME).first().isVisible()), 10_000)) === true);
   await h.shot('ask-2-chat');
 
   // The chat's agent, as OpenCode's shell runs the command.
-  const agent = (...args) => spawnSync(join(h.home, 'bin', 'planner'), args, { env: { PATH: process.env.PATH, HOME: h.home, OPENCODE_SESSION_ID: run?.sessionId ?? '' }, encoding: 'utf8', timeout: 20_000 });
+  const agent = agentOf(run);
   const added = agent('add', `${tag} email`, '--minutes', '15');
   check('the agent adds a task with the command line', added.status === 0 && /^Added ".+ email" for today \(0:15\)/.test(added.stdout), added.stderr || added.stdout);
   await h.nav('Today').click();
@@ -75,6 +81,44 @@ try {
   const plan = (await h.call('GET', '/state')).json.state;
   check('the plan has the task no more', !Object.values(plan.tasks).some((task) => task.title === `${tag} email` && !task.deletedAt));
   await h.shot('ask-5-undone');
+  await h.frame.getByRole('dialog', { name: 'Ask Planner' }).getByRole('textbox', { name: 'Ask Planner' }).press('Escape');
+
+  // Braindump: Organize with the agent hands the notes to a chat of their own.
+  await h.nav('Backlog').click();
+  await h.frame.getByRole('button', { name: 'Braindump' }).click();
+  const dump = h.frame.getByRole('dialog', { name: 'Braindump' });
+  const notes = `${tag} buy paint ~30m\n${tag} call the plumber about the leak`;
+  await dump.getByRole('textbox', { name: 'Brain dump' }).fill(notes);
+  await dump.getByRole('button', { name: 'Organize with the agent' }).click();
+  const dumped = await waitFor(() => held.find((entry) => entry.body.includes('Braindump: turn my notes below into tasks')));
+  check('Braindump hands the notes to the agent, with the command line', Boolean(dumped?.body.includes(`${tag} call the plumber about the leak`) && dumped.body.includes(`${join(h.home, 'bin', 'planner')} help`)), dumped?.path ?? 'no first message seen');
+  const dumpRun = await runOf(`Braindump: ${tag} buy paint ~30m`);
+  if (dumpRun) chats.push(dumpRun);
+  check('the Braindump\'s chat is named for its notes, and the dialog closed', Boolean(dumpRun) && !(await dump.isVisible()));
+  const painted = agentOf(dumpRun)('add', `${tag} Buy paint`, '--minutes', '30', '--when', 'next-weeks');
+  check('its agent adds the tasks with the command line', painted.status === 0, painted.stderr || painted.stdout);
+  check('the Backlog shows them', await h.frame.locator('li.task-card', { hasText: `${tag} Buy paint` }).first().waitFor({ timeout: 15_000 }).then(() => true, () => false));
+  await h.shot('ask-6-braindump');
+
+  // Daily highlights: Summarize hands the day to a chat; its agent saves the summary on the page.
+  const { today } = (await h.call('GET', '/health')).json;
+  const done = `harness-${Date.now().toString(36)}`;
+  await h.call('POST', '/commands', { commands: [{ cmd: `${done}a`, type: 'task.created', task: { id: `${done}t`, title: `${tag} shipped the calendar`, placement: { kind: 'day', date: today }, position: 1 } }, { cmd: `${done}b`, type: 'task.completed', taskId: `${done}t`, on: today }] });
+  await h.nav('Daily highlights').click();
+  await h.frame.getByRole('heading', { name: 'Daily highlights' }).waitFor();
+  // A highlight is an editable field: find it by its star, which is named for it.
+  await h.frame.getByRole('button', { name: `Star ${tag} shipped the calendar` }).waitFor({ timeout: 15_000 });
+  await h.frame.getByRole('button', { name: 'Summarize with the agent' }).click();
+  const asked = await waitFor(() => held.find((entry) => entry.body.includes('Daily highlights: write the summary of my workday')));
+  check('Summarize hands the day to the agent, with where the summary goes', Boolean(asked?.body.includes(`planner summary ${today}`)), asked?.path ?? 'no first message seen');
+  const summaryRun = await waitFor(async () => (await h.call('GET', '/ask/runs')).json?.runs.find((entry) => entry.request?.startsWith('Highlights summary:') && entry.sessionId && !chats.some((known) => known.id === entry.id)));
+  if (summaryRun) chats.push(summaryRun);
+  const wrote = agentOf(summaryRun)('summary', today, `I shipped the calendar (${tag}).`);
+  check('its agent saves the summary with the command line', wrote.status === 0, wrote.stderr || wrote.stdout);
+  const summary = await waitFor(async () => (await h.frame.getByRole('textbox', { name: 'Summary' }).inputValue().catch(() => '')) === `I shipped the calendar (${tag}).`, 15_000);
+  check('the page shows the summary', summary === true);
+  await h.shot('ask-7-highlights');
+
   // A status the host answered (OpenChamber's own source-control binding answers 422 for the demo folder) is no error
   // of the page's, as in linear.mjs.
   const errors = h.problems.filter((problem) => !/favicon|ERR_ABORTED|Failed to load resource/.test(problem));
@@ -82,7 +126,7 @@ try {
 } catch (error) {
   check('the journey ran to its end', false, error instanceof Error ? error.stack : String(error));
 } finally {
-  if (chat?.sessionId) await h.context.request.delete(`${h.base}/api/session/${encodeURIComponent(chat.sessionId)}${chat.directory ? `?directory=${encodeURIComponent(chat.directory)}` : ''}`).catch(() => {});
+  for (const chat of chats) await h.context.request.delete(`${h.base}/api/session/${encodeURIComponent(chat.sessionId)}${chat.directory ? `?directory=${encodeURIComponent(chat.directory)}` : ''}`).catch(() => {});
   await h.close();
 }
 const failed = results.filter((result) => !result.ok).length;

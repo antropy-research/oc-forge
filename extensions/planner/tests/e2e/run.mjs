@@ -208,9 +208,8 @@ page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
 page.on('console', (message) => {
   const url = message.location().url ?? '';
   // The Planner's own frames and routes only: OpenChamber's requests for the demo projects say "planner" too.
-  // A failed generate is the dev container having no model, not a Planner error.
   const planners = /\/api\/guests\/oc-forge-planner\//.test(url) || /\/api\/guest-files\/[^/]+\/panel\/(main\.js|index\.html)/.test(url);
-  if (message.type() === 'error' && planners && !url.includes('/generate')) problems.push(`console: ${message.text()} (${url.replace(/guest-files\/[^/]+/, 'guest-files/…')})`);
+  if (message.type() === 'error' && planners) problems.push(`console: ${message.text()} (${url.replace(/guest-files\/[^/]+/, 'guest-files/…')})`);
 });
 
 const openPlanner = async () => {
@@ -559,24 +558,9 @@ try {
   await frame.getByRole('textbox', { name: 'Add highlight' }).fill(`${run} helped a teammate`);
   await frame.getByRole('textbox', { name: 'Add highlight' }).press('Enter');
   await frame.getByRole('button', { name: `Remove ${run} helped a teammate` }).waitFor({ timeout: 10_000 });
-  // The dev container has no Small Model; answer the host's generate route like a model would.
-  const isSummaryGenerate = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/generate';
-  let summaryPrompt = '';
-  await context.route(isSummaryGenerate, (route) => {
-    summaryPrompt = JSON.parse(route.request().postData() ?? '{}').prompt ?? '';
-    return route.fulfill({ json: { ok: true, result: { text: `I shipped the calendar and helped a teammate (${run}).` } } });
-  });
-  // A summary saved by an earlier run turns the button into "Summarize again".
-  await frame.getByRole('button', { name: /^Summarize (with AI|again)$/ }).click();
-  // The field is re-created when the summary is saved, so look it up again each time.
-  const expectedSummary = `I shipped the calendar and helped a teammate (${run}).`;
-  let summaryText = '';
-  for (let i = 0; i < 40 && summaryText !== expectedSummary; i++) {
-    summaryText = (await frame.getByRole('textbox', { name: 'Summary' }).inputValue().catch(() => '')).trim();
-    if (summaryText !== expectedSummary) await page.waitForTimeout(250);
-  }
-  check('the AI summary is written from the highlights', summaryText === expectedSummary && summaryPrompt.includes(`${run} helped a teammate`), summaryText);
-  await context.unroute(isSummaryGenerate);
+  // The summary is the chat's agent's (a chat beside the Planner); run.mjs works on the real plan, so it starts none
+  // (the chat and the agent's command line: tests/plan.test.ts and tests/e2e/ask.mjs).
+  check('the summary is offered to the agent you chat with', await frame.getByRole('button', { name: /^Summarize (with the agent|again)$/ }).isVisible());
   await frame.getByRole('button', { name: /^Publish/ }).click();
   await page.waitForTimeout(800);
   check('highlights publish with a starred and an added item', (await subtitle()).includes('published'));
@@ -1418,16 +1402,11 @@ try {
   const bank = taskTitled(dumped, `${run} call the bank`);
   check('Braindump by line adds the kept lines with their syntax', bank?.plannedMinutes === 15 && bank.placement.kind === 'backlog' && !taskTitled(dumped, `${run} not this one`) && dumped.state.channels[taskTitled(dumped, `${run} renew passport`)?.channelId]?.name === 'personal');
 
-  const isGenerate = (url) => new URL(url).pathname === '/api/guests/oc-forge-planner/generate';
-  await context.route(isGenerate, (route) => route.fulfill({ json: { ok: true, result: { text: JSON.stringify([{ title: `${run} book flights`, minutes: 30, when: 'tomorrow', channel: 'work' }, { title: `${run} pay rent`, minutes: null, when: 'someday', channel: null }]) } } }));
+  // Organizing goes to the chat's agent in a chat of its own; run.mjs works on the real plan, so it starts none.
   await frame.getByRole('button', { name: 'Braindump' }).click();
   await dump.getByRole('textbox', { name: 'Brain dump' }).fill('I need to book flights for the trip and pay the rent at some point');
-  await dump.getByRole('button', { name: 'Organize with AI' }).click();
-  await dump.getByRole('button', { name: 'Add 2 tasks' }).click();
-  const organized = await waitForState((latest) => Boolean(taskTitled(latest, `${run} book flights`)));
-  const flights = taskTitled(organized, `${run} book flights`);
-  check('Braindump with AI adds what the model proposed', flights?.plannedMinutes === 30 && flights.placement.kind === 'day' && taskTitled(organized, `${run} pay rent`)?.placement.kind === 'backlog');
-  await context.unroute(isGenerate);
+  check('Braindump offers the notes to the agent you chat with', await dump.getByRole('button', { name: 'Organize with the agent' }).isEnabled());
+  await dump.getByRole('button', { name: 'Close' }).click();
 
   await nav('Home').click();
   await addInToday(`${run} weekly report ~40m`);

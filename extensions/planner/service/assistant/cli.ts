@@ -1,5 +1,5 @@
-// The Planner's command line, for the agent Ask Planner hands a request to: the chat's own agent (OpenCode, through
-// OpenChamber) runs it with its shell tool, reads the plan as text and changes it with operations the service checks
+// The Planner's command line, for the agent Ask Planner, Braindump and the Daily highlights summary hand their work to:
+// the chat's own agent (OpenCode, through OpenChamber) runs it with its shell tool, reads the plan as text and changes it with operations the service checks
 // against the plan. It finds the running service in the file its launcher names (`PLANNER_AGENT_FILE`, written by the
 // service at each start: the address and a key that opens only the agent's routes), and tells the service which chat
 // runs it (OpenCode's shell sets `OPENCODE_SESSION_ID`), so the Planner keeps each chat's changes and can take them
@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { addDays, isDateKey, weekdayName } from '../../src/domain/core/dates.ts';
 import type { DateKey, PlannerState } from '../../src/domain/core/types.ts';
-import { backlogText, channelsText, dayText, findText, taskText, weekText, type AgentEvent } from '../../src/domain/assistant/assistant.ts';
+import { backlogText, channelsText, dayText, findText, highlightsText, taskText, weekText, type AgentEvent } from '../../src/domain/assistant/assistant.ts';
 
 const HELP = (today: string) => `planner: the Planner's command line, for an agent working on the person's plan (Ask Planner in OpenChamber).
 ${today}
@@ -19,10 +19,11 @@ Read
   planner show [today|tomorrow|YYYY-MM-DD|week|backlog]  a day's tasks, sessions and calendar events (default today)
   planner find <words>                                   open tasks, and ones done in 30 days, holding every word
   planner task <id>                                      one task in full: notes, subtasks, sessions, where it is from
-  planner channels                                       the channels a task can be in
+  planner channels                                       the channels a task can be in, and the backlog's folders
+  planner highlights [D]                                 a day's Daily highlights: what got done, its reflection and summary
 
 Change (each prints what it did and its change id; nothing is ever deleted)
-  planner add <title> [--when W] [--minutes N] [--channel NAME] [--priority P] [--due D] [--notes TEXT]
+  planner add <title> [--when W] [--minutes N] [--channel NAME] [--priority P] [--due D] [--notes TEXT] [--folder NAME]
   planner move <id>... --to W
   planner done <id>...     planner reopen <id>...     planner archive <id>...
   planner estimate <id> <minutes|none>
@@ -33,10 +34,12 @@ Change (each prints what it did and its change id; nothing is ever deleted)
   planner priority <id> <urgent|high|medium|low|none>
   planner subtask <id> <title> [--minutes N]
   planner schedule <id> <HH:MM> [--day D] [--minutes N]   a working session on the calendar; plans the task that day
+  planner summary <D> <text>                              the Daily highlights summary of a day
   planner undo [<change>]                                 take back this chat's last change, or the one named
 
 W: today, tomorrow, a date YYYY-MM-DD, or a backlog bucket: next-weeks, next-month, next-quarter, next-year, someday, never.
-D: today, tomorrow or a date YYYY-MM-DD. P: urgent, high, medium or low.
+D: today, tomorrow, yesterday or a date YYYY-MM-DD. P: urgent, high, medium or low. A folder is a backlog folder; a
+task planned for a day keeps its folder.
 
 Work like this: read before you change; change only what the person asked for; when a request is unclear, ask them
 instead of guessing; archive what they no longer want; end with a short list of what you changed.`;
@@ -131,7 +134,7 @@ const opsOf = (command: string, words: string[], flags: Record<string, string>):
   switch (command) {
     case 'add': {
       const title = words.join(' ').trim() || fail('usage: planner add <title> [--when W] [--minutes N] [--channel NAME] [--priority P] [--due D] [--notes TEXT]');
-      return [{ op: 'add', title, when: flags.when ?? null, minutes: minutesArg(flags.minutes) ?? null, channel: flags.channel ?? null, priority: flags.priority ?? null, due: flags.due ?? null, notes: flags.notes ?? null }];
+      return [{ op: 'add', title, when: flags.when ?? null, minutes: minutesArg(flags.minutes) ?? null, channel: flags.channel ?? null, priority: flags.priority ?? null, due: flags.due ?? null, notes: flags.notes ?? null, folder: flags.folder ?? null }];
     }
     case 'move': {
       const to = flags.to ?? flags.when ?? fail('usage: planner move <id>... --to W');
@@ -157,6 +160,8 @@ const opsOf = (command: string, words: string[], flags: Record<string, string>):
       return [{ op: 'subtask', taskId: need(id, 'subtask <id> <title> [--minutes N]'), title: rest.join(' ').trim() || fail('usage: planner subtask <id> <title> [--minutes N]'), minutes: minutesArg(flags.minutes) ?? null }];
     case 'schedule':
       return [{ op: 'schedule', taskId: need(id, 'schedule <id> <HH:MM> [--day D] [--minutes N]'), start: need(rest[0], 'schedule <id> <HH:MM> [--day D] [--minutes N]'), date: flags.day ?? null, minutes: minutesArg(flags.minutes) ?? null }];
+    case 'summary':
+      return [{ op: 'summary', date: need(id, 'summary <D> <text>'), text: rest.join(' ').trim() || fail('usage: planner summary <D> <text>') }];
   }
   return fail(`unknown command "${command}": planner help lists them`);
 };
@@ -197,13 +202,19 @@ const run = async (args: readonly string[]): Promise<string> => {
     return taskText(state, need(words[0], 'task <id>').replace(/^\[|\]$/g, ''), today, zone);
   }
   if (command === 'channels') return channelsText((await plan(agent)).state);
+  if (command === 'highlights') {
+    const { state, today } = await plan(agent);
+    const which = words[0] ?? 'today';
+    const date = which === 'today' ? today : which === 'yesterday' ? addDays(today, -1) : isDateKey(which) ? which : fail('usage: planner highlights [today|yesterday|YYYY-MM-DD]');
+    return highlightsText(state, date, today);
+  }
   if (command === 'undo') {
     const answer = await call<{ undone: string }>(agent, 'POST', '/agent/undo', { session, ...(words[0] ? { change: words[0] } : {}) });
     return `Took back: ${answer.undone}`;
   }
   // Ids may come with their brackets, as the plan shows them: the first word of a task's command, every word of one
   // that takes only ids.
-  const unbracket = (word: string, index: number): string => (command !== 'add' && (index === 0 || ['move', 'done', 'reopen', 'archive'].includes(command)) ? word.replace(/^\[|\]$/g, '') : word);
+  const unbracket = (word: string, index: number): string => (!['add', 'summary'].includes(command) && (index === 0 || ['move', 'done', 'reopen', 'archive'].includes(command)) ? word.replace(/^\[|\]$/g, '') : word);
   const ops = opsOf(command, words.map(unbracket), flags);
   const answer = await call<{ change: { id: string; label: string } }>(agent, 'POST', '/agent/ops', { ops, session });
   return `${answer.change.label} (change ${answer.change.id})`;

@@ -1,6 +1,6 @@
 {
   "name": "@oc-forge/openchamber-planner",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "description": "Sunsama-style daily planning inside OpenChamber.",
@@ -60,8 +60,7 @@
       },
       "capabilities": [
         "sessions",
-        "prompt",
-        "model"
+        "prompt"
       ],
       "service": {
         "entry": "service/main.js",

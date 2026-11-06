@@ -21,7 +21,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type {
   AttachIssueRequest,
-  GenerateRequest,
   GuestActionItem,
   GuestProject,
   GuestSessionsSnapshot,
@@ -65,8 +64,6 @@ export type PlannerOptions = {
   linearApi?: LinearWorld | true;
   /** Answers Linear before the world does: errors, slow answers, documents the world lacks. */
   linearAnswer?: LinearAnswer;
-  /** What the Small Model answers (`host.generate`). */
-  generate?: (request: GenerateRequest) => string | Promise<string>;
   /** Files in the service's home before it starts, by path under it (the plan is `data/`, keys sit beside it). */
   files?: Record<string, string>;
   /** More environment for the service. */
@@ -352,10 +349,6 @@ export const startPlanner = async (options: PlannerOptions = {}): Promise<Planne
       openUrl: async (url: string) => void opened.push(url),
       openSurface: async (id: string) => void surfaces.push(id),
       setBadge: async (badge: unknown) => void (win.badge = badge),
-      generate: async (request: GenerateRequest) => {
-        if (!options.generate) throw Object.assign(new Error('No model'), { code: 'NO_MODEL' });
-        return { text: await options.generate(request) };
-      },
       onSession: (listener: (snapshot: any) => void) => {
         sessionListeners.add(listener);
         listener(snapshotOf());

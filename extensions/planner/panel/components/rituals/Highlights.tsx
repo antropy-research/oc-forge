@@ -1,13 +1,14 @@
 import { useState } from 'preact/hooks';
-import { HostRequestError } from '@openchamber/sdk';
 import type { DateKey, Highlight, RitualRecord } from '../../../src/domain/core/types.ts';
-import { addDays, clockLabel, formatMinutes, instantAt, monthDay, weekdayName, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
-import { actualMinutes, tasksForDay } from '../../../src/domain/core/selectors.ts';
+import { addDays, clockLabel, instantAt, monthDay, weekdayName, zonedDateMinutes } from '../../../src/domain/core/dates.ts';
+import { tasksForDay } from '../../../src/domain/core/selectors.ts';
 import { completedOnDay, highlightItems, ritualRecord } from '../../../src/domain/plan/rituals.ts';
 import { ACTIVITY_SECTIONS, ACTIVITY_SOURCE_NOUNS, activityGroups, activityLabel, activityMoreUrl, activityText, type ActivityGroup } from '../../../src/domain/github/activity.ts';
 import { newId } from '../../../src/domain/core/ids.ts';
 import { useGitHub, usePlanner, useView } from '../../lib/core/context.ts';
 import { useGitHubActivity } from '../../lib/github/activity.ts';
+import { highlightsLabel, highlightsRequest, startAsk } from '../../lib/assistant/ask.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 import { GitHubSignIn } from '../github/GitHubPanel.tsx';
 import { ExternalLink } from '../common/ExternalLink.tsx';
 import { ChannelBreakdown, TimeSummary } from './DailyShutdown.tsx';
@@ -122,23 +123,15 @@ export const Highlights = () => {
     setItems([...all, { id: newId(), text: activityText(group).slice(0, 1000), taskId: null, starred: false, url: group.url, ref: githubRef(group) }]);
   };
 
+  // The summary is written by the agent you chat with, in a new chat beside the Planner; it saves it here.
   const summarize = async () => {
     setSummarizing(true);
     try {
-      const minutes = done.reduce((sum, task) => sum + actualMinutes(view.state, task), 0);
-      const { text } = await host.generate({
-        system: 'You write a short, plain summary of one person\'s workday from their list of accomplishments. Two or three sentences, first person, no headings, no bullet points, no filler.',
-        prompt: `Accomplishments on ${monthDay(date)} (${formatMinutes(minutes)} of tracked work):\n${items.map((item) => `- ${item.text}${item.starred ? ' (highlight)' : ''}`).join('\n')}${record.reflection ? `\nTheir reflection: ${record.reflection}` : ''}`,
-        maxOutputTokens: 300,
-      });
-      save({ summary: text.trim() });
+      const { sent } = await startAsk(host, client, highlightsRequest(date), { label: highlightsLabel(date) });
+      if (sent === 'no-model') client.notify('The chat was created, but no model is set up to answer it. Open the chat to pick one.');
+      else if (sent === 'failed') client.notify('The chat was created, but the request did not send. Open the chat to send it again.');
     } catch (error) {
-      const code = error instanceof HostRequestError ? error.code : '';
-      client.notify(
-        code === 'MODEL_FAILED' || code === 'NO_MODEL'
-          ? 'No model can write summaries yet. Add a provider key, or choose a Small Model in OpenChamber settings.'
-          : `Summary failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      client.notify(`The agent could not start: ${messageOf(error)}`);
     } finally {
       setSummarizing(false);
     }
@@ -225,7 +218,7 @@ export const Highlights = () => {
             <GitHubActivity date={date} included={included} onInclude={includeGitHub} />
           </div>
           <div class="ritual-section">
-            <h2>Summary <button class="link" disabled={summarizing || items.length === 0} onClick={() => void summarize()}>{summarizing ? 'Summarizing…' : record.summary ? 'Summarize again' : 'Summarize with AI'}</button></h2>
+            <h2>Summary <button class="link" disabled={summarizing || items.length === 0} onClick={() => void summarize()}>{summarizing ? 'Starting…' : record.summary ? 'Summarize again' : 'Summarize with the agent'}</button></h2>
             <textarea rows={3} aria-label="Summary" key={`summary-${date}-${record.summary ?? ''}`} defaultValue={record.summary ?? ''} placeholder="Optional: a few sentences about the day" onBlur={(event) => event.currentTarget.value !== (record.summary ?? '') && save({ summary: event.currentTarget.value })} />
           </div>
           <div class="ritual-section">

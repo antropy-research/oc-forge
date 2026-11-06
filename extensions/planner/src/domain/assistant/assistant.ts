@@ -1,7 +1,7 @@
-// Ask Planner: the chat's own agent works on the plan with the Planner's command line (service/assistant/cli.ts).
-// Here is what it may do, checked against the plan before anything is written (known tasks and channels only, never a
-// delete), the commands each operation becomes, a sentence for each change, and the plan as the agent reads it: ids in
-// brackets, times as 24-hour clocks, days as dates.
+// The chat's own agent works on the plan with the Planner's command line (service/assistant/cli.ts), for Ask Planner,
+// Braindump and the Daily highlights summary. Here is what it may do, checked against the plan before anything is
+// written (known tasks, channels and folders only, never a delete), the commands each operation becomes, a sentence for
+// each change, and the plan as the agent reads it: ids in brackets, times as 24-hour clocks, days as dates.
 import { BACKLOG_BUCKETS, type BacklogBucket, type DateKey, type Placement, type PlannerState, type Priority, type Task } from '../core/types.ts';
 import type { EventBody } from '../core/events.ts';
 import { addDays, formatMinutes, instantAt, isDateKey, longDay, weekdayName, zonedDateMinutes } from '../core/dates.ts';
@@ -9,12 +9,13 @@ import { actualMinutes, backlogTasks, blocksFor, blocksOnDay, channelByName, liv
 import { applyEvents } from '../core/reducer.ts';
 import { asEvents } from '../plan/undo.ts';
 import { createManyTaskCommands, moveTo } from '../plan/commands.ts';
+import { completedOnDay, highlightItems, ritualRecord } from '../plan/rituals.ts';
 
 /** today, tomorrow, a YYYY-MM-DD date, or a backlog bucket id. */
 export type When = string;
 
 export type AssistantOp =
-  | { op: 'add'; title: string; when: When; minutes: number | null; channel: string | null; priority: Priority | null; notes: string | null; due: DateKey | null }
+  | { op: 'add'; title: string; when: When; minutes: number | null; channel: string | null; priority: Priority | null; notes: string | null; due: DateKey | null; folder: string | null }
   | { op: 'move'; taskId: string; when: When }
   | { op: 'done'; taskId: string }
   | { op: 'reopen'; taskId: string }
@@ -26,12 +27,15 @@ export type AssistantOp =
   | { op: 'due'; taskId: string; due: DateKey | null }
   | { op: 'priority'; taskId: string; priority: Priority | null }
   | { op: 'subtask'; taskId: string; title: string; minutes: number | null }
-  | { op: 'schedule'; taskId: string; date: DateKey; start: number; minutes: number };
+  | { op: 'schedule'; taskId: string; date: DateKey; start: number; minutes: number }
+  /** The Daily highlights summary of a day. */
+  | { op: 'summary'; date: DateKey; text: string };
 
 /** The operations a request may carry, in one batch (one change, one Undo). */
 export const MAX_OPS = 40;
 const TITLE_MAX = 500;
 const NOTES_MAX = 20_000;
+const SUMMARY_MAX = 4_000;
 const PRIORITIES: readonly Priority[] = ['urgent', 'high', 'medium', 'low'];
 const BUCKETS = new Set<string>(BACKLOG_BUCKETS.map((bucket) => bucket.id));
 
@@ -42,7 +46,8 @@ export const whenToPlacement = (when: When, today: DateKey): Placement | null =>
   return BUCKETS.has(when) ? { kind: 'backlog', bucket: when as BacklogBucket } : null;
 };
 
-const dayOf = (value: string, today: DateKey): DateKey | null => (value === 'today' ? today : value === 'tomorrow' ? addDays(today, 1) : isDateKey(value) ? value : null);
+const dayOf = (value: string, today: DateKey): DateKey | null =>
+  value === 'today' ? today : value === 'tomorrow' ? addDays(today, 1) : value === 'yesterday' ? addDays(today, -1) : isDateKey(value) ? value : null;
 
 /** `HH:MM` (24-hour) as minutes after midnight. */
 export const clockMinutes = (value: string): number | null => {
@@ -75,6 +80,13 @@ const priorityOf = (value: unknown): Priority | null | undefined => (value === n
 
 const channelNames = (state: PlannerState): string => liveChannels(state).map((channel) => `#${channel.name}`).join(', ') || 'none';
 
+const liveFolders = (state: PlannerState) => Object.values(state.folders).filter((folder) => !folder.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+const folderByName = (state: PlannerState, name: string) => {
+  const lower = name.trim().toLowerCase();
+  return liveFolders(state).find((folder) => folder.name.toLowerCase() === lower) ?? null;
+};
+const folderNames = (state: PlannerState): string => liveFolders(state).map((folder) => `"${folder.name}"`).join(', ') || 'none';
+
 /**
  * One operation as sent, checked against the plan as it is: the operation, or why it cannot be done (the agent reads
  * this and can try again). Never a delete: a task the person no longer wants is archived.
@@ -96,7 +108,15 @@ const readOp = (raw: unknown, state: PlannerState, today: DateKey): AssistantOp 
     if (priority === undefined) return `priority must be one of ${PRIORITIES.join(', ')}`;
     const due = op.due === undefined || op.due === null ? null : typeof op.due === 'string' ? dayOf(op.due, today) : null;
     if (op.due !== undefined && op.due !== null && !due) return 'due must be today, tomorrow or a date YYYY-MM-DD';
-    return { op: 'add', title, when, minutes, channel, priority, notes: text(op.notes, NOTES_MAX), due };
+    const folder = op.folder === undefined || op.folder === null ? null : typeof op.folder === 'string' ? folderByName(state, op.folder)?.name : undefined;
+    if (folder === undefined) return `unknown backlog folder "${String(op.folder)}"; the folders are ${folderNames(state)}`;
+    return { op: 'add', title, when, minutes, channel, priority, notes: text(op.notes, NOTES_MAX), due, folder };
+  }
+  if (kind === 'summary') {
+    const date = typeof op.date === 'string' ? dayOf(op.date, today) : null;
+    if (!date) return 'summary needs a day: today, yesterday or a date YYYY-MM-DD';
+    const summary = text(op.text, SUMMARY_MAX);
+    return summary ? { op: 'summary', date, text: summary } : 'summary needs its text';
   }
   if (!['move', 'done', 'reopen', 'archive', 'estimate', 'channel', 'rename', 'notes', 'due', 'priority', 'subtask', 'schedule'].includes(String(kind))) {
     return kind === 'delete' ? 'tasks are never deleted here: archive one instead' : `unknown operation "${String(kind)}"`;
@@ -182,11 +202,13 @@ export const readOps = (raw: unknown, state: PlannerState, today: DateKey, zone:
 /** The commands one operation becomes, against the plan as it is. */
 export const opCommands = (state: PlannerState, op: AssistantOp, today: DateKey, zone: string, newId: () => string = randomId): EventBody[] => {
   if (op.op === 'add') {
-    const bodies = createManyTaskCommands(state, [{ title: op.title, plannedMinutes: op.minutes, placement: whenToPlacement(op.when, today), channel: op.channel, priority: op.priority, objective: null }], { kind: 'day', date: today }, { today });
+    const folderId = op.folder ? folderByName(state, op.folder)?.id ?? null : null;
+    const bodies = createManyTaskCommands(state, [{ title: op.title, plannedMinutes: op.minutes, placement: whenToPlacement(op.when, today), channel: op.channel, priority: op.priority, objective: null }], { kind: 'day', date: today }, { today, folderId });
     const made = bodies.find((body): body is Extract<EventBody, { type: 'task.created' }> => body.type === 'task.created');
     if (made && (op.notes || op.due)) bodies.push({ type: 'task.updated', taskId: made.task.id, patch: { ...(op.notes ? { notes: op.notes } : {}), ...(op.due ? { dueDate: op.due } : {}) } });
     return bodies;
   }
+  if (op.op === 'summary') return [{ type: 'ritual.saved', ritual: 'highlights', date: op.date, fields: { summary: op.text } }];
   const task = state.tasks[op.taskId]!;
   switch (op.op) {
     case 'move': {
@@ -248,7 +270,8 @@ const dayLabel = (date: DateKey, today: DateKey): string => (date === today ? 't
 
 /** A sentence for a change, in the past tense, as the chat and the Planner list it. */
 export const describeOp = (state: PlannerState, op: AssistantOp, today: DateKey): string => {
-  if (op.op === 'add') return `Added "${op.title}" for ${whenLabel(op.when, today)}${op.minutes ? ` (${formatMinutes(op.minutes)})` : ''}${op.channel ? ` in #${op.channel}` : ''}`;
+  if (op.op === 'add') return `Added "${op.title}" for ${whenLabel(op.when, today)}${op.minutes ? ` (${formatMinutes(op.minutes)})` : ''}${op.channel ? ` in #${op.channel}` : ''}${op.folder ? ` in the folder "${op.folder}"` : ''}`;
+  if (op.op === 'summary') return `Wrote the highlights summary of ${dayLabel(op.date, today)}`;
   const title = `"${state.tasks[op.taskId]?.title ?? op.taskId}"`;
   switch (op.op) {
     case 'move':
@@ -293,7 +316,8 @@ export interface AgentEvent {
 
 const taskLine = (state: PlannerState, task: Task): string => {
   const channel = task.channelId ? state.channels[task.channelId]?.name : null;
-  const extras = [task.plannedMinutes ? formatMinutes(task.plannedMinutes) : null, channel ? `#${channel}` : null, task.priority, task.dueDate ? `due ${task.dueDate}` : null, task.source ? `${task.source.kind} ${task.source.key}` : null, task.subtasks.length ? `${task.subtasks.filter((subtask) => subtask.done).length}/${task.subtasks.length} subtasks` : null].filter(Boolean);
+  const folder = task.folderId ? state.folders[task.folderId] : null;
+  const extras = [task.plannedMinutes ? formatMinutes(task.plannedMinutes) : null, channel ? `#${channel}` : null, folder && !folder.deletedAt ? `folder "${folder.name}"` : null, task.priority, task.dueDate ? `due ${task.dueDate}` : null, task.source ? `${task.source.kind} ${task.source.key}` : null, task.subtasks.length ? `${task.subtasks.filter((subtask) => subtask.done).length}/${task.subtasks.length} subtasks` : null].filter(Boolean);
   return `- [${task.id}] ${task.completedAt ? '(done) ' : ''}${task.title}${extras.length ? ` (${extras.join(', ')})` : ''}`;
 };
 
@@ -380,8 +404,26 @@ export const taskText = (state: PlannerState, taskId: string, today: DateKey, zo
   return lines.join('\n');
 };
 
-/** The channels, with the context each belongs to. */
+/** The channels, with the context each belongs to, and the backlog's folders. */
 export const channelsText = (state: PlannerState): string => {
   const channels = liveChannels(state);
-  return channels.length ? channels.map((channel) => `#${channel.name} (${channel.context})`).join('\n') : 'No channels.';
+  const folders = liveFolders(state);
+  return [
+    channels.length ? `Channels:\n${channels.map((channel) => `#${channel.name} (${channel.context})`).join('\n')}` : 'No channels.',
+    folders.length ? `Backlog folders:\n${folders.map((folder) => `"${folder.name}"`).join('\n')}` : 'No backlog folders.',
+  ].join('\n\n');
+};
+
+/** A day's Daily highlights: what got done (starred first), the time tracked, the reflection and the summary. */
+export const highlightsText = (state: PlannerState, date: DateKey, today: DateKey): string => {
+  const items = highlightItems(state, date).filter((item) => !item.hidden);
+  const ordered = [...items.filter((item) => item.starred), ...items.filter((item) => !item.starred)];
+  const tracked = completedOnDay(state, date).reduce((sum, task) => sum + actualMinutes(state, task), 0);
+  const record = ritualRecord(state, 'highlights', date);
+  return [
+    `Daily highlights, ${longDay(date)}, ${date}${date === today ? ' (today)' : date === addDays(today, -1) ? ' (yesterday)' : ''}: ${ordered.length} item${ordered.length === 1 ? '' : 's'}, ${formatMinutes(tracked)} tracked`,
+    ...(ordered.length ? ordered.map((item) => `- ${item.starred ? '(starred) ' : ''}${item.text}${item.url ? ` (${item.url})` : ''}`) : ['- (nothing done yet)']),
+    `Reflection: ${record.reflection?.trim() || 'none'}`,
+    `Summary: ${record.summary?.trim() || 'none'}`,
+  ].join('\n');
 };

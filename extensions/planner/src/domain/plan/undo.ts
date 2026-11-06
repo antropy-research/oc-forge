@@ -6,7 +6,7 @@ import { SUBTASK_PATCH_FIELDS, type EventBody, type PlannerEvent, type SubtaskPa
 import { zonedDateMinutes } from '../core/dates.ts';
 import { applyEvents } from '../core/reducer.ts';
 import { samePlacement } from '../core/selectors.ts';
-import type { PlannerState, Subtask, Task, WorkBlock } from '../core/types.ts';
+import { ritualKey, type PlannerState, type Subtask, type Task, type WorkBlock } from '../core/types.ts';
 
 /** What an Undo says when something it would put back was changed since, in another window (or elsewhere). */
 export const CHANGED_SINCE = 'Changed in another window since; not undone';
@@ -48,6 +48,14 @@ const inverseOne = (state: PlannerState, body: EventBody): EventBody[] | null =>
     if (!objective || objective.deletedAt) return null;
     const aligned = Object.values(state.tasks).filter((task) => task.objectiveId === objective.id);
     return [{ type: 'objective.restored', objectiveId: objective.id }, ...aligned.map((task): EventBody => ({ type: 'task.updated', taskId: task.id, patch: { objectiveId: objective.id } }))];
+  }
+  if (body.type === 'ritual.saved') {
+    // A ritual's text (the chat's agent writes a day's highlights summary): back to what it held, '' for none, which
+    // every ritual reads as nothing written. Its lists and dates have no Undo.
+    const fields = Object.keys(body.fields);
+    if (!fields.length || fields.some((field) => field !== 'summary' && field !== 'reflection')) return null;
+    const before = state.rituals[ritualKey(body.ritual, body.date)] ?? {};
+    return [{ type: 'ritual.saved', ritual: body.ritual, date: body.date, fields: Object.fromEntries(fields.map((field) => [field, before[field as 'summary' | 'reflection'] ?? ''])) }];
   }
   if (!('taskId' in body)) return null;
   const task = state.tasks[body.taskId];

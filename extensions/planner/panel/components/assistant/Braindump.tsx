@@ -1,18 +1,22 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { HostRequestError } from '@openchamber/sdk';
 import { BACKLOG_BUCKETS, type Placement } from '../../../src/domain/core/types.ts';
 import { addDays, formatMinutes } from '../../../src/domain/core/dates.ts';
-import { braindumpSystem, parseBraindump, readBraindumpAnswer, type DumpItem } from '../../../src/domain/assistant/braindump.ts';
+import { parseBraindump, type DumpItem } from '../../../src/domain/assistant/braindump.ts';
 import { parseDuration } from '../../../src/domain/plan/quickAdd.ts';
 import { liveChannels } from '../../../src/domain/core/selectors.ts';
+import { messageOf } from '../../../src/domain/core/values.ts';
 import { usePlanner, useView } from '../../lib/core/context.ts';
+import { NOTES_MAX, braindumpRequest, startAsk } from '../../lib/assistant/ask.ts';
 import { createManyTaskCommands } from '../../../src/domain/plan/commands.ts';
 
 type Row = DumpItem & { keep: boolean };
 
 const placementValue = (placement: Placement): string => (placement.kind === 'day' ? `day:${placement.date}` : `bucket:${placement.bucket}`);
 
-/** Sunsama's Braindump: write everything down, then add it as tasks. */
+/**
+ * Sunsama's Braindump: write everything down, then add it as tasks, one per line (checked here before anything is
+ * added), or handed to the agent you chat with, which turns the notes into tasks in a new chat beside the Planner.
+ */
 export const BraindumpModal = ({ onClose, folderId }: { onClose: () => void; folderId: string | null }) => {
   const { client, host } = usePlanner();
   const view = useView();
@@ -21,26 +25,33 @@ export const BraindumpModal = ({ onClose, folderId }: { onClose: () => void; fol
   const [rows, setRows] = useState<Row[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  const [problem, setProblem] = useState('');
   const fallback: Placement = { kind: 'backlog', bucket: 'next-weeks' };
   const channels = liveChannels(view.state).map((channel) => channel.name);
   useEffect(() => area.current?.focus(), []);
 
-  const organize = async (withModel: boolean) => {
+  /** One task per line, as Add task reads a line, to check before adding. */
+  const perLine = () => {
+    setNote('Each line became a task; ~30m, @tomorrow, #channel and !high work as in Add task.');
+    setRows(parseBraindump(text, view.today, view.state.settings.weekStartsOn, fallback).map((item) => ({ ...item, keep: true })));
+  };
+
+  /** The notes to the agent you chat with, in a new chat; it adds the tasks (Ask Planner can take them back). */
+  const withAgent = async () => {
     setBusy(true);
-    let items: DumpItem[] | null = null;
-    if (withModel) {
-      try {
-        const { text: answer } = await host.generate({ system: braindumpSystem(channels), prompt: text.slice(0, 60_000), maxOutputTokens: 2000 });
-        items = readBraindumpAnswer(answer, view.today, fallback, channels);
-        setNote(items ? 'Organized with AI. Check the list before adding.' : 'The AI answer was not usable, so each line became a task.');
-      } catch (error) {
-        const code = error instanceof HostRequestError ? error.code : '';
-        setNote(code === 'NO_MODEL' || code === 'MODEL_FAILED' ? 'No model is set up for AI, so each line became a task.' : `AI failed (${error instanceof Error ? error.message : String(error)}), so each line became a task.`);
-      }
-    } else setNote('Each line became a task; ~30m, @tomorrow, #channel and !high work as in Add task.');
-    items ??= parseBraindump(text, view.today, view.state.settings.weekStartsOn, fallback);
-    setRows(items.map((item) => ({ ...item, keep: true })));
-    setBusy(false);
+    setProblem('');
+    try {
+      const folder = folderId ? view.state.folders[folderId]?.name ?? null : null;
+      const first = text.trim().split('\n')[0]!.trim();
+      const { sent } = await startAsk(host, client, braindumpRequest(text, folder), { label: `Braindump: ${first}` });
+      if (sent === 'no-model') client.notify('The chat was created, but no model is set up to answer it. Open the chat to pick one.');
+      else if (sent === 'failed') client.notify('The chat was created, but the notes did not send. Open the chat to send them again.');
+      if (text.trim().length > NOTES_MAX) client.notify(`The agent got the first ${NOTES_MAX.toLocaleString('en-US')} characters of your notes.`);
+      onClose();
+    } catch (error) {
+      setProblem(`The agent could not start: ${messageOf(error)}`);
+      setBusy(false);
+    }
   };
 
   const update = (index: number, patch: Partial<Row>) => setRows((current) => current && current.map((row, at) => (at === index ? { ...row, ...patch } : row)));
@@ -60,12 +71,13 @@ export const BraindumpModal = ({ onClose, folderId }: { onClose: () => void; fol
         </header>
         {!rows ? (
           <>
-            <p class="hint">Get everything out of your head, one thing per line or in sentences. Nothing is added until you confirm.</p>
+            <p class="hint">Get everything out of your head, one thing per line or in sentences. One task per line shows the list to check before anything is added; the agent you chat with turns your notes into tasks in a new chat, and Ask Planner can take them back.</p>
+            {problem && <p class="danger" role="alert">{problem}</p>}
             <textarea ref={area} rows={10} aria-label="Brain dump" value={text} onInput={(event) => setText(event.currentTarget.value)} placeholder={'Call the bank about the card\nRenew passport before December\nFix the flaky login test ~1h #work'} />
             <div class="row">
               <div class="nav-spacer" />
-              <button disabled={busy || !text.trim()} onClick={() => void organize(false)}>One task per line</button>
-              <button class="primary" disabled={busy || !text.trim()} onClick={() => void organize(true)}>{busy ? 'Organizing…' : 'Organize with AI'}</button>
+              <button disabled={busy || !text.trim()} onClick={perLine}>One task per line</button>
+              <button class="primary" disabled={busy || !text.trim()} onClick={() => void withAgent()}>{busy ? 'Starting…' : 'Organize with the agent'}</button>
             </div>
           </>
         ) : (

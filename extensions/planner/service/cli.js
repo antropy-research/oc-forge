@@ -71,6 +71,7 @@ var BACKLOG_BUCKETS = [
   { id: "never", label: "Never" }
 ];
 var MEETING_EXCLUSIONS = ["noAttendees", "nonBlocking", "oooHold", "unconfirmed", "multiDayAllDay"];
+var ritualKey = (ritual, date) => `${ritual}:${date}`;
 var DEFAULT_SETTINGS = {
   timezone: null,
   workloadMinutes: 6 * 60,
@@ -178,6 +179,17 @@ var IGNORED = {
 // src/domain/plan/suggest.ts
 var STOP_WORDS = new Set(["the", "a", "an", "to", "for", "of", "and", "or", "in", "on", "with", "at", "by", "from", "my", "your", "this", "that", "is", "be", "do", "up", "it"]);
 
+// src/domain/plan/rituals.ts
+var ritualRecord = (state, ritual, date) => state.rituals[ritualKey(ritual, date)] ?? {};
+var completedOnDay = (state, date) => Object.values(state.tasks).filter((task) => task.completedOn === date && !task.deletedAt).sort((a, b) => (a.completedAt ?? "").localeCompare(b.completedAt ?? ""));
+var highlightItems = (state, date) => {
+  const saved = ritualRecord(state, "highlights", date).items ?? [];
+  const live = saved.filter((item) => !item.taskId || state.tasks[item.taskId] && !state.tasks[item.taskId].deletedAt);
+  const known = new Set(saved.map((item) => item.taskId).filter(Boolean));
+  const fresh = completedOnDay(state, date).filter((task) => !known.has(task.id)).map((task) => ({ id: task.id, text: task.title, taskId: task.id, starred: false }));
+  return [...live, ...fresh];
+};
+
 // src/domain/assistant/assistant.ts
 var BUCKETS = new Set(BACKLOG_BUCKETS.map((bucket) => bucket.id));
 var clock = (minutes) => {
@@ -188,10 +200,12 @@ var live = (state, id) => {
   const task = typeof id === "string" ? state.tasks[id] : undefined;
   return task && !task.deletedAt ? task : null;
 };
+var liveFolders = (state) => Object.values(state.folders).filter((folder) => !folder.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 var dayLabel = (date, today) => date === today ? "today" : date === addDays(today, 1) ? "tomorrow" : `${weekdayName(date)} ${date}`;
 var taskLine = (state, task) => {
   const channel = task.channelId ? state.channels[task.channelId]?.name : null;
-  const extras = [task.plannedMinutes ? formatMinutes(task.plannedMinutes) : null, channel ? `#${channel}` : null, task.priority, task.dueDate ? `due ${task.dueDate}` : null, task.source ? `${task.source.kind} ${task.source.key}` : null, task.subtasks.length ? `${task.subtasks.filter((subtask) => subtask.done).length}/${task.subtasks.length} subtasks` : null].filter(Boolean);
+  const folder = task.folderId ? state.folders[task.folderId] : null;
+  const extras = [task.plannedMinutes ? formatMinutes(task.plannedMinutes) : null, channel ? `#${channel}` : null, folder && !folder.deletedAt ? `folder "${folder.name}"` : null, task.priority, task.dueDate ? `due ${task.dueDate}` : null, task.source ? `${task.source.kind} ${task.source.key}` : null, task.subtasks.length ? `${task.subtasks.filter((subtask) => subtask.done).length}/${task.subtasks.length} subtasks` : null].filter(Boolean);
   return `- [${task.id}] ${task.completedAt ? "(done) " : ""}${task.title}${extras.length ? ` (${extras.join(", ")})` : ""}`;
 };
 var span = (start, end, zone) => `${clock(zonedDateMinutes(start, zone).minutes)}–${clock(zonedDateMinutes(end, zone).minutes)}`;
@@ -282,8 +296,30 @@ ${task.notes.trim()}` : "Notes: none");
 };
 var channelsText = (state) => {
   const channels = liveChannels(state);
-  return channels.length ? channels.map((channel) => `#${channel.name} (${channel.context})`).join(`
-`) : "No channels.";
+  const folders = liveFolders(state);
+  return [
+    channels.length ? `Channels:
+${channels.map((channel) => `#${channel.name} (${channel.context})`).join(`
+`)}` : "No channels.",
+    folders.length ? `Backlog folders:
+${folders.map((folder) => `"${folder.name}"`).join(`
+`)}` : "No backlog folders."
+  ].join(`
+
+`);
+};
+var highlightsText = (state, date, today) => {
+  const items = highlightItems(state, date).filter((item) => !item.hidden);
+  const ordered = [...items.filter((item) => item.starred), ...items.filter((item) => !item.starred)];
+  const tracked = completedOnDay(state, date).reduce((sum, task) => sum + actualMinutes(state, task), 0);
+  const record = ritualRecord(state, "highlights", date);
+  return [
+    `Daily highlights, ${longDay(date)}, ${date}${date === today ? " (today)" : date === addDays(today, -1) ? " (yesterday)" : ""}: ${ordered.length} item${ordered.length === 1 ? "" : "s"}, ${formatMinutes(tracked)} tracked`,
+    ...ordered.length ? ordered.map((item) => `- ${item.starred ? "(starred) " : ""}${item.text}${item.url ? ` (${item.url})` : ""}`) : ["- (nothing done yet)"],
+    `Reflection: ${record.reflection?.trim() || "none"}`,
+    `Summary: ${record.summary?.trim() || "none"}`
+  ].join(`
+`);
 };
 
 // service/assistant/cli.ts
@@ -295,10 +331,11 @@ Read
   planner show [today|tomorrow|YYYY-MM-DD|week|backlog]  a day's tasks, sessions and calendar events (default today)
   planner find <words>                                   open tasks, and ones done in 30 days, holding every word
   planner task <id>                                      one task in full: notes, subtasks, sessions, where it is from
-  planner channels                                       the channels a task can be in
+  planner channels                                       the channels a task can be in, and the backlog's folders
+  planner highlights [D]                                 a day's Daily highlights: what got done, its reflection and summary
 
 Change (each prints what it did and its change id; nothing is ever deleted)
-  planner add <title> [--when W] [--minutes N] [--channel NAME] [--priority P] [--due D] [--notes TEXT]
+  planner add <title> [--when W] [--minutes N] [--channel NAME] [--priority P] [--due D] [--notes TEXT] [--folder NAME]
   planner move <id>... --to W
   planner done <id>...     planner reopen <id>...     planner archive <id>...
   planner estimate <id> <minutes|none>
@@ -309,10 +346,12 @@ Change (each prints what it did and its change id; nothing is ever deleted)
   planner priority <id> <urgent|high|medium|low|none>
   planner subtask <id> <title> [--minutes N]
   planner schedule <id> <HH:MM> [--day D] [--minutes N]   a working session on the calendar; plans the task that day
+  planner summary <D> <text>                              the Daily highlights summary of a day
   planner undo [<change>]                                 take back this chat's last change, or the one named
 
 W: today, tomorrow, a date YYYY-MM-DD, or a backlog bucket: next-weeks, next-month, next-quarter, next-year, someday, never.
-D: today, tomorrow or a date YYYY-MM-DD. P: urgent, high, medium or low.
+D: today, tomorrow, yesterday or a date YYYY-MM-DD. P: urgent, high, medium or low. A folder is a backlog folder; a
+task planned for a day keeps its folder.
 
 Work like this: read before you change; change only what the person asked for; when a request is unclear, ask them
 instead of guessing; archive what they no longer want; end with a short list of what you changed.`;
@@ -397,7 +436,7 @@ var opsOf = (command, words, flags) => {
   switch (command) {
     case "add": {
       const title = words.join(" ").trim() || fail("usage: planner add <title> [--when W] [--minutes N] [--channel NAME] [--priority P] [--due D] [--notes TEXT]");
-      return [{ op: "add", title, when: flags.when ?? null, minutes: minutesArg(flags.minutes) ?? null, channel: flags.channel ?? null, priority: flags.priority ?? null, due: flags.due ?? null, notes: flags.notes ?? null }];
+      return [{ op: "add", title, when: flags.when ?? null, minutes: minutesArg(flags.minutes) ?? null, channel: flags.channel ?? null, priority: flags.priority ?? null, due: flags.due ?? null, notes: flags.notes ?? null, folder: flags.folder ?? null }];
     }
     case "move": {
       const to = flags.to ?? flags.when ?? fail("usage: planner move <id>... --to W");
@@ -423,6 +462,8 @@ var opsOf = (command, words, flags) => {
       return [{ op: "subtask", taskId: need(id, "subtask <id> <title> [--minutes N]"), title: rest.join(" ").trim() || fail("usage: planner subtask <id> <title> [--minutes N]"), minutes: minutesArg(flags.minutes) ?? null }];
     case "schedule":
       return [{ op: "schedule", taskId: need(id, "schedule <id> <HH:MM> [--day D] [--minutes N]"), start: need(rest[0], "schedule <id> <HH:MM> [--day D] [--minutes N]"), date: flags.day ?? null, minutes: minutesArg(flags.minutes) ?? null }];
+    case "summary":
+      return [{ op: "summary", date: need(id, "summary <D> <text>"), text: rest.join(" ").trim() || fail("usage: planner summary <D> <text>") }];
   }
   return fail(`unknown command "${command}": planner help lists them`);
 };
@@ -464,11 +505,17 @@ var run = async (args) => {
   }
   if (command === "channels")
     return channelsText((await plan(agent)).state);
+  if (command === "highlights") {
+    const { state, today } = await plan(agent);
+    const which = words[0] ?? "today";
+    const date = which === "today" ? today : which === "yesterday" ? addDays(today, -1) : isDateKey(which) ? which : fail("usage: planner highlights [today|yesterday|YYYY-MM-DD]");
+    return highlightsText(state, date, today);
+  }
   if (command === "undo") {
     const answer = await call(agent, "POST", "/agent/undo", { session, ...words[0] ? { change: words[0] } : {} });
     return `Took back: ${answer.undone}`;
   }
-  const unbracket = (word, index) => command !== "add" && (index === 0 || ["move", "done", "reopen", "archive"].includes(command)) ? word.replace(/^\[|\]$/g, "") : word;
+  const unbracket = (word, index) => !["add", "summary"].includes(command) && (index === 0 || ["move", "done", "reopen", "archive"].includes(command)) ? word.replace(/^\[|\]$/g, "") : word;
   const ops = opsOf(command, words.map(unbracket), flags);
   const answer = await call(agent, "POST", "/agent/ops", { ops, session });
   return `${answer.change.label} (change ${answer.change.id})`;

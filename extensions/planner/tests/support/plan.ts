@@ -1,20 +1,19 @@
 // Area A, the plan (tasks, days, rituals, history), over the shared harness (planner.ts): the plan's days in a zone
 // whose midnight is hours away, tasks made through the service, Planner windows whose commands can be held on their
 // way (as review 12's reviewer held one), a two-window race and a two-window Undo, what the Add task field and the
-// Braindump modal do with what is typed and with the Small Model's answer (their glue lives in components, so it is
-// repeated here, step for step, over the panel's own builders), and Ask Planner: the chat it starts, and the Planner's
-// command line run as that chat's agent runs it.
+// Braindump modal do with what is typed (their glue lives in components, so it is repeated here, step for step, over
+// the panel's own builders), and the chat's agent: the chat Ask Planner, Braindump and the Daily highlights summary
+// start, and the Planner's command line run as that chat's agent runs it.
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { HostClient } from '@openchamber/sdk';
-import { braindumpSystem, parseBraindump, readBraindumpAnswer, type DumpItem } from '../../src/domain/assistant/braindump.ts';
+import { parseBraindump, type DumpItem } from '../../src/domain/assistant/braindump.ts';
 import { addDays } from '../../src/domain/core/dates.ts';
 import type { EventBody, SubtaskConflict } from '../../src/domain/core/events.ts';
 import { newId } from '../../src/domain/core/ids.ts';
 import { parseQuickAdd } from '../../src/domain/plan/quickAdd.ts';
-import { liveChannels } from '../../src/domain/core/selectors.ts';
 import type { Placement, PlannerState, Subtask } from '../../src/domain/core/types.ts';
-import { startAsk } from '../../panel/lib/assistant/ask.ts';
+import { braindumpRequest, highlightsLabel, highlightsRequest, startAsk } from '../../panel/lib/assistant/ask.ts';
 import { addParsedTask } from '../../panel/lib/core/addTask.ts';
 import { createManyTaskCommands } from '../../src/domain/plan/commands.ts';
 import type { Planner, PlannerWindow, WindowOptions } from './planner.ts';
@@ -107,22 +106,26 @@ export const addTask = (window: PlannerWindow, line: string, placement?: Placeme
   return addParsedTask({ client: window.client, linear: window.linear, github: window.github, google: window.google }, parseQuickAdd(line, today), placement ?? day(today), 'bottom', today);
 };
 
-/** Braindump → Organize with AI → Add: the Small Model's items when its answer can be read, else one task per line. */
-export const braindump = async (window: PlannerWindow, text: string): Promise<DumpItem[]> => {
+/** Braindump → One task per line → Add (in `folderId`, when it was opened in a folder), as the modal does. */
+export const braindump = async (window: PlannerWindow, text: string, folderId: string | null = null): Promise<DumpItem[]> => {
   const { state, today } = window.client.getView();
   const fallback: Placement = backlog;
-  const channels = liveChannels(state).map((channel) => channel.name);
-  let items: DumpItem[] | null = null;
-  try {
-    const { text: answer } = await window.host.generate({ system: braindumpSystem(channels), prompt: text.slice(0, 60_000), maxOutputTokens: 2000 });
-    items = readBraindumpAnswer(answer, today, fallback, channels);
-  } catch {
-    // No model: each line becomes a task.
-  }
-  items ??= parseBraindump(text, today, state.settings.weekStartsOn, fallback);
+  const items = parseBraindump(text, today, state.settings.weekStartsOn, fallback);
   const inputs = items.map((item) => ({ title: item.title.trim(), plannedMinutes: item.plannedMinutes, placement: item.placement, channel: item.channel, priority: item.priority, objective: null }));
-  await window.client.dispatch(createManyTaskCommands(state, inputs, fallback, { today }), { undo: `Added ${inputs.length} tasks` });
+  await window.client.dispatch(createManyTaskCommands(state, inputs, fallback, { today, folderId }), { undo: `Added ${inputs.length} tasks` });
   return items;
+};
+
+/** Braindump → Organize with the agent, as the modal does: the chat it started for the notes. */
+export const braindumpWithAgent = async (window: PlannerWindow, notes: string, folder: string | null = null) => {
+  const started = await startAsk(window.host, window.client, braindumpRequest(notes, folder), { label: `Braindump: ${notes.trim().split('\n')[0]!.trim()}` });
+  return { ...started, chat: window.started.at(-1)! };
+};
+
+/** Daily highlights → Summarize with the agent, as the page does: the chat it started for the day. */
+export const summarizeWithAgent = async (window: PlannerWindow, date: string) => {
+  const started = await startAsk(window.host, window.client, highlightsRequest(date), { label: highlightsLabel(date) });
+  return { ...started, chat: window.started.at(-1)! };
 };
 
 /** Ask Planner → Ask, as the dialog does: the chat OpenChamber started for it (its first message, its chip). */
