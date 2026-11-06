@@ -49,7 +49,7 @@ run = [
   "cmp adapters/openchamber/host/protocol.ts extensions/planner/panel/lib/openchamber/ocforge/host/protocol.ts",
   # Its tests drive a real Chromium (GitHub's Ubuntu runners have Google Chrome).
   "cd extensions/cloak-browser && bun install --frozen-lockfile && bun run check && bun run build && bun run test",
-  "git -C extensions/cloak-browser diff --exit-code -- panel/main.js service/main.js",
+  "git -C extensions/cloak-browser diff --exit-code -- panel/main.js panel/frame.js service/main.js",
 ]
 
 [tasks.ci]
