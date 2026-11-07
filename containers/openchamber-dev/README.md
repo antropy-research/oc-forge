@@ -134,6 +134,21 @@ docker compose exec -w /extensions/planner openchamber bun run build   # panel/m
 A folder install keeps its real path: the catalog re-reads `package.json` and serves
 the rebuilt files, so reload the page after a build instead of reinstalling.
 
+`extensions/planner` and `extensions/cloak-browser` are submodules, each its own repository
+([openchamber-planner](https://github.com/antropy-research/openchamber-planner),
+[openchamber-cloak-browser](https://github.com/antropy-research/openchamber-cloak-browser)):
+check them out with `git submodule update --init extensions/planner extensions/cloak-browser`
+before building them, and again after their pins move. A change to one is committed and pushed
+in its repository first; this one then commits the submodule's new commit. It runs CloakBrowser, a Chromium, in the
+container: the image has Chromium's libraries and fonts for it, and the extension
+downloads the browser itself on first use into the home volume
+(`~/.cache/oc-forge-cloak-browser`, about 700 MB), its profile beside the other data
+(`~/.local/share/oc-forge-cloak-browser`). The agent's browser actions run in it: at every start the
+container makes Cloak Browser the Browser provider (Settings → General → OpenChamber Tools),
+installing and approving the folder first when it is not (`dev-defaults.mjs`, set by
+`OC_DEV_BROWSER_PROVIDER` in `compose.yaml`; `builtin` is OpenChamber's own browser). A change in
+Settings lasts until the next start. `tests/e2e/dev.mjs` in the extension walks through both sides.
+
 ## A model for agents
 
 Without a provider of its own, the container's OpenCode runs agents on OpenCode's free

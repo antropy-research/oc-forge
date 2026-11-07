@@ -7,3 +7,13 @@
 [submodule "vendors/orca"]
 	path = vendors/orca
 	url = https://github.com/stablyai/orca.git
+[submodule "extensions/cloak-browser"]
+	path = extensions/cloak-browser
+	url = https://github.com/antropy-research/openchamber-cloak-browser.git
+[submodule "extensions/planner"]
+	path = extensions/planner
+	url = https://github.com/antropy-research/openchamber-planner.git
+[submodule "extensions/file-browser"]
+	path = extensions/file-browser
+	url = https://github.com/antropy-research/openchamber-file-browser.git
+	update = none

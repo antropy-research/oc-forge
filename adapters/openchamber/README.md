@@ -187,7 +187,7 @@ anchor that is unique and survives formatting; put the logic in `host/` (or
 - `tests/e2e/openchamber-adapters/`: two throwaway instances on this machine
   (the npm release and the adapted package), two scratch extensions
   (`extension/`, which asks for `modals`, and `plain-extension/`, which
-  doesn't) and the repository's Planner extension. `run.mjs` checks every API
+  doesn't and has a static page, the compared page) and the repository's Planner extension. `run.mjs` checks every API
   at 1440×900 and 1024×768, the release against the adapted build with no
   extension using the APIs (rail, header and an extension page, pixel by
   pixel), and that the Planner works on both. R4 forwards keys from a frame

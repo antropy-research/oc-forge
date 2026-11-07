@@ -1,7 +1,8 @@
 // End-to-end check of oc-forge's OpenChamber adapters, against the two
 // instances stack.mjs starts: every API with the scratch test extensions on the
 // adapted build, at 1440×900 and 1024×768, the adapted build against the
-// release with no extension using the APIs, and the Planner on both.
+// release with no extension using the APIs (a static extension page included), and
+// the Planner on both.
 //
 //   node tests/e2e/openchamber-adapters/stack.mjs up
 //   node tests/e2e/openchamber-adapters/run.mjs [outDir]
@@ -29,6 +30,7 @@ const BASE = Number(process.env.STACK_PORT_BASE ?? 35350);
 const instances = { stock: `http://127.0.0.1:${BASE}`, adapted: `http://127.0.0.1:${BASE + 1}` };
 const TEST = 'ocforge-test';
 const PLAIN = 'ocforge-test-plain';
+const PLANNER = 'oc-forge-planner';
 const CHATS = ['First chat', 'Second chat', 'Third chat'];
 
 const results = [];
@@ -128,7 +130,8 @@ const open = async (browser, base, viewport, seeded, path = `/?session=${seeded.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (attempt > 0) await ready(context.request, base, seeded);
     await page.goto(`${base}${path}`);
-    const loaded = await until(() => page.locator('[data-context-surface="plugin:oc-forge-planner"]').count(), 60_000)
+    // The catalog has loaded once an extension's rail icon shows (which ones are on depends on the phase).
+    const loaded = await until(() => page.locator('[data-context-surface^="plugin:"]').count(), 60_000)
       && await until(async () => (await page.locator('[role="tablist"] [role="tab"]').count()) >= 3, 60_000)
       && await until(() => page.getByText(CHATS[2], { exact: true }).first().count(), 30_000);
     if (loaded) break;
@@ -353,16 +356,17 @@ const compare = async (browser, seeded, request, viewport) => {
       headerShot: await page.screenshot({ clip: headerBox ?? undefined }),
     };
     await page.screenshot({ path: join(out, `${size}-compare-${name}-chat.png`) });
+    // An extension page that uses no oc-forge API: the plain extension's static one.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (attempt > 0) await page.reload();
-      await openExtensionPage(page, 'Planner');
-      const home = await page.frameLocator('iframe[title="Planner"]').getByRole('heading', { name: 'Home' }).waitFor({ timeout: 60_000 }).then(() => true).catch(() => false);
-      if (home) break;
+      await openExtensionPage(page, 'oc-forge plain page');
+      const shown = await page.frameLocator('iframe[title="oc-forge plain panel"]').getByRole('heading', { name: 'oc-forge plain page' }).waitFor({ timeout: 60_000 }).then(() => true).catch(() => false);
+      if (shown) break;
     }
     await page.waitForTimeout(2_000);
     view.back = await page.getByRole('button', { name: 'Back to chat' }).count();
     view.pageShot = await page.screenshot();
-    await page.screenshot({ path: join(out, `${size}-compare-${name}-planner-page.png`) });
+    await page.screenshot({ path: join(out, `${size}-compare-${name}-plain-page.png`) });
     views[name] = view;
     await context.close();
   }
@@ -390,7 +394,7 @@ const compare = async (browser, seeded, request, viewport) => {
   check(`[${size}] stock vs adapted: the header looks the same`, headerDiff < 0.002, `${(headerDiff * 100).toFixed(2)}% pixels differ`);
   check(`[${size}] stock vs adapted: an extension page keeps the release's "← back" header`, stock.back === 1 && adapted.back === 1);
   const pageDiff = await diff(stock.pageShot, adapted.pageShot);
-  check(`[${size}] stock vs adapted: the Planner page looks the same`, pageDiff < 0.01, `${(pageDiff * 100).toFixed(2)}% pixels differ`);
+  check(`[${size}] stock vs adapted: an extension page looks the same`, pageDiff < 0.01, `${(pageDiff * 100).toFixed(2)}% pixels differ`);
 };
 
 // The repository's own extension, untouched, on either build: it must load and work.
@@ -405,10 +409,13 @@ const realExtensions = async (browser, name, base, seeded, request) => {
   await context.close();
 };
 
+// The Planner is its rail panel (it has no page): the rail icon shows it, as on either build.
 const planner = async (page, name) => {
-  await openExtensionPage(page, 'Planner');
+  const icon = page.locator(`[data-context-surface="plugin:${PLANNER}"]`);
+  await icon.waitFor({ timeout: 60_000 });
+  if (!await pressed(page, `plugin:${PLANNER}`)) await icon.click();
   const planner = page.frameLocator('.inset-0 > iframe[title="Planner"]');
-  check(`[${name}] the Planner page loads`, await planner.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 120_000 }).then(() => true).catch(() => false));
+  check(`[${name}] the Planner loads in its rail panel`, await planner.getByRole('heading', { name: 'Home' }).waitFor({ timeout: 120_000 }).then(() => true).catch(() => false));
   // The Planner asks for allow-modals (it prints task lists and the calendar); the release ignores the ocForge block.
   const plannerSandbox = await page.locator('.inset-0 > iframe[title="Planner"]').first().getAttribute('sandbox').catch(() => null);
   const wanted = name === 'adapted' ? 'allow-scripts allow-modals' : 'allow-scripts';
@@ -429,7 +436,7 @@ const planner = async (page, name) => {
   };
   const added = Object.values((await plannerService('GET', '/state')).state?.tasks ?? {}).filter((task) => task.title === title && !task.deletedAt);
   if (added.length) await plannerService('POST', '/commands', { commands: added.map((task) => ({ cmd: `e2e-clean-${task.id}`, type: 'task.deleted', taskId: task.id })) });
-  await page.getByRole('button', { name: 'Back to chat' }).click();
+  await icon.click();
 };
 
 const parts = new Set((process.env.OC_FORGE_E2E_PARTS ?? 'compare,extensions,api').split(','));
@@ -438,12 +445,13 @@ const request = (await browser.newContext()).request;
 const seeded = {};
 for (const [name, base] of Object.entries(instances)) seeded[name] = await seed(name, base, request);
 
-// With no extension using the APIs: the test extensions off. The Planner only uses links, keys and modals, which show
-// nothing until it is used.
-const usingTheApis = [TEST, PLAIN];
+// With no extension using the APIs: the test extension off. The Planner only uses links, keys and modals, which show
+// nothing until it is used; the plain extension uses none (its static page is the compared page).
+const usingTheApis = [TEST];
 for (const base of Object.values(instances)) {
   await request.post(`${base}/auth/session`, { data: { password } });
   for (const id of usingTheApis) await setEnabled(request, base, id, false);
+  for (const id of [PLAIN, PLANNER]) await setEnabled(request, base, id, true);
 }
 if (parts.has('compare')) for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await compare(browser, seeded, request, viewport);
 if (parts.has('extensions')) for (const [name, base] of Object.entries(instances)) await realExtensions(browser, name, base, seeded[name], request);
@@ -451,7 +459,7 @@ if (parts.has('extensions')) for (const [name, base] of Object.entries(instances
 // Every API, with the test extensions on.
 const base = instances.adapted;
 await request.post(`${base}/auth/session`, { data: { password } });
-for (const id of usingTheApis) await setEnabled(request, base, id, true);
+for (const id of [TEST, PLAIN, PLANNER]) await setEnabled(request, base, id, true);
 if (parts.has('api')) {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) await apiRound(browser, base, viewport, seeded.adapted, request);
   check('R5 the deep link\'s late new-chat draft ran at one size at least', lateDraftChecked);

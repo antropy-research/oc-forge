@@ -103,7 +103,11 @@ const up = async () => {
   rmSync(extensions, { recursive: true, force: true });
   mkdirSync(extensions, { recursive: true });
   for (const name of ['planner']) {
-    const files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', `extensions/${name}`], { cwd: repo }).toString().split('\0').filter(Boolean);
+    // A submodule (its own repository) lists its own files; this checkout lists only the submodule's pin there.
+    const own = existsSync(join(repo, 'extensions', name, '.git'));
+    const files = own
+      ? execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: join(repo, 'extensions', name) }).toString().split('\0').filter(Boolean).map((file) => `extensions/${name}/${file}`)
+      : execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', `extensions/${name}`], { cwd: repo }).toString().split('\0').filter(Boolean);
     for (const file of files) {
       if (!existsSync(join(repo, file))) continue;
       const target = join(extensions, file.slice('extensions/'.length));

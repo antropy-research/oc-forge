@@ -87,6 +87,23 @@ RUN arch="$(dpkg --print-architecture)" \
   && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh \
   && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_${arch}"
 
+# The Cloak Browser extension (extensions/cloak-browser) runs CloakBrowser, a Chromium, headless in this
+# container: the libraries its `chrome` links (none are in the slim image), and fonts for Latin, CJK,
+# the other scripts Noto covers (Arabic, Hebrew, Devanagari, Thai, …) and emoji (it has none either).
+# The browser itself is downloaded by the extension on first use.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 \
+    libdbus-1-3 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
+    libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+    fonts-liberation fonts-noto-cjk fonts-noto-color-emoji fonts-noto-core \
+  && rm -rf /var/lib/apt/lists/*
+
+# The dev defaults, applied once OpenChamber answers: Cloak Browser installed, approved and the Browser
+# provider (OC_DEV_BROWSER_PROVIDER in compose.yaml), so the agent's browser actions run on CloakBrowser.
+# Into a folder that exists: a folder COPY makes would get the file's mode, which the `node` user cannot enter.
+COPY --chmod=0644 containers/openchamber-dev/dev-defaults.mjs /usr/local/lib/oc-forge-dev-defaults.mjs
+
 ENV LANG=C.UTF-8
 # The image's `node` user is UID 1000, so files written into the bind-mounted
 # extensions folder stay owned by the host user.
@@ -95,4 +112,6 @@ WORKDIR /home/node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1
-CMD ["openchamber", "serve", "--foreground", "--port", "3000", "--host", "0.0.0.0"]
+# OpenChamber in the foreground, and the dev defaults beside it; the subshell leaves the helper to init (compose's
+# `init: true`), which reaps it when it is done.
+CMD ["sh", "-c", "(node /usr/local/lib/oc-forge-dev-defaults.mjs &); exec openchamber serve --foreground --port 3000 --host 0.0.0.0"]
